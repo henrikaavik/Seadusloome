@@ -1,0 +1,199 @@
+/* Estonian Legal Ontology Explorer — D3.js Force Graph Styles */
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body.explorer-page {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  background: #0f1729;
+  color: #e2e8f0;
+  overflow: hidden;
+  height: 100vh;
+}
+
+svg#canvas { width: 100%; height: 100vh; display: block; }
+
+/* ------- Top bar ------- */
+#topbar {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 10;
+  background: linear-gradient(180deg, rgba(15,23,41,0.95) 0%, rgba(15,23,41,0.7) 80%, transparent 100%);
+  padding: 16px 24px 32px;
+  display: flex; align-items: center; gap: 16px;
+}
+#topbar h1 { font-size: 16px; font-weight: 600; color: #f1f5f9; white-space: nowrap; }
+#topbar .badge {
+  font-size: 11px; background: rgba(251,146,60,0.15); color: #fdba74;
+  padding: 3px 10px; border-radius: 99px; border: 1px solid rgba(251,146,60,0.25);
+}
+
+/* ------- Search ------- */
+#search-box {
+  margin-left: auto; display: flex; align-items: center; gap: 8px;
+}
+#search-input {
+  background: rgba(30,41,59,0.85); border: 1px solid rgba(100,116,139,0.3);
+  color: #e2e8f0; padding: 6px 14px; border-radius: 8px; font-size: 13px;
+  width: 260px; outline: none; backdrop-filter: blur(8px);
+  transition: border-color 0.15s;
+}
+#search-input:focus { border-color: rgba(56,189,248,0.5); }
+#search-input::placeholder { color: #64748b; }
+#search-btn {
+  background: rgba(56,189,248,0.15); border: 1px solid rgba(56,189,248,0.3);
+  color: #38bdf8; padding: 6px 14px; border-radius: 8px; font-size: 12px;
+  cursor: pointer; transition: all 0.15s;
+}
+#search-btn:hover { background: rgba(56,189,248,0.25); }
+
+/* ------- Controls ------- */
+#controls {
+  position: fixed; top: 56px; left: 24px; z-index: 10;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.ctrl-btn {
+  background: rgba(30,41,59,0.85); border: 1px solid rgba(100,116,139,0.3); color: #94a3b8;
+  padding: 6px 14px; border-radius: 8px; font-size: 12px; cursor: pointer;
+  backdrop-filter: blur(8px); transition: all 0.15s; text-align: left;
+}
+.ctrl-btn:hover { background: rgba(51,65,85,0.9); color: #e2e8f0; }
+.ctrl-btn.active { border-color: rgba(56,189,248,0.4); color: #38bdf8; }
+
+/* ------- Tooltip ------- */
+#tooltip {
+  position: fixed; z-index: 20; pointer-events: none;
+  background: rgba(15,23,42,0.95); border: 1px solid rgba(100,116,139,0.3);
+  border-radius: 10px; padding: 14px 18px; max-width: 300px;
+  backdrop-filter: blur(12px); opacity: 0; transition: opacity 0.15s;
+}
+#tooltip.visible { opacity: 1; }
+#tooltip h3 { font-size: 14px; font-weight: 600; margin-bottom: 2px; }
+#tooltip .cat {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;
+  margin-bottom: 8px; display: inline-block; padding: 2px 8px; border-radius: 4px;
+}
+#tooltip p { font-size: 12px; color: #94a3b8; line-height: 1.5; }
+#tooltip .stat { font-size: 11px; color: #64748b; margin-top: 6px; }
+
+/* ------- Legend ------- */
+#legend {
+  position: fixed; bottom: 24px; left: 24px; z-index: 10;
+  background: rgba(15,23,42,0.92); border: 1px solid rgba(100,116,139,0.2);
+  border-radius: 12px; padding: 16px; backdrop-filter: blur(12px);
+}
+#legend h3 {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
+  color: #64748b; margin-bottom: 8px;
+}
+.legend-item { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #94a3b8; padding: 2px 0; }
+.legend-dot { width: 10px; height: 10px; border-radius: 50%; }
+
+/* ------- Instructions ------- */
+#instructions {
+  position: fixed; bottom: 24px; right: 24px; z-index: 10;
+  background: rgba(15,23,42,0.92); border: 1px solid rgba(100,116,139,0.2);
+  border-radius: 12px; padding: 14px 18px; backdrop-filter: blur(12px);
+  font-size: 11px; color: #64748b; line-height: 1.6;
+}
+
+/* ------- Loading overlay ------- */
+#loading-overlay {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  z-index: 30; background: rgba(15,23,41,0.7);
+  display: flex; align-items: center; justify-content: center;
+  backdrop-filter: blur(4px); transition: opacity 0.3s;
+  pointer-events: none; opacity: 0;
+}
+#loading-overlay.visible { opacity: 1; pointer-events: all; }
+
+.spinner {
+  width: 40px; height: 40px;
+  border: 3px solid rgba(56,189,248,0.2);
+  border-top-color: #38bdf8;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ------- Detail panel (right sidebar) ------- */
+#detail-panel {
+  position: fixed; top: 0; right: 0; bottom: 0; z-index: 15;
+  width: 380px; max-width: 90vw;
+  background: rgba(15,23,42,0.97);
+  border-left: 1px solid rgba(100,116,139,0.2);
+  backdrop-filter: blur(12px);
+  transform: translateX(100%);
+  transition: transform 0.3s ease;
+  overflow-y: auto;
+  padding: 24px;
+}
+#detail-panel.open { transform: translateX(0); }
+
+#detail-panel .panel-header {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  margin-bottom: 20px;
+}
+#detail-panel .panel-header h2 {
+  font-size: 18px; font-weight: 600; color: #f1f5f9;
+  line-height: 1.3; flex: 1; padding-right: 12px;
+}
+#detail-close {
+  background: rgba(100,116,139,0.2); border: 1px solid rgba(100,116,139,0.3);
+  color: #94a3b8; width: 32px; height: 32px; border-radius: 8px;
+  cursor: pointer; font-size: 18px; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+  transition: all 0.15s; flex-shrink: 0;
+}
+#detail-close:hover { background: rgba(100,116,139,0.35); color: #e2e8f0; }
+
+#detail-panel .panel-category {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
+  display: inline-block; padding: 3px 10px; border-radius: 4px;
+  margin-bottom: 16px;
+}
+
+#detail-panel .meta-section { margin-bottom: 20px; }
+#detail-panel .meta-section h4 {
+  font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em;
+  color: #64748b; margin-bottom: 8px;
+}
+#detail-panel .meta-row {
+  display: flex; gap: 8px; padding: 4px 0;
+  font-size: 12px; border-bottom: 1px solid rgba(100,116,139,0.1);
+}
+#detail-panel .meta-key { color: #64748b; min-width: 100px; flex-shrink: 0; }
+#detail-panel .meta-val { color: #cbd5e1; word-break: break-all; }
+
+#detail-panel .neighbor-list { list-style: none; padding: 0; }
+#detail-panel .neighbor-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 0; font-size: 12px;
+  border-bottom: 1px solid rgba(100,116,139,0.1);
+  cursor: pointer; transition: color 0.15s;
+}
+#detail-panel .neighbor-item:hover { color: #38bdf8; }
+#detail-panel .neighbor-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+#detail-panel .neighbor-pred { color: #64748b; font-size: 10px; margin-left: auto; }
+
+#detail-panel .external-link {
+  display: inline-block; margin-top: 12px;
+  color: #38bdf8; font-size: 12px; text-decoration: none;
+  border-bottom: 1px solid rgba(56,189,248,0.3);
+  transition: border-color 0.15s;
+}
+#detail-panel .external-link:hover { border-color: #38bdf8; }
+
+/* ------- Breadcrumb (navigation state) ------- */
+#breadcrumb {
+  position: fixed; top: 56px; left: 200px; z-index: 10;
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px; color: #64748b;
+}
+#breadcrumb span { cursor: pointer; transition: color 0.15s; }
+#breadcrumb span:hover { color: #e2e8f0; }
+#breadcrumb .separator { cursor: default; }
+#breadcrumb .current { color: #94a3b8; cursor: default; }
+
+/* ------- Responsive ------- */
+@media (max-width: 1280px) {
+  #detail-panel { width: 320px; }
+  #search-input { width: 180px; }
+}
