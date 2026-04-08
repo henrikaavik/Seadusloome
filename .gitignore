@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
+.venv/
+
+# uv
+uv.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+.env.production
+
+# Testing
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Docker
+docker/data/
+
+# FastHTML
+.sesskey
+
+# Ruff
+.ruff_cache/
+
+# Misc
+*.log

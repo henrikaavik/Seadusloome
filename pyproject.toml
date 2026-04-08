@@ -1,0 +1,40 @@
+[project]
+name = "seadusloome"
+version = "0.1.0"
+description = "Estonian Legal Ontology Advisory Software"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "python-fasthtml",
+    "rdflib",
+    "pyshacl",
+    "PyJWT",
+    "bcrypt",
+    "authlib",
+    "requests",
+    "psycopg[binary]",
+    "httpx",
+]
+
+[dependency-groups]
+dev = [
+    "ruff",
+    "pyright",
+    "pytest",
+]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 99
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+"app/**/*.py" = ["F403", "F405"]
+
+[tool.pyright]
+pythonVersion = "3.13"
+typeCheckingMode = "basic"
+reportMissingTypeStubs = false
+reportWildcardImportFromLibrary = false
