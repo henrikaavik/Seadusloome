@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+.git/
+.github/
+.ruff_cache/
+.pytest_cache/
+.claude/
+*.md
+docs/
+tests/
+d3-demo.html
+.env
+.sesskey
