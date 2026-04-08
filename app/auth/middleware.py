@@ -22,6 +22,8 @@ SKIP_PATHS: list[str] = [
     r"/auth/login",
     r"/static/.*",
     r"/favicon\.ico",
+    r"/api/explorer/.*",
+    r"/api/health",
 ]
 
 

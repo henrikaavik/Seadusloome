@@ -1,9 +1,13 @@
 from fasthtml.common import *
+from starlette.requests import Request
 
 from app.auth.middleware import SKIP_PATHS, auth_before
 from app.auth.organizations import register_org_routes
 from app.auth.routes import register_auth_routes
 from app.auth.users import register_user_routes
+from app.explorer.routes import register_explorer_routes
+from app.templates.admin_dashboard import register_admin_routes
+from app.templates.dashboard import index_redirect, register_dashboard_routes
 
 bware = Beforeware(auth_before, skip=SKIP_PATHS)
 app, rt = fast_app(before=bware)
@@ -11,15 +15,14 @@ app, rt = fast_app(before=bware)
 register_auth_routes(rt)
 register_org_routes(rt)
 register_user_routes(rt)
+register_explorer_routes(rt)
+register_dashboard_routes(rt)
+register_admin_routes(rt)
 
 
 @rt("/")
-def index():
-    return Titled(
-        "Seadusloome",
-        P("Estonian Legal Ontology Advisory Software"),
-        P("System is running."),
-    )
+def index(req: Request):
+    return index_redirect(req)
 
 
 serve()
