@@ -59,6 +59,9 @@ const state = {
   pinnedNodes: new Set(),
   showEdgeLabels: true,
   selectedEntity: null,       // URI of selected entity for detail panel
+  timelineActive: false,      // whether the timeline filter is applied
+  timelineYear: 2026,         // currently selected year on the timeline slider
+  selectedEntityData: null,   // full entity detail data (metadata, outgoing, incoming)
 };
 
 // ---------------------------------------------------------------------------

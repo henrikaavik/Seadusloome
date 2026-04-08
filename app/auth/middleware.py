@@ -25,6 +25,7 @@ SKIP_PATHS: list[str] = [
     r"/explorer",
     r"/api/explorer/.*",
     r"/api/health",
+    r"/ws/explorer",
 ]
 
 

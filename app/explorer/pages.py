@@ -127,6 +127,36 @@ def explorer_page(req: Request):
                     Div(cls="spinner"),
                     id="loading-overlay",
                 ),
+                # ----- Timeline slider -----
+                Div(
+                    Div(
+                        Span("1990", cls="tl-label"),
+                        Input(
+                            id="timeline-slider",
+                            type="range",
+                            min="1990",
+                            max="2026",
+                            value="2026",
+                            step="1",
+                        ),
+                        Span("2026", cls="tl-label"),
+                        cls="tl-slider-row",
+                    ),
+                    Div(
+                        Span("Ajafilter: ", cls="tl-prefix"),
+                        Span("Keelatud", id="timeline-value", cls="tl-value"),
+                        Button(
+                            "L\u00e4htesta",
+                            id="timeline-reset",
+                            cls="tl-reset-btn",
+                            onclick="explorerResetTimeline()",
+                        ),
+                        cls="tl-info-row",
+                    ),
+                    id="timeline-bar",
+                ),
+                # ----- Toast container -----
+                Div(id="toast-container"),
                 # ----- Detail panel (right sidebar) -----
                 Div(
                     Div(
@@ -144,10 +174,28 @@ def explorer_page(req: Request):
                         Div(id="panel-meta"),
                         cls="meta-section",
                     ),
+                    # ----- Version history section -----
+                    Div(
+                        H4("Versiooniajalugu"),
+                        Div(id="panel-versions"),
+                        id="version-history-section",
+                        cls="meta-section",
+                        style="display:none;",
+                    ),
                     Div(
                         H4("Seosed"),
                         Ul(id="panel-neighbors", cls="neighbor-list"),
                         cls="meta-section",
+                    ),
+                    # ----- Bookmark button -----
+                    Div(
+                        Button(
+                            "Lisa j\u00e4rjehoidjatesse",
+                            id="panel-bookmark-btn",
+                            cls="bookmark-btn",
+                            onclick="explorerBookmark()",
+                        ),
+                        cls="bookmark-section",
                     ),
                     A(
                         "Ava allikas",

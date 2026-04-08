@@ -7,6 +7,7 @@ from app.auth.routes import register_auth_routes
 from app.auth.users import register_user_routes
 from app.explorer.pages import register_explorer_pages
 from app.explorer.routes import register_explorer_routes
+from app.explorer.websocket import register_ws_routes
 from app.templates.admin_dashboard import register_admin_routes
 from app.templates.dashboard import index_redirect, register_dashboard_routes
 
@@ -18,6 +19,7 @@ register_org_routes(rt)
 register_user_routes(rt)
 register_explorer_routes(rt)
 register_explorer_pages(rt)
+register_ws_routes(app)
 register_dashboard_routes(rt)
 register_admin_routes(rt)
 

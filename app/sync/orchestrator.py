@@ -13,6 +13,19 @@ from app.sync.converter import convert_ontology, serialize_to_turtle
 from app.sync.jena_loader import clear_default_graph, get_triple_count, upload_turtle
 from app.sync.validator import load_shapes, validate_graph
 
+# Lazy import to avoid circular dependencies; used for WS notifications.
+_notify_sync: object | None = None
+
+
+def _get_notify_fn():  # type: ignore[no-untyped-def]
+    """Lazily import the sync-complete notifier."""
+    global _notify_sync  # noqa: PLW0603
+    if _notify_sync is None:
+        from app.explorer.websocket import notify_sync_complete_sync
+
+        _notify_sync = notify_sync_complete_sync
+    return _notify_sync
+
 logger = logging.getLogger(__name__)
 
 ONTOLOGY_REPO = "https://github.com/henrikaavik/estonian-legal-ontology.git"
@@ -128,6 +141,15 @@ def run_sync(repo_dir: Path | None = None) -> bool:
         logger.info("Sync complete. %d triples in Jena.", final_count)
 
         log_sync("success", started_at, entity_count=final_count)
+
+        # Notify connected explorer WebSocket clients.
+        try:
+            fn = _get_notify_fn()
+            if callable(fn):
+                fn()
+        except Exception:
+            logger.debug("WS notification after sync failed (non-critical)")
+
         return True
 
     except Exception as e:

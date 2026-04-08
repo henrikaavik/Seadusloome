@@ -192,6 +192,121 @@ svg#canvas { width: 100%; height: 100vh; display: block; }
 #breadcrumb .separator { cursor: default; }
 #breadcrumb .current { color: #94a3b8; cursor: default; }
 
+/* ------- Timeline slider bar ------- */
+#timeline-bar {
+  position: fixed; bottom: 0; left: 0; right: 0; z-index: 12;
+  background: rgba(15,23,42,0.95);
+  border-top: 1px solid rgba(100,116,139,0.2);
+  backdrop-filter: blur(12px);
+  padding: 10px 24px;
+}
+
+.tl-slider-row {
+  display: flex; align-items: center; gap: 12px;
+}
+.tl-label {
+  font-size: 11px; color: #64748b; min-width: 36px; text-align: center;
+}
+
+#timeline-slider {
+  flex: 1; height: 6px; -webkit-appearance: none; appearance: none;
+  background: rgba(100,116,139,0.3); border-radius: 3px; outline: none;
+  cursor: pointer;
+}
+#timeline-slider::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 18px; height: 18px; border-radius: 50%;
+  background: #38bdf8; border: 2px solid rgba(15,23,42,0.8);
+  cursor: pointer; transition: transform 0.15s;
+}
+#timeline-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.2);
+}
+#timeline-slider::-moz-range-thumb {
+  width: 18px; height: 18px; border-radius: 50%;
+  background: #38bdf8; border: 2px solid rgba(15,23,42,0.8);
+  cursor: pointer;
+}
+
+.tl-info-row {
+  display: flex; align-items: center; gap: 8px; margin-top: 4px;
+}
+.tl-prefix { font-size: 11px; color: #64748b; }
+.tl-value { font-size: 12px; color: #38bdf8; font-weight: 600; }
+
+.tl-reset-btn {
+  margin-left: auto;
+  background: rgba(100,116,139,0.15); border: 1px solid rgba(100,116,139,0.3);
+  color: #94a3b8; padding: 3px 10px; border-radius: 6px; font-size: 11px;
+  cursor: pointer; transition: all 0.15s;
+}
+.tl-reset-btn:hover { background: rgba(100,116,139,0.3); color: #e2e8f0; }
+
+/* ------- Toast notifications ------- */
+#toast-container {
+  position: fixed; top: 80px; right: 24px; z-index: 50;
+  display: flex; flex-direction: column; gap: 8px;
+  pointer-events: none;
+}
+.toast {
+  background: rgba(15,23,42,0.95); border: 1px solid rgba(56,189,248,0.3);
+  border-radius: 10px; padding: 12px 20px;
+  color: #e2e8f0; font-size: 13px;
+  backdrop-filter: blur(12px);
+  pointer-events: auto;
+  animation: toastIn 0.3s ease, toastOut 0.3s ease 2.7s forwards;
+  max-width: 320px;
+}
+.toast.success { border-color: rgba(52,211,153,0.4); }
+.toast.info { border-color: rgba(56,189,248,0.4); }
+.toast.warning { border-color: rgba(251,146,60,0.4); }
+
+@keyframes toastIn {
+  from { opacity: 0; transform: translateX(40px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes toastOut {
+  from { opacity: 1; transform: translateX(0); }
+  to { opacity: 0; transform: translateX(40px); }
+}
+
+/* ------- Bookmark button ------- */
+.bookmark-section { margin-top: 12px; margin-bottom: 12px; }
+.bookmark-btn {
+  width: 100%;
+  background: rgba(56,189,248,0.1); border: 1px solid rgba(56,189,248,0.3);
+  color: #38bdf8; padding: 8px 16px; border-radius: 8px;
+  font-size: 12px; cursor: pointer; transition: all 0.15s;
+}
+.bookmark-btn:hover { background: rgba(56,189,248,0.2); }
+.bookmark-btn.bookmarked {
+  background: rgba(52,211,153,0.15); border-color: rgba(52,211,153,0.4);
+  color: #34d399;
+}
+
+/* ------- Version history ------- */
+.version-timeline { list-style: none; padding: 0; margin: 0; }
+.version-entry {
+  position: relative;
+  padding: 6px 0 6px 20px;
+  font-size: 12px;
+  border-left: 2px solid rgba(100,116,139,0.2);
+}
+.version-entry::before {
+  content: '';
+  position: absolute; left: -5px; top: 12px;
+  width: 8px; height: 8px; border-radius: 50%;
+  background: #38bdf8;
+}
+.version-entry:first-child::before { background: #34d399; }
+.version-date { color: #64748b; font-size: 10px; display: block; margin-bottom: 2px; }
+.version-label { color: #cbd5e1; }
+.version-empty { color: #64748b; font-size: 12px; font-style: italic; }
+
+/* ------- Adjust legend and instructions for timeline bar ------- */
+#legend { bottom: 80px; }
+#instructions { bottom: 80px; }
+
 /* ------- Responsive ------- */
 @media (max-width: 1280px) {
   #detail-panel { width: 320px; }
