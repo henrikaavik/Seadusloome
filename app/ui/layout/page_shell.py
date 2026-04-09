@@ -39,6 +39,11 @@ def PageShell(  # noqa: ANN201
     """
     return (
         *_head_tags(title),
+        A(  # noqa: F405
+            "Mine põhisisu juurde",
+            href="#main-content",
+            cls="skip-to-content",
+        ),
         Div(  # noqa: F405
             TopBar(user=user, theme=theme, unread_count=unread_count),
             Div(  # noqa: F405
