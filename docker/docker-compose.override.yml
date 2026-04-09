@@ -1,0 +1,7 @@
+# docker-compose.override.yml — loaded automatically in local dev (docker compose up)
+# Mounts the local app/ directory so code changes are reflected without rebuilding the image.
+# In production (Coolify), only docker-compose.yml is used; this file is not present there.
+services:
+  app:
+    volumes:
+      - ../app:/app/app

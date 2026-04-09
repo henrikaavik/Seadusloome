@@ -33,3 +33,20 @@ jobs:
 
       - name: Test
         run: uv run pytest -x -q
+
+  deploy:
+    name: Deploy to Coolify
+    needs: lint-and-test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Coolify deploy webhook
+        env:
+          COOLIFY_WEBHOOK: ${{ secrets.COOLIFY_DEPLOY_HOOK_URL }}
+        run: |
+          if [ -z "$COOLIFY_WEBHOOK" ]; then
+            echo "COOLIFY_DEPLOY_HOOK_URL secret not set — skipping deploy trigger"
+            exit 0
+          fi
+          curl -fsS -X POST "$COOLIFY_WEBHOOK"
+          echo "Coolify deploy triggered"

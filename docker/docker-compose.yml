@@ -5,15 +5,13 @@ services:
       dockerfile: docker/Dockerfile
     ports:
       - "5001:5001"
-    volumes:
-      - ../app:/app/app
     env_file:
       - ../.env
     depends_on:
       postgres:
         condition: service_healthy
       jena:
-        condition: service_started
+        condition: service_healthy
     restart: unless-stopped
 
   postgres:
@@ -34,14 +32,19 @@ services:
     restart: unless-stopped
 
   jena:
-    image: stain/jena-fuseki
+    image: apache/jena-fuseki:5.4.0
     ports:
       - "3030:3030"
     environment:
       ADMIN_PASSWORD: ${FUSEKI_ADMIN_PASSWORD:-localdev}
-      FUSEKI_DATASET_1: ${JENA_DATASET:-ontology}
     volumes:
       - jenadata:/fuseki
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:3030/$$/ping || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
     restart: unless-stopped
 
 volumes:
