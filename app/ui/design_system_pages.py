@@ -1,10 +1,10 @@
 """Live design-system reference page.
 
 Serves a navigable catalog of every design system component at
-``/design-system`` so developers can preview tokens, layouts, and components
-without logging in. The route lives in ``SKIP_PATHS`` so it is reachable while
-the rest of the app requires auth; a banner at the top reminds visitors that
-in production access is admin-only.
+``/design-system``. Access is restricted to admin users via
+``require_role('admin')`` on every handler — the page exposes implementation
+details and the same auth middleware that protects the rest of the app
+applies here too.
 
 Each sub-page renders live examples next to the Python snippet that produced
 them. Examples are intentionally kept short (3-6 variations per component) so
@@ -16,6 +16,7 @@ from __future__ import annotations
 from fasthtml.common import *  # noqa: F403
 from starlette.requests import Request
 
+from app.auth.roles import require_role
 from app.ui.data.data_table import Column, DataTable
 from app.ui.data.pagination import Pagination
 from app.ui.feedback.empty_state import EmptyState
@@ -126,21 +127,11 @@ def _example(title: str, rendered, code: str):
     )
 
 
-def _admin_notice():
-    """Banner reminding visitors that prod locks this page to admins."""
-    return Alert(
-        "Arendusrežiimis on see leht avalik. Tootmises on ligipääs ainult admin-rollile.",
-        variant="info",
-        title="Disainisüsteemi teatmik",
-    )
-
-
 def _section_shell(req: Request, title: str, slug: str, *content):
     """Wrap a sub-page's content in PageShell with a consistent breadcrumb."""
     return PageShell(
-        _admin_notice(),
         Breadcrumb(("Disainisüsteem", "/design-system"), title),
-        H2(title),  # noqa: F405
+        H1(title, cls="page-title"),  # noqa: F405
         *content,
         Div(  # noqa: F405
             A("\u2190 Tagasi teatmikku", href="/design-system", cls="ds-back-link"),  # noqa: F405
@@ -172,7 +163,7 @@ def design_system_index(req: Request):
     """GET /design-system — landing page with cards linking to each section."""
     cards = [_section_card(slug, label, desc) for slug, label, desc in SECTIONS]
     return PageShell(
-        _admin_notice(),
+        H1("Disainisüsteem", cls="page-title"),  # noqa: F405
         P(  # noqa: F405
             "Seadusloome disainisüsteem põhineb Estonia Brand visuaalsel "
             "identiteedil (brand.estonia.ee). Siit leiad elavad näited "
@@ -239,47 +230,46 @@ def _typography_page(req: Request):
     )
 
 
+_BUTTON_VARIANTS = [
+    ("primary", "Salvesta"),
+    ("secondary", "Tühista"),
+    ("ghost", "Näita veel"),
+    ("danger", "Kustuta"),
+]
+
+
 def _buttons_page(req: Request):
-    examples = [
+    variants = [
         _example(
-            "Primary",
-            Button("Salvesta", variant="primary"),
-            'Button("Salvesta", variant="primary")',
-        ),
-        _example(
-            "Secondary",
-            Button("Tühista", variant="secondary"),
-            'Button("Tühista", variant="secondary")',
-        ),
-        _example(
-            "Ghost", Button("Näita veel", variant="ghost"), 'Button("Näita veel", variant="ghost")'
-        ),
-        _example(
-            "Danger", Button("Kustuta", variant="danger"), 'Button("Kustuta", variant="danger")'
-        ),
-        _example(
-            "Suurused",
-            Div(  # noqa: F405
-                Button("Väike", size="sm"),
-                Button("Keskmine", size="md"),
-                Button("Suur", size="lg"),
-                cls="ds-row",
-            ),
-            'Button("Väike", size="sm")\nButton("Keskmine", size="md")\nButton("Suur", size="lg")',
-        ),
-        _example(
-            "Olek",
-            Div(  # noqa: F405
-                Button("Salvestan", loading=True),
-                Button("Deaktiveeritud", disabled=True),
-                IconButton("x", aria_label="Sulge"),
-                cls="ds-row",
-            ),
-            'Button("Salvestan", loading=True)\nButton("Deaktiveeritud", disabled=True)\n'
-            'IconButton("x", aria_label="Sulge")',
-        ),
+            v.capitalize(),
+            Button(label, variant=v),  # type: ignore[arg-type]
+            f'Button("{label}", variant="{v}")',
+        )
+        for v, label in _BUTTON_VARIANTS
     ]
-    return _section_shell(req, "Nupud", "buttons", *examples)
+    sizes = _example(
+        "Suurused",
+        Div(  # noqa: F405
+            Button("Väike", size="sm"),
+            Button("Keskmine", size="md"),
+            Button("Suur", size="lg"),
+            cls="ds-row",
+        ),
+        'Button("Väike", size="sm")\nButton("Keskmine", size="md")\nButton("Suur", size="lg")',
+    )
+    states = _example(
+        "Olek",
+        Div(  # noqa: F405
+            Button("Salvestan", loading=True),
+            Button("Deaktiveeritud", disabled=True),
+            IconButton("x", aria_label="Sulge"),
+            cls="ds-row",
+        ),
+        'Button("Salvestan", loading=True)\n'
+        'Button("Deaktiveeritud", disabled=True)\n'
+        'IconButton("x", aria_label="Sulge")',
+    )
+    return _section_shell(req, "Nupud", "buttons", *variants, sizes, states)
 
 
 def _forms_page(req: Request):
@@ -321,53 +311,56 @@ def _forms_page(req: Request):
     return _section_shell(req, "Vormid", "forms", *examples)
 
 
+_ALERT_SAMPLES = [
+    ("info", "Info", "Info sõnum"),
+    ("success", "Õnnestus", "Edukalt salvestatud"),
+    ("warning", "Hoiatus", "Kontrolli sisendeid"),
+    ("danger", "Viga", "Midagi läks valesti"),
+]
+_BADGE_VARIANTS = [
+    ("primary", "Uus"),
+    ("success", "Valmis"),
+    ("warning", "Hoiatus"),
+    ("danger", "Viga"),
+]
+_STATUS_KEYS = ["ok", "running", "pending", "failed", "warning"]
+
+
 def _surfaces_page(req: Request):
-    examples = [
-        _example(
-            "Card",
-            Card(
-                CardHeader(H3("Pealkiri")),  # noqa: F405
-                CardBody(P("Kaardi sisu paikneb siin.")),
-            ),  # noqa: F405
-            'Card(CardHeader(H3("Pealkiri")),\n     CardBody(P("Kaardi sisu paikneb siin.")))',
-        ),
-        _example(
-            "Alert variandid",
-            Div(  # noqa: F405
-                Alert("Info sõnum", variant="info", title="Info"),
-                Alert("Edukalt salvestatud", variant="success", title="Õnnestus"),
-                Alert("Kontrolli sisendeid", variant="warning", title="Hoiatus"),
-                Alert("Midagi läks valesti", variant="danger", title="Viga"),
-                cls="ds-stack",
-            ),
-            'Alert("Info sõnum", variant="info", title="Info")\n'
-            'Alert("Edukalt salvestatud", variant="success", title="Õnnestus")',
-        ),
-        _example(
-            "Badge",
-            Div(  # noqa: F405
-                Badge("Uus", variant="primary"),
-                Badge("Valmis", variant="success"),
-                Badge("Hoiatus", variant="warning"),
-                Badge("Viga", variant="danger"),
-                cls="ds-row",
-            ),
-            'Badge("Uus", variant="primary")',
-        ),
-        _example(
-            "StatusBadge",
-            Div(  # noqa: F405
-                StatusBadge("ok"),
-                StatusBadge("running"),
-                StatusBadge("pending"),
-                StatusBadge("failed"),
-                StatusBadge("warning"),
-                cls="ds-row",
-            ),
-            'StatusBadge("ok")\nStatusBadge("running")\nStatusBadge("failed")',
-        ),
-    ]
-    return _section_shell(req, "Pinnad", "surfaces", *examples)
+    card_ex = _example(
+        "Card",
+        Card(CardHeader(H3("Pealkiri")), CardBody(P("Kaardi sisu."))),  # noqa: F405
+        'Card(CardHeader(H3("Pealkiri")),\n     CardBody(P("Kaardi sisu.")))',
+    )
+    alert_ex = _example(
+        "Alert variandid",
+        Div(
+            *[
+                Alert(msg, variant=v, title=t)  # type: ignore[arg-type]
+                for v, t, msg in _ALERT_SAMPLES
+            ],
+            cls="ds-stack",
+        ),  # noqa: F405
+        'Alert("Info sõnum", variant="info", title="Info")\n'
+        'Alert("Edukalt salvestatud", variant="success", title="Õnnestus")',
+    )
+    badge_ex = _example(
+        "Badge",
+        Div(
+            *[
+                Badge(label, variant=v)  # type: ignore[arg-type]
+                for v, label in _BADGE_VARIANTS
+            ],
+            cls="ds-row",
+        ),  # noqa: F405
+        'Badge("Uus", variant="primary")',
+    )
+    status_ex = _example(
+        "StatusBadge",
+        Div(*[StatusBadge(s) for s in _STATUS_KEYS], cls="ds-row"),  # type: ignore[arg-type]  # noqa: F405
+        'StatusBadge("ok")\nStatusBadge("running")\nStatusBadge("failed")',
+    )
+    return _section_shell(req, "Pinnad", "surfaces", card_ex, alert_ex, badge_ex, status_ex)
 
 
 def _feedback_page(req: Request):
@@ -534,15 +527,20 @@ def _icons_page(req: Request):
 
 
 def register_design_system_routes(rt) -> None:  # type: ignore[no-untyped-def]
-    """Mount GET handlers for ``/design-system`` and all sub-sections."""
-    rt("/design-system", methods=["GET"])(design_system_index)
-    rt("/design-system/colors", methods=["GET"])(_colors_page)
-    rt("/design-system/typography", methods=["GET"])(_typography_page)
-    rt("/design-system/buttons", methods=["GET"])(_buttons_page)
-    rt("/design-system/forms", methods=["GET"])(_forms_page)
-    rt("/design-system/surfaces", methods=["GET"])(_surfaces_page)
-    rt("/design-system/feedback", methods=["GET"])(_feedback_page)
-    rt("/design-system/data", methods=["GET"])(_data_page)
-    rt("/design-system/navigation", methods=["GET"])(_navigation_page)
-    rt("/design-system/modals", methods=["GET"])(_modals_page)
-    rt("/design-system/icons", methods=["GET"])(_icons_page)
+    """Mount GET handlers for ``/design-system`` and all sub-sections.
+
+    All routes are wrapped with ``require_role('admin')`` so the design system
+    catalog is only reachable for system administrators.
+    """
+    admin_only = require_role("admin")
+    rt("/design-system", methods=["GET"])(admin_only(design_system_index))
+    rt("/design-system/colors", methods=["GET"])(admin_only(_colors_page))
+    rt("/design-system/typography", methods=["GET"])(admin_only(_typography_page))
+    rt("/design-system/buttons", methods=["GET"])(admin_only(_buttons_page))
+    rt("/design-system/forms", methods=["GET"])(admin_only(_forms_page))
+    rt("/design-system/surfaces", methods=["GET"])(admin_only(_surfaces_page))
+    rt("/design-system/feedback", methods=["GET"])(admin_only(_feedback_page))
+    rt("/design-system/data", methods=["GET"])(admin_only(_data_page))
+    rt("/design-system/navigation", methods=["GET"])(admin_only(_navigation_page))
+    rt("/design-system/modals", methods=["GET"])(admin_only(_modals_page))
+    rt("/design-system/icons", methods=["GET"])(admin_only(_icons_page))

@@ -24,7 +24,7 @@ Validator = Callable[[str], str | None]
 # ---------------------------------------------------------------------------
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-_URL_RE = re.compile(r"^https?://[^\s]+$")
+_URL_RE = re.compile(r"^https?://[^\s/]+\.[^\s]+")
 
 
 def validate_required(value: str) -> str | None:
@@ -109,3 +109,17 @@ def register_validator(name: str, validator: Validator) -> None:
 def get_validator(name: str) -> Validator | None:
     """Look up a registered validator by name."""
     return _REGISTRY.get(name)
+
+
+# ---------------------------------------------------------------------------
+# Factory validators (NOT in the default registry)
+# ---------------------------------------------------------------------------
+#
+# Factories like validate_min_length(5) and validate_max_length(100) return
+# a concrete validator. To use them with the live validation endpoint, call
+# the factory first and register the result:
+#
+#     register_validator("username_length", validate_min_length(3))
+#
+# They are intentionally NOT in the default registry because they require
+# a length parameter to be bound before they can validate a value.

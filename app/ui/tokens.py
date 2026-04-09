@@ -37,9 +37,10 @@ DANGER = "#B91C1C"
 INFO = PALDISKI  # alias
 
 # ---------------------------------------------------------------------------
-# Category colors (for the D3 explorer — kept for backward compat)
+# Category colors (legacy — for the D3 explorer, kept for backward compat)
 # ---------------------------------------------------------------------------
 
+# Legacy — D3 explorer only; do not use in new code
 CATEGORY_COLORS = {
     "Enacted Law": "#38bdf8",
     "Draft Legislation": "#a78bfa",

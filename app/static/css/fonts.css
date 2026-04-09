@@ -1,8 +1,13 @@
 /* ===========================================================================
    Aino typeface — Estonia Brand primary font
-   Download from brand.estonia.ee/guidelines/typography and place in
-   app/static/fonts/aino/ as WOFF2 files.
-   See docs/legal/aino-license.md for licensing.
+
+   Aino files are not committed to this repository. See
+   docs/legal/aino-license.md. When the files are present in
+   app/static/fonts/aino/, these rules will load them; until then
+   the browser falls back to Verdana (no visible difference in most
+   admin UI contexts). font-display: optional prevents 404 retries —
+   if the file is missing the browser gives up immediately and uses
+   the fallback rather than blocking text rendering.
    =========================================================================== */
 
 @font-face {
@@ -10,7 +15,7 @@
   src: url('/static/fonts/aino/Aino-Regular.woff2') format('woff2');
   font-weight: 400;
   font-style: normal;
-  font-display: swap;
+  font-display: optional;
 }
 
 @font-face {
@@ -18,7 +23,7 @@
   src: url('/static/fonts/aino/Aino-Bold.woff2') format('woff2');
   font-weight: 700;
   font-style: normal;
-  font-display: swap;
+  font-display: optional;
 }
 
 @font-face {
@@ -26,7 +31,7 @@
   src: url('/static/fonts/aino/Aino-BoldItalic.woff2') format('woff2');
   font-weight: 700;
   font-style: italic;
-  font-display: swap;
+  font-display: optional;
 }
 
 @font-face {
@@ -34,5 +39,5 @@
   src: url('/static/fonts/aino/Aino-Headline.woff2') format('woff2');
   font-weight: 900;
   font-style: normal;
-  font-display: swap;
+  font-display: optional;
 }

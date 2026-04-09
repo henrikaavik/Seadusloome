@@ -45,11 +45,13 @@ def FormField(
     error_id = f"{name}-error"
     help_id = f"{name}-help"
 
-    # Link input to help and error for a11y
+    # Link input to help and error for a11y. When a live validator is wired
+    # OR an error is currently rendered, the error id is always referenced
+    # so that screen readers pick up later DOM updates from HTMX swaps.
     described_by = []
     if help:
         described_by.append(help_id)
-    if error:
+    if error or validator:
         described_by.append(error_id)
     aria_describedby = " ".join(described_by) if described_by else None
 

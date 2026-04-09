@@ -1413,3 +1413,294 @@
     scroll-behavior: auto !important;
   }
 }
+
+/* ===========================================================================
+   Page-level utility classes
+   Used by Phase 1 pages migrated to the design system. Keep this section
+   minimal — page-specific layouts should use real components instead.
+   =========================================================================== */
+
+.page-title {
+  font-size: var(--text-3xl);
+  margin: 0 0 var(--space-6) 0;
+}
+
+.page-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+}
+
+.section-subtitle {
+  margin: var(--space-4) 0 var(--space-2) 0;
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+  font-weight: var(--font-medium);
+}
+
+.muted-text {
+  color: var(--color-text-muted);
+}
+
+.back-link {
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+}
+.back-link a {
+  color: var(--color-text-muted);
+  text-decoration: none;
+}
+.back-link a:hover { color: var(--color-primary); }
+
+.card-title {
+  margin: 0;
+  font-size: var(--text-xl);
+  font-weight: var(--font-bold);
+}
+
+.card-subtitle {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+
+.info-list {
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-2) var(--space-4);
+}
+.info-list dt {
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+  font-weight: var(--font-medium);
+}
+.info-list dd {
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+.quick-links {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--space-3);
+}
+.quick-links li { margin: 0; }
+
+.inline-form {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.bookmark-add-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+}
+.bookmark-add-form .form-field { margin-bottom: 0; flex: 1 1 200px; }
+
+.table-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+}
+
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.auth-card {
+  max-width: 400px;
+  margin: var(--space-12) auto;
+}
+
+/* ===========================================================================
+   Design-system catalog (/design-system) — preview-only utilities
+   =========================================================================== */
+
+.ds-swatch {
+  width: 120px;
+  height: 80px;
+  border-radius: var(--radius);
+  border: 1px solid var(--color-border);
+  padding: var(--space-2);
+  box-shadow: var(--shadow-sm);
+}
+
+.ds-swatch-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: var(--space-4);
+  margin-top: var(--space-4);
+}
+
+.ds-swatch-item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.ds-swatch-name { font-size: var(--text-sm); }
+.ds-swatch-hex {
+  font-family: var(--font-family-mono);
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+}
+.ds-swatch-note {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+}
+
+.ds-snippet {
+  background: var(--color-background);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+  font-family: var(--font-family-mono);
+  font-size: var(--text-xs);
+  overflow-x: auto;
+  margin: var(--space-3) 0 0 0;
+}
+.ds-snippet code { background: transparent; }
+
+.ds-example {
+  background: var(--color-surface);
+  margin-bottom: var(--space-4);
+}
+.ds-example-title {
+  font-size: var(--text-base);
+  margin: 0;
+}
+.ds-example-render {
+  padding: var(--space-4);
+  background: var(--color-background);
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-sm);
+  margin-bottom: var(--space-3);
+}
+
+.ds-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.ds-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.ds-icon-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+
+.ds-icon-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+}
+.ds-icon-label {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  font-family: var(--font-family-mono);
+}
+
+.ds-back-link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-primary);
+  text-decoration: none;
+  font-size: var(--text-sm);
+}
+.ds-back-link:hover { color: var(--color-primary-hover); }
+
+.ds-card-link {
+  display: inline-block;
+  margin-top: var(--space-3);
+  color: var(--color-primary);
+  font-weight: var(--font-medium);
+  text-decoration: none;
+}
+.ds-card-link:hover { color: var(--color-primary-hover); }
+
+.ds-index-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: var(--space-4);
+  margin-top: var(--space-4);
+}
+
+.ds-index-card {
+  height: 100%;
+}
+
+.ds-type-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+
+.ds-type-row {
+  display: grid;
+  grid-template-columns: 120px 80px 1fr 1fr;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--color-border);
+}
+.ds-type-name {
+  font-family: var(--font-family-mono);
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+}
+.ds-type-size {
+  font-family: var(--font-family-mono);
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+}
+.ds-type-sample {
+  color: var(--color-text);
+  line-height: var(--leading-tight);
+}
+.ds-type-note {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+}
+
+.ds-footer-nav {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: var(--space-8);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--color-border);
+}

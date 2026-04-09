@@ -13,11 +13,26 @@ from app.auth.audit import log_action
 from app.auth.organizations import list_orgs
 from app.auth.roles import require_role
 from app.db import get_connection as _connect
+from app.ui.data.data_table import Column, DataTable
+from app.ui.forms.form_field import FormField, FormSelectField
+from app.ui.layout import PageShell
+from app.ui.primitives.badge import Badge, StatusBadge
+from app.ui.primitives.button import Button
+from app.ui.surfaces.alert import Alert
+from app.ui.surfaces.card import Card, CardBody, CardHeader
+from app.ui.theme import get_theme_from_request
 
 logger = logging.getLogger(__name__)
 
 VALID_ROLES = ("drafter", "reviewer", "org_admin", "admin")
 ORG_ASSIGNABLE_ROLES = ("drafter", "reviewer")
+
+_ROLE_LABELS = {
+    "admin": "Administraator",
+    "org_admin": "Organisatsiooni admin",
+    "reviewer": "Ülevaataja",
+    "drafter": "Koostaja",
+}
 
 
 def _hash_password(password: str) -> str:
@@ -181,82 +196,172 @@ def deactivate_user(user_id: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Rendering helpers
+# ---------------------------------------------------------------------------
+
+
+def _error_page(req: Request, message: str, back_href: str, active_nav: str):
+    """Render an error page wrapped in PageShell."""
+    auth = req.scope.get("auth")
+    theme = get_theme_from_request(req)
+    return PageShell(
+        H1("Viga", cls="page-title"),
+        Alert(message, variant="danger"),
+        P(A("← Tagasi", href=back_href), cls="back-link"),
+        title="Viga",
+        user=auth,
+        theme=theme,
+        active_nav=active_nav,
+    )
+
+
+def _user_table(users: list[dict], *, show_org: bool, base_path: str):  # type: ignore[type-arg]
+    """Render a user DataTable.
+
+    Args:
+        users: User dicts to display.
+        show_org: Whether to include the organization column.
+        base_path: URL prefix for actions (``/admin/users`` or ``/org/users``).
+    """
+    if not users:
+        return P("Kasutajaid ei leitud.", cls="muted-text")
+
+    def _status_cell(row: dict) -> object:  # type: ignore[type-arg]
+        if row["_is_active"]:
+            return StatusBadge("ok")
+        return Badge("Deaktiveeritud", variant="danger")
+
+    def _role_cell(row: dict) -> object:  # type: ignore[type-arg]
+        return Badge(
+            _ROLE_LABELS.get(row["role"], row["role"]),
+            variant="primary",
+        )
+
+    def _actions_cell(row: dict) -> object:  # type: ignore[type-arg]
+        actions: list = [
+            A(
+                "Muuda rolli",
+                href=f"{base_path}/{row['id']}/role",
+                cls="btn btn-secondary btn-sm",
+            )
+        ]
+        if row["_is_active"]:
+            actions.append(
+                Form(
+                    Button(
+                        "Deaktiveeri",
+                        type="submit",
+                        variant="danger",
+                        size="sm",
+                    ),
+                    method="post",
+                    action=f"{base_path}/{row['id']}/deactivate",
+                    cls="inline-form",
+                )
+            )
+        return Div(*actions, cls="table-actions")
+
+    columns: list[Column] = [
+        Column(key="full_name", label="Nimi", sortable=False),
+        Column(key="email", label="E-post", sortable=False),
+    ]
+    if show_org:
+        columns.append(Column(key="org_name", label="Organisatsioon", sortable=False))
+    columns.extend(
+        [
+            Column(key="role", label="Roll", sortable=False, render=_role_cell),
+            Column(key="status", label="Staatus", sortable=False, render=_status_cell),
+            Column(
+                key="actions",
+                label="Tegevused",
+                sortable=False,
+                render=_actions_cell,
+            ),
+        ]
+    )
+
+    rows = [
+        {
+            "id": u["id"],
+            "full_name": u["full_name"],
+            "email": u["email"],
+            "org_name": u.get("org_name", "—"),
+            "role": u["role"],
+            "_is_active": u.get("is_active", True),
+        }
+        for u in users
+    ]
+
+    return DataTable(columns=columns, rows=rows, empty_message="Kasutajaid ei leitud.")
+
+
+# ---------------------------------------------------------------------------
 # Route handlers — System admin (/admin/users)
 # ---------------------------------------------------------------------------
 
 
-def _user_table(users: list[dict], show_org: bool = True) -> Table | P:  # type: ignore[type-arg]
-    """Render a user table."""
-    if not users:
-        return P("Kasutajaid ei leitud.")
-
-    header_cells = [Th("Nimi"), Th("E-post"), Th("Roll"), Th("Staatus")]
-    if show_org:
-        header_cells.insert(2, Th("Organisatsioon"))
-    header_cells.append(Th("Tegevused"))
-
-    rows = []
-    for u in users:
-        cells = [
-            Td(u["full_name"]),
-            Td(u["email"]),
-            Td(u["role"]),
-            Td("Aktiivne" if u.get("is_active", True) else "Deaktiveeritud"),
-        ]
-        if show_org:
-            cells.insert(2, Td(u.get("org_name", "—")))
-
-        actions = []
-        actions.append(A("Muuda rolli", href=f"/admin/users/{u['id']}/role"))
-        if u.get("is_active", True):
-            actions.append(
-                Form(
-                    Button("Deaktiveeri", type="submit", cls="button secondary"),
-                    method="post",
-                    action=f"/admin/users/{u['id']}/deactivate",
-                    style="display:inline",
-                )
-            )
-        cells.append(Td(*actions))
-        rows.append(Tr(*cells))
-
-    return Table(Thead(Tr(*header_cells)), Tbody(*rows))
-
-
 def admin_user_list(req: Request):
     """GET /admin/users — list all users (system admin)."""
+    auth = req.scope.get("auth")
+    theme = get_theme_from_request(req)
     users = list_users()
-    return Titled(
-        "Kasutajad",
-        A("Lisa uus kasutaja", href="/admin/users/new", cls="button"),
-        _user_table(users, show_org=True),
+
+    content = (
+        H1("Kasutajad", cls="page-title"),
+        Div(
+            A(
+                "Lisa uus kasutaja",
+                href="/admin/users/new",
+                cls="btn btn-primary btn-md",
+            ),
+            cls="page-actions",
+        ),
+        Card(
+            CardHeader(H3("Kõik kasutajad", cls="card-title")),
+            CardBody(_user_table(users, show_org=True, base_path="/admin/users")),
+        ),
+    )
+
+    return PageShell(
+        *content,
+        title="Kasutajad",
+        user=auth,
+        theme=theme,
+        active_nav="/admin",
     )
 
 
 def admin_user_new_form(req: Request):
     """GET /admin/users/new — create user form (system admin)."""
-    orgs = list_orgs()
-    org_options = [Option("— Ei kuulu —", value="")] + [
-        Option(o["name"], value=o["id"]) for o in orgs
-    ]
-    role_options = [Option(r, value=r) for r in VALID_ROLES]
+    auth = req.scope.get("auth")
+    theme = get_theme_from_request(req)
 
-    return Titled(
-        "Uus kasutaja",
-        Form(
-            Fieldset(
-                Label("E-post", Input(name="email", type="email", required=True)),
-                Label("Parool", Input(name="password", type="password", required=True)),
-                Label("Täisnimi", Input(name="full_name", type="text", required=True)),
-                Label("Roll", Select(*role_options, name="role")),
-                Label("Organisatsioon", Select(*org_options, name="org_id")),
-            ),
-            Button("Loo kasutaja", type="submit"),
-            " ",
-            A("Tühista", href="/admin/users"),
-            method="post",
-            action="/admin/users",
+    orgs = list_orgs()
+    org_options: list = [("", "— Ei kuulu —")] + [(o["id"], o["name"]) for o in orgs]
+    role_options = [(r, _ROLE_LABELS.get(r, r)) for r in VALID_ROLES]
+
+    form = Form(
+        FormField(name="email", label="E-post", type="email", required=True),
+        FormField(name="password", label="Parool", type="password", required=True),
+        FormField(name="full_name", label="Täisnimi", type="text", required=True),
+        FormSelectField(name="role", label="Roll", options=role_options),
+        FormSelectField(name="org_id", label="Organisatsioon", options=org_options),
+        Div(
+            Button("Loo kasutaja", type="submit", variant="primary"),
+            A("Tühista", href="/admin/users", cls="btn btn-ghost btn-md"),
+            cls="form-actions",
         ),
+        method="post",
+        action="/admin/users",
+    )
+
+    return PageShell(
+        H1("Uus kasutaja", cls="page-title"),
+        Card(CardBody(form)),
+        title="Uus kasutaja",
+        user=auth,
+        theme=theme,
+        active_nav="/admin",
     )
 
 
@@ -271,18 +376,15 @@ def admin_user_create(
     """POST /admin/users — create a new user (system admin)."""
     pw_error = validate_password(password)
     if pw_error:
-        return Titled(
-            "Viga",
-            P(pw_error, style="color:red"),
-            A("Tagasi", href="/admin/users/new"),
-        )
+        return _error_page(req, pw_error, "/admin/users/new", "/admin")
     actual_org_id = org_id if org_id else None
     user = create_user(email.strip(), password, full_name.strip(), role, actual_org_id)
     if user is None:
-        return Titled(
-            "Viga",
-            P("Kasutaja loomine ebaõnnestus. E-posti aadress võib olla juba kasutusel."),
-            A("Tagasi", href="/admin/users/new"),
+        return _error_page(
+            req,
+            "Kasutaja loomine ebaõnnestus. E-posti aadress võib olla juba kasutusel.",
+            "/admin/users/new",
+            "/admin",
         )
     auth = req.scope.get("auth", {})
     log_action(
@@ -295,22 +397,41 @@ def admin_user_create(
 
 def admin_user_role_form(req: Request, user_id: str):
     """GET /admin/users/{user_id}/role — change role form (system admin)."""
+    auth = req.scope.get("auth")
+    theme = get_theme_from_request(req)
+
     user = get_user(user_id)
     if user is None:
-        return Titled("Viga", P("Kasutajat ei leitud."), A("Tagasi", href="/admin/users"))
+        return _error_page(req, "Kasutajat ei leitud.", "/admin/users", "/admin")
 
-    role_options = [Option(r, value=r, selected=(r == user["role"])) for r in VALID_ROLES]
-    return Titled(
-        "Muuda rolli",
-        P(f"Kasutaja: {user['full_name']} ({user['email']})"),
-        Form(
-            Fieldset(Label("Roll", Select(*role_options, name="role"))),
-            Button("Salvesta", type="submit"),
-            " ",
-            A("Tühista", href="/admin/users"),
-            method="post",
-            action=f"/admin/users/{user_id}/role",
+    role_options = [(r, _ROLE_LABELS.get(r, r)) for r in VALID_ROLES]
+
+    form = Form(
+        FormSelectField(
+            name="role",
+            label="Roll",
+            options=role_options,
+            value=user["role"],
         ),
+        Div(
+            Button("Salvesta", type="submit", variant="primary"),
+            A("Tühista", href="/admin/users", cls="btn btn-ghost btn-md"),
+            cls="form-actions",
+        ),
+        method="post",
+        action=f"/admin/users/{user_id}/role",
+    )
+
+    return PageShell(
+        H1("Muuda rolli", cls="page-title"),
+        Card(
+            CardHeader(P(f"Kasutaja: {user['full_name']} ({user['email']})", cls="card-subtitle")),
+            CardBody(form),
+        ),
+        title="Muuda rolli",
+        user=auth,
+        theme=theme,
+        active_nav="/admin",
     )
 
 
@@ -320,25 +441,22 @@ def admin_user_role_update(req: Request, user_id: str, role: str):
 
     # Prevent admin from changing their own role
     if str(user_id) == str(auth.get("id")):
-        return Titled(
-            "Viga",
-            P("Te ei saa oma rolli muuta."),
-            A("Tagasi", href="/admin/users"),
-        )
+        return _error_page(req, "Te ei saa oma rolli muuta.", "/admin/users", "/admin")
 
     # If demoting an admin, ensure at least 1 admin remains
     target_user = get_user(user_id)
     if target_user and target_user["role"] == "admin" and role != "admin":
         if count_admins() <= 1:
-            return Titled(
-                "Viga",
-                P("Süsteemis peab olema vähemalt üks administraator."),
-                A("Tagasi", href="/admin/users"),
+            return _error_page(
+                req,
+                "Süsteemis peab olema vähemalt üks administraator.",
+                "/admin/users",
+                "/admin",
             )
 
     success = update_user_role(user_id, role)
     if not success:
-        return Titled("Viga", P("Rolli muutmine ebaõnnestus."), A("Tagasi", href="/admin/users"))
+        return _error_page(req, "Rolli muutmine ebaõnnestus.", "/admin/users", "/admin")
     log_action(auth.get("id"), "user.role_update", {"user_id": user_id, "new_role": role})
     return RedirectResponse(url="/admin/users", status_code=303)
 
@@ -347,21 +465,18 @@ def admin_user_deactivate(req: Request, user_id: str):
     """POST /admin/users/{user_id}/deactivate — deactivate user (system admin)."""
     auth = req.scope.get("auth", {})
     if str(user_id) == str(auth.get("id")):
-        return Titled(
-            "Viga", P("Te ei saa ennast deaktiveerida."), A("Tagasi", href="/admin/users")
-        )
+        return _error_page(req, "Te ei saa ennast deaktiveerida.", "/admin/users", "/admin")
     target = get_user(user_id)
     if target and target.get("role") == "admin" and count_admins() <= 1:
-        return Titled(
-            "Viga",
-            P("Viimast administraatorit ei saa deaktiveerida."),
-            A("Tagasi", href="/admin/users"),
+        return _error_page(
+            req,
+            "Viimast administraatorit ei saa deaktiveerida.",
+            "/admin/users",
+            "/admin",
         )
     success = deactivate_user(user_id)
     if not success:
-        return Titled(
-            "Viga", P("Kasutaja deaktiveerimine ebaõnnestus."), A("Tagasi", href="/admin/users")
-        )
+        return _error_page(req, "Kasutaja deaktiveerimine ebaõnnestus.", "/admin/users", "/admin")
     log_action(auth.get("id"), "user.deactivate", {"user_id": user_id})
     return RedirectResponse(url="/admin/users", status_code=303)
 
@@ -374,35 +489,65 @@ def admin_user_deactivate(req: Request, user_id: str):
 def org_user_list(req: Request):
     """GET /org/users — list own org users (org admin)."""
     auth = req.scope.get("auth", {})
+    theme = get_theme_from_request(req)
     org_id = auth.get("org_id")
     if not org_id:
-        return Titled("Viga", P("Te ei kuulu ühtegi organisatsiooni."), A("Tagasi", href="/"))
+        return _error_page(req, "Te ei kuulu ühtegi organisatsiooni.", "/", "/org/users")
     users = list_users(org_id=org_id)
-    return Titled(
-        "Organisatsiooni kasutajad",
-        A("Kutsu uus kasutaja", href="/org/users/new", cls="button"),
-        _user_table(users, show_org=False),
+
+    content = (
+        H1("Organisatsiooni kasutajad", cls="page-title"),
+        Div(
+            A(
+                "Kutsu uus kasutaja",
+                href="/org/users/new",
+                cls="btn btn-primary btn-md",
+            ),
+            cls="page-actions",
+        ),
+        Card(
+            CardHeader(H3("Organisatsiooni liikmed", cls="card-title")),
+            CardBody(_user_table(users, show_org=False, base_path="/org/users")),
+        ),
+    )
+
+    return PageShell(
+        *content,
+        title="Organisatsiooni kasutajad",
+        user=auth or None,
+        theme=theme,
+        active_nav="/org/users",
     )
 
 
 def org_user_new_form(req: Request):
     """GET /org/users/new — invite/create user form (org admin)."""
-    role_options = [Option(r, value=r) for r in ORG_ASSIGNABLE_ROLES]
-    return Titled(
-        "Uus kasutaja",
-        Form(
-            Fieldset(
-                Label("E-post", Input(name="email", type="email", required=True)),
-                Label("Parool", Input(name="password", type="password", required=True)),
-                Label("Täisnimi", Input(name="full_name", type="text", required=True)),
-                Label("Roll", Select(*role_options, name="role")),
-            ),
-            Button("Loo kasutaja", type="submit"),
-            " ",
-            A("Tühista", href="/org/users"),
-            method="post",
-            action="/org/users",
+    auth = req.scope.get("auth")
+    theme = get_theme_from_request(req)
+
+    role_options = [(r, _ROLE_LABELS.get(r, r)) for r in ORG_ASSIGNABLE_ROLES]
+
+    form = Form(
+        FormField(name="email", label="E-post", type="email", required=True),
+        FormField(name="password", label="Parool", type="password", required=True),
+        FormField(name="full_name", label="Täisnimi", type="text", required=True),
+        FormSelectField(name="role", label="Roll", options=role_options),
+        Div(
+            Button("Loo kasutaja", type="submit", variant="primary"),
+            A("Tühista", href="/org/users", cls="btn btn-ghost btn-md"),
+            cls="form-actions",
         ),
+        method="post",
+        action="/org/users",
+    )
+
+    return PageShell(
+        H1("Uus kasutaja", cls="page-title"),
+        Card(CardBody(form)),
+        title="Uus kasutaja",
+        user=auth,
+        theme=theme,
+        active_nav="/org/users",
     )
 
 
@@ -411,29 +556,27 @@ def org_user_create(req: Request, email: str, password: str, full_name: str, rol
     auth = req.scope.get("auth", {})
     org_id = auth.get("org_id")
     if not org_id:
-        return Titled("Viga", P("Te ei kuulu ühtegi organisatsiooni."), A("Tagasi", href="/"))
+        return _error_page(req, "Te ei kuulu ühtegi organisatsiooni.", "/", "/org/users")
 
     pw_error = validate_password(password)
     if pw_error:
-        return Titled(
-            "Viga",
-            P(pw_error, style="color:red"),
-            A("Tagasi", href="/org/users/new"),
-        )
+        return _error_page(req, pw_error, "/org/users/new", "/org/users")
 
     if role not in ORG_ASSIGNABLE_ROLES:
-        return Titled(
-            "Viga",
-            P(f"Lubamatu roll: {role}. Lubatud: {', '.join(ORG_ASSIGNABLE_ROLES)}"),
-            A("Tagasi", href="/org/users/new"),
+        return _error_page(
+            req,
+            f"Lubamatu roll: {role}. Lubatud: {', '.join(ORG_ASSIGNABLE_ROLES)}",
+            "/org/users/new",
+            "/org/users",
         )
 
     user = create_user(email.strip(), password, full_name.strip(), role, org_id)
     if user is None:
-        return Titled(
-            "Viga",
-            P("Kasutaja loomine ebaõnnestus. E-posti aadress võib olla juba kasutusel."),
-            A("Tagasi", href="/org/users/new"),
+        return _error_page(
+            req,
+            "Kasutaja loomine ebaõnnestus. E-posti aadress võib olla juba kasutusel.",
+            "/org/users/new",
+            "/org/users",
         )
     log_action(
         auth.get("id"),
@@ -446,24 +589,41 @@ def org_user_create(req: Request, email: str, password: str, full_name: str, rol
 def org_user_role_form(req: Request, user_id: str):
     """GET /org/users/{user_id}/role — change role form (org admin)."""
     auth = req.scope.get("auth", {})
+    theme = get_theme_from_request(req)
     org_id = auth.get("org_id")
 
     user = get_user(user_id)
     if user is None or user.get("org_id") != org_id:
-        return Titled("Viga", P("Kasutajat ei leitud."), A("Tagasi", href="/org/users"))
+        return _error_page(req, "Kasutajat ei leitud.", "/org/users", "/org/users")
 
-    role_options = [Option(r, value=r, selected=(r == user["role"])) for r in ORG_ASSIGNABLE_ROLES]
-    return Titled(
-        "Muuda rolli",
-        P(f"Kasutaja: {user['full_name']} ({user['email']})"),
-        Form(
-            Fieldset(Label("Roll", Select(*role_options, name="role"))),
-            Button("Salvesta", type="submit"),
-            " ",
-            A("Tühista", href="/org/users"),
-            method="post",
-            action=f"/org/users/{user_id}/role",
+    role_options = [(r, _ROLE_LABELS.get(r, r)) for r in ORG_ASSIGNABLE_ROLES]
+
+    form = Form(
+        FormSelectField(
+            name="role",
+            label="Roll",
+            options=role_options,
+            value=user["role"],
         ),
+        Div(
+            Button("Salvesta", type="submit", variant="primary"),
+            A("Tühista", href="/org/users", cls="btn btn-ghost btn-md"),
+            cls="form-actions",
+        ),
+        method="post",
+        action=f"/org/users/{user_id}/role",
+    )
+
+    return PageShell(
+        H1("Muuda rolli", cls="page-title"),
+        Card(
+            CardHeader(P(f"Kasutaja: {user['full_name']} ({user['email']})", cls="card-subtitle")),
+            CardBody(form),
+        ),
+        title="Muuda rolli",
+        user=auth or None,
+        theme=theme,
+        active_nav="/org/users",
     )
 
 
@@ -474,18 +634,19 @@ def org_user_role_update(req: Request, user_id: str, role: str):
 
     user = get_user(user_id)
     if user is None or user.get("org_id") != org_id:
-        return Titled("Viga", P("Kasutajat ei leitud."), A("Tagasi", href="/org/users"))
+        return _error_page(req, "Kasutajat ei leitud.", "/org/users", "/org/users")
 
     if role not in ORG_ASSIGNABLE_ROLES:
-        return Titled(
-            "Viga",
-            P(f"Lubamatu roll: {role}. Lubatud: {', '.join(ORG_ASSIGNABLE_ROLES)}"),
-            A("Tagasi", href="/org/users"),
+        return _error_page(
+            req,
+            f"Lubamatu roll: {role}. Lubatud: {', '.join(ORG_ASSIGNABLE_ROLES)}",
+            "/org/users",
+            "/org/users",
         )
 
     success = update_user_role(user_id, role)
     if not success:
-        return Titled("Viga", P("Rolli muutmine ebaõnnestus."), A("Tagasi", href="/org/users"))
+        return _error_page(req, "Rolli muutmine ebaõnnestus.", "/org/users", "/org/users")
     log_action(auth.get("id"), "user.role_update", {"user_id": user_id, "new_role": role})
     return RedirectResponse(url="/org/users", status_code=303)
 
@@ -497,12 +658,15 @@ def org_user_deactivate(req: Request, user_id: str):
 
     user = get_user(user_id)
     if user is None or user.get("org_id") != org_id:
-        return Titled("Viga", P("Kasutajat ei leitud."), A("Tagasi", href="/org/users"))
+        return _error_page(req, "Kasutajat ei leitud.", "/org/users", "/org/users")
 
     success = deactivate_user(user_id)
     if not success:
-        return Titled(
-            "Viga", P("Kasutaja deaktiveerimine ebaõnnestus."), A("Tagasi", href="/org/users")
+        return _error_page(
+            req,
+            "Kasutaja deaktiveerimine ebaõnnestus.",
+            "/org/users",
+            "/org/users",
         )
     log_action(auth.get("id"), "user.deactivate", {"user_id": user_id})
     return RedirectResponse(url="/org/users", status_code=303)

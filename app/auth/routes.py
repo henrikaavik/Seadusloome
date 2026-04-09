@@ -36,6 +36,7 @@ def _login_form(email: str = "", error: str | None = None):
                     type="email",
                     value=email,
                     required=True,
+                    validator="email",
                 ),
                 FormField(
                     name="password",

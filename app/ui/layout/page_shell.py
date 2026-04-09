@@ -10,8 +10,15 @@ from app.ui.theme import THEME_INIT_SCRIPT
 
 
 def _head_tags(title: str):  # noqa: ANN202
-    """Standard <head> tags for every page."""
+    """Standard <head> tags for every page.
+
+    The inline THEME_INIT_SCRIPT is emitted first so the parser executes it
+    before any stylesheet starts blocking render. This guarantees the
+    ``data-theme`` attribute is on ``<html>`` before the first paint and
+    avoids the brief flash of the wrong theme (FOUC).
+    """
     return (
+        Script(THEME_INIT_SCRIPT),  # noqa: F405
         Title(f"{title} — Seadusloome"),  # noqa: F405
         Meta(charset="utf-8"),  # noqa: F405
         Meta(name="viewport", content="width=device-width, initial-scale=1"),  # noqa: F405
@@ -19,7 +26,6 @@ def _head_tags(title: str):  # noqa: ANN202
         Link(rel="stylesheet", href="/static/css/fonts.css"),  # noqa: F405
         Link(rel="stylesheet", href="/static/css/tokens.css"),  # noqa: F405
         Link(rel="stylesheet", href="/static/css/ui.css"),  # noqa: F405
-        Script(THEME_INIT_SCRIPT),  # noqa: F405
     )
 
 

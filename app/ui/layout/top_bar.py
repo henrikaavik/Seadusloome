@@ -4,24 +4,37 @@ from fasthtml.common import *  # noqa: F403
 
 from app.auth.provider import UserDict
 
+_THEME_CYCLE_JS = (
+    "const t = (document.cookie.match(/theme=([^;]+)/) || [])[1] || 'system';"
+    "const next = {system:'light', light:'dark', dark:'system'}[t];"
+    "document.cookie = 'theme=' + next + '; path=/; max-age=31536000; samesite=lax';"
+    "if (next === 'system') document.documentElement.removeAttribute('data-theme');"
+    "else document.documentElement.setAttribute('data-theme', next);"
+    "const icons = {light: '\u2600', dark: '\u263e', system: '\u25d0'};"
+    "const labels = {light: 'Hele', dark: 'Tume', system: 'S\u00fcsteem'};"
+    "const iconEl = this.querySelector('.theme-toggle-icon');"
+    "if (iconEl) iconEl.textContent = icons[next];"
+    "this.setAttribute('aria-label', 'Teema: ' + labels[next]);"
+)
+
 
 def ThemeToggle(current_theme: str = "system"):  # noqa: ANN201
-    """Theme toggle button cycling light/dark/system."""
-    icons = {"light": "☀", "dark": "☾", "system": "◐"}
-    label = {
-        "light": "Hele",
-        "dark": "Tume",
-        "system": "Süsteem",
-    }
+    """Theme toggle button cycling light/dark/system entirely on the client.
+
+    The toggle writes the ``theme`` cookie via JavaScript and updates the
+    ``data-theme`` attribute on ``<html>`` directly. No request is made to
+    the server, which avoids the CSRF surface and the page reload that the
+    HTMX-based version required.
+    """
+    icons = {"light": "\u2600", "dark": "\u263e", "system": "\u25d0"}
+    labels = {"light": "Hele", "dark": "Tume", "system": "Süsteem"}
     return Button(  # noqa: F405
-        Span(icons.get(current_theme, "◐"), cls="theme-toggle-icon"),  # noqa: F405
-        Span(label.get(current_theme, "Süsteem"), cls="sr-only"),  # noqa: F405
+        Span(icons.get(current_theme, "\u25d0"), cls="theme-toggle-icon"),  # noqa: F405
+        Span(labels.get(current_theme, "Süsteem"), cls="sr-only"),  # noqa: F405
         type="button",
         cls="theme-toggle",
-        aria_label=f"Teema: {label.get(current_theme, 'Süsteem')}",
-        hx_post="/api/theme/cycle",
-        hx_swap="none",
-        hx_on__after_request="window.location.reload()",
+        aria_label=f"Teema: {labels.get(current_theme, 'Süsteem')}",
+        onclick=_THEME_CYCLE_JS,
     )
 
 
