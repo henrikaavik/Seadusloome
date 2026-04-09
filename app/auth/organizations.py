@@ -46,10 +46,7 @@ def list_orgs() -> list[dict]:  # type: ignore[type-arg]
             rows = conn.execute(
                 "SELECT id, name, slug, created_at FROM organizations ORDER BY name"
             ).fetchall()
-        return [
-            {"id": str(r[0]), "name": r[1], "slug": r[2], "created_at": r[3]}
-            for r in rows
-        ]
+        return [{"id": str(r[0]), "name": r[1], "slug": r[2], "created_at": r[3]} for r in rows]
     except Exception:
         logger.exception("Failed to list organizations")
         return []
@@ -225,8 +222,10 @@ def org_create(req: Request, name: str, slug: str):
     if org is None:
         return Titled(
             "Viga",
-            P("Organisatsiooni loomine ebaõnnestus. "
-              "Nimi või lühitunnus võib olla juba kasutusel."),
+            P(
+                "Organisatsiooni loomine ebaõnnestus. "
+                "Nimi või lühitunnus võib olla juba kasutusel."
+            ),
             A("Tagasi", href="/admin/organizations"),
         )
     auth = req.scope.get("auth", {})
@@ -267,8 +266,10 @@ def org_delete(req: Request, org_id: str):
     if not success:
         return Titled(
             "Viga",
-            P("Organisatsiooni kustutamine ebaõnnestus. "
-              "Veenduge, et organisatsioonil pole kasutajaid."),
+            P(
+                "Organisatsiooni kustutamine ebaõnnestus. "
+                "Veenduge, et organisatsioonil pole kasutajaid."
+            ),
             A("Tagasi", href="/admin/organizations"),
         )
     auth = req.scope.get("auth", {})

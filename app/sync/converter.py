@@ -82,9 +82,7 @@ def convert_ontology(repo_path: Path) -> Graph:
             logger.info("Skipping %s (directory not found)", domain_name)
             continue
 
-        jsonld_files = sorted(domain_path.glob("*.json")) + sorted(
-            domain_path.glob("*.jsonld")
-        )
+        jsonld_files = sorted(domain_path.glob("*.json")) + sorted(domain_path.glob("*.jsonld"))
         if not jsonld_files:
             logger.info("Skipping %s (no JSON-LD files)", domain_name)
             continue

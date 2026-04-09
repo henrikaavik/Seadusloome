@@ -76,14 +76,10 @@ def _get_user_stats() -> dict:  # type: ignore[type-arg]
                 "LEFT JOIN users u ON u.org_id = o.id "
                 "GROUP BY o.id, o.name ORDER BY o.name"
             ).fetchall()
-            stats["users_per_org"] = [
-                {"org_name": r[0], "user_count": r[1]} for r in rows
-            ]
+            stats["users_per_org"] = [{"org_name": r[0], "user_count": r[1]} for r in rows]
 
             # Active sessions (not expired)
-            row = conn.execute(
-                "SELECT COUNT(*) FROM sessions WHERE expires_at > now()"
-            ).fetchone()
+            row = conn.execute("SELECT COUNT(*) FROM sessions WHERE expires_at > now()").fetchone()
             stats["active_sessions"] = row[0] if row else 0
     except Exception:
         logger.exception("Failed to fetch user stats")
@@ -142,6 +138,7 @@ _STATUS_COLORS = {
 
 def _render_health_section(jena_ok: bool, pg_ok: bool) -> list:
     """Render the system health section."""
+
     def _status_badge(ok: bool) -> Span:  # type: ignore[type-arg]
         color = "green" if ok else "red"
         text = "OK" if ok else "Viga"
@@ -198,8 +195,7 @@ def _render_user_stats_section(stats: dict) -> list:  # type: ignore[type-arg]
 
     if stats["users_per_org"]:
         org_rows = [
-            Tr(Td(org["org_name"]), Td(str(org["user_count"])))
-            for org in stats["users_per_org"]
+            Tr(Td(org["org_name"]), Td(str(org["user_count"]))) for org in stats["users_per_org"]
         ]
         content.append(H4("Kasutajaid organisatsioonide kaupa"))
         content.append(
@@ -300,9 +296,7 @@ def health_check(req: Request):
     pg_ok = _check_postgres()
     overall = "ok" if (jena_ok and pg_ok) else "degraded"
 
-    return JSONResponse(
-        {"status": overall, "jena": jena_ok, "postgres": pg_ok}
-    )
+    return JSONResponse({"status": overall, "jena": jena_ok, "postgres": pg_ok})
 
 
 # ---------------------------------------------------------------------------

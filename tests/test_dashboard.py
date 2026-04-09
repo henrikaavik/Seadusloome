@@ -37,9 +37,7 @@ class TestDashboardAuth:
 class TestHealthCheck:
     @patch("app.templates.admin_dashboard.jena_check_health")
     @patch("app.templates.admin_dashboard._check_postgres")
-    def test_health_returns_json(
-        self, mock_pg: MagicMock, mock_jena: MagicMock
-    ):
+    def test_health_returns_json(self, mock_pg: MagicMock, mock_jena: MagicMock):
         mock_pg.return_value = True
         mock_jena.return_value = True
 
@@ -55,9 +53,7 @@ class TestHealthCheck:
 
     @patch("app.templates.admin_dashboard.jena_check_health")
     @patch("app.templates.admin_dashboard._check_postgres")
-    def test_health_degraded_when_service_down(
-        self, mock_pg: MagicMock, mock_jena: MagicMock
-    ):
+    def test_health_degraded_when_service_down(self, mock_pg: MagicMock, mock_jena: MagicMock):
         mock_pg.return_value = True
         mock_jena.return_value = False
 

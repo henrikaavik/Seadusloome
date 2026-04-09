@@ -93,16 +93,20 @@ def explorer_overview(req: Request) -> JSONResponse:
             short_name = type_uri.rsplit("#", 1)[-1]
         else:
             short_name = type_uri.rsplit("/", 1)[-1]
-        categories.append({
-            "uri": type_uri,
-            "name": short_name,
-            "count": int(row.get("count", 0)),
-        })
+        categories.append(
+            {
+                "uri": type_uri,
+                "name": short_name,
+                "count": int(row.get("count", 0)),
+            }
+        )
 
-    return JSONResponse({
-        "data": categories,
-        "meta": {"total": len(categories)},
-    })
+    return JSONResponse(
+        {
+            "data": categories,
+            "meta": {"total": len(categories)},
+        }
+    )
 
 
 def explorer_category(req: Request, name: str) -> JSONResponse:
@@ -133,16 +137,20 @@ def explorer_category(req: Request, name: str) -> JSONResponse:
 
     entities = []
     for row in rows:
-        entities.append({
-            "uri": row.get("entity", ""),
-            "label": row.get("label", ""),
-            "type": row.get("type", ""),
-        })
+        entities.append(
+            {
+                "uri": row.get("entity", ""),
+                "label": row.get("label", ""),
+                "type": row.get("type", ""),
+            }
+        )
 
-    return JSONResponse({
-        "data": entities,
-        "meta": {"page": page, "size": size, "total": total},
-    })
+    return JSONResponse(
+        {
+            "data": entities,
+            "meta": {"page": page, "size": size, "total": total},
+        }
+    )
 
 
 def explorer_entity(req: Request, entity_id: str) -> JSONResponse:
@@ -172,12 +180,14 @@ def explorer_entity(req: Request, entity_id: str) -> JSONResponse:
     for row in out_rows:
         pred = row.get("predicate", "")
         short_pred = pred.rsplit("#", 1)[-1] if "#" in pred else pred.rsplit("/", 1)[-1]
-        outgoing.append({
-            "predicate": pred,
-            "predicateName": short_pred,
-            "object": row.get("object", ""),
-            "objectLabel": row.get("objectLabel", ""),
-        })
+        outgoing.append(
+            {
+                "predicate": pred,
+                "predicateName": short_pred,
+                "object": row.get("object", ""),
+                "objectLabel": row.get("objectLabel", ""),
+            }
+        )
 
     # Get incoming triples (subject -> predicate -> entity)
     in_query = ENTITY_DETAIL_INCOMING.format(entity_uri=entity_uri)
@@ -186,32 +196,38 @@ def explorer_entity(req: Request, entity_id: str) -> JSONResponse:
     for row in in_rows:
         pred = row.get("predicate", "")
         short_pred = pred.rsplit("#", 1)[-1] if "#" in pred else pred.rsplit("/", 1)[-1]
-        incoming.append({
-            "subject": row.get("subject", ""),
-            "subjectLabel": row.get("subjectLabel", ""),
-            "predicate": pred,
-            "predicateName": short_pred,
-        })
+        incoming.append(
+            {
+                "subject": row.get("subject", ""),
+                "subjectLabel": row.get("subjectLabel", ""),
+                "predicate": pred,
+                "predicateName": short_pred,
+            }
+        )
 
-    return JSONResponse({
-        "data": {
-            "uri": entity_uri,
-            "metadata": metadata,
-            "outgoing": outgoing,
-            "incoming": incoming,
-        },
-        "meta": {},
-    })
+    return JSONResponse(
+        {
+            "data": {
+                "uri": entity_uri,
+                "metadata": metadata,
+                "outgoing": outgoing,
+                "incoming": incoming,
+            },
+            "meta": {},
+        }
+    )
 
 
 def explorer_search(req: Request) -> JSONResponse:
     """GET /api/explorer/search -- search entities by label."""
     q = req.query_params.get("q", "").strip()
     if not q:
-        return JSONResponse({
-            "data": [],
-            "meta": {"query": "", "total": 0},
-        })
+        return JSONResponse(
+            {
+                "data": [],
+                "meta": {"query": "", "total": 0},
+            }
+        )
 
     try:
         limit = min(_MAX_SEARCH_LIMIT, max(1, int(req.query_params.get("limit", "20"))))
@@ -227,16 +243,20 @@ def explorer_search(req: Request) -> JSONResponse:
 
     results = []
     for row in rows:
-        results.append({
-            "uri": row.get("entity", ""),
-            "label": row.get("label", ""),
-            "type": row.get("type", ""),
-        })
+        results.append(
+            {
+                "uri": row.get("entity", ""),
+                "label": row.get("label", ""),
+                "type": row.get("type", ""),
+            }
+        )
 
-    return JSONResponse({
-        "data": results,
-        "meta": {"query": q, "total": len(results)},
-    })
+    return JSONResponse(
+        {
+            "data": results,
+            "meta": {"query": q, "total": len(results)},
+        }
+    )
 
 
 def explorer_timeline(req: Request) -> JSONResponse:
@@ -262,18 +282,22 @@ def explorer_timeline(req: Request) -> JSONResponse:
 
     entities = []
     for row in rows:
-        entities.append({
-            "uri": row.get("entity", ""),
-            "label": row.get("label", ""),
-            "type": row.get("type", ""),
-            "validFrom": row.get("validFrom", ""),
-            "validUntil": row.get("validUntil", ""),
-        })
+        entities.append(
+            {
+                "uri": row.get("entity", ""),
+                "label": row.get("label", ""),
+                "type": row.get("type", ""),
+                "validFrom": row.get("validFrom", ""),
+                "validUntil": row.get("validUntil", ""),
+            }
+        )
 
-    return JSONResponse({
-        "data": entities,
-        "meta": {"date": date, "page": page, "size": size, "total": total},
-    })
+    return JSONResponse(
+        {
+            "data": entities,
+            "meta": {"date": date, "page": page, "size": size, "total": total},
+        }
+    )
 
 
 # ---------------------------------------------------------------------------

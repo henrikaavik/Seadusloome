@@ -261,7 +261,12 @@ def admin_user_new_form(req: Request):
 
 
 def admin_user_create(
-    req: Request, email: str, password: str, full_name: str, role: str, org_id: str = "",
+    req: Request,
+    email: str,
+    password: str,
+    full_name: str,
+    role: str,
+    org_id: str = "",
 ):
     """POST /admin/users — create a new user (system admin)."""
     pw_error = validate_password(password)
@@ -294,9 +299,7 @@ def admin_user_role_form(req: Request, user_id: str):
     if user is None:
         return Titled("Viga", P("Kasutajat ei leitud."), A("Tagasi", href="/admin/users"))
 
-    role_options = [
-        Option(r, value=r, selected=(r == user["role"])) for r in VALID_ROLES
-    ]
+    role_options = [Option(r, value=r, selected=(r == user["role"])) for r in VALID_ROLES]
     return Titled(
         "Muuda rolli",
         P(f"Kasutaja: {user['full_name']} ({user['email']})"),
@@ -350,7 +353,8 @@ def admin_user_deactivate(req: Request, user_id: str):
     target = get_user(user_id)
     if target and target.get("role") == "admin" and count_admins() <= 1:
         return Titled(
-            "Viga", P("Viimast administraatorit ei saa deaktiveerida."),
+            "Viga",
+            P("Viimast administraatorit ei saa deaktiveerida."),
             A("Tagasi", href="/admin/users"),
         )
     success = deactivate_user(user_id)
@@ -448,9 +452,7 @@ def org_user_role_form(req: Request, user_id: str):
     if user is None or user.get("org_id") != org_id:
         return Titled("Viga", P("Kasutajat ei leitud."), A("Tagasi", href="/org/users"))
 
-    role_options = [
-        Option(r, value=r, selected=(r == user["role"])) for r in ORG_ASSIGNABLE_ROLES
-    ]
+    role_options = [Option(r, value=r, selected=(r == user["role"])) for r in ORG_ASSIGNABLE_ROLES]
     return Titled(
         "Muuda rolli",
         P(f"Kasutaja: {user['full_name']} ({user['email']})"),

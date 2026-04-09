@@ -122,7 +122,9 @@ class TestJWTTokens:
     def test_wrong_secret_raises(self):
         now = datetime.now(UTC)
         payload = {
-            "sub": "uid", "email": "u@t.ee", "role": "drafter",
+            "sub": "uid",
+            "email": "u@t.ee",
+            "role": "drafter",
             "exp": now + timedelta(hours=1),
         }
         token = jwt.encode(payload, "correct-secret", algorithm=JWT_ALGORITHM)

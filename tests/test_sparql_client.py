@@ -272,9 +272,7 @@ class TestSparqlClientCount:
         client = SparqlClient()
         mock_response = MagicMock()
         mock_response.json.return_value = {
-            "results": {
-                "bindings": [{"count": {"type": "literal", "value": "42"}}]
-            }
+            "results": {"bindings": [{"count": {"type": "literal", "value": "42"}}]}
         }
         mock_response.raise_for_status = MagicMock()
 
@@ -294,9 +292,7 @@ class TestSparqlClientCount:
         client = SparqlClient()
         mock_response = MagicMock()
         mock_response.json.return_value = {
-            "results": {
-                "bindings": [{"count": {"type": "literal", "value": "not_a_number"}}]
-            }
+            "results": {"bindings": [{"count": {"type": "literal", "value": "not_a_number"}}]}
         }
         mock_response.raise_for_status = MagicMock()
 

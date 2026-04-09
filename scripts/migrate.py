@@ -40,7 +40,8 @@ def apply_migration(conn: psycopg.Connection, path: Path) -> None:
     print(f"  Applying {version}...")
     conn.execute(sql)  # type: ignore[arg-type]
     conn.execute(
-        "INSERT INTO schema_migrations (version) VALUES (%s)", (version,)  # type: ignore[arg-type]
+        "INSERT INTO schema_migrations (version) VALUES (%s)",
+        (version,),  # type: ignore[arg-type]
     )
     conn.commit()
     print(f"  Applied {version}")

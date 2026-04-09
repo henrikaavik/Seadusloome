@@ -25,6 +25,7 @@ def _get_notify_fn():  # type: ignore[no-untyped-def]
         _notify_sync = notify_sync_complete_sync
     return _notify_sync
 
+
 logger = logging.getLogger(__name__)
 
 ONTOLOGY_REPO = "https://github.com/henrikaavik/estonian-legal-ontology.git"

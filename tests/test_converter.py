@@ -40,9 +40,13 @@ def test_serialize_to_turtle():
 def test_load_index(tmp_path: Path):
     krr = tmp_path / "krr_outputs"
     krr.mkdir()
-    index = {"generated": "2026-01-01", "total_files": 2, "laws": [
-        {"name": "test_law", "files": ["test_law_peep.json"]},
-    ]}
+    index = {
+        "generated": "2026-01-01",
+        "total_files": 2,
+        "laws": [
+            {"name": "test_law", "files": ["test_law_peep.json"]},
+        ],
+    }
     (krr / "INDEX.json").write_text(json.dumps(index))
 
     laws = load_index(tmp_path)
@@ -52,5 +56,6 @@ def test_load_index(tmp_path: Path):
 
 def test_load_index_missing(tmp_path: Path):
     import pytest
+
     with pytest.raises(FileNotFoundError):
         load_index(tmp_path)

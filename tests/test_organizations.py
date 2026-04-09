@@ -102,7 +102,10 @@ class TestGetOrg:
         mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
         mock_connect.return_value.__exit__ = MagicMock(return_value=False)
         mock_conn.execute.return_value.fetchone.return_value = (
-            "id-1", "Org One", "org-one", "2024-01-01"
+            "id-1",
+            "Org One",
+            "org-one",
+            "2024-01-01",
         )
 
         result = get_org("id-1")
@@ -140,7 +143,10 @@ class TestCreateOrg:
         mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
         mock_connect.return_value.__exit__ = MagicMock(return_value=False)
         mock_conn.execute.return_value.fetchone.return_value = (
-            "new-id", "New Org", "new-org", "2024-06-01"
+            "new-id",
+            "New Org",
+            "new-org",
+            "2024-06-01",
         )
 
         result = create_org("New Org", "new-org")

@@ -84,9 +84,7 @@ class JWTAuthProvider(AuthProvider):
         Returns ``None`` when the token is expired, tampered, or malformed.
         """
         try:
-            payload: dict[str, str] = jwt.decode(
-                token, SECRET_KEY, algorithms=[JWT_ALGORITHM]
-            )
+            payload: dict[str, str] = jwt.decode(token, SECRET_KEY, algorithms=[JWT_ALGORITHM])
         except jwt.PyJWTError:
             return None
 
@@ -139,8 +137,7 @@ class JWTAuthProvider(AuthProvider):
 
         with self._connect() as conn:
             conn.execute(
-                "INSERT INTO sessions (user_id, token_hash, expires_at) "
-                "VALUES (%s, %s, %s)",
+                "INSERT INTO sessions (user_id, token_hash, expires_at) VALUES (%s, %s, %s)",
                 (user["id"], token_hash, expires_at),
             )
             conn.commit()
