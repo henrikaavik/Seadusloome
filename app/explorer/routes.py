@@ -219,6 +219,7 @@ def explorer_search(req: Request) -> JSONResponse:
         limit = 20
 
     safe_pattern = _sanitize_regex(q)
+    safe_pattern = safe_pattern.replace("\\", "\\\\").replace('"', '\\"')
     query = SEARCH_ENTITIES.format(search_pattern=safe_pattern, limit=limit)
 
     client = _get_client()

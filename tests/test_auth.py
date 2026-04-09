@@ -114,9 +114,9 @@ class TestJWTTokens:
             "exp": now + timedelta(hours=1),
         }
         token = jwt.encode(payload, SECRET_KEY, algorithm=JWT_ALGORITHM)
-        # Flip a character in the signature portion
-        tampered = token[:-1] + ("A" if token[-1] != "A" else "B")
-        with pytest.raises(jwt.InvalidSignatureError):
+        # Corrupt the signature by replacing last 4 chars
+        tampered = token[:-4] + "XXXX"
+        with pytest.raises((jwt.InvalidSignatureError, jwt.DecodeError)):
             jwt.decode(tampered, SECRET_KEY, algorithms=[JWT_ALGORITHM])
 
     def test_wrong_secret_raises(self):

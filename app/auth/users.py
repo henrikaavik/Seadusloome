@@ -342,12 +342,22 @@ def admin_user_role_update(req: Request, user_id: str, role: str):
 
 def admin_user_deactivate(req: Request, user_id: str):
     """POST /admin/users/{user_id}/deactivate — deactivate user (system admin)."""
+    auth = req.scope.get("auth", {})
+    if str(user_id) == str(auth.get("id")):
+        return Titled(
+            "Viga", P("Te ei saa ennast deaktiveerida."), A("Tagasi", href="/admin/users")
+        )
+    target = get_user(user_id)
+    if target and target.get("role") == "admin" and count_admins() <= 1:
+        return Titled(
+            "Viga", P("Viimast administraatorit ei saa deaktiveerida."),
+            A("Tagasi", href="/admin/users"),
+        )
     success = deactivate_user(user_id)
     if not success:
         return Titled(
             "Viga", P("Kasutaja deaktiveerimine ebaõnnestus."), A("Tagasi", href="/admin/users")
         )
-    auth = req.scope.get("auth", {})
     log_action(auth.get("id"), "user.deactivate", {"user_id": user_id})
     return RedirectResponse(url="/admin/users", status_code=303)
 
