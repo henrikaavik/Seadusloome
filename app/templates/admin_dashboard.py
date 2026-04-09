@@ -11,6 +11,7 @@ from starlette.responses import JSONResponse
 
 from app.auth.roles import require_role
 from app.db import get_connection as _connect
+from app.jobs.queue import Job, JobQueue
 from app.sync.jena_loader import check_health as jena_check_health
 from app.ui.data.data_table import Column, DataTable
 from app.ui.data.pagination import Pagination
@@ -242,6 +243,89 @@ def _sync_card(sync_logs: list[dict], *, status_banner: tuple[str, str] | None =
     )
 
 
+def _get_job_queue_snapshot() -> dict:  # type: ignore[type-arg]
+    """Fetch recent jobs grouped by status for the admin card.
+
+    Swallows DB errors so the rest of the dashboard still renders if
+    Postgres is temporarily unreachable — the health card above this
+    one will already have flagged the outage.
+    """
+    snapshot: dict = {"pending": [], "running": [], "failed": []}  # type: ignore[type-arg]
+    try:
+        queue = JobQueue()
+        snapshot["pending"] = queue.list_by_status("pending", limit=5)
+        snapshot["running"] = queue.list_by_status("running", limit=5)
+        snapshot["failed"] = queue.list_by_status("failed", limit=5)
+    except Exception:
+        logger.exception("Failed to fetch job queue snapshot")
+    return snapshot
+
+
+def _job_queue_card():
+    """Render the background job queue status card.
+
+    Shows counts of pending/running/failed jobs at a glance, plus a
+    table of the most recent failures so an admin can spot broken
+    pipelines without needing to SSH into Postgres.
+    """
+    snapshot = _get_job_queue_snapshot()
+    pending: list[Job] = snapshot["pending"]
+    running: list[Job] = snapshot["running"]
+    failed: list[Job] = snapshot["failed"]
+
+    has_any = bool(pending or running or failed)
+
+    if not has_any:
+        body: object = P("Taustajobisid pole.", cls="muted-text")
+        return Card(
+            CardHeader(H3("Taustajobide järjekord", cls="card-title")),
+            CardBody(body),
+            id="job-queue-card",
+        )
+
+    summary = Div(
+        Badge(f"{len(pending)} ootel", variant="default"),
+        " ",
+        Badge(f"{len(running)} töötab", variant="primary"),
+        " ",
+        Badge(f"{len(failed)} ebaõnnestus", variant="danger"),
+        cls="job-queue-summary",
+    )
+
+    body_children: list = [summary]
+
+    if failed:
+        columns = [
+            Column(key="job_type", label="Tüüp", sortable=False),
+            Column(key="error_message", label="Viga", sortable=False),
+            Column(key="attempts", label="Katseid", sortable=False),
+            Column(key="finished_at", label="Lõpetatud", sortable=False),
+        ]
+        rows = []
+        for job in failed:
+            error_raw = job.error_message or "—"
+            # Truncate long error messages for readability in the card.
+            if len(error_raw) > 120:
+                error_raw = error_raw[:117] + "..."
+            finished = job.finished_at
+            rows.append(
+                {
+                    "job_type": job.job_type,
+                    "error_message": error_raw,
+                    "attempts": f"{job.attempts}/{job.max_attempts}",
+                    "finished_at": finished.strftime("%d.%m.%Y %H:%M") if finished else "—",
+                }
+            )
+        body_children.append(H4("Viimased ebaõnnestunud jobid", cls="section-subtitle"))
+        body_children.append(DataTable(columns=columns, rows=rows))
+
+    return Card(
+        CardHeader(H3("Taustajobide järjekord", cls="card-title")),
+        CardBody(*body_children),
+        id="job-queue-card",
+    )
+
+
 def _user_stats_card(stats: dict):  # type: ignore[type-arg]
     """Render the user statistics card."""
     summary = Dl(
@@ -306,6 +390,7 @@ def admin_dashboard_page(req: Request):
         H1("Administreerimise töölaud", cls="page-title"),
         _health_card(jena_ok, pg_ok),
         _sync_card(sync_logs),
+        _job_queue_card(),
         _user_stats_card(user_stats),
         _quick_links_card(),
     )

@@ -1,4 +1,7 @@
+import logging
 import os
+import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fasthtml.common import *
@@ -11,6 +14,7 @@ from app.auth.middleware import SKIP_PATHS, auth_before
 from app.auth.organizations import register_org_routes
 from app.auth.routes import register_auth_routes
 from app.auth.users import register_user_routes
+from app.docs.routes import register_draft_routes
 from app.explorer.pages import register_explorer_pages
 from app.explorer.routes import register_explorer_routes
 from app.explorer.websocket import register_ws_routes
@@ -22,7 +26,48 @@ from app.ui.forms.live_validation import register_validation_routes
 from app.ui.primitives.button import Button  # noqa: F401  -- shadow guard #419
 from app.ui.theme import THEME_INIT_SCRIPT
 
+logger = logging.getLogger(__name__)
+
 _STATIC_DIR = Path(__file__).parent / "static"
+
+# Background worker handles: populated lazily by the lifespan hook so
+# that importing this module does not spawn a thread. Tests that import
+# ``app`` via ``TestClient`` still trigger the lifespan unless
+# ``DISABLE_BACKGROUND_WORKER=1`` is set (see tests/conftest.py).
+_stop_worker = threading.Event()
+_worker_thread: threading.Thread | None = None
+
+
+@asynccontextmanager
+async def lifespan(_app):  # type: ignore[no-untyped-def]
+    """ASGI lifespan hook: start the background worker, stop it on shutdown.
+
+    Set ``DISABLE_BACKGROUND_WORKER=1`` to skip startup entirely — the
+    pytest suite uses this flag so mocked DB calls are not racing a
+    real worker thread.
+    """
+    global _worker_thread
+    if os.environ.get("DISABLE_BACKGROUND_WORKER") == "1":
+        logger.info("Background worker disabled via DISABLE_BACKGROUND_WORKER=1")
+        yield
+        return
+
+    # Local import so tests that patch app.jobs.worker see the module
+    # freshly re-imported if they reload after setting env vars.
+    from app.jobs.worker import start_worker_thread
+
+    _stop_worker.clear()
+    _worker_thread = start_worker_thread(_stop_worker)
+    logger.info("Background worker started")
+    try:
+        yield
+    finally:
+        logger.info("Stopping background worker...")
+        _stop_worker.set()
+        if _worker_thread is not None:
+            _worker_thread.join(timeout=5.0)
+            _worker_thread = None
+
 
 # Head tags hoisted into <head> by FastHTML. The theme init script must run
 # before the first paint to avoid a flash of the wrong theme (FOUC); it is
@@ -41,7 +86,9 @@ _HDRS = (
 
 bware = Beforeware(auth_before, skip=SKIP_PATHS)
 # pico=False: using custom design system (app/ui) instead of Pico CSS.
-app, rt = fast_app(before=bware, pico=False, hdrs=_HDRS)
+# lifespan=lifespan: FastHTML forwards this to Starlette so the
+# background job worker starts/stops with the ASGI app.
+app, rt = fast_app(before=bware, pico=False, hdrs=_HDRS, lifespan=lifespan)
 
 # Middleware order matters: Starlette's `add_middleware` prepends to the
 # user_middleware list, so the LAST middleware added becomes the OUTERMOST
@@ -97,6 +144,7 @@ register_dashboard_routes(rt)
 register_admin_routes(rt)
 register_validation_routes(rt)
 register_design_system_routes(rt)
+register_draft_routes(rt)
 
 
 @rt("/")

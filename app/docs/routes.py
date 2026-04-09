@@ -1,0 +1,747 @@
+"""FastHTML routes for the Phase 2 Document Upload module.
+
+Route map:
+
+    GET  /drafts                     — list the caller's org's drafts
+    GET  /drafts/new                 — upload form
+    POST /drafts                     — multipart upload handler
+    GET  /drafts/{draft_id}          — draft detail page with status tracker
+    GET  /drafts/{draft_id}/status   — HTMX polling fragment (status only)
+    POST /drafts/{draft_id}/delete   — delete draft + encrypted file
+
+All routes require authentication (they are **not** in ``SKIP_PATHS``).
+The listing and detail pages additionally enforce ``draft.org_id ==
+user.org_id`` for every returned record. Single-draft lookups that fail
+that check return a 404 rather than a 403 so we never leak the fact
+that a draft from another org exists.
+"""
+
+from __future__ import annotations
+
+import logging
+import uuid
+from typing import Any, cast
+
+from fasthtml.common import *  # noqa: F403
+from starlette.requests import Request
+from starlette.responses import RedirectResponse, Response
+
+from app.auth.provider import UserDict
+from app.db import get_connection as _connect
+from app.docs.audit import (
+    log_draft_delete,
+    log_draft_upload,
+    log_draft_view,
+)
+from app.docs.draft_model import (
+    Draft,
+    count_drafts_for_org_conn,
+    delete_draft,
+    fetch_draft,
+    fetch_drafts_for_org,
+)
+from app.docs.upload import DraftUploadError, handle_upload
+from app.storage import delete_file as delete_encrypted_file
+from app.ui.data.data_table import Column, DataTable
+from app.ui.data.pagination import Pagination
+from app.ui.layout import PageShell
+from app.ui.primitives.badge import Badge, BadgeVariant
+from app.ui.primitives.button import Button
+from app.ui.surfaces.alert import Alert
+from app.ui.surfaces.card import Card, CardBody, CardFooter, CardHeader
+from app.ui.theme import get_theme_from_request
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Status display helpers
+# ---------------------------------------------------------------------------
+
+# Public pipeline stages in order. "failed" is a terminal branch rendered
+# separately so the tracker reads left-to-right during normal operation.
+_STATUS_STAGES: tuple[tuple[str, str], ...] = (
+    ("uploaded", "Üles laaditud"),
+    ("parsing", "Töötlemine"),
+    ("extracting", "Olemite eraldamine"),
+    ("analyzing", "Mõjude analüüs"),
+    ("ready", "Valmis"),
+)
+
+_STATUS_LABELS: dict[str, str] = dict(_STATUS_STAGES)
+_STATUS_LABELS["failed"] = "Ebaõnnestus"
+
+_TERMINAL_STATUSES: frozenset[str] = frozenset({"ready", "failed"})
+
+_PAGE_SIZE = 25
+
+_DELETE_CONFIRM = (
+    "Kas olete kindel, et soovite selle eelnõu kustutada? Seda tegevust ei saa tagasi võtta."
+)
+
+
+_STATUS_KEY_MAP: dict[str, str] = {
+    "uploaded": "pending",
+    "parsing": "running",
+    "extracting": "running",
+    "analyzing": "running",
+    "ready": "ok",
+    "failed": "failed",
+}
+
+_STATUS_VARIANT_MAP: dict[str, BadgeVariant] = {
+    "uploaded": "default",
+    "parsing": "primary",
+    "extracting": "primary",
+    "analyzing": "primary",
+    "ready": "success",
+    "failed": "danger",
+}
+
+
+def _status_badge(status: str):
+    """Return a Badge for a draft status.
+
+    We use plain ``Badge`` instead of ``StatusBadge`` because the latter
+    ships its own English-ish label set and our domain statuses
+    (uploaded/parsing/extracting/analyzing) need Estonian copy.
+    """
+    key = _STATUS_KEY_MAP.get(status, "pending")
+    variant: BadgeVariant = _STATUS_VARIANT_MAP.get(status, "default")
+    label = _STATUS_LABELS.get(status, status)
+    return Badge(label, variant=variant, cls=f"draft-status draft-status-{key}")
+
+
+def _format_timestamp(value: Any) -> str:
+    """Render a ``datetime`` the same way the admin dashboard does."""
+    if value is None:
+        return "—"
+    try:
+        return value.strftime("%d.%m.%Y %H:%M")
+    except AttributeError:
+        return str(value)
+
+
+def _status_tracker(draft: Draft):
+    """Render the 6-stage horizontal status tracker.
+
+    Wrapped in a polling Div so HTMX can refresh it every 3 seconds
+    until the draft reaches a terminal state. The outer div is swapped
+    with ``outerHTML`` so the polling attributes come back with the new
+    fragment.
+    """
+    items: list = []
+    current_index = -1
+    for idx, (key, _) in enumerate(_STATUS_STAGES):
+        if key == draft.status:
+            current_index = idx
+            break
+
+    for idx, (key, label) in enumerate(_STATUS_STAGES):
+        classes = ["draft-stage"]
+        if draft.status == "failed":
+            # On failure every stage past the last successful one is dim.
+            classes.append("draft-stage-idle")
+        elif current_index >= 0 and idx < current_index:
+            classes.append("draft-stage-done")
+        elif current_index >= 0 and idx == current_index:
+            classes.append("draft-stage-active")
+        else:
+            classes.append("draft-stage-idle")
+        items.append(
+            Li(  # noqa: F405
+                Span(str(idx + 1), cls="draft-stage-number", aria_hidden="true"),  # noqa: F405
+                Span(label, cls="draft-stage-label"),  # noqa: F405
+                cls=" ".join(classes),
+            )
+        )
+
+    tracker = Ol(*items, cls="draft-status-tracker", aria_label="Töötluse staatus")  # noqa: F405
+
+    # Build the poll attributes only while the draft is still progressing.
+    poll_attrs: dict[str, Any] = {}
+    if draft.status not in _TERMINAL_STATUSES:
+        poll_attrs = {
+            "hx_get": f"/drafts/{draft.id}/status",
+            "hx_trigger": "every 3s",
+            "hx_target": "this",
+            "hx_swap": "outerHTML",
+        }
+
+    header = Div(  # noqa: F405
+        Span("Staatus:", cls="draft-status-label-text"),  # noqa: F405
+        _status_badge(draft.status),
+        cls="draft-status-header",
+    )
+
+    children: list = [header, tracker]
+    if draft.status == "failed" and draft.error_message:
+        children.append(
+            Alert(
+                draft.error_message,
+                variant="danger",
+                title="Töötlemine ebaõnnestus",
+            )
+        )
+
+    return Div(  # noqa: F405
+        *children,
+        id=f"draft-status-{draft.id}",
+        cls="draft-status-wrapper",
+        **poll_attrs,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _require_auth(req: Request) -> Response | UserDict:
+    """Return the auth dict or a 303 redirect to the login page.
+
+    ``auth_before`` already guards every non-SKIP_PATHS route in the
+    middleware layer, but defensive handlers short-circuit the typing
+    concerns around a missing ``org_id`` and make the unit tests simpler.
+    """
+    auth = req.scope.get("auth")
+    if not auth or not auth.get("id"):
+        return RedirectResponse(url="/auth/login", status_code=303)
+    return cast(UserDict, auth)
+
+
+def _parse_uuid(raw: str) -> uuid.UUID | None:
+    """Return a ``UUID`` parsed from *raw*, or ``None`` if invalid."""
+    try:
+        return uuid.UUID(raw)
+    except (ValueError, TypeError):
+        return None
+
+
+def _not_found_page(req: Request):
+    """Render the 404 page used whenever a draft is missing or out of scope."""
+    auth = req.scope.get("auth")
+    theme = get_theme_from_request(req)
+    return PageShell(
+        H1("Eelnõu ei leitud", cls="page-title"),  # noqa: F405
+        Alert(
+            "Otsitud eelnõu ei ole olemas või Te ei oma selle vaatamise õigust.",
+            variant="warning",
+        ),
+        P(A("← Tagasi eelnõude nimekirja", href="/drafts"), cls="back-link"),  # noqa: F405
+        title="Eelnõu ei leitud",
+        user=auth,
+        theme=theme,
+        active_nav="/drafts",
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /drafts — listing
+# ---------------------------------------------------------------------------
+
+
+def _draft_rows(drafts: list[Draft]) -> list[dict[str, Any]]:
+    """Shape ``Draft`` objects into the dict rows expected by DataTable."""
+    rows: list[dict[str, Any]] = []
+    for draft in drafts:
+        rows.append(
+            {
+                "id": str(draft.id),
+                "title": draft.title,
+                "filename": draft.filename,
+                "status_raw": draft.status,
+                "created_at": _format_timestamp(draft.created_at),
+            }
+        )
+    return rows
+
+
+def _draft_list_columns() -> list[Column]:
+    """Return the column definitions for the drafts DataTable."""
+
+    def _title_cell(row: dict[str, Any]):
+        return A(  # noqa: F405
+            row["title"],
+            href=f"/drafts/{row['id']}",
+            cls="data-table-link",
+        )
+
+    def _status_cell(row: dict[str, Any]):
+        return _status_badge(row["status_raw"])
+
+    def _actions_cell(row: dict[str, Any]):
+        return A(  # noqa: F405
+            "Vaata",
+            href=f"/drafts/{row['id']}",
+            cls="btn btn-secondary btn-sm",
+        )
+
+    return [
+        Column(key="title", label="Pealkiri", sortable=False, render=_title_cell),
+        Column(key="filename", label="Failinimi", sortable=False),
+        Column(
+            key="status",
+            label="Staatus",
+            sortable=False,
+            render=_status_cell,
+        ),
+        Column(key="created_at", label="Üles laaditud", sortable=False),
+        Column(
+            key="actions",
+            label="Tegevused",
+            sortable=False,
+            render=_actions_cell,
+        ),
+    ]
+
+
+def drafts_list_page(req: Request):
+    """GET /drafts — paginated list of the caller's org's drafts."""
+    auth_or_redirect = _require_auth(req)
+    if isinstance(auth_or_redirect, Response):
+        return auth_or_redirect
+    auth = auth_or_redirect
+    theme = get_theme_from_request(req)
+    org_id = auth.get("org_id")
+
+    page_str = req.query_params.get("page", "1")
+    try:
+        page = max(1, int(page_str))
+    except ValueError:
+        page = 1
+    offset = (page - 1) * _PAGE_SIZE
+
+    if not org_id:
+        body: Any = Alert(
+            "Te ei kuulu ühtegi organisatsiooni, seega ei saa Te eelnõusid näha ega üles laadida.",
+            variant="warning",
+        )
+        pagination = None
+        total = 0
+    else:
+        drafts = fetch_drafts_for_org(org_id, limit=_PAGE_SIZE, offset=offset)
+        total = count_drafts_for_org_conn(org_id)
+        total_pages = max(1, (total + _PAGE_SIZE - 1) // _PAGE_SIZE)
+
+        if total == 0:
+            body = Div(
+                P(
+                    "Teie organisatsioon ei ole veel ühtegi eelnõu üles laadinud.",
+                    cls="muted-text",
+                ),
+                A(
+                    "Laadi üles uus eelnõu",
+                    href="/drafts/new",
+                    cls="btn btn-primary btn-md",
+                ),
+                cls="empty-state",
+            )
+            pagination = None
+        else:
+            body = DataTable(
+                columns=_draft_list_columns(),
+                rows=_draft_rows(drafts),
+                empty_message="Eelnõusid ei leitud.",
+            )
+            pagination = Pagination(
+                current_page=page,
+                total_pages=total_pages,
+                base_url="/drafts",
+                page_size=_PAGE_SIZE,
+                total=total,
+            )
+
+    header_children: list = [H1("Eelnõud", cls="page-title")]  # noqa: F405
+    if org_id:
+        header_children.append(
+            Div(
+                A(
+                    "Laadi üles uus eelnõu",
+                    href="/drafts/new",
+                    cls="btn btn-primary btn-md",
+                ),
+                cls="page-actions",
+            )
+        )
+
+    card_body_children: list = [body]
+    if pagination is not None:
+        card_body_children.append(pagination)
+
+    return PageShell(
+        *header_children,
+        Card(
+            CardHeader(H3("Minu organisatsiooni eelnõud", cls="card-title")),  # noqa: F405
+            CardBody(*card_body_children),
+        ),
+        title="Eelnõud",
+        user=auth,
+        theme=theme,
+        active_nav="/drafts",
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /drafts/new — upload form
+# ---------------------------------------------------------------------------
+
+
+def _upload_form(*, title_value: str = "", error: str | None = None):
+    """Render the multipart upload form.
+
+    IMPORTANT: this form uses the raw ``Form`` primitive from
+    ``fasthtml.common`` rather than :class:`AppForm` because file uploads
+    **must** use ``enctype="multipart/form-data"``. AppForm defaults to
+    ``application/x-www-form-urlencoded`` and would silently drop the file.
+    """
+    error_alert = Alert(error, variant="danger") if error else None
+
+    return Form(  # noqa: F405
+        Div(
+            Label(  # noqa: F405
+                "Pealkiri",
+                Span(" *", cls="form-field-required", aria_hidden="true"),  # noqa: F405
+                fr="field-title",
+                cls="form-field-label",
+            ),
+            Input(  # noqa: F405
+                name="title",
+                type="text",
+                id="field-title",
+                value=title_value,
+                required=True,
+                maxlength="200",
+                cls="input",
+            ),
+            Small(  # noqa: F405
+                "Kuni 200 tähemärki.",
+                cls="form-field-help",
+            ),
+            cls="form-field",
+        ),
+        Div(
+            Label(  # noqa: F405
+                "Fail",
+                Span(" *", cls="form-field-required", aria_hidden="true"),  # noqa: F405
+                fr="field-file",
+                cls="form-field-label",
+            ),
+            Input(  # noqa: F405
+                name="file",
+                type="file",
+                id="field-file",
+                accept=".docx,.pdf",
+                required=True,
+                cls="input input-file",
+            ),
+            Small(  # noqa: F405
+                "Toetatud failitüübid: .docx, .pdf. Maksimaalne suurus 50 MB.",
+                cls="form-field-help",
+            ),
+            cls="form-field",
+        ),
+        Div(
+            Button("Laadi üles", type="submit", variant="primary"),
+            A("Tühista", href="/drafts", cls="btn btn-ghost btn-md"),  # noqa: F405
+            cls="form-actions",
+        ),
+        method="post",
+        action="/drafts",
+        enctype="multipart/form-data",
+        cls="upload-form",
+        **({"data-error": "1"} if error_alert else {}),
+    ), error_alert
+
+
+def new_draft_page(req: Request):
+    """GET /drafts/new — render the upload form."""
+    auth_or_redirect = _require_auth(req)
+    if isinstance(auth_or_redirect, Response):
+        return auth_or_redirect
+    auth = auth_or_redirect
+    theme = get_theme_from_request(req)
+
+    if not auth.get("org_id"):
+        return PageShell(
+            H1("Uus eelnõu", cls="page-title"),  # noqa: F405
+            Alert(
+                "Te ei kuulu ühtegi organisatsiooni, seega ei saa Te eelnõusid "
+                "üles laadida. Võtke ühendust administraatoriga.",
+                variant="warning",
+            ),
+            P(A("← Tagasi eelnõude nimekirja", href="/drafts"), cls="back-link"),  # noqa: F405
+            title="Uus eelnõu",
+            user=auth,
+            theme=theme,
+            active_nav="/drafts",
+        )
+
+    form, error_alert = _upload_form()
+    card_children: list = []
+    if error_alert is not None:
+        card_children.append(error_alert)
+    card_children.append(form)
+
+    return PageShell(
+        H1("Uus eelnõu", cls="page-title"),  # noqa: F405
+        P(
+            "Laadige üles draft legislative dokument (.docx või .pdf). "
+            "Pärast üleslaadimist käivitub automaatselt parse-, olemite "
+            "eraldamise ja mõjude analüüsi pipeline.",
+            cls="page-lead",
+        ),
+        Card(CardBody(*card_children)),
+        P(A("← Tagasi eelnõude nimekirja", href="/drafts"), cls="back-link"),  # noqa: F405
+        title="Uus eelnõu",
+        user=auth,
+        theme=theme,
+        active_nav="/drafts",
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /drafts — create handler
+# ---------------------------------------------------------------------------
+
+
+async def create_draft_handler(req: Request):
+    """POST /drafts — accept a multipart upload and create a draft row."""
+    auth_or_redirect = _require_auth(req)
+    if isinstance(auth_or_redirect, Response):
+        return auth_or_redirect
+    auth = auth_or_redirect
+    theme = get_theme_from_request(req)
+
+    form = await req.form()
+    title_raw = form.get("title", "")
+    upload = form.get("file")
+    title_value = str(title_raw) if title_raw is not None else ""
+
+    if upload is None or not hasattr(upload, "read"):
+        error_message = "Palun valige üleslaaditav fail."
+    else:
+        try:
+            draft = await handle_upload(auth, title_value, upload)  # type: ignore[arg-type]
+        except DraftUploadError as exc:
+            error_message = str(exc)
+        else:
+            log_draft_upload(
+                auth.get("id"),
+                draft.id,
+                filename=draft.filename,
+                content_type=draft.content_type,
+                file_size=draft.file_size,
+            )
+            return RedirectResponse(url=f"/drafts/{draft.id}", status_code=303)
+
+    form_el, _ = _upload_form(title_value=title_value, error=error_message)
+    return PageShell(
+        H1("Uus eelnõu", cls="page-title"),  # noqa: F405
+        Alert(error_message, variant="danger"),
+        Card(CardBody(form_el)),
+        P(A("← Tagasi eelnõude nimekirja", href="/drafts"), cls="back-link"),  # noqa: F405
+        title="Uus eelnõu",
+        user=auth,
+        theme=theme,
+        active_nav="/drafts",
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /drafts/{draft_id} — detail page
+# ---------------------------------------------------------------------------
+
+
+def _draft_detail_body(draft: Draft) -> list[Any]:
+    """Build the metadata + actions body of the draft detail page."""
+    metadata = Dl(  # noqa: F405
+        Dt("Pealkiri"),  # noqa: F405
+        Dd(draft.title),  # noqa: F405
+        Dt("Failinimi"),  # noqa: F405
+        Dd(draft.filename),  # noqa: F405
+        Dt("Failisuurus"),  # noqa: F405
+        Dd(f"{draft.file_size:,} baiti".replace(",", " ")),  # noqa: F405
+        Dt("Failitüüp"),  # noqa: F405
+        Dd(draft.content_type),  # noqa: F405
+        Dt("Üles laaditud"),  # noqa: F405
+        Dd(_format_timestamp(draft.created_at)),  # noqa: F405
+        cls="info-list",
+    )
+
+    actions: list = []
+    if draft.status == "ready":
+        actions.append(
+            A(  # noqa: F405
+                "Vaata mõjuaruannet",
+                href=f"/drafts/{draft.id}/report",
+                cls="btn btn-primary btn-md",
+            )
+        )
+
+    actions.append(
+        Form(  # noqa: F405
+            Button(
+                "Kustuta eelnõu",
+                type="submit",
+                variant="danger",
+                size="md",
+            ),
+            method="post",
+            action=f"/drafts/{draft.id}/delete",
+            enctype="application/x-www-form-urlencoded",
+            hx_confirm=_DELETE_CONFIRM,
+            cls="inline-form",
+        )
+    )
+
+    return [metadata, Div(*actions, cls="draft-actions")]
+
+
+def draft_detail_page(req: Request, draft_id: str):
+    """GET /drafts/{draft_id} — full draft detail with status tracker."""
+    auth_or_redirect = _require_auth(req)
+    if isinstance(auth_or_redirect, Response):
+        return auth_or_redirect
+    auth = auth_or_redirect
+    theme = get_theme_from_request(req)
+
+    parsed = _parse_uuid(draft_id)
+    if parsed is None:
+        return _not_found_page(req)
+
+    draft = fetch_draft(parsed)
+    if draft is None:
+        return _not_found_page(req)
+    if str(draft.org_id) != str(auth.get("org_id")):
+        # Defensive: return 404 (not 403) so we never leak the existence
+        # of drafts belonging to other organisations.
+        return _not_found_page(req)
+
+    log_draft_view(auth.get("id"), draft.id)
+
+    detail_body = _draft_detail_body(draft)
+    tracker = _status_tracker(draft)
+
+    return PageShell(
+        H1(draft.title, cls="page-title"),  # noqa: F405
+        P(A("← Tagasi eelnõude nimekirja", href="/drafts"), cls="back-link"),  # noqa: F405
+        Card(
+            CardHeader(H3("Staatus", cls="card-title")),  # noqa: F405
+            CardBody(tracker),
+        ),
+        Card(
+            CardHeader(H3("Üksikasjad", cls="card-title")),  # noqa: F405
+            CardBody(*detail_body),
+            CardFooter(
+                P(
+                    f"Graafi URI: {draft.graph_uri}",
+                    cls="muted-text",
+                ),
+            ),
+        ),
+        title=draft.title,
+        user=auth,
+        theme=theme,
+        active_nav="/drafts",
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /drafts/{draft_id}/status — HTMX polling fragment
+# ---------------------------------------------------------------------------
+
+
+def draft_status_fragment(req: Request, draft_id: str):
+    """GET /drafts/{draft_id}/status — just the status-tracker Div.
+
+    Returned raw (no PageShell) so HTMX can swap it with ``outerHTML``
+    without injecting a second copy of the layout into the page body.
+    Covers issue #347.
+    """
+    auth_or_redirect = _require_auth(req)
+    if isinstance(auth_or_redirect, Response):
+        return auth_or_redirect
+    auth = auth_or_redirect
+
+    parsed = _parse_uuid(draft_id)
+    if parsed is None:
+        return Div(  # noqa: F405
+            Alert("Eelnõu ei leitud.", variant="warning"),
+            id=f"draft-status-{draft_id}",
+        )
+
+    draft = fetch_draft(parsed)
+    if draft is None or str(draft.org_id) != str(auth.get("org_id")):
+        return Div(  # noqa: F405
+            Alert("Eelnõu ei leitud.", variant="warning"),
+            id=f"draft-status-{draft_id}",
+        )
+
+    return _status_tracker(draft)
+
+
+# ---------------------------------------------------------------------------
+# POST /drafts/{draft_id}/delete — delete handler
+# ---------------------------------------------------------------------------
+
+
+def delete_draft_handler(req: Request, draft_id: str):
+    """POST /drafts/{draft_id}/delete — remove the draft + encrypted file."""
+    auth_or_redirect = _require_auth(req)
+    if isinstance(auth_or_redirect, Response):
+        return auth_or_redirect
+    auth = auth_or_redirect
+
+    parsed = _parse_uuid(draft_id)
+    if parsed is None:
+        return _not_found_page(req)
+
+    draft = fetch_draft(parsed)
+    if draft is None or str(draft.org_id) != str(auth.get("org_id")):
+        return _not_found_page(req)
+
+    storage_path: str | None = None
+    try:
+        with _connect() as conn:
+            storage_path = delete_draft(conn, parsed)
+            conn.commit()
+    except Exception:
+        logger.exception("Failed to delete draft id=%s", parsed)
+        return _not_found_page(req)
+
+    if storage_path:
+        try:
+            delete_encrypted_file(storage_path)
+        except Exception:
+            logger.exception(
+                "Failed to delete encrypted file for draft id=%s path=%s",
+                parsed,
+                storage_path,
+            )
+
+    log_draft_delete(
+        auth.get("id"),
+        parsed,
+        filename=draft.filename,
+    )
+    return RedirectResponse(url="/drafts", status_code=303)
+
+
+# ---------------------------------------------------------------------------
+# Route registration
+# ---------------------------------------------------------------------------
+
+
+def register_draft_routes(rt) -> None:  # type: ignore[no-untyped-def]
+    """Mount the draft upload routes on the FastHTML route decorator *rt*.
+
+    The list/detail/new pages are behind the global auth ``Beforeware``,
+    so **do not** add ``/drafts`` to ``SKIP_PATHS``.
+    """
+    rt("/drafts", methods=["GET"])(drafts_list_page)
+    rt("/drafts/new", methods=["GET"])(new_draft_page)
+    rt("/drafts", methods=["POST"])(create_draft_handler)
+    rt("/drafts/{draft_id}", methods=["GET"])(draft_detail_page)
+    rt("/drafts/{draft_id}/status", methods=["GET"])(draft_status_fragment)
+    rt("/drafts/{draft_id}/delete", methods=["POST"])(delete_draft_handler)
