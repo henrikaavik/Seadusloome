@@ -1704,3 +1704,78 @@
   padding-top: var(--space-4);
   border-top: 1px solid var(--color-border);
 }
+
+/* ===========================================================================
+   Phase 2 Batch 4 — Impact Report page
+   =========================================================================== */
+
+.report-page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.report-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+@media (max-width: 768px) {
+  .report-summary-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+.report-summary-cell {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.report-summary-label {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.report-summary-value {
+  font-size: var(--text-2xl);
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.report-summary-score {
+  font-size: var(--text-lg);
+  font-weight: 600;
+  align-self: flex-start;
+}
+
+.export-form {
+  margin-bottom: var(--space-3);
+}
+
+.export-status {
+  min-height: 1.5em;
+}
+
+.export-status-pending {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-text-muted);
+}
+
+/* ===========================================================================
+   Phase 2 Batch 4 — Explorer draft overlay
+   =========================================================================== */
+
+.d3-node-highlighted {
+  stroke: var(--color-danger);
+  stroke-width: 3;
+}

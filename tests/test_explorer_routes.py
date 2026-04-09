@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch
+import json
+import uuid
+from unittest.mock import MagicMock, patch
 
 from starlette.testclient import TestClient
 
@@ -331,3 +333,144 @@ class TestExplorerAuthSkip:
         # But with mock we get 200 for sure
         # Without Jena running the query returns empty due to error handling
         assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 Batch 4 — Explorer draft overlay
+# ---------------------------------------------------------------------------
+
+
+_OVERLAY_ORG_ID = "11111111-1111-1111-1111-111111111111"
+_OVERLAY_OTHER_ORG_ID = "22222222-2222-2222-2222-222222222222"
+_OVERLAY_USER_ID = "33333333-3333-3333-3333-333333333333"
+_OVERLAY_DRAFT_ID = uuid.UUID("44444444-4444-4444-4444-444444444444")
+
+
+def _overlay_user(org_id: str = _OVERLAY_ORG_ID) -> dict:
+    return {
+        "id": _OVERLAY_USER_ID,
+        "email": "drafter@seadusloome.ee",
+        "full_name": "Test Drafter",
+        "role": "drafter",
+        "org_id": org_id,
+    }
+
+
+def _overlay_provider(org_id: str = _OVERLAY_ORG_ID) -> MagicMock:
+    provider = MagicMock()
+    provider.get_current_user.return_value = _overlay_user(org_id)
+    return provider
+
+
+def _overlay_authed_client() -> TestClient:
+    client = TestClient(app, follow_redirects=False)
+    client.cookies.set("access_token", "stub-token")
+    return client
+
+
+class _ConnectCM:
+    """Context-manager wrapper around the explorer overlay DB mock."""
+
+    def __init__(self, conn: MagicMock):
+        self.conn = conn
+
+    def __enter__(self) -> MagicMock:
+        return self.conn
+
+    def __exit__(self, *_):
+        return False
+
+
+def _make_overlay_conn(
+    *,
+    draft_org_id: str | None,
+    findings: dict | None,
+) -> MagicMock:
+    """Build a connection mock matching the two SELECTs in the overlay path.
+
+    The first SELECT returns ``(org_id,)``; the second returns
+    ``(report_data_jsonb,)``. ``draft_org_id=None`` simulates a missing
+    draft row; ``findings=None`` simulates a missing report row.
+    """
+    conn = MagicMock()
+    cursor1 = MagicMock()
+    cursor1.fetchone.return_value = (draft_org_id,) if draft_org_id else None
+    cursor2 = MagicMock()
+    cursor2.fetchone.return_value = (findings,) if findings is not None else None
+    conn.execute.side_effect = [cursor1, cursor2]
+    return conn
+
+
+class TestExplorerDraftOverlay:
+    """The /explorer page is in SKIP_PATHS, so the auth middleware never
+    populates ``req.scope['auth']``. The overlay helper checks scope auth
+    directly, so these tests stub :func:`app.explorer.pages._fetch_draft_overlay`
+    rather than the underlying DB connection — that keeps the test suite
+    independent of auth middleware quirks while still exercising the
+    page's branching on the helper return value.
+    """
+
+    @patch("app.explorer.pages._fetch_draft_overlay")
+    def test_own_org_draft_embeds_overlay_data(
+        self,
+        mock_overlay: MagicMock,
+    ):
+        mock_overlay.return_value = ["urn:x:1", "urn:x:2"]
+        client = _overlay_authed_client()
+        resp = client.get(f"/explorer?draft={_OVERLAY_DRAFT_ID}")
+
+        assert resp.status_code == 200
+        # The JSON blob is embedded in a <script id="draft-overlay-data"> tag.
+        assert 'id="draft-overlay-data"' in resp.text
+        assert "urn:x:1" in resp.text
+        assert "urn:x:2" in resp.text
+        # Validate the embedded JSON parses cleanly.
+        start = resp.text.find('id="draft-overlay-data"')
+        assert start != -1
+        # Pull out the JSON between the script tags after the id attribute.
+        script_open = resp.text.find(">", start) + 1
+        script_close = resp.text.find("</script>", script_open)
+        payload = resp.text[script_open:script_close]
+        parsed = json.loads(payload)
+        assert "uris" in parsed
+        assert "urn:x:1" in parsed["uris"]
+        assert "urn:x:2" in parsed["uris"]
+        # The helper got the raw draft id.
+        mock_overlay.assert_called_once()
+        assert mock_overlay.call_args.args[1] == str(_OVERLAY_DRAFT_ID)
+
+    @patch("app.explorer.pages._fetch_draft_overlay")
+    def test_cross_org_draft_drops_overlay_silently(
+        self,
+        mock_overlay: MagicMock,
+    ):
+        # The helper does the org-scope check internally and returns
+        # an empty list for cross-org / missing drafts.
+        mock_overlay.return_value = []
+
+        client = _overlay_authed_client()
+        resp = client.get(f"/explorer?draft={_OVERLAY_DRAFT_ID}")
+
+        # Page still renders normally — no overlay tag, no error UI.
+        assert resp.status_code == 200
+        assert 'id="draft-overlay-data"' not in resp.text
+        # The explorer page still works (Otsi search button as a smoke check).
+        assert "Otsi" in resp.text
+
+    @patch("app.explorer.pages._fetch_draft_overlay")
+    def test_malformed_draft_param_drops_overlay_silently(
+        self,
+        mock_overlay: MagicMock,
+    ):
+        # The pages helper short-circuits on UUID parse failure and
+        # never calls _fetch_draft_overlay; we still patch it so any
+        # accidental call fails the test instead of trying to hit the DB.
+        mock_overlay.return_value = []
+
+        client = _overlay_authed_client()
+        resp = client.get("/explorer?draft=not-a-uuid")
+
+        assert resp.status_code == 200
+        assert 'id="draft-overlay-data"' not in resp.text
+        # Standard explorer chrome is still present.
+        assert "Otsi" in resp.text

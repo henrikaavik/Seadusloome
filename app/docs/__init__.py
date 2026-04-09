@@ -12,6 +12,7 @@ handlers alongside the upload flow in later Phase 2 batches.
 # job, the real handlers have overridden the fallback stubs in
 # app/jobs/worker.py.
 from app.docs import analyze_handler as _analyze_handler  # noqa: F401,E402
+from app.docs import export_handler as _export_handler  # noqa: F401,E402
 from app.docs import extract_handler as _extract_handler  # noqa: F401,E402
 from app.docs import parse_handler as _parse_handler  # noqa: F401,E402
 from app.docs.draft_model import (
@@ -23,6 +24,7 @@ from app.docs.draft_model import (
     list_drafts_for_org,
     update_draft_status,
 )
+from app.docs.report_routes import register_report_routes
 from app.docs.routes import register_draft_routes
 from app.docs.upload import DraftUploadError, handle_upload
 
@@ -36,5 +38,6 @@ __all__ = [
     "handle_upload",
     "list_drafts_for_org",
     "register_draft_routes",
+    "register_report_routes",
     "update_draft_status",
 ]

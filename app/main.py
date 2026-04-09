@@ -13,6 +13,7 @@ from app.auth.middleware import SKIP_PATHS, auth_before
 from app.auth.organizations import register_org_routes
 from app.auth.routes import register_auth_routes
 from app.auth.users import register_user_routes
+from app.docs.report_routes import register_report_routes
 from app.docs.routes import register_draft_routes
 from app.explorer.pages import register_explorer_pages
 from app.explorer.routes import register_explorer_routes
@@ -153,6 +154,7 @@ register_admin_routes(rt)
 register_validation_routes(rt)
 register_design_system_routes(rt)
 register_draft_routes(rt)
+register_report_routes(rt)
 
 
 @rt("/")

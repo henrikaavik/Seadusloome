@@ -15,7 +15,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.jobs import worker as worker_module
 from app.jobs.queue import Job
 from app.jobs.worker import (
     _HANDLERS,
@@ -393,18 +392,30 @@ class TestStubHandlers:
 
         assert _HANDLERS["analyze_impact"] is real_handler
 
-    def test_export_report_stub_returns_stub_dict(self):
-        result = worker_module._export_report_stub({"draft_id": "x"})
-        assert result == {"status": "stub"}
+    def test_export_report_handler_is_real_not_stub(self):
+        """``export_report`` now points at the real .docx-backed handler.
+
+        Batch 4 replaced the last Phase 2 stub with
+        :func:`app.docs.export_handler.export_report`; this test
+        guards the registry so a future refactor that accidentally
+        drops the import fails loudly instead of silently falling
+        back to the worker-module fallback.
+        """
+        # Importing app.docs triggers app.docs.export_handler's
+        # @register_handler side effect.
+        import app.docs  # noqa: F401
+        from app.docs.export_handler import export_report as real_handler
+
+        assert _HANDLERS["export_report"] is real_handler
 
     def test_all_four_handlers_are_registered(self):
         """All four Phase 2 job types must be present in _HANDLERS.
 
-        After Batch 3 three are real (parse_draft, extract_entities,
-        analyze_impact) and one is still a stub (export_report); the
-        dispatcher only needs to know the type exists.
+        After Batch 4 every Phase 2 handler is the real implementation:
+        parse_draft, extract_entities, analyze_impact and export_report.
+        No stubs remain in app.jobs.worker.
         """
-        # Importing app.docs registers all three real handlers.
+        # Importing app.docs registers all four real handlers.
         import app.docs  # noqa: F401
 
         for job_type in ("parse_draft", "extract_entities", "analyze_impact", "export_report"):

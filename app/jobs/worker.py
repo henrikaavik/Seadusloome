@@ -13,12 +13,16 @@ Handler contract:
     - Handlers MUST raise to signal failure; raising triggers the
       queue's exponential backoff retry logic automatically.
 
-Phase 2 Batch 3 leaves only ``export_report`` as a stub handler;
-``parse_draft``, ``extract_entities`` and ``analyze_impact`` are
-real handlers registered from :mod:`app.docs.parse_handler`,
-:mod:`app.docs.extract_handler` and :mod:`app.docs.analyze_handler`
-respectively. The export_report stub will be removed in the batch
-that lands the .docx export pipeline.
+Phase 2 Batch 4 wires the final real handler:
+
+    parse_draft       → :mod:`app.docs.parse_handler`
+    extract_entities  → :mod:`app.docs.extract_handler`
+    analyze_impact    → :mod:`app.docs.analyze_handler`
+    export_report     → :mod:`app.docs.export_handler`
+
+All four are imported via :mod:`app.docs` at startup so the dispatch
+registry is fully populated by the time the worker claims a job.
+There are no stubs left in this module.
 """
 
 from __future__ import annotations
@@ -174,28 +178,10 @@ def start_worker_thread(stop_event: threading.Event) -> threading.Thread:
 
 
 # ---------------------------------------------------------------------------
-# Phase 2 stub handlers
+# Phase 2 handler registration
 # ---------------------------------------------------------------------------
 #
-# These keep the dispatcher wired up for the four job types the Phase 2
-# spec names. Later batches will remove each stub as the real
-# implementation (Tika parsing, LLM entity extraction, SPARQL impact
-# engine, .docx export) lands in its own module.
-
-
-# parse_draft handler is now registered by app.docs.parse_handler (imported
-# via app/docs/__init__.py at app startup); the stub used to live here.
-
-# extract_entities handler is now registered by app.docs.extract_handler
-# (imported via app/docs/__init__.py at app startup); the stub used to
-# live here.
-
-# analyze_impact handler is now registered by app.docs.analyze_handler
-# (imported via app/docs/__init__.py at app startup); the Phase 2
-# Batch 3 stub used to live here.
-
-
-@register_handler("export_report")
-def _export_report_stub(payload: dict[str, Any]) -> dict[str, Any]:
-    logger.warning("export_report stub — .docx export lands in a later Phase 2 batch")
-    return {"status": "stub"}
+# All four Phase 2 handlers (parse_draft, extract_entities,
+# analyze_impact, export_report) are real implementations imported as
+# side effects from ``app.docs`` at app startup. The previous stubs
+# that used to live here have been removed in Phase 2 Batch 4.
