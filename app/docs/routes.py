@@ -42,6 +42,7 @@ from app.docs.draft_model import (
 )
 from app.docs.upload import DraftUploadError, handle_upload
 from app.storage import delete_file as delete_encrypted_file
+from app.sync.jena_loader import delete_named_graph
 from app.ui.data.data_table import Column, DataTable
 from app.ui.data.pagination import Pagination
 from app.ui.layout import PageShell
@@ -719,6 +720,18 @@ def delete_draft_handler(req: Request, draft_id: str):
                 parsed,
                 storage_path,
             )
+
+    # Purge the draft's named graph from Jena (idempotent — a 404 from
+    # Fuseki is treated as success, which covers drafts deleted before
+    # the analyze_impact handler ever loaded the graph).
+    try:
+        delete_named_graph(draft.graph_uri)
+    except Exception:
+        logger.exception(
+            "Failed to delete named graph for draft id=%s uri=%s",
+            parsed,
+            draft.graph_uri,
+        )
 
     log_draft_delete(
         auth.get("id"),

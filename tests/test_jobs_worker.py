@@ -377,15 +377,35 @@ class TestStubHandlers:
 
         assert _HANDLERS["extract_entities"] is real_handler
 
-    def test_analyze_impact_stub_returns_stub_dict(self):
-        result = worker_module._analyze_impact_stub({"draft_id": "x"})
-        assert result == {"status": "stub", "affected": 0, "conflicts": 0}
+    def test_analyze_impact_handler_is_real_not_stub(self):
+        """``analyze_impact`` now points at the real SPARQL-backed handler.
+
+        Batch 3 replaced the Phase 2 stub with
+        :func:`app.docs.analyze_handler.analyze_impact`; this test
+        guards the registry so a future refactor that accidentally
+        drops the import fails loudly instead of silently falling
+        back to the worker-module fallback.
+        """
+        # Importing app.docs triggers app.docs.analyze_handler's
+        # @register_handler side effect.
+        import app.docs  # noqa: F401
+        from app.docs.analyze_handler import analyze_impact as real_handler
+
+        assert _HANDLERS["analyze_impact"] is real_handler
 
     def test_export_report_stub_returns_stub_dict(self):
         result = worker_module._export_report_stub({"draft_id": "x"})
         assert result == {"status": "stub"}
 
-    def test_all_four_stubs_are_registered(self):
-        """All four Phase 2 job types must be present in _HANDLERS."""
+    def test_all_four_handlers_are_registered(self):
+        """All four Phase 2 job types must be present in _HANDLERS.
+
+        After Batch 3 three are real (parse_draft, extract_entities,
+        analyze_impact) and one is still a stub (export_report); the
+        dispatcher only needs to know the type exists.
+        """
+        # Importing app.docs registers all three real handlers.
+        import app.docs  # noqa: F401
+
         for job_type in ("parse_draft", "extract_entities", "analyze_impact", "export_report"):
             assert job_type in _HANDLERS

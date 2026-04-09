@@ -456,6 +456,7 @@ class TestDraftStatusFragment:
 
 
 class TestDeleteDraftHandler:
+    @patch("app.docs.routes.delete_named_graph")
     @patch("app.docs.routes.log_draft_delete")
     @patch("app.docs.routes.delete_encrypted_file")
     @patch("app.docs.routes.delete_draft")
@@ -470,6 +471,7 @@ class TestDeleteDraftHandler:
         mock_delete: MagicMock,
         mock_delete_file: MagicMock,
         mock_log: MagicMock,
+        mock_delete_graph: MagicMock,
     ):
         mock_get_provider.return_value = _stub_provider()
         draft = _make_draft()
@@ -489,6 +491,8 @@ class TestDeleteDraftHandler:
         mock_delete.assert_called_once()
         mock_delete_file.assert_called_once_with("/tmp/ciphertext.enc")
         mock_log.assert_called_once()
+        # Named graph cleanup must have been triggered with the draft's URI.
+        mock_delete_graph.assert_called_once_with(draft.graph_uri)
 
     @patch("app.docs.routes.fetch_draft")
     @patch("app.auth.middleware._get_provider")

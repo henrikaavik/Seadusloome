@@ -1,7 +1,29 @@
-"""Load RDF data into Apache Jena Fuseki via Graph Store Protocol."""
+"""Load RDF data into Apache Jena Fuseki via Graph Store Protocol.
+
+This module owns all HTTP traffic to Fuseki's Graph Store Protocol
+endpoint (``{JENA_URL}/{JENA_DATASET}/data``) plus a thin SPARQL helper
+for introspection. It is used by two very different callers:
+
+    * The sync pipeline (``app/sync/orchestrator.py``) — pushes the
+      enacted-law ontology into the **default** graph on a scheduled
+      cadence. This is the "big refresh" flow that clears the default
+      graph and re-uploads ~1M triples.
+    * The draft pipeline (``app/docs/analyze_handler.py``) — writes
+      each draft into its own **named graph** so the impact analyser
+      can run SPARQL against the union of the default graph and the
+      draft graph without mutating the enacted-law data.
+
+The named-graph helpers (added in Phase 2 Batch 3) share the same
+``httpx`` + auth pattern as ``upload_turtle`` but talk to
+``?graph=<encoded URI>`` instead of ``?default``. The graph URI is
+URL-encoded via ``urllib.parse.quote(..., safe="")`` because draft
+graph URIs are full HTTPS URLs with colons and slashes that Fuseki
+rejects if left raw in the query string.
+"""
 
 import logging
 import os
+from urllib.parse import quote
 
 import httpx
 
@@ -106,3 +128,169 @@ def check_health() -> bool:
         return response.status_code == 200
     except httpx.HTTPError:
         return False
+
+
+# ---------------------------------------------------------------------------
+# Named graph helpers (Phase 2 Batch 3)
+# ---------------------------------------------------------------------------
+#
+# The draft pipeline writes each uploaded draft into a dedicated named
+# graph so the impact analyser can query the union of the default graph
+# (enacted laws) and the draft graph without polluting the shared
+# ontology. Fuseki's Graph Store Protocol supports PUT (replace),
+# DELETE, and GET on named graphs via ``?graph=<encoded URI>``. We wrap
+# those three verbs plus two small SPARQL queries for introspection.
+
+
+def put_named_graph(graph_uri: str, turtle: str) -> bool:
+    """Upload Turtle data into the named graph identified by *graph_uri*.
+
+    Uses Fuseki's Graph Store Protocol endpoint
+    ``{JENA_URL}/{JENA_DATASET}/data?graph={graph_uri}`` with PUT
+    semantics — the named graph is **replaced**, not merged. Callers
+    that want merge semantics should read the graph, append triples,
+    and PUT the result back (no existing caller does this today).
+
+    Args:
+        graph_uri: The named graph URI. Typically a full HTTPS URL
+            (``https://data.riik.ee/ontology/estleg/drafts/<uuid>``);
+            the caller does **not** need to URL-encode it — we do that
+            here so calls with the same URI produce the same request.
+        turtle: The Turtle serialisation to upload. UTF-8 encoding is
+            enforced via the ``Content-Type`` header so Estonian
+            characters survive the round-trip.
+
+    Returns:
+        ``True`` on any 2xx response, ``False`` on any non-2xx or a
+        transport-level failure. Errors are logged at WARNING level
+        with the status code so they can be traced in Fuseki's access
+        log without grepping for exceptions.
+    """
+    endpoint = get_graph_store_endpoint()
+    encoded = quote(graph_uri, safe="")
+    url = f"{endpoint}?graph={encoded}"
+    logger.info("PUT named graph %s (%d bytes)", graph_uri, len(turtle))
+    try:
+        response = httpx.put(
+            url,
+            content=turtle.encode("utf-8"),
+            headers={"Content-Type": "text/turtle; charset=utf-8"},
+            auth=(JENA_ADMIN_USER, JENA_ADMIN_PASSWORD),
+            timeout=120.0,
+        )
+    except httpx.HTTPError:
+        logger.exception("put_named_graph transport error for %s", graph_uri)
+        return False
+    if 200 <= response.status_code < 300:
+        logger.info(
+            "put_named_graph succeeded for %s (status %d)",
+            graph_uri,
+            response.status_code,
+        )
+        return True
+    logger.warning(
+        "put_named_graph non-2xx for %s: status=%d body=%s",
+        graph_uri,
+        response.status_code,
+        response.text[:200],
+    )
+    return False
+
+
+def delete_named_graph(graph_uri: str) -> bool:
+    """Delete the named graph identified by *graph_uri*.
+
+    Sends ``DELETE {JENA_URL}/{JENA_DATASET}/data?graph=<uri>``. The
+    call is **idempotent**: a 404 is treated as success because the
+    caller's intent ("this graph must not exist") is already satisfied
+    — this matters for the delete-draft flow where the analyzer may
+    never have loaded the graph in the first place (parse or extract
+    failed before the named-graph upload).
+
+    Returns:
+        ``True`` on 200/204/404, ``False`` on any other status or a
+        transport-level failure.
+    """
+    endpoint = get_graph_store_endpoint()
+    encoded = quote(graph_uri, safe="")
+    url = f"{endpoint}?graph={encoded}"
+    logger.info("DELETE named graph %s", graph_uri)
+    try:
+        response = httpx.delete(
+            url,
+            auth=(JENA_ADMIN_USER, JENA_ADMIN_PASSWORD),
+            timeout=30.0,
+        )
+    except httpx.HTTPError:
+        logger.exception("delete_named_graph transport error for %s", graph_uri)
+        return False
+    if response.status_code in (200, 204):
+        logger.info(
+            "delete_named_graph succeeded for %s (status %d)",
+            graph_uri,
+            response.status_code,
+        )
+        return True
+    if response.status_code == 404:
+        # Idempotent: already gone. Still a success from the caller's POV.
+        logger.info("delete_named_graph: %s was already absent (404)", graph_uri)
+        return True
+    logger.warning(
+        "delete_named_graph non-2xx for %s: status=%d body=%s",
+        graph_uri,
+        response.status_code,
+        response.text[:200],
+    )
+    return False
+
+
+def named_graph_exists(graph_uri: str) -> bool:
+    """Return ``True`` if the named graph has at least one triple.
+
+    Uses a SPARQL ``ASK`` query with an explicit ``GRAPH`` clause. An
+    empty named graph (or a non-existent one) returns ``False``.
+    Transport errors also return ``False`` — defensively, callers
+    should not treat this as "the graph is empty" in critical paths,
+    but the impact-report flow can safely re-PUT on ``False``.
+    """
+    # ASK queries aren't covered by the module-level sparql_query helper
+    # (which hardcodes the SELECT results shape), so talk to the SPARQL
+    # endpoint directly with a tiny inline helper.
+    ask = f"ASK {{ GRAPH <{graph_uri}> {{ ?s ?p ?o }} }}"
+    endpoint = get_sparql_endpoint()
+    try:
+        response = httpx.post(
+            endpoint,
+            data={"query": ask},
+            headers={"Accept": "application/sparql-results+json"},
+            timeout=30.0,
+        )
+        response.raise_for_status()
+    except httpx.HTTPError:
+        logger.exception("named_graph_exists SPARQL ASK failed for %s", graph_uri)
+        return False
+    try:
+        return bool(response.json().get("boolean", False))
+    except ValueError:
+        logger.warning("named_graph_exists: could not parse JSON response")
+        return False
+
+
+def get_named_graph_triple_count(graph_uri: str) -> int:
+    """Return the number of triples in the given named graph.
+
+    Zero is returned both when the graph is empty and when the SPARQL
+    query fails — use :func:`named_graph_exists` first if you need to
+    distinguish "empty" from "missing".
+    """
+    sparql_query_text = (
+        f"SELECT (COUNT(*) AS ?count) WHERE {{ GRAPH <{graph_uri}> {{ ?s ?p ?o }} }}"
+    )
+    result = sparql_query(sparql_query_text)
+    bindings = result.get("results", {}).get("bindings", [])
+    if not bindings:
+        return 0
+    try:
+        return int(bindings[0]["count"]["value"])
+    except (KeyError, ValueError, TypeError):
+        return 0

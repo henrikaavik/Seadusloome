@@ -13,11 +13,12 @@ Handler contract:
     - Handlers MUST raise to signal failure; raising triggers the
       queue's exponential backoff retry logic automatically.
 
-Phase 2 ships stub handlers for job types whose real implementations
-have not landed yet (``extract_entities``, ``analyze_impact``,
-``export_report``). The ``parse_draft`` handler is the real
-Tika-backed version and is registered from
-:mod:`app.docs.parse_handler`.
+Phase 2 Batch 3 leaves only ``export_report`` as a stub handler;
+``parse_draft``, ``extract_entities`` and ``analyze_impact`` are
+real handlers registered from :mod:`app.docs.parse_handler`,
+:mod:`app.docs.extract_handler` and :mod:`app.docs.analyze_handler`
+respectively. The export_report stub will be removed in the batch
+that lands the .docx export pipeline.
 """
 
 from __future__ import annotations
@@ -189,11 +190,9 @@ def start_worker_thread(stop_event: threading.Event) -> threading.Thread:
 # (imported via app/docs/__init__.py at app startup); the stub used to
 # live here.
 
-
-@register_handler("analyze_impact")
-def _analyze_impact_stub(payload: dict[str, Any]) -> dict[str, Any]:
-    logger.warning("analyze_impact stub — SPARQL impact engine lands in a later Phase 2 batch")
-    return {"status": "stub", "affected": 0, "conflicts": 0}
+# analyze_impact handler is now registered by app.docs.analyze_handler
+# (imported via app/docs/__init__.py at app startup); the Phase 2
+# Batch 3 stub used to live here.
 
 
 @register_handler("export_report")
