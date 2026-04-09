@@ -6,6 +6,13 @@ the FastHTML route registration. The package is named ``docs`` (not
 handlers alongside the upload flow in later Phase 2 batches.
 """
 
+# Import handlers for side effects — they register themselves via
+# @register_handler on import. The worker imports ``app.docs`` at
+# startup (see app/main.py), so by the time the worker claims any
+# job, the real handlers have overridden the fallback stubs in
+# app/jobs/worker.py.
+from app.docs import extract_handler as _extract_handler  # noqa: F401,E402
+from app.docs import parse_handler as _parse_handler  # noqa: F401,E402
 from app.docs.draft_model import (
     Draft,
     count_drafts_for_org,

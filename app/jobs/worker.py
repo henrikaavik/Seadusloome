@@ -13,10 +13,11 @@ Handler contract:
     - Handlers MUST raise to signal failure; raising triggers the
       queue's exponential backoff retry logic automatically.
 
-Phase 2 currently ships stub handlers for the four job types the
-spec names (``parse_draft``, ``extract_entities``, ``analyze_impact``,
-``export_report``); later batches swap these out for real
-implementations.
+Phase 2 ships stub handlers for job types whose real implementations
+have not landed yet (``extract_entities``, ``analyze_impact``,
+``export_report``). The ``parse_draft`` handler is the real
+Tika-backed version and is registered from
+:mod:`app.docs.parse_handler`.
 """
 
 from __future__ import annotations
@@ -181,16 +182,12 @@ def start_worker_thread(stop_event: threading.Event) -> threading.Thread:
 # engine, .docx export) lands in its own module.
 
 
-@register_handler("parse_draft")
-def _parse_draft_stub(payload: dict[str, Any]) -> dict[str, Any]:
-    logger.warning("parse_draft stub — real Tika integration lands in a later Phase 2 batch")
-    return {"status": "stub", "note": "Tika not wired yet"}
+# parse_draft handler is now registered by app.docs.parse_handler (imported
+# via app/docs/__init__.py at app startup); the stub used to live here.
 
-
-@register_handler("extract_entities")
-def _extract_entities_stub(payload: dict[str, Any]) -> dict[str, Any]:
-    logger.warning("extract_entities stub — LLM extraction lands in a later Phase 2 batch")
-    return {"status": "stub", "entities": []}
+# extract_entities handler is now registered by app.docs.extract_handler
+# (imported via app/docs/__init__.py at app startup); the stub used to
+# live here.
 
 
 @register_handler("analyze_impact")

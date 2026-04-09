@@ -345,13 +345,37 @@ class TestStartWorkerThread:
 
 
 class TestStubHandlers:
-    def test_parse_draft_stub_returns_stub_dict(self):
-        result = worker_module._parse_draft_stub({"draft_id": "x"})
-        assert result == {"status": "stub", "note": "Tika not wired yet"}
+    def test_parse_draft_handler_is_real_not_stub(self):
+        """``parse_draft`` now points at the real Tika-backed handler.
 
-    def test_extract_entities_stub_returns_stub_dict(self):
-        result = worker_module._extract_entities_stub({"draft_id": "x"})
-        assert result == {"status": "stub", "entities": []}
+        Batch 2A replaced the stub with
+        :func:`app.docs.parse_handler.parse_draft`; this test guards
+        the registry so a future refactor that accidentally drops the
+        import fails loudly instead of silently falling back to the
+        worker-module fallback.
+        """
+        # Importing app.docs triggers app.docs.parse_handler's
+        # @register_handler side effect.
+        import app.docs  # noqa: F401
+        from app.docs.parse_handler import parse_draft as real_handler
+
+        assert _HANDLERS["parse_draft"] is real_handler
+
+    def test_extract_entities_handler_is_real_not_stub(self):
+        """``extract_entities`` now points at the real LLM-backed handler.
+
+        Batch 2B replaced the stub with
+        :func:`app.docs.extract_handler.extract_entities`; this test
+        guards the registry so a future refactor that accidentally
+        drops the import fails loudly instead of silently falling
+        back to the worker-module fallback.
+        """
+        # Importing app.docs triggers app.docs.extract_handler's
+        # @register_handler side effect.
+        import app.docs  # noqa: F401
+        from app.docs.extract_handler import extract_entities as real_handler
+
+        assert _HANDLERS["extract_entities"] is real_handler
 
     def test_analyze_impact_stub_returns_stub_dict(self):
         result = worker_module._analyze_impact_stub({"draft_id": "x"})
