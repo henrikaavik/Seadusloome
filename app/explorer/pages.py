@@ -17,6 +17,8 @@ def explorer_page(req: Request):
                 # D3.js v7
                 Script(
                     src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js",
+                    integrity="sha512-jmDsOHNPGMbOkS50n+TJaZNJBaJCz5Z+3dqzsPe9C5Vs7BVrL/9r8g9EDR0+vRYHFjpFa2cmNqzO+wFLZBkKg==",
+                    crossorigin="anonymous",
                 ),
                 # Explorer styles
                 Link(rel="stylesheet", href="/static/css/explorer.css"),

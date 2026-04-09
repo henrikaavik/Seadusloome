@@ -41,11 +41,13 @@ async def webhook_handler(request: Request) -> JSONResponse:
 
     body = await request.body()
 
-    # Verify signature if secret is configured
-    if WEBHOOK_SECRET:
-        if not verify_signature(body, signature, WEBHOOK_SECRET):
-            logger.warning("Invalid webhook signature")
-            return JSONResponse({"error": "Invalid signature"}, status_code=401)
+    # Verify signature — reject if secret is not configured
+    if not WEBHOOK_SECRET:
+        logger.warning("GITHUB_WEBHOOK_SECRET not configured, rejecting request")
+        return JSONResponse({"error": "Webhook not configured"}, status_code=503)
+    if not verify_signature(body, signature, WEBHOOK_SECRET):
+        logger.warning("Invalid webhook signature")
+        return JSONResponse({"error": "Invalid signature"}, status_code=401)
 
     if event == "ping":
         logger.info("Received GitHub webhook ping")

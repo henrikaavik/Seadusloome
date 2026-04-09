@@ -1,14 +1,13 @@
 """Sync pipeline orchestrator: GitHub → RDF → validate → Jena Fuseki."""
 
 import logging
-import os
+import shutil
 import subprocess
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
-import psycopg
-
+from app.db import get_connection
 from app.sync.converter import convert_ontology, serialize_to_turtle
 from app.sync.jena_loader import clear_default_graph, get_triple_count, upload_turtle
 from app.sync.validator import load_shapes, validate_graph
@@ -29,9 +28,6 @@ def _get_notify_fn():  # type: ignore[no-untyped-def]
 logger = logging.getLogger(__name__)
 
 ONTOLOGY_REPO = "https://github.com/henrikaavik/estonian-legal-ontology.git"
-DATABASE_URL = os.environ.get(
-    "DATABASE_URL", "postgresql://seadusloome:localdev@localhost:5432/seadusloome"
-)
 
 
 def log_sync(
@@ -42,7 +38,7 @@ def log_sync(
 ) -> None:
     """Write a sync_log entry to PostgreSQL."""
     try:
-        with psycopg.connect(DATABASE_URL) as conn:
+        with get_connection() as conn:
             conn.execute(
                 """INSERT INTO sync_log
                    (started_at, finished_at, status, entity_count, error_message)
@@ -156,3 +152,7 @@ def run_sync(repo_dir: Path | None = None) -> bool:
         logger.exception("Sync pipeline failed")
         log_sync("failed", started_at, error_message=str(e)[:1000])
         return False
+
+    finally:
+        if use_temp and repo_dir:
+            shutil.rmtree(repo_dir, ignore_errors=True)

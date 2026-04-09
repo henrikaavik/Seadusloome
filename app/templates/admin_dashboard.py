@@ -3,26 +3,16 @@
 from __future__ import annotations
 
 import logging
-import os
 
-import psycopg
 from fasthtml.common import *
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from app.auth.roles import require_role
+from app.db import get_connection as _connect
 from app.sync.jena_loader import check_health as jena_check_health
 
 logger = logging.getLogger(__name__)
-
-DATABASE_URL = os.environ.get(
-    "DATABASE_URL",
-    "postgresql://seadusloome:localdev@localhost:5432/seadusloome",
-)
-
-
-def _connect() -> psycopg.Connection:  # type: ignore[type-arg]
-    return psycopg.connect(DATABASE_URL)
 
 
 # ---------------------------------------------------------------------------

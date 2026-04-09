@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from starlette.requests import Request
 from starlette.responses import RedirectResponse, Response
 
+from app.auth.cookies import set_auth_cookie
 from app.auth.jwt_provider import JWTAuthProvider
 
 if TYPE_CHECKING:
@@ -26,19 +27,8 @@ SKIP_PATHS: list[str] = [
     r"/api/explorer/.*",
     r"/api/health",
     r"/ws/explorer",
+    r"/webhooks/github",
 ]
-
-
-def _set_cookie(response: Response, name: str, value: str, max_age: int) -> None:
-    response.set_cookie(
-        key=name,
-        value=value,
-        httponly=True,
-        samesite="lax",
-        secure=False,  # Set True in production behind HTTPS
-        max_age=max_age,
-        path="/",
-    )
 
 
 def auth_before(req: Request) -> Response | None:
@@ -74,8 +64,8 @@ def auth_before(req: Request) -> Response | None:
             # not exist yet.  Instead we redirect the browser to the same URL
             # with fresh cookies.  The next request will carry the new tokens.
             redirect = RedirectResponse(url=str(req.url), status_code=307)
-            _set_cookie(redirect, "access_token", new_access, max_age=3600)
-            _set_cookie(redirect, "refresh_token", new_refresh, max_age=30 * 86400)
+            set_auth_cookie(redirect, "access_token", new_access, max_age=3600)
+            set_auth_cookie(redirect, "refresh_token", new_refresh, max_age=30 * 86400)
             return redirect
 
     # No valid credentials -- redirect to login.

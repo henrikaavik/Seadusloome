@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import logging
-import os
 
 import bcrypt
-import psycopg
 from fasthtml.common import *
 from starlette.requests import Request
 from starlette.responses import RedirectResponse
@@ -14,25 +12,37 @@ from starlette.responses import RedirectResponse
 from app.auth.audit import log_action
 from app.auth.organizations import list_orgs
 from app.auth.roles import require_role
+from app.db import get_connection as _connect
 
 logger = logging.getLogger(__name__)
-
-DATABASE_URL = os.environ.get(
-    "DATABASE_URL",
-    "postgresql://seadusloome:localdev@localhost:5432/seadusloome",
-)
 
 VALID_ROLES = ("drafter", "reviewer", "org_admin", "admin")
 ORG_ASSIGNABLE_ROLES = ("drafter", "reviewer")
 
 
-def _connect() -> psycopg.Connection:  # type: ignore[type-arg]
-    return psycopg.connect(DATABASE_URL)
-
-
 def _hash_password(password: str) -> str:
     """Hash *password* with bcrypt."""
     return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+
+
+def validate_password(password: str) -> str | None:
+    """Return an error message if *password* is too weak, or ``None`` if valid."""
+    if len(password) < 8:
+        return "Parool peab olema vähemalt 8 tähemärki pikk"
+    if not any(c.isupper() for c in password):
+        return "Parool peab sisaldama vähemalt ühte suurtähte"
+    if not any(c.isdigit() for c in password):
+        return "Parool peab sisaldama vähemalt ühte numbrit"
+    return None
+
+
+def count_admins() -> int:
+    """Return the number of active admin users."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM users WHERE role = 'admin' AND is_active = TRUE"
+        ).fetchone()
+        return row[0] if row else 0
 
 
 # ---------------------------------------------------------------------------
@@ -155,10 +165,14 @@ def update_user_role(user_id: str, role: str) -> bool:
 
 
 def deactivate_user(user_id: str) -> bool:
-    """Deactivate a user by setting is_active to false. Returns True on success."""
+    """Deactivate a user by setting is_active to false and revoking sessions.
+
+    Returns True on success.
+    """
     try:
         with _connect() as conn:
             conn.execute("UPDATE users SET is_active = FALSE WHERE id = %s", (user_id,))
+            conn.execute("DELETE FROM sessions WHERE user_id = %s", (user_id,))
             conn.commit()
         return True
     except Exception:
@@ -250,6 +264,13 @@ def admin_user_create(
     req: Request, email: str, password: str, full_name: str, role: str, org_id: str = "",
 ):
     """POST /admin/users — create a new user (system admin)."""
+    pw_error = validate_password(password)
+    if pw_error:
+        return Titled(
+            "Viga",
+            P(pw_error, style="color:red"),
+            A("Tagasi", href="/admin/users/new"),
+        )
     actual_org_id = org_id if org_id else None
     user = create_user(email.strip(), password, full_name.strip(), role, actual_org_id)
     if user is None:
@@ -292,10 +313,29 @@ def admin_user_role_form(req: Request, user_id: str):
 
 def admin_user_role_update(req: Request, user_id: str, role: str):
     """POST /admin/users/{user_id}/role — update user role (system admin)."""
+    auth = req.scope.get("auth", {})
+
+    # Prevent admin from changing their own role
+    if str(user_id) == str(auth.get("id")):
+        return Titled(
+            "Viga",
+            P("Te ei saa oma rolli muuta."),
+            A("Tagasi", href="/admin/users"),
+        )
+
+    # If demoting an admin, ensure at least 1 admin remains
+    target_user = get_user(user_id)
+    if target_user and target_user["role"] == "admin" and role != "admin":
+        if count_admins() <= 1:
+            return Titled(
+                "Viga",
+                P("Süsteemis peab olema vähemalt üks administraator."),
+                A("Tagasi", href="/admin/users"),
+            )
+
     success = update_user_role(user_id, role)
     if not success:
         return Titled("Viga", P("Rolli muutmine ebaõnnestus."), A("Tagasi", href="/admin/users"))
-    auth = req.scope.get("auth", {})
     log_action(auth.get("id"), "user.role_update", {"user_id": user_id, "new_role": role})
     return RedirectResponse(url="/admin/users", status_code=303)
 
@@ -358,6 +398,14 @@ def org_user_create(req: Request, email: str, password: str, full_name: str, rol
     org_id = auth.get("org_id")
     if not org_id:
         return Titled("Viga", P("Te ei kuulu ühtegi organisatsiooni."), A("Tagasi", href="/"))
+
+    pw_error = validate_password(password)
+    if pw_error:
+        return Titled(
+            "Viga",
+            P(pw_error, style="color:red"),
+            A("Tagasi", href="/org/users/new"),
+        )
 
     if role not in ORG_ASSIGNABLE_ROLES:
         return Titled(

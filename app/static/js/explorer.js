@@ -792,6 +792,17 @@ async function showEntityDetail(d) {
     panelNeighbors.innerHTML = '<li style="color:#64748b;font-size:12px;list-style:none;">Seoseid ei leitud</li>';
   }
 
+  // Version history
+  state.selectedEntityData = detail ? detail.entity : null;
+  renderVersionHistory(detail ? detail.entity : null);
+
+  // Reset bookmark button
+  const bookmarkBtn = document.getElementById('panel-bookmark-btn');
+  if (bookmarkBtn) {
+    bookmarkBtn.textContent = 'Lisa j\u00e4rjehoidjatesse';
+    bookmarkBtn.classList.remove('bookmarked');
+  }
+
   // External link
   const uri = d.uri || d.id;
   if (uri && uri.startsWith('http')) {
@@ -961,6 +972,10 @@ window.explorerCloseDetail = closeDetail;
 
 window.explorerSearch = performSearch;
 
+window.explorerResetTimeline = resetTimeline;
+
+window.explorerBookmark = addBookmark;
+
 // ---------------------------------------------------------------------------
 // Drag handlers
 // ---------------------------------------------------------------------------
@@ -993,6 +1008,342 @@ function escapeHtml(str) {
   const div = document.createElement('div');
   div.appendChild(document.createTextNode(str));
   return div.innerHTML;
+}
+
+// ---------------------------------------------------------------------------
+// Toast notifications
+// ---------------------------------------------------------------------------
+
+function showToast(message, type) {
+  type = type || 'info';
+  const container = document.getElementById('toast-container');
+  if (!container) return;
+
+  const toast = document.createElement('div');
+  toast.className = 'toast ' + type;
+  toast.textContent = message;
+  container.appendChild(toast);
+
+  // Auto-remove after animation completes (3s total)
+  setTimeout(function() {
+    if (toast.parentNode) toast.parentNode.removeChild(toast);
+  }, 3200);
+}
+
+// ---------------------------------------------------------------------------
+// WebSocket — real-time sync notifications
+// ---------------------------------------------------------------------------
+
+function initWebSocket() {
+  var protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  var wsUrl = protocol + '//' + window.location.host + '/ws/explorer';
+  var ws = null;
+  var reconnectDelay = 2000;
+
+  function connect() {
+    try {
+      ws = new WebSocket(wsUrl);
+    } catch (e) {
+      // WebSocket construction can fail in test environments; ignore.
+      return;
+    }
+
+    ws.onopen = function() {
+      reconnectDelay = 2000;
+    };
+
+    ws.onmessage = function(event) {
+      try {
+        var data = JSON.parse(event.data);
+        if (data.event === 'sync_complete') {
+          showToast(data.message || 'Andmebaas uuendatud', 'success');
+          // Optionally reload current view to reflect new data
+          if (state.view === 'overview') {
+            init();
+          }
+        }
+      } catch (e) {
+        // Non-JSON message or notification HTML from FastHTML; show as-is if it
+        // looks like a sync notification.
+        var text = event.data;
+        if (text && text.indexOf('uuendatud') !== -1) {
+          showToast('Andmebaas uuendatud', 'success');
+        }
+      }
+    };
+
+    ws.onclose = function() {
+      // Attempt to reconnect with exponential backoff (max 30s).
+      setTimeout(function() {
+        reconnectDelay = Math.min(reconnectDelay * 1.5, 30000);
+        connect();
+      }, reconnectDelay);
+    };
+
+    ws.onerror = function() {
+      // onerror is always followed by onclose; nothing extra needed.
+    };
+  }
+
+  connect();
+}
+
+// ---------------------------------------------------------------------------
+// Timeline — temporal filtering
+// ---------------------------------------------------------------------------
+
+let timelineDebounce = null;
+
+async function loadTimeline(year) {
+  var date = year + '-07-01';  // Mid-year as representative date
+  var json = await apiFetch('/api/explorer/timeline?date=' + date + '&size=50');
+  if (!json || !json.data) return null;
+  return json;
+}
+
+async function applyTimelineFilter(year) {
+  state.timelineActive = true;
+  state.timelineYear = year;
+
+  var valueEl = document.getElementById('timeline-value');
+  if (valueEl) valueEl.textContent = year;
+
+  var result = await loadTimeline(year);
+  if (!result) return;
+
+  // Replace current graph with timeline-filtered entities
+  var entities = result.data || [];
+  var total = (result.meta && result.meta.total) || entities.length;
+
+  var nodes = [];
+  var links = [];
+
+  // Group entities by category for display
+  var catCounts = {};
+  entities.forEach(function(e) {
+    var catKey = categoryFromUri(e.type);
+    if (!catCounts[catKey]) catCounts[catKey] = { count: 0, entities: [] };
+    catCounts[catKey].count++;
+    catCounts[catKey].entities.push(e);
+  });
+
+  // Build category nodes with filtered counts
+  Object.keys(catCounts).forEach(function(catKey) {
+    var info = catCounts[catKey];
+    nodes.push({
+      id: 'cat:' + catKey,
+      label: CATEGORY_LABELS_EN[catKey] || catKey,
+      category: catKey,
+      desc: info.count + ' kehtivat ' + year + '. a.',
+      count: info.count,
+      r: Math.max(20, Math.min(40, 15 + Math.log10(info.count + 1) * 8)),
+      isCategory: true,
+      uri: null,
+    });
+
+    // Add individual entity nodes (up to first 10 per category)
+    info.entities.slice(0, 10).forEach(function(e) {
+      var nodeId = e.uri;
+      nodes.push({
+        id: nodeId,
+        label: e.label || nodeId.split('/').pop().split('#').pop(),
+        category: catKey,
+        desc: (e.validFrom || '') + ' \u2013 ' + (e.validUntil || 'kehtiv'),
+        count: 0,
+        r: 12,
+        isCategory: false,
+        uri: e.uri,
+      });
+      links.push({
+        source: 'cat:' + catKey,
+        target: nodeId,
+        label: 'kehtiv',
+        isCross: false,
+      });
+    });
+  });
+
+  // Cross-category links
+  var catKeys = Object.keys(catCounts);
+  for (var i = 0; i < catKeys.length; i++) {
+    for (var j = i + 1; j < catKeys.length; j++) {
+      links.push({
+        source: 'cat:' + catKeys[i],
+        target: 'cat:' + catKeys[j],
+        label: '',
+        isCross: true,
+      });
+    }
+  }
+
+  state.nodes = nodes;
+  state.links = links;
+  state.view = 'overview';
+  state.expandedCategory = null;
+  state.pinnedNodes.clear();
+  closeDetail();
+  updateBreadcrumb();
+  render();
+
+  showToast('N\u00e4itan ' + total + ' kehtivat olemit aastal ' + year, 'info');
+}
+
+function resetTimeline() {
+  state.timelineActive = false;
+  state.timelineYear = 2026;
+
+  var slider = document.getElementById('timeline-slider');
+  if (slider) slider.value = '2026';
+
+  var valueEl = document.getElementById('timeline-value');
+  if (valueEl) valueEl.textContent = 'Keelatud';
+
+  // Reload default overview
+  init();
+}
+
+// ---------------------------------------------------------------------------
+// Bookmarking from explorer
+// ---------------------------------------------------------------------------
+
+async function addBookmark() {
+  if (!state.selectedEntity) return;
+
+  var entityUri = state.selectedEntity;
+  var node = state.nodes.find(function(n) {
+    return n.id === entityUri || n.uri === entityUri;
+  });
+  var label = node ? node.label : '';
+
+  try {
+    var resp = await fetch('/api/bookmarks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'entity_uri=' + encodeURIComponent(entityUri) + '&label=' + encodeURIComponent(label),
+      redirect: 'manual',
+    });
+
+    if (resp.status === 303 || resp.status === 200) {
+      showToast('Lisatud j\u00e4rjehoidjatesse: ' + (label || entityUri), 'success');
+
+      var btn = document.getElementById('panel-bookmark-btn');
+      if (btn) {
+        btn.textContent = 'J\u00e4rjehoidjas \u2713';
+        btn.classList.add('bookmarked');
+      }
+    } else if (resp.status === 303 && resp.headers.get('location') === '/auth/login') {
+      showToast('Logi sisse, et lisada j\u00e4rjehoidjaid', 'warning');
+    } else {
+      showToast('J\u00e4rjehoidja lisamine eba\u00f5nnestus', 'warning');
+    }
+  } catch (e) {
+    showToast('J\u00e4rjehoidja lisamine eba\u00f5nnestus', 'warning');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Version history rendering
+// ---------------------------------------------------------------------------
+
+function renderVersionHistory(entityData) {
+  var section = document.getElementById('version-history-section');
+  var container = document.getElementById('panel-versions');
+  if (!section || !container) return;
+
+  container.innerHTML = '';
+
+  // Extract version-related metadata from the entity detail
+  var versions = [];
+
+  if (entityData && entityData.metadata) {
+    var meta = entityData.metadata;
+
+    // Collect version-related fields
+    var validFrom = meta.validFrom || meta.kehtivAlates || meta.jõustumisKuupäev || '';
+    var validUntil = meta.validUntil || meta.kehtivKuni || meta.kehtetuksKuupäev || '';
+    var dateAdopted = meta.dateAdopted || meta.vastuvõtmisKuupäev || '';
+    var datePublished = meta.datePublished || meta.avaldamisKuupäev || '';
+
+    if (dateAdopted) {
+      versions.push({ date: dateAdopted, label: 'Vastuv\u00f5etud' });
+    }
+    if (datePublished) {
+      versions.push({ date: datePublished, label: 'Avaldatud' });
+    }
+    if (validFrom) {
+      versions.push({ date: validFrom, label: 'J\u00f5ustunud' });
+    }
+    if (validUntil) {
+      versions.push({ date: validUntil, label: 'Kehtetu' });
+    }
+  }
+
+  // Check outgoing relations for amendments and versions
+  if (entityData && entityData.outgoing) {
+    entityData.outgoing.forEach(function(rel) {
+      var pred = (rel.predicateName || '').toLowerCase();
+      if (pred.indexOf('amend') !== -1 || pred.indexOf('muut') !== -1 ||
+          pred.indexOf('version') !== -1 || pred.indexOf('versioon') !== -1) {
+        versions.push({
+          date: '',
+          label: (rel.predicateName || 'Muudatus') + ': ' + (rel.objectLabel || rel.object || ''),
+        });
+      }
+    });
+  }
+
+  // Check incoming relations for amendments
+  if (entityData && entityData.incoming) {
+    entityData.incoming.forEach(function(rel) {
+      var pred = (rel.predicateName || '').toLowerCase();
+      if (pred.indexOf('amend') !== -1 || pred.indexOf('muut') !== -1 ||
+          pred.indexOf('version') !== -1 || pred.indexOf('versioon') !== -1) {
+        versions.push({
+          date: '',
+          label: (rel.subjectLabel || rel.subject || '') + ' (' + (rel.predicateName || 'muudatus') + ')',
+        });
+      }
+    });
+  }
+
+  if (versions.length === 0) {
+    section.style.display = 'none';
+    return;
+  }
+
+  // Sort by date (entries with dates first)
+  versions.sort(function(a, b) {
+    if (a.date && b.date) return a.date.localeCompare(b.date);
+    if (a.date) return -1;
+    if (b.date) return 1;
+    return 0;
+  });
+
+  section.style.display = '';
+
+  var ul = document.createElement('ul');
+  ul.className = 'version-timeline';
+
+  versions.forEach(function(v) {
+    var li = document.createElement('li');
+    li.className = 'version-entry';
+
+    if (v.date) {
+      var dateSpan = document.createElement('span');
+      dateSpan.className = 'version-date';
+      dateSpan.textContent = v.date;
+      li.appendChild(dateSpan);
+    }
+
+    var labelSpan = document.createElement('span');
+    labelSpan.className = 'version-label';
+    labelSpan.textContent = v.label;
+    li.appendChild(labelSpan);
+
+    ul.appendChild(li);
+  });
+
+  container.appendChild(ul);
 }
 
 // ---------------------------------------------------------------------------
@@ -1029,11 +1380,29 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     });
   }
+
+  // Timeline slider event listener
+  const timelineSlider = document.getElementById('timeline-slider');
+  if (timelineSlider) {
+    timelineSlider.addEventListener('input', (e) => {
+      const year = parseInt(e.target.value, 10);
+      const valueEl = document.getElementById('timeline-value');
+      if (valueEl) valueEl.textContent = year;
+
+      // Debounce the API call
+      if (timelineDebounce) clearTimeout(timelineDebounce);
+      timelineDebounce = setTimeout(() => {
+        applyTimelineFilter(year);
+      }, 400);
+    });
+  }
 });
 
 // ---------------------------------------------------------------------------
 // Initialisation
 // ---------------------------------------------------------------------------
+
+let wsInitialized = false;
 
 async function init() {
   const overview = await loadOverview();
@@ -1042,6 +1411,12 @@ async function init() {
   state.view = 'overview';
   updateBreadcrumb();
   render();
+
+  // Start WebSocket connection once
+  if (!wsInitialized) {
+    wsInitialized = true;
+    initWebSocket();
+  }
 }
 
 init();

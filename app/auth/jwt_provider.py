@@ -12,12 +12,9 @@ import jwt
 import psycopg
 
 from app.auth.provider import AuthProvider, UserDict
+from app.db import get_connection
 
 SECRET_KEY = os.environ.get("SECRET_KEY", "dev-secret")
-DATABASE_URL = os.environ.get(
-    "DATABASE_URL",
-    "postgresql://seadusloome:localdev@localhost:5432/seadusloome",
-)
 
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 REFRESH_TOKEN_EXPIRE_DAYS = 30
@@ -43,12 +40,14 @@ class JWTAuthProvider(AuthProvider):
     """Concrete auth provider using JWT access tokens and DB-backed refresh tokens."""
 
     def __init__(self, database_url: str | None = None):
-        self._database_url = database_url or DATABASE_URL
+        self._database_url = database_url
 
     # -- connection helper ---------------------------------------------------
 
     def _connect(self) -> psycopg.Connection:  # type: ignore[type-arg]
-        return psycopg.connect(self._database_url)
+        if self._database_url:
+            return psycopg.connect(self._database_url)
+        return get_connection()
 
     # -- public interface ----------------------------------------------------
 
@@ -60,7 +59,7 @@ class JWTAuthProvider(AuthProvider):
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT id, email, password_hash, full_name, role, org_id "
-                "FROM users WHERE email = %s",
+                "FROM users WHERE email = %s AND is_active = TRUE",
                 (email,),
             ).fetchone()
 
@@ -161,7 +160,7 @@ class JWTAuthProvider(AuthProvider):
                 "SELECT s.id, u.id, u.email, u.full_name, u.role, u.org_id "
                 "FROM sessions s "
                 "JOIN users u ON u.id = s.user_id "
-                "WHERE s.token_hash = %s AND s.expires_at > %s",
+                "WHERE s.token_hash = %s AND s.expires_at > %s AND u.is_active = TRUE",
                 (token_hash, now),
             ).fetchone()
 

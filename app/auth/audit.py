@@ -8,16 +8,10 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 
-import psycopg
+from app.db import get_connection
 
 logger = logging.getLogger(__name__)
-
-DATABASE_URL = os.environ.get(
-    "DATABASE_URL",
-    "postgresql://seadusloome:localdev@localhost:5432/seadusloome",
-)
 
 
 def log_action(
@@ -41,7 +35,7 @@ def log_action(
     """
     try:
         detail_json = json.dumps(detail, default=str) if detail else None
-        with psycopg.connect(DATABASE_URL) as conn:
+        with get_connection() as conn:
             conn.execute(
                 "INSERT INTO audit_log (user_id, action, detail) VALUES (%s, %s, %s::jsonb)",
                 (user_id, action, detail_json),
