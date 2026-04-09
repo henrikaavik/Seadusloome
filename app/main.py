@@ -16,10 +16,17 @@ from app.ui.forms.live_validation import register_validation_routes
 
 bware = Beforeware(auth_before, skip=SKIP_PATHS)
 # pico=False: using custom design system (app/ui) instead of Pico CSS.
-# static_path: FastHTML serves static files from this directory at /static/*.
-# Since the working directory is the project root (/app in the container),
-# the static files live at app/static/ on disk.
-app, rt = fast_app(before=bware, pico=False, static_path="app/static")
+app, rt = fast_app(before=bware, pico=False)
+
+# FastHTML adds a default static-file route at `/{fname:path}.{ext:static}`
+# that serves from the current working directory. Our assets live under
+# `app/static/` and are referenced via absolute URLs like
+# `/static/css/tokens.css`, so we strip the default route and mount an
+# explicit StaticFiles at /static pointing at the correct directory.
+from starlette.staticfiles import StaticFiles  # noqa: E402
+
+app.routes[:] = [r for r in app.routes if getattr(r, "name", None) != "static_route_exts_get"]
+app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 register_auth_routes(rt)
 register_org_routes(rt)
