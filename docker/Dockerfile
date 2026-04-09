@@ -29,8 +29,8 @@ ENV PYTHONPATH="/app"
 
 EXPOSE 5001
 
-# Run via -m so the working directory (/app) is on sys.path and
-# `from app.* import ...` works. Do NOT use `python app/main.py` — that
-# puts /app/app on sys.path instead of /app and breaks every absolute
-# import from the app package.
-CMD ["python", "-m", "app.main"]
+# Invoke uvicorn directly (bypass FastHTML's serve() auto-detection,
+# which assumes the script is run as a top-level file and passes
+# "main:app" to uvicorn — that fails when the app lives at app.main:app).
+# --host 0.0.0.0 lets Traefik reach the container over the internal network.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "5001", "--no-access-log"]

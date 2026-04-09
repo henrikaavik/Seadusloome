@@ -36,4 +36,12 @@ def index(req: Request):
     return index_redirect(req)
 
 
-serve()
+# In production, uvicorn is invoked directly via the Dockerfile CMD, and
+# this module is imported by it. Guard serve() so it only runs when the
+# file is executed directly for local development
+# (`python app/main.py` or `python -m app.main`). Note: FastHTML's serve()
+# normally auto-checks __name__ internally, but that check fails for the
+# uvicorn-imported case in our deployment layout, causing it to spawn a
+# second uvicorn on the wrong module path.
+if __name__ == "__main__":
+    serve()  # noqa: F405
