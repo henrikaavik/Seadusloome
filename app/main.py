@@ -57,7 +57,20 @@ app, rt = fast_app(before=bware, pico=False, hdrs=_HDRS)
 if os.environ.get("APP_ENV", "development") != "development":
     app.add_middleware(
         TrustedHostMiddleware,
-        allowed_hosts=["seadusloome.sixtyfour.ee", "*.sixtyfour.ee"],
+        allowed_hosts=[
+            "seadusloome.sixtyfour.ee",
+            "*.sixtyfour.ee",
+            # Docker HEALTHCHECK in the Dockerfile calls
+            # `curl http://localhost:5001/api/ping` from inside the running
+            # container. That request carries `Host: localhost:5001`, which
+            # TrustedHostMiddleware would otherwise reject with 400, causing
+            # Coolify to mark the container unhealthy and roll back the
+            # deploy. Allowing localhost/127.0.0.1 is safe because Traefik
+            # never forwards external traffic with those Host headers —
+            # only the in-container healthcheck can use them.
+            "localhost",
+            "127.0.0.1",
+        ],
     )
 
 # Trust X-Forwarded-* headers from the reverse proxy (Traefik/Coolify) so
