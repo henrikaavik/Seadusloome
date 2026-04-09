@@ -19,8 +19,15 @@ COPY scripts/ scripts/
 # Runtime stage
 FROM python:3.13-slim
 
-# Install curl for HEALTHCHECK (see below)
-RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
+# Install curl for HEALTHCHECK and git for the sync pipeline.
+# curl: used by the /api/ping HEALTHCHECK below.
+# git: app/sync/orchestrator.py clones/pulls the Estonian Legal Ontology repo
+#      via subprocess. Without git the sync silently fails and Jena stays
+#      empty, which is how we debugged the "Jena has no data" issue at the
+#      end of Phase 1.5.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends curl git && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 

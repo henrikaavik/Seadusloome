@@ -231,19 +231,48 @@ flowchart LR
 
 ## Deploying
 
-Every push to `main` runs lint + type-check + tests via GitHub Actions. On
-green CI, a `deploy` job fires a Coolify webhook which rebuilds and
-redeploys the container.
+Every push to `main` runs lint + type-check + tests via GitHub Actions.
+On green CI, a `deploy` job calls Coolify's authenticated Deploy API to
+rebuild and redeploy the container.
 
 **One-time setup (required after cloning the repo into a new GitHub org):**
 
-1. In Coolify, open the Seadusloome application → **Deployments** → **Webhooks** → copy the *Deploy* URL.
-2. In GitHub, go to **Settings → Secrets and variables → Actions → New repository secret**.
-3. Name: `COOLIFY_DEPLOY_HOOK_URL` · Value: *the URL from step 1*.
+Coolify's Deploy Webhook is an authenticated API endpoint, so you need
+TWO GitHub Actions secrets:
 
-Without the secret, the CI `deploy` job gracefully no-ops (it logs a
-skip notice and exits `0`), so the rest of the pipeline still passes.
-You can still trigger manual deploys from the Coolify UI.
+1. **`COOLIFY_DEPLOY_HOOK_URL`** — the deploy URL from Coolify
+   - In Coolify: open `seadusloome-app` → **Webhooks** tab → copy the value of
+     the **"Deploy Webhook (auth required)"** field. It looks like
+     `https://app.coolify.io/api/v1/deploy?uuid=<long-id>`.
+2. **`COOLIFY_API_TOKEN`** — a Coolify API token with deploy permission
+   - In Coolify: click your avatar top-right → **Keys & Tokens** → **API Tokens** → **Create New Token**.
+   - Give it a name like `github-actions-deploy` and check the **write** scope
+     (or **read:application write:deployment** if scoped tokens are available).
+   - Copy the token immediately — Coolify only shows it once.
+
+Add both to GitHub: **Settings → Secrets and variables → Actions → New repository secret**.
+
+Without both secrets, the CI `deploy` job gracefully warns and no-ops
+(it logs a skip notice and exits `0`), so the rest of the pipeline still
+passes. You can still trigger manual deploys from the Coolify UI.
+
+### Troubleshooting deploys
+
+If a deploy is marked **Failed** in Coolify, open the deployment log and
+look for the `Healthcheck` section. Common failure modes we have hit:
+
+- **`curl: (22) The requested URL returned error: 400` on `/api/ping`** —
+  usually means `TrustedHostMiddleware` is rejecting the `Host: localhost`
+  header. The allow-list in `app/main.py` must include `localhost` and
+  `127.0.0.1` or the Docker HEALTHCHECK will fail every time. Regression
+  tests in `tests/test_prod_middleware.py` cover this.
+- **`connection refused` to `localhost:5432` or `jena:3030`** — means
+  the Coolify env vars (`DATABASE_URL`, `JENA_URL`) are not being
+  injected at runtime. Verify they are set under
+  `seadusloome-app → Environment Variables → Production`, not just Preview.
+- **Healthcheck passes but the app can't reach Jena** — make sure
+  `seadusloome-jena` has a **Network Alias** `jena` configured, otherwise
+  `http://jena:3030` won't resolve inside the Coolify network.
 
 ## Development Phases
 

@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
 
+# Opt into Node.js 24 for JavaScript actions ahead of the June 2026
+# deprecation of Node 20 on GitHub runners. Once every action we use
+# (actions/checkout, astral-sh/setup-uv) publishes a Node-24-native
+# version, this flag can be removed.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
@@ -43,10 +50,38 @@ jobs:
       - name: Trigger Coolify deploy webhook
         env:
           COOLIFY_WEBHOOK: ${{ secrets.COOLIFY_DEPLOY_HOOK_URL }}
+          COOLIFY_API_TOKEN: ${{ secrets.COOLIFY_API_TOKEN }}
         run: |
+          set -e
           if [ -z "$COOLIFY_WEBHOOK" ]; then
-            echo "COOLIFY_DEPLOY_HOOK_URL secret not set — skipping deploy trigger"
+            echo "::warning::COOLIFY_DEPLOY_HOOK_URL secret not set — skipping deploy trigger"
             exit 0
           fi
-          curl -fsS -X POST "$COOLIFY_WEBHOOK"
-          echo "Coolify deploy triggered"
+          if [ -z "$COOLIFY_API_TOKEN" ]; then
+            echo "::warning::COOLIFY_API_TOKEN secret not set — Deploy Webhook requires Bearer auth; skipping"
+            echo "::warning::See README 'Deploying' section for how to create the token"
+            exit 0
+          fi
+
+          # Coolify's Deploy Webhook is an authenticated API endpoint
+          # (https://app.coolify.io/api/v1/deploy?uuid=…). It requires an
+          # Authorization: Bearer header using a Coolify API token. We
+          # capture the HTTP status so the job fails loudly when Coolify
+          # returns anything other than 200 — silent no-ops are how we
+          # ended up debugging issue #437 for multiple phases.
+          http_code=$(
+            curl -sS -o /tmp/coolify-deploy.body -w '%{http_code}' \
+              -X GET \
+              -H "Authorization: Bearer $COOLIFY_API_TOKEN" \
+              -H "Accept: application/json" \
+              "$COOLIFY_WEBHOOK"
+          )
+          echo "Coolify responded: HTTP $http_code"
+          cat /tmp/coolify-deploy.body || true
+          echo
+
+          if [ "$http_code" != "200" ]; then
+            echo "::error::Coolify deploy trigger returned HTTP $http_code"
+            exit 1
+          fi
+          echo "Coolify deploy triggered successfully"
