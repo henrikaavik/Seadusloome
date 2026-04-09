@@ -29,6 +29,7 @@ SKIP_PATHS: list[str] = [
     r"/ws/explorer",
     r"/webhooks/github",
     r"/api/theme/cycle",
+    r"/api/validate/.*",
     r"/design-system",
     r"/design-system/.*",
 ]

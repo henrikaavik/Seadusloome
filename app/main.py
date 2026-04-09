@@ -12,6 +12,7 @@ from app.explorer.websocket import register_ws_routes
 from app.sync.webhook import register_webhook_routes
 from app.templates.admin_dashboard import register_admin_routes
 from app.templates.dashboard import index_redirect, register_dashboard_routes
+from app.ui.forms.live_validation import register_validation_routes
 from app.ui.theme import VALID_THEMES, set_theme_cookie
 
 bware = Beforeware(auth_before, skip=SKIP_PATHS)
@@ -27,6 +28,7 @@ register_ws_routes(app)
 register_webhook_routes(app)
 register_dashboard_routes(rt)
 register_admin_routes(rt)
+register_validation_routes(rt)
 
 
 @rt("/")
