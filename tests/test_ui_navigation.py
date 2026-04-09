@@ -14,7 +14,7 @@ def test_breadcrumb_renders_linked_items_and_current_page():
         )
     )
     assert 'aria-label="Breadcrumb"' in html
-    assert '<nav' in html and '<ol' in html
+    assert "<nav" in html and "<ol" in html
     assert 'href="/"' in html
     assert 'href="/drafts"' in html
     assert 'aria-current="page"' in html
