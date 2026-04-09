@@ -82,6 +82,18 @@ def index(req: Request):
     return index_redirect(req)
 
 
+@rt("/api/ping", methods=["GET"])
+def ping():
+    """Lightweight liveness probe for Coolify/Docker HEALTHCHECK.
+
+    Returns 200 OK without touching the database or Jena. Use `/api/health`
+    for full readiness checks that include downstream dependencies.
+    """
+    from starlette.responses import PlainTextResponse
+
+    return PlainTextResponse("ok")
+
+
 # In production, uvicorn is invoked directly via the Dockerfile CMD, and
 # this module is imported by it. Guard serve() so it only runs when the
 # file is executed directly for local development
