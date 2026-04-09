@@ -11,7 +11,10 @@ from unittest.mock import MagicMock
 
 from app.docs.impact.analyzer import ImpactAnalyzer, ImpactFindings
 
-_GRAPH_URI = "https://data.riik.ee/ontology/estleg/drafts/test"
+# #476: the URI must match the tightened ``_SAFE_GRAPH_URI`` allowlist
+# in ``app.docs.impact.queries`` — any string outside the production
+# ``drafts/<uuid>`` shape is now rejected as an injection guard.
+_GRAPH_URI = "https://data.riik.ee/ontology/estleg/drafts/11111111-1111-1111-1111-111111111111"
 
 
 def _client(responses: dict[str, list[dict[str, str]]]) -> MagicMock:

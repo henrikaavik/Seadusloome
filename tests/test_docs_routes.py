@@ -16,7 +16,7 @@ Patterns:
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -52,6 +52,8 @@ def _make_draft(
     status: str = "uploaded",
     title: str = "Test eelnõu",
     error_message: str | None = None,
+    created_at: datetime | None = None,
+    updated_at: datetime | None = None,
 ) -> Draft:
     now = datetime.now(UTC)
     resolved_id = draft_id or uuid.UUID("44444444-4444-4444-4444-444444444444")
@@ -69,8 +71,8 @@ def _make_draft(
         parsed_text=None,
         entity_count=None,
         error_message=error_message,
-        created_at=now,
-        updated_at=now,
+        created_at=created_at or now,
+        updated_at=updated_at or now,
     )
 
 
@@ -482,6 +484,73 @@ class TestDraftStatusFragment:
         assert resp.status_code == 200
         assert "Eelnõu ei leitud" in resp.text
 
+    @patch("app.docs.routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_status_fragment_keeps_polling_when_recently_updated(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+    ):
+        """Regression for #470.
+
+        A draft created long ago but with a recent ``updated_at`` is
+        still making progress and must keep polling. Using
+        ``created_at`` for the stale check would have stopped polling
+        prematurely for any draft whose pipeline takes longer than
+        the 5-minute window to finish.
+        """
+        mock_get_provider.return_value = _stub_provider()
+        now = datetime.now(UTC)
+        draft = _make_draft(
+            status="analyzing",
+            created_at=now - timedelta(hours=1),
+            updated_at=now - timedelta(seconds=10),
+        )
+        mock_fetch.return_value = draft
+
+        client = _authed_client()
+        resp = client.get(
+            f"/drafts/{draft.id}/status",
+            headers={"HX-Request": "true"},
+        )
+
+        assert resp.status_code == 200
+        # Polling attributes must still be present.
+        assert "every 3s" in resp.text
+        assert "Vajab tähelepanu" not in resp.text
+
+    @patch("app.docs.routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_status_fragment_marks_stale_when_updated_at_is_old(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+    ):
+        """Regression for #470.
+
+        A draft whose ``updated_at`` is older than the polling budget
+        surfaces the yellow "stuck pipeline" alert and drops the
+        polling attributes.
+        """
+        mock_get_provider.return_value = _stub_provider()
+        now = datetime.now(UTC)
+        draft = _make_draft(
+            status="analyzing",
+            created_at=now - timedelta(hours=2),
+            updated_at=now - timedelta(hours=1),
+        )
+        mock_fetch.return_value = draft
+
+        client = _authed_client()
+        resp = client.get(
+            f"/drafts/{draft.id}/status",
+            headers={"HX-Request": "true"},
+        )
+
+        assert resp.status_code == 200
+        assert "Vajab tähelepanu" in resp.text
+        assert "every 3s" not in resp.text
+
 
 # ---------------------------------------------------------------------------
 # POST /drafts/{draft_id}/delete
@@ -530,8 +599,8 @@ class TestDeleteDraftHandler:
         mock_delete_graph.assert_called_once_with(draft.graph_uri)
 
         # #454: a DELETE FROM background_jobs ... must have run as part
-        # of the cleanup so any pending/claimed/retrying job for this
-        # draft doesn't outlive the row.
+        # of the cleanup so any pending/claimed/running/retrying job
+        # for this draft doesn't outlive the row.
         delete_job_calls = [
             c
             for c in mock_conn.execute.call_args_list
@@ -542,6 +611,11 @@ class TestDeleteDraftHandler:
         # we don't accidentally cancel jobs from other drafts.
         delete_call = delete_job_calls[0]
         assert delete_call.args[1] == (str(draft.id),)
+        # #478: running jobs must also be in the status filter — a
+        # worker that picked up the job just before the delete would
+        # otherwise leave the row behind.
+        delete_sql = delete_call.args[0]
+        assert "'running'" in delete_sql
 
     @patch("app.docs.routes.fetch_draft")
     @patch("app.auth.middleware._get_provider")
@@ -558,3 +632,53 @@ class TestDeleteDraftHandler:
 
         assert resp.status_code == 200
         assert "Eelnõu ei leitud" in resp.text
+
+    @patch("app.docs.routes.delete_named_graph")
+    @patch("app.docs.routes.log_draft_delete")
+    @patch("app.docs.routes.delete_encrypted_file")
+    @patch("app.docs.routes.delete_draft")
+    @patch("app.docs.routes._connect")
+    @patch("app.docs.routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_delete_draft_htmx_returns_hx_redirect(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_connect: MagicMock,
+        mock_delete: MagicMock,
+        mock_delete_file: MagicMock,
+        mock_log: MagicMock,
+        mock_delete_graph: MagicMock,
+    ):
+        """Regression for #467.
+
+        When HTMX drives the delete form, a plain 303 causes HTMX to
+        follow the redirect as an AJAX GET and swap the drafts-list
+        partial (which begins with a ``<title>`` tag) into ``<body>``,
+        corrupting the layout. The handler must instead return a 204
+        with an ``HX-Redirect`` header so HTMX performs a real browser
+        navigation.
+        """
+        mock_get_provider.return_value = _stub_provider()
+        draft = _make_draft()
+        mock_fetch.return_value = draft
+
+        mock_conn = MagicMock()
+        mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+        mock_delete.return_value = "/tmp/ciphertext.enc"
+
+        client = _authed_client()
+        resp = client.post(
+            f"/drafts/{draft.id}/delete",
+            headers={"HX-Request": "true"},
+        )
+
+        # HTMX path returns 204 + HX-Redirect, not a 303.
+        assert resp.status_code == 204
+        assert resp.headers["hx-redirect"] == "/drafts"
+        # The underlying cleanup must still have run.
+        mock_delete.assert_called_once()
+        mock_delete_file.assert_called_once_with("/tmp/ciphertext.enc")
+        mock_log.assert_called_once()
+        mock_delete_graph.assert_called_once_with(draft.graph_uri)

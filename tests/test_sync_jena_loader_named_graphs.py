@@ -9,9 +9,15 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from app.sync import jena_loader
 
-_GRAPH_URI = "https://data.riik.ee/ontology/estleg/drafts/abc-123"
+# #480: the URI must match the ``_SAFE_GRAPH_URI`` allowlist in
+# ``jena_loader`` — ``put_named_graph`` / ``delete_named_graph``
+# now reject anything outside the production ``drafts/<uuid>`` shape
+# before the HTTP call.
+_GRAPH_URI = "https://data.riik.ee/ontology/estleg/drafts/11111111-1111-1111-1111-111111111111"
 
 
 class TestPutNamedGraph:
@@ -98,6 +104,46 @@ class TestDeleteNamedGraph:
 
         mock_delete.side_effect = httpx.ConnectError("fuseki unreachable")
         assert jena_loader.delete_named_graph(_GRAPH_URI) is False
+
+
+class TestGraphUriValidation:
+    """#480: PUT/DELETE must reject URIs outside the draft allowlist."""
+
+    @patch("app.sync.jena_loader.httpx.put")
+    def test_put_rejects_unsafe_uri(self, mock_put: MagicMock):
+        """Garbage URIs must never reach httpx."""
+        with pytest.raises(ValueError, match="Unsafe graph URI"):
+            jena_loader.put_named_graph("urn:not-a-draft", "# turtle")
+        mock_put.assert_not_called()
+
+    @patch("app.sync.jena_loader.httpx.put")
+    def test_put_rejects_default_graph_uri(self, mock_put: MagicMock):
+        """The default Jena graph URI must be rejected too."""
+        with pytest.raises(ValueError, match="Unsafe graph URI"):
+            jena_loader.put_named_graph(
+                "http://jena.apache.org/Default",
+                "# turtle",
+            )
+        mock_put.assert_not_called()
+
+    @patch("app.sync.jena_loader.httpx.delete")
+    def test_delete_rejects_unsafe_uri(self, mock_delete: MagicMock):
+        """Garbage URIs must never reach httpx on delete either."""
+        with pytest.raises(ValueError, match="Unsafe graph URI"):
+            jena_loader.delete_named_graph("not a uri at all")
+        mock_delete.assert_not_called()
+
+    def test_validator_re_exported_from_queries(self):
+        """#480: ``app.docs.impact.queries`` must re-export the validator.
+
+        This guards against future drift — someone refactoring the
+        queries module could otherwise inline a second regex that
+        drifts from the jena_loader canonical definition.
+        """
+        from app.docs.impact import queries
+
+        assert queries._validate_graph_uri is jena_loader._validate_graph_uri
+        assert queries._SAFE_GRAPH_URI is jena_loader._SAFE_GRAPH_URI
 
 
 class TestNamedGraphExists:

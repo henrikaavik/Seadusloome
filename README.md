@@ -42,7 +42,7 @@ graph TB
 
     subgraph Storage["Storage Layer"]
         Jena["Apache Jena Fuseki\n(SPARQL Triplestore)"]
-        PG["PostgreSQL 16\n+ pgvector"]
+        PG["PostgreSQL 18\n+ pgvector"]
         LLM["Pluggable LLM\n(Claude API)"]
     end
 
@@ -220,7 +220,7 @@ flowchart LR
 | Server | FastHTML (Python 3.13) |
 | Frontend | D3.js + HTMX + Vanilla JS |
 | Triplestore | Apache Jena Fuseki (SPARQL) |
-| Database | PostgreSQL 16 + pgvector |
+| Database | PostgreSQL 18 + pgvector |
 | AI | Pluggable LLM (Claude API primary) |
 | Embeddings | multilingual-e5-large / EstBERT |
 | Auth | JWT (TARA SSO-ready via OIDC) |
@@ -291,7 +291,7 @@ project:
 1. Coolify → seadusloome project → + Add New Resource → Application
 2. Name: `seadusloome-tika`
 3. Source: Docker Image
-4. Image: `apache/tika:latest-full`
+4. Image: `apache/tika:3.2.3.1-full`
 5. Port (internal): `9998`
 6. Network alias: `seadusloome-tika` (must match the env var below)
 7. Domain: leave empty — Tika is internal only
@@ -303,15 +303,28 @@ Once it's running, on `seadusloome-app` set:
 **Step 4 — Add two Coolify persistent volumes to seadusloome-app.**
 
 Encrypted draft files and generated .docx reports need to survive
-container restarts.
+container restarts. **Use Coolify's named volume type, NOT bind mounts.**
 
 1. Coolify → seadusloome-app → Persistent Storage
-2. Add: mount path `/var/seadusloome/drafts` (name: `drafts`)
-3. Add: mount path `/var/seadusloome/exports` (name: `exports`)
+2. Click "+ Add". In the dialog:
+   - Type: **Volume Mount** (not Bind Mount)
+   - Name: `drafts`
+   - Mount Path: `/var/seadusloome/drafts`
+3. Click "+ Add" again:
+   - Type: **Volume Mount**
+   - Name: `exports`
+   - Mount Path: `/var/seadusloome/exports`
 
 Also set on seadusloome-app:
 - `STORAGE_DIR=/var/seadusloome/drafts`
 - `EXPORT_DIR=/var/seadusloome/exports`
+
+**Important**: if you ever delete the seadusloome-app application from
+Coolify, the named volumes are orphaned (not destroyed). You can
+reattach them by creating a new application with the same mount paths.
+Bind mounts point to a host directory that you manage separately —
+use bind mounts only if you need to share the files with another
+service or back them up externally.
 
 **Step 5 — (Optional) Set ANTHROPIC_API_KEY for real Claude extraction.**
 

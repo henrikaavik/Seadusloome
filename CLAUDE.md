@@ -14,7 +14,7 @@ The architecture plan is in `estonian-legal-ontology-plan.md`. The ontology sour
 - **Frontend:** D3.js force-directed graph + HTMX + Vanilla JS (no heavy JS framework)
 - **API/Server:** FastHTML (Python) with Starlette routes — REST + WebSocket
 - **Application Core:** Ontology query engine, document analyzer, impact mapper, conflict detector, AI law drafter
-- **Storage:** Apache Jena Fuseki (SPARQL triplestore for RDF ontology queries) + PostgreSQL 16 with pgvector (app state, vectors, chat history)
+- **Storage:** Apache Jena Fuseki (SPARQL triplestore for RDF ontology queries) + PostgreSQL 18 with pgvector (app state, vectors, chat history)
 - **AI Layer:** Pluggable LLM via abstract `LLMProvider` interface (both Claude and Codex supported; Claude is the default), RAG pipeline with multilingual embeddings
 - **Deployment:** Coolify (self-hosted PaaS) on Hetzner VPS with Traefik reverse proxy
 
@@ -39,7 +39,7 @@ The architecture plan is in `estonian-legal-ontology-plan.md`. The ontology sour
 | Server framework | FastHTML (Python) |
 | Frontend visualization | D3.js + HTMX |
 | Triplestore | Apache Jena Fuseki (SPARQL) |
-| Database | PostgreSQL 16 + pgvector |
+| Database | PostgreSQL 18 + pgvector |
 | LLM | Pluggable (Claude and Codex both supported; Claude is the default) |
 | Embeddings | multilingual-e5-large / EstBERT |
 | Document parsing | Apache Tika / python-docx |

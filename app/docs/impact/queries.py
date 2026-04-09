@@ -35,27 +35,42 @@ might assemble a graph URI from user-supplied data.
 
 from __future__ import annotations
 
-import re
+# #480: the canonical definition of ``_SAFE_GRAPH_URI`` /
+# ``_validate_graph_uri`` lives in ``app.sync.jena_loader`` because
+# that's where the Graph Store Protocol transport enforces the
+# named-graph contract. We re-export both names here so the queries
+# module and the analyzer keep their existing import paths — there is
+# exactly one regex definition in the codebase so the SPARQL layer and
+# the GSP layer cannot drift.
+#
+# #465/#476: every ``graph_uri`` value interpolated into a SPARQL
+# template must match the allowlist. The format mirrors the URIs we
+# generate server-side: ``https://data.riik.ee/ontology/estleg/drafts/
+# <uuid>``. #476 tightened this from a generic ``https?://...`` shape
+# to the exact production host + path so any future code path handing
+# us a user-supplied URI is rejected loudly rather than slipping
+# through on a lexical match.
+#
+# #479: the regex is deliberately strict about the characters we allow
+# in the path. We do NOT permit ``#`` (fragment) or ``?`` (query)
+# because every URI we generate uses neither. A future feature that
+# needs fragments or query params must extend the regex AND the SPARQL
+# template, not loosen this allowlist in isolation.
+from app.sync.jena_loader import _SAFE_GRAPH_URI, _validate_graph_uri
 
-# #465: every ``graph_uri`` value interpolated into a SPARQL template
-# must match this allowlist. The format mirrors the URIs we generate
-# server-side: ``https://data.riik.ee/ontology/estleg/drafts/<uuid>``.
-# Anything outside the alphabet would be either invalid for SPARQL or
-# a sign of injection.
-_SAFE_GRAPH_URI = re.compile(r"^https?://[A-Za-z0-9./:_-]{1,512}$")
-
-
-def _validate_graph_uri(uri: str) -> str:
-    """Return *uri* unchanged after asserting it matches the allowlist.
-
-    Raises:
-        ValueError: When *uri* doesn't fit the safe pattern. The
-            caller (the analyzer) is expected to surface this as a
-            handler-level failure that flips the draft to ``failed``.
-    """
-    if not isinstance(uri, str) or not _SAFE_GRAPH_URI.fullmatch(uri):
-        raise ValueError(f"Unsafe graph URI rejected: {uri!r}")
-    return uri
+__all__ = [
+    "_SAFE_GRAPH_URI",
+    "_validate_graph_uri",
+    "PREFIXES",
+    "AFFECTED_ENTITIES",
+    "CONFLICTS",
+    "GAPS",
+    "EU_COMPLIANCE",
+    "build_affected_entities_query",
+    "build_conflicts_query",
+    "build_gaps_query",
+    "build_eu_compliance_query",
+]
 
 
 PREFIXES = """

@@ -133,12 +133,22 @@ _POLLING_TIMEOUT_SECONDS = 300
 
 
 def _is_status_polling_stale(draft: Draft) -> bool:
-    """Return True if we should stop polling and surface a warning."""
-    created = draft.created_at
-    if created is None:
+    """Return True if we should stop polling and surface a warning.
+
+    #470: we use ``updated_at`` (bumped by every handler on each
+    pipeline transition) rather than ``created_at``. A long-running
+    draft whose pipeline is still making progress will keep bumping
+    ``updated_at``, so the polling budget resets on each transition.
+    A pipeline that's genuinely hung leaves ``updated_at`` frozen, and
+    the polling window elapses against that frozen timestamp. If
+    ``updated_at`` is missing for any reason (older rows, DB race),
+    fall back to ``created_at`` so we still honour the timeout.
+    """
+    reference = draft.updated_at or draft.created_at
+    if reference is None:
         return False
     try:
-        elapsed = (datetime.now(UTC) - created).total_seconds()
+        elapsed = (datetime.now(UTC) - reference).total_seconds()
     except (TypeError, ValueError):
         return False
     return elapsed > _POLLING_TIMEOUT_SECONDS
@@ -762,21 +772,23 @@ def delete_draft_handler(req: Request, draft_id: str):
         logger.exception("Failed to delete draft id=%s", parsed)
         return _not_found_page(req)
 
-    # #454: cancel any pending/claimed/retrying background jobs that
-    # still reference this draft. The handlers all early-return on a
-    # missing draft row, but leaving the rows on the queue keeps a
-    # stale ``Ebaõnnestus``-style error appearing on the admin job
-    # dashboard once the worker fails to find the row. Doing this
-    # *after* the row delete is intentional: it's idempotent and means
-    # any job claimed by the worker between the row delete and this
-    # cleanup is also covered.
+    # #454/#478: cancel any pending/claimed/running/retrying background
+    # jobs that still reference this draft. The handlers all
+    # early-return on a missing draft row, but leaving the rows on the
+    # queue keeps a stale ``Ebaõnnestus``-style error appearing on the
+    # admin job dashboard once the worker fails to find the row. Doing
+    # this *after* the row delete is intentional: it's idempotent and
+    # means any job claimed by the worker between the row delete and
+    # this cleanup is also covered. #478 added ``running`` because a
+    # worker that picked up the job just before deletion would
+    # otherwise leave the row behind and produce a spurious failure.
     try:
         with _connect() as conn:
             conn.execute(
                 """
                 DELETE FROM background_jobs
                 WHERE payload->>'draft_id' = %s
-                  AND status IN ('pending', 'claimed', 'retrying')
+                  AND status IN ('pending', 'claimed', 'running', 'retrying')
                 """,
                 (str(parsed),),
             )
@@ -814,6 +826,26 @@ def delete_draft_handler(req: Request, draft_id: str):
         parsed,
         filename=draft.filename,
     )
+
+    # #467: when the browser drives the delete via HTMX (the form has
+    # ``hx_post`` + ``hx_target='body'`` + ``hx_swap='outerHTML'`` — see
+    # ``_draft_detail_body``), returning a plain 303 here makes HTMX
+    # follow the redirect as an AJAX GET, fetch the drafts-list partial
+    # (whose first element is a ``<title>`` tag from ``PageShell``), and
+    # swap that entire partial into ``<body>``. The rendered page ends
+    # up with a ``<title>`` inside the body, which browsers treat as
+    # invalid HTML and render as visible text — corrupting the layout.
+    #
+    # The fix is to detect HTMX requests and return an empty 204 with an
+    # ``HX-Redirect`` header so HTMX performs a **real** browser
+    # navigation to ``/drafts`` instead of swapping. Non-HTMX clients
+    # (JS-disabled users hitting the native form action) still get the
+    # 303 redirect.
+    if req.headers.get("HX-Request") == "true":
+        return Response(
+            status_code=204,
+            headers={"HX-Redirect": "/drafts"},
+        )
     return RedirectResponse(url="/drafts", status_code=303)
 
 

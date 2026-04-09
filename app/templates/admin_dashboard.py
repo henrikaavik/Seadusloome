@@ -294,18 +294,23 @@ def _job_queue_card():
             id="job-queue-card",
         )
 
-    summary = Div(
+    # #477: the retrying badge should only render when there's
+    # actually something to retry. After the #441 fix this should
+    # normally be 0; keeping a ``0 kordab`` badge permanently in the
+    # UI made it look like a live metric rather than a drift guard.
+    # The underlying query still runs so drift still surfaces loudly
+    # the moment a row ends up in ``retrying``.
+    summary_children: list = [
         Badge(f"{len(pending)} ootel", variant="default"),
         " ",
         Badge(f"{len(running)} töötab", variant="primary"),
         " ",
-        # #455: a 4th badge for ``retrying``. After the #441 fix this
-        # should normally be 0; a non-zero value means a row is stuck.
-        Badge(f"{len(retrying)} kordab", variant="warning"),
-        " ",
-        Badge(f"{len(failed)} ebaõnnestus", variant="danger"),
-        cls="job-queue-summary",
-    )
+    ]
+    if len(retrying) > 0:
+        summary_children.append(Badge(f"{len(retrying)} kordab", variant="warning"))
+        summary_children.append(" ")
+    summary_children.append(Badge(f"{len(failed)} ebaõnnestus", variant="danger"))
+    summary = Div(*summary_children, cls="job-queue-summary")
 
     body_children: list = [summary]
 

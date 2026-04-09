@@ -23,6 +23,7 @@ rejects if left raw in the query string.
 
 import logging
 import os
+import re
 from urllib.parse import quote
 
 import httpx
@@ -33,6 +34,31 @@ JENA_URL = os.environ.get("JENA_URL", "http://localhost:3030")
 JENA_DATASET = os.environ.get("JENA_DATASET", "ontology")
 JENA_ADMIN_USER = "admin"
 JENA_ADMIN_PASSWORD = os.environ.get("FUSEKI_ADMIN_PASSWORD", "localdev")
+
+
+# #480: the same allowlist that ``app.docs.impact.queries`` uses for
+# SPARQL interpolation applies at the Graph Store Protocol layer too —
+# ``put_named_graph`` / ``delete_named_graph`` must reject any URI that
+# isn't one of our generated ``drafts/<uuid>`` shapes before the HTTP
+# request even goes out. Keeping the canonical definition here (and
+# re-exporting from ``app.docs.impact.queries``) means the validator
+# lives next to the GSP transport, which is conceptually where the
+# named-graph contract is enforced.
+_SAFE_GRAPH_URI = re.compile(r"^https://data\.riik\.ee/ontology/estleg/drafts/[0-9a-f-]{36}$")
+
+
+def _validate_graph_uri(uri: str) -> str:
+    """Return *uri* unchanged after asserting it matches the allowlist.
+
+    Raises:
+        ValueError: When *uri* doesn't fit the safe pattern. Callers
+            should surface this as a handler-level failure rather than
+            papering over it — an unsafe URI here is a sign of either
+            a bug or an injection attempt, never a transient error.
+    """
+    if not isinstance(uri, str) or not _SAFE_GRAPH_URI.fullmatch(uri):
+        raise ValueError(f"Unsafe graph URI rejected: {uri!r}")
+    return uri
 
 
 def get_sparql_endpoint() -> str:
@@ -166,6 +192,11 @@ def put_named_graph(graph_uri: str, turtle: str) -> bool:
         with the status code so they can be traced in Fuseki's access
         log without grepping for exceptions.
     """
+    # #480: reject unsafe URIs before we hit the network. The Graph
+    # Store Protocol layer is the last line of defence; any earlier
+    # bug (or a future code path assembling a URI from user input)
+    # would otherwise leak through directly into Fuseki.
+    _validate_graph_uri(graph_uri)
     endpoint = get_graph_store_endpoint()
     encoded = quote(graph_uri, safe="")
     url = f"{endpoint}?graph={encoded}"
@@ -211,6 +242,11 @@ def delete_named_graph(graph_uri: str) -> bool:
         ``True`` on 200/204/404, ``False`` on any other status or a
         transport-level failure.
     """
+    # #480: same allowlist as put_named_graph — reject unsafe URIs
+    # before the HTTP call. Delete is idempotent, but we'd still
+    # rather fail loudly than issue a DELETE against an arbitrary
+    # graph (possibly dropping the default graph by accident).
+    _validate_graph_uri(graph_uri)
     endpoint = get_graph_store_endpoint()
     encoded = quote(graph_uri, safe="")
     url = f"{endpoint}?graph={encoded}"

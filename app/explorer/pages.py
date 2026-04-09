@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+import time
 import uuid
 
 from fasthtml.common import *
@@ -16,6 +18,56 @@ from app.db import get_connection as _connect
 from app.ui.primitives.button import Button  # noqa: E402
 
 logger = logging.getLogger(__name__)
+
+
+# #475: the explorer page previously re-queried ``drafts`` and
+# ``impact_reports`` on every request, including from HTMX polling
+# fragments. The data is per-draft-per-org and changes only when a new
+# impact_report row is inserted at the end of the analyze_impact
+# handler — the cache TTL is short enough (60s) that an admin staring
+# at the explorer sees fresh data within a minute, but long enough to
+# absorb the typical "user opens the page 5 times in a row" pattern.
+#
+# Cache key is ``(draft_id, org_id)`` to avoid cross-org leakage even
+# in the unlikely event of a collision on draft UUIDs.
+_OVERLAY_CACHE_TTL_SECONDS = 60.0
+_overlay_cache: dict[tuple[str, str], tuple[float, list[str]]] = {}
+_overlay_cache_lock = threading.Lock()
+
+
+def _overlay_cache_get(key: tuple[str, str]) -> list[str] | None:
+    """Return a cached overlay list if present and still fresh."""
+    now = time.monotonic()
+    with _overlay_cache_lock:
+        entry = _overlay_cache.get(key)
+        if entry is None:
+            return None
+        stored_at, uris = entry
+        if (now - stored_at) > _OVERLAY_CACHE_TTL_SECONDS:
+            # Lazy eviction — stale entries stay until a hit prunes them.
+            _overlay_cache.pop(key, None)
+            return None
+        return uris
+
+
+def _overlay_cache_put(key: tuple[str, str], uris: list[str]) -> None:
+    """Store a freshly-computed overlay list in the cache."""
+    now = time.monotonic()
+    with _overlay_cache_lock:
+        # Keep the cache bounded — if it grows beyond ~256 entries,
+        # drop the oldest half. This is a pragmatic cap for an admin
+        # tool with a handful of concurrent users, not a full LRU.
+        if len(_overlay_cache) > 256:
+            keys_to_drop = list(_overlay_cache.keys())[:128]
+            for k in keys_to_drop:
+                _overlay_cache.pop(k, None)
+        _overlay_cache[key] = (now, uris)
+
+
+def _overlay_cache_clear() -> None:
+    """Drop every cached overlay entry. Exposed for tests."""
+    with _overlay_cache_lock:
+        _overlay_cache.clear()
 
 
 def _fetch_draft_overlay(req: Request, draft_id_raw: str) -> list[str]:
@@ -41,6 +93,16 @@ def _fetch_draft_overlay(req: Request, draft_id_raw: str) -> list[str]:
     except (TypeError, ValueError):
         return []
 
+    # #475: check the TTL cache before hitting the DB. Hits here dodge
+    # two SELECTs (one for the draft, one for the impact_report) plus
+    # the JSON deserialisation below. See ``_overlay_cache_get`` for
+    # the eviction semantics.
+    org_id = str(auth.get("org_id"))
+    cache_key = (str(draft_uuid), org_id)
+    cached = _overlay_cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     try:
         with _connect() as conn:
             draft_row = conn.execute(
@@ -48,8 +110,10 @@ def _fetch_draft_overlay(req: Request, draft_id_raw: str) -> list[str]:
                 (str(draft_uuid),),
             ).fetchone()
             if draft_row is None:
+                _overlay_cache_put(cache_key, [])
                 return []
-            if str(draft_row[0]) != str(auth.get("org_id")):
+            if str(draft_row[0]) != org_id:
+                _overlay_cache_put(cache_key, [])
                 return []
 
             report_row = conn.execute(
@@ -67,6 +131,7 @@ def _fetch_draft_overlay(req: Request, draft_id_raw: str) -> list[str]:
         return []
 
     if report_row is None:
+        _overlay_cache_put(cache_key, [])
         return []
 
     raw = report_row[0]
@@ -74,10 +139,12 @@ def _fetch_draft_overlay(req: Request, draft_id_raw: str) -> list[str]:
         try:
             data = json.loads(raw)
         except (TypeError, ValueError):
+            _overlay_cache_put(cache_key, [])
             return []
     elif isinstance(raw, dict):
         data = raw
     else:
+        _overlay_cache_put(cache_key, [])
         return []
 
     affected = data.get("affected_entities") or []
@@ -87,6 +154,7 @@ def _fetch_draft_overlay(req: Request, draft_id_raw: str) -> list[str]:
             uri = row.get("uri")
             if uri:
                 uris.append(str(uri))
+    _overlay_cache_put(cache_key, uris)
     return uris
 
 

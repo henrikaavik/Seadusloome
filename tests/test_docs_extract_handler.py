@@ -74,9 +74,12 @@ class TestHappyPath:
         draft_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
         draft = _make_draft(draft_id=draft_id, parsed_text="§ 1. Test.")
 
-        # Three conn mocks for three ``with get_connection()`` blocks:
-        # 1) initial get_draft, 2) status→extracting, 3) inserts + commit
-        mock_conns = [MagicMock(), MagicMock(), MagicMock()]
+        # Four conn mocks for four ``with get_connection()`` blocks:
+        # 1) initial get_draft
+        # 2) status→extracting
+        # 3) #469: DELETE FROM draft_entities for retry cleanup
+        # 4) inserts + commit
+        mock_conns = [MagicMock(), MagicMock(), MagicMock(), MagicMock()]
         # Status update (block 2) must report rowcount > 0 so
         # update_draft_status returns True.
         mock_conns[1].execute.return_value.rowcount = 1
@@ -129,8 +132,8 @@ class TestHappyPath:
         }
 
         # Three INSERT ... draft_entities calls + one UPDATE drafts
-        # on the third connection.
-        insert_exec = mock_conns[2].execute
+        # on the fourth connection.
+        insert_exec = mock_conns[3].execute
         # 3 inserts + 1 update = 4 calls
         assert insert_exec.call_count == 4
         insert_calls = [
@@ -151,7 +154,17 @@ class TestHappyPath:
         assert update_params[1] == str(draft_id)
 
         # Commit happened on the inserts connection.
-        mock_conns[2].commit.assert_called_once()
+        mock_conns[3].commit.assert_called_once()
+
+        # #469: the retry-cleanup DELETE ran on conn 3 (the dedicated
+        # pre-extract cleanup block). Verify it used the draft id.
+        cleanup_calls = [
+            call
+            for call in mock_conns[2].execute.call_args_list
+            if "delete from draft_entities" in call.args[0].lower()
+        ]
+        assert len(cleanup_calls) == 1
+        assert cleanup_calls[0].args[1] == (str(draft_id),)
 
         # Next job was enqueued.
         mock_queue.enqueue.assert_called_once_with(
@@ -163,7 +176,7 @@ class TestHappyPath:
     def test_json_location_is_serialised(self):
         draft_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
         draft = _make_draft(draft_id=draft_id)
-        mock_conns = [MagicMock(), MagicMock(), MagicMock()]
+        mock_conns = [MagicMock(), MagicMock(), MagicMock(), MagicMock()]
         mock_conns[1].execute.return_value.rowcount = 1
 
         location = {"chunk": 5, "offset": 1234, "extra": "meta"}
@@ -202,13 +215,68 @@ class TestHappyPath:
         # Find the insert call and make sure location was json.dumps'd.
         insert_calls = [
             call
-            for call in mock_conns[2].execute.call_args_list
+            for call in mock_conns[3].execute.call_args_list
             if "insert into draft_entities" in call.args[0].lower()
         ]
         assert len(insert_calls) == 1
         params = insert_calls[0].args[1]
         # Location is the last positional param.
         assert params[-1] == json.dumps(location)
+
+    def test_retry_cleanup_clears_prior_partial_rows(self):
+        """#469: on retry, the handler must DELETE pre-existing rows.
+
+        Simulates the scenario where a previous attempt inserted
+        ``draft_entities`` rows but then failed before the final
+        UPDATE. The retry should wipe those rows before the extractor
+        runs so duplicates never reach the database.
+        """
+        draft_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
+        draft = _make_draft(draft_id=draft_id)
+
+        mock_conns = [MagicMock(), MagicMock(), MagicMock(), MagicMock()]
+        mock_conns[1].execute.return_value.rowcount = 1
+
+        extracted = [_ref("KarS § 133")]
+        resolved = [
+            ResolvedRef(
+                extracted=extracted[0],
+                entity_uri="urn:test",
+                matched_label=None,
+                match_score=1.0,
+            )
+        ]
+
+        with (
+            patch("app.docs.extract_handler.get_connection") as mock_get_conn,
+            patch("app.docs.extract_handler.get_draft", return_value=draft),
+            patch(
+                "app.docs.extract_handler.extract_refs_from_text",
+                return_value=extracted,
+            ),
+            patch("app.docs.extract_handler.resolve_refs", return_value=resolved),
+            patch("app.docs.extract_handler.JobQueue"),
+        ):
+            mock_get_conn.side_effect = [_ConnectCM(c) for c in mock_conns]
+            # Retry attempt number 2 — the cleanup DELETE must still
+            # run unconditionally regardless of the attempt counter.
+            extract_entities(
+                {"draft_id": str(draft_id)},
+                attempt=2,
+                max_attempts=3,
+            )
+
+        # The DELETE must have run on the dedicated cleanup connection
+        # (conn 3), BEFORE any INSERTs on conn 4.
+        cleanup_sql_calls = [
+            call
+            for call in mock_conns[2].execute.call_args_list
+            if "delete from draft_entities" in call.args[0].lower()
+        ]
+        assert len(cleanup_sql_calls) == 1
+        assert cleanup_sql_calls[0].args[1] == (str(draft_id),)
+        # The cleanup connection must have committed.
+        mock_conns[2].commit.assert_called_once()
 
 
 class TestFailurePaths:
@@ -251,8 +319,9 @@ class TestFailurePaths:
     def test_extractor_failure_marks_draft_failed_on_final_attempt(self):
         draft_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
         draft = _make_draft(draft_id=draft_id)
-        # Connections: 1) get_draft, 2) status→extracting, 3) status→failed
-        mock_conns = [MagicMock(), MagicMock(), MagicMock()]
+        # Connections: 1) get_draft, 2) status→extracting,
+        # 3) #469 cleanup DELETE, 4) status→failed
+        mock_conns = [MagicMock(), MagicMock(), MagicMock(), MagicMock()]
         for c in mock_conns:
             c.execute.return_value.rowcount = 1
 
@@ -277,8 +346,8 @@ class TestFailurePaths:
             # Resolver must not have been called — extractor died first.
             mock_resolve.assert_not_called()
 
-        # The third connection's execute should be the status=failed UPDATE.
-        last_exec = mock_conns[2].execute.call_args_list
+        # The fourth connection's execute should be the status=failed UPDATE.
+        last_exec = mock_conns[3].execute.call_args_list
         # update_draft_status runs one UPDATE and commits.
         assert any("update drafts" in call.args[0].lower() for call in last_exec)
         assert any("failed" in str(call.args[1]) for call in last_exec if len(call.args) > 1)
@@ -287,9 +356,10 @@ class TestFailurePaths:
         """#448: a transient extractor error on attempt 1 must not flip the draft."""
         draft_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
         draft = _make_draft(draft_id=draft_id)
-        # Only two connections this time — no failed-update conn since
-        # the handler should bail before hitting that path.
-        mock_conns = [MagicMock(), MagicMock()]
+        # Three connections: 1) get_draft, 2) status→extracting,
+        # 3) #469 cleanup DELETE. No fourth conn since the handler
+        # should bail before the failed-status-update path.
+        mock_conns = [MagicMock(), MagicMock(), MagicMock()]
         for c in mock_conns:
             c.execute.return_value.rowcount = 1
 
@@ -310,14 +380,15 @@ class TestFailurePaths:
                     max_attempts=3,
                 )
 
-        # Only the get_draft + extracting transitions ran. No third
-        # connection was opened for a failed-status update.
-        assert mock_get_conn.call_count == 2
+        # get_draft + extracting transition + cleanup DELETE = 3 conns.
+        # No fourth connection was opened for a failed-status update.
+        assert mock_get_conn.call_count == 3
 
     def test_resolver_failure_marks_draft_failed_on_final_attempt(self):
         draft_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
         draft = _make_draft(draft_id=draft_id)
-        mock_conns = [MagicMock(), MagicMock(), MagicMock()]
+        # 1) get_draft, 2) status→extracting, 3) cleanup, 4) status→failed
+        mock_conns = [MagicMock(), MagicMock(), MagicMock(), MagicMock()]
         for c in mock_conns:
             c.execute.return_value.rowcount = 1
 
@@ -342,5 +413,5 @@ class TestFailurePaths:
                     max_attempts=3,
                 )
 
-        last_exec = mock_conns[2].execute.call_args_list
+        last_exec = mock_conns[3].execute.call_args_list
         assert any("update drafts" in call.args[0].lower() for call in last_exec)

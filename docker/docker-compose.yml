@@ -7,6 +7,14 @@ services:
       - "5001:5001"
     env_file:
       - ../.env
+    # These three vars are intentionally hardcoded here and OVERRIDE
+    # whatever is in ../.env. Docker Compose precedence: `environment:`
+    # beats `env_file:` on key conflicts. This guarantees local dev
+    # always points at the local tika container + compose-managed
+    # volumes, regardless of the developer's .env values. The
+    # trade-off is that STORAGE_DIR/EXPORT_DIR/TIKA_URL in .env are
+    # IGNORED under compose — edit them here if you need different
+    # paths.
     environment:
       TIKA_URL: http://tika:9998
       STORAGE_DIR: /var/seadusloome/drafts
@@ -20,7 +28,7 @@ services:
       jena:
         condition: service_healthy
       tika:
-        condition: service_started
+        condition: service_healthy
     restart: unless-stopped
 
   postgres:
@@ -43,9 +51,15 @@ services:
   tika:
     # Local dev only. In production, Tika is a separate Coolify application
     # with network alias `seadusloome-tika` (set TIKA_URL accordingly).
-    image: apache/tika:latest-full
+    image: apache/tika:3.2.3.1-full
     ports:
-      - "9998:9998"
+      - "9998:9998"  # Exposed for local curl testing; internal-only in prod
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:9998/tika || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
     restart: unless-stopped
 
   jena:

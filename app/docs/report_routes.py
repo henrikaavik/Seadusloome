@@ -661,27 +661,37 @@ def export_status_fragment(req: Request, draft_id: str, job_id: str):
             cls="export-status export-status-failed",
         )
 
-    # #457: cap polling at _EXPORT_POLLING_TIMEOUT_SECONDS so the
+    # #457/#471: cap polling at _EXPORT_POLLING_TIMEOUT_SECONDS so the
     # browser doesn't hammer this endpoint forever when a worker
     # hangs. After the cap we drop the polling attributes and surface
     # a yellow alert directing the user to the admin dashboard.
+    # #471: if ``job.created_at`` is missing (older rows, DB race)
+    # treat the current wall-clock as "just started" instead of
+    # falling through to "keep polling" — that prevented the stale
+    # alert from ever firing for jobs whose timestamp was NULL and
+    # left the browser hammering the endpoint indefinitely.
     job_created = job.created_at
-    if job_created is not None:
-        try:
-            elapsed = (datetime.now(UTC) - job_created).total_seconds()
-        except (TypeError, ValueError):
-            elapsed = 0.0
-        if elapsed > _EXPORT_POLLING_TIMEOUT_SECONDS:
-            return Div(
-                Alert(
-                    "Vajab tähelepanu — töötlemine võtab oodatust kauem aega. "
-                    "Kontrollige administreerimispaneelilt, kas taustajob on kinni jäänud.",
-                    variant="warning",
-                    title="Eksport venib",
-                ),
-                id="export-status",
-                cls="export-status export-status-stale",
-            )
+    if job_created is None:
+        logger.warning(
+            "Job %s has no created_at timestamp — treating as just-started for polling budget",
+            job.id,
+        )
+        job_created = datetime.now(UTC)
+    try:
+        elapsed = (datetime.now(UTC) - job_created).total_seconds()
+    except (TypeError, ValueError):
+        elapsed = 0.0
+    if elapsed > _EXPORT_POLLING_TIMEOUT_SECONDS:
+        return Div(
+            Alert(
+                "Vajab tähelepanu — töötlemine võtab oodatust kauem aega. "
+                "Kontrollige administreerimispaneelilt, kas taustajob on kinni jäänud.",
+                variant="warning",
+                title="Eksport venib",
+            ),
+            id="export-status",
+            cls="export-status export-status-stale",
+        )
 
     # pending / claimed / running / retrying — keep polling.
     return _export_status_spinner(parsed_draft, parsed_job_id)

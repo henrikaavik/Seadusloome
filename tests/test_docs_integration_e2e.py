@@ -35,6 +35,7 @@ from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
 from starlette.testclient import TestClient
 
 # ---------------------------------------------------------------------------
@@ -534,3 +535,91 @@ class TestDocsPipelineE2E:
             )
             assert "Kokkuvõte" in report_resp.text
             assert "42/100" in report_resp.text
+
+    def test_parse_draft_retry_gating(self, monkeypatch):
+        """Exercise the #448 retry gate on parse_draft.
+
+        Scenario:
+            * A draft exists and is parked at ``status='parsing'``.
+            * Attempts 1 and 2 fail transiently (Tika raises).
+            * Attempt 3 (the final attempt) fails again.
+
+        Assertions:
+            * Attempts 1 and 2 re-raise AND leave the draft row in
+              ``status='parsing'`` — the UI must not flash a misleading
+              ``Ebaõnnestus`` state while a retry is still pending.
+            * Only attempt 3 flips the row to ``failed``.
+        """
+        monkeypatch.setenv("APP_ENV", "development")
+        monkeypatch.delenv("STORAGE_ENCRYPTION_KEY", raising=False)
+        monkeypatch.delenv("TIKA_URL", raising=False)
+
+        state = _State()
+        # Pre-mint the draft id and seed a draft row already in the
+        # ``parsing`` state so the retry harness doesn't have to walk
+        # through the upload flow.
+        draft_id = uuid.UUID("88888888-8888-8888-8888-888888888888")
+        state.draft_id = draft_id
+        now = datetime.now(UTC)
+        state.draft_row = (
+            draft_id,
+            uuid.UUID(_USER_ID),
+            uuid.UUID(_ORG_ID),
+            "Retry test eelnõu",
+            "eelnou.docx",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            20,
+            "/tmp/fake.enc",
+            f"https://data.riik.ee/ontology/estleg/drafts/{draft_id}",
+            "parsing",  # index 9: already parked in parsing
+            None,  # parsed_text
+            None,  # entity_count
+            None,  # error_message
+            now,
+            now,
+        )
+        conn_factory = _make_conn_factory(state)
+
+        from app.docs.parse_handler import parse_draft
+
+        # Tika will raise every time the handler calls it. We patch
+        # ``read_file`` so the handler reaches the Tika call without
+        # touching the disk.
+        fake_tika = MagicMock()
+        fake_tika.extract_text.side_effect = RuntimeError("Tika down")
+
+        with (
+            patch("app.docs.parse_handler.get_connection", side_effect=conn_factory),
+            patch("app.docs.parse_handler.get_default_tika_client", return_value=fake_tika),
+            patch("app.docs.parse_handler.read_file", return_value=b"plaintext bytes"),
+            patch("app.jobs.queue.get_connection", side_effect=conn_factory),
+        ):
+            payload = {"draft_id": str(draft_id)}
+
+            # Attempt 1: transient failure. Handler must re-raise and
+            # leave the draft in ``parsing`` (NOT ``failed``).
+            with pytest.raises(RuntimeError, match="Tika down"):
+                parse_draft(payload, attempt=1, max_attempts=3)
+            assert state.draft_row[9] == "parsing", (
+                "attempt 1 must NOT flip the draft to failed — retry is pending"
+            )
+
+            # Attempt 2: still transient. Same guarantees.
+            with pytest.raises(RuntimeError, match="Tika down"):
+                parse_draft(payload, attempt=2, max_attempts=3)
+            assert state.draft_row[9] == "parsing", (
+                "attempt 2 must NOT flip the draft to failed — retry is pending"
+            )
+
+            # Attempt 3: final attempt. Handler still re-raises (the
+            # worker depends on the exception to consume the retry
+            # budget) BUT the draft row is now marked ``failed`` so
+            # the UI surfaces the permanent error.
+            with pytest.raises(RuntimeError, match="Tika down"):
+                parse_draft(payload, attempt=3, max_attempts=3)
+            assert state.draft_row[9] == "failed", (
+                "final attempt must flip the draft to failed so the UI surfaces the error"
+            )
+            # Error message column must have been populated.
+            assert state.draft_row[12] is not None
+            assert "Tika down" in str(state.draft_row[12])

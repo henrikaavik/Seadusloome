@@ -6,9 +6,26 @@ import json
 import uuid
 from unittest.mock import MagicMock, patch
 
+import pytest
 from starlette.testclient import TestClient
 
 from app.main import app
+
+
+@pytest.fixture(autouse=True)
+def _clear_overlay_cache():
+    """#475: flush the per-process overlay cache between tests.
+
+    Without this, a test that hits the cache on draft X leaks the
+    cached value into the next test using the same draft id, even
+    when the second test expects a different DB response.
+    """
+    from app.explorer.pages import _overlay_cache_clear
+
+    _overlay_cache_clear()
+    yield
+    _overlay_cache_clear()
+
 
 # Mock data for SparqlClient responses
 _OVERVIEW_DATA = [
@@ -561,4 +578,52 @@ class TestExplorerDraftOverlay:
         assert any("</script>" in uri for uri in parsed["uris"]), (
             "the original payload should still decode back to the literal "
             "</script> sequence after JSON unescaping"
+        )
+
+    @patch("app.explorer.pages._connect")
+    @patch("app.auth.middleware._get_provider")
+    def test_overlay_cache_avoids_repeat_db_calls(
+        self,
+        mock_get_provider: MagicMock,
+        mock_connect: MagicMock,
+    ):
+        """#475: repeated explorer hits for the same draft/org should cache.
+
+        Without the TTL cache the explorer re-queries both ``drafts``
+        and ``impact_reports`` on every page load (including every
+        HTMX polling fragment). This test asserts the second hit does
+        NOT call ``_connect`` again.
+        """
+        mock_get_provider.return_value = _overlay_provider()
+        report_data = {"affected_entities": [{"uri": "urn:x:1"}]}
+
+        # Every call to ``_connect`` builds a fresh one-shot mock with
+        # side_effects configured for exactly two SELECTs. If the cache
+        # works we only see one call to ``_connect``.
+        call_counter = {"n": 0}
+
+        def _factory(*_a, **_kw):
+            call_counter["n"] += 1
+            return _ConnectCM(
+                _make_overlay_conn(
+                    draft_org_id=_OVERLAY_ORG_ID,
+                    findings=report_data,
+                )
+            )
+
+        mock_connect.side_effect = _factory
+
+        client = _overlay_authed_client()
+        # First request — cache miss, DB queried.
+        resp1 = client.get(f"/explorer?draft={_OVERLAY_DRAFT_ID}")
+        assert resp1.status_code == 200
+        assert "urn:x:1" in resp1.text
+        assert call_counter["n"] == 1
+
+        # Second request — cache hit, DB NOT queried.
+        resp2 = client.get(f"/explorer?draft={_OVERLAY_DRAFT_ID}")
+        assert resp2.status_code == 200
+        assert "urn:x:1" in resp2.text
+        assert call_counter["n"] == 1, (
+            "overlay cache should have absorbed the second request (#475)"
         )

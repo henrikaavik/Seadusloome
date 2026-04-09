@@ -83,6 +83,21 @@ def extract_entities(
         update_draft_status(conn, draft_id, "extracting")
         conn.commit()
 
+    # #469: clear any draft_entities rows left behind by a previous
+    # failed attempt. Without this, a retry that succeeds after a
+    # partial insert would double-count entities because the final
+    # UPDATE only sets ``entity_count`` from ``len(resolved)`` but the
+    # table still holds the orphan rows from the prior attempt. Doing
+    # this BEFORE the extractor runs keeps the transaction bounded and
+    # idempotent — a retry that never reaches step 5 still leaves the
+    # table in a known-clean state.
+    with get_connection() as conn:
+        conn.execute(
+            "DELETE FROM draft_entities WHERE draft_id = %s",
+            (str(draft_id),),
+        )
+        conn.commit()
+
     try:
         # -- 3. Extract refs via LLM -----------------------------------
         extracted = extract_refs_from_text(draft.parsed_text)

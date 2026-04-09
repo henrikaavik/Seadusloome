@@ -113,15 +113,6 @@ def _load_timeout(explicit: float | None) -> float:
         return 60.0
 
 
-def _is_production() -> bool:
-    """Return True when the current environment is production.
-
-    Implemented in terms of :func:`app.config.is_stub_allowed` so all
-    three Phase 2 stub gates (Tika, Claude, Fernet) move together (#449).
-    """
-    return not is_stub_allowed()
-
-
 # ---------------------------------------------------------------------------
 # Client
 # ---------------------------------------------------------------------------
@@ -144,7 +135,12 @@ class TikaClient:
         self.timeout = _load_timeout(timeout)
         # ``stub_mode`` is a cached boolean so we do not re-check the env
         # on every call. The caller can detect stub mode via ``is_healthy``.
-        self._stub_mode = self.url is None and not _is_production()
+        # #481: source the production/dev gate directly from
+        # :func:`app.config.is_stub_allowed` rather than wrapping it in
+        # a local ``_is_production`` helper. The wrapper added nothing
+        # but a level of indirection that made the call site harder to
+        # trace through during incident debugging.
+        self._stub_mode = self.url is None and is_stub_allowed()
 
     # -- stub-mode helpers --------------------------------------------------
 
