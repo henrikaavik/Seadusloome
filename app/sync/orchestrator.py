@@ -1,6 +1,7 @@
 """Sync pipeline orchestrator: GitHub → RDF → validate → Jena Fuseki."""
 
 import logging
+import re
 import shutil
 import subprocess
 import tempfile
@@ -11,6 +12,24 @@ from app.db import get_connection
 from app.sync.converter import convert_ontology, serialize_to_turtle
 from app.sync.jena_loader import clear_default_graph, get_triple_count, upload_turtle
 from app.sync.validator import load_shapes, validate_graph
+
+_RESULTS_COUNT_RE = re.compile(r"Results \((\d+)\)")
+
+
+def _parse_violation_count(results_line: str) -> int:
+    """Extract the integer violation count from a pyshacl `Results (N)` line.
+
+    Returns 0 if the line doesn't match the expected format — the caller
+    only uses this for logging/UI display, so failing open is acceptable.
+    """
+    match = _RESULTS_COUNT_RE.search(results_line)
+    if match:
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return 0
+    return 0
+
 
 # Lazy import to avoid circular dependencies; used for WS notifications.
 _notify_sync: object | None = None
@@ -105,7 +124,18 @@ def run_sync(repo_dir: Path | None = None) -> bool:
         entity_count = len(graph)
         logger.info("Converted %d triples", entity_count)
 
-        # Step 3: Validate with SHACL (if shapes exist)
+        # Step 3: Validate with SHACL (if shapes exist).
+        #
+        # Design note (#440): SHACL violations are reported as WARNINGS,
+        # not errors that abort the sync. Phase 1 discovered that a
+        # shape-vs-data drift could block every deploy behind a
+        # 2,634-violation report even though the data was largely good;
+        # simultaneously the ontology repo got a shape fix that cut
+        # violations to 213 genuine missing-summary cases (0.4% of
+        # provisions). The right long-term policy is "validate, log,
+        # keep going" — the admin dashboard surfaces the warning count
+        # so cleanup can happen over time without blocking deploys.
+        shacl_warning: str | None = None
         shapes_dir = repo_dir / "shacl"
         if shapes_dir.exists() and any(shapes_dir.iterdir()):
             logger.info("Validating with SHACL shapes...")
@@ -113,9 +143,20 @@ def run_sync(repo_dir: Path | None = None) -> bool:
             if len(shapes) > 0:
                 conforms, report = validate_graph(graph, shapes)
                 if not conforms:
-                    logger.error("SHACL validation failed, aborting sync")
-                    log_sync("failed", started_at, error_message=report[:1000])
-                    return False
+                    # Extract "Results (N):" line for a clean summary
+                    results_line = next(
+                        (line for line in report.splitlines() if "Results (" in line),
+                        "Results (unknown)",
+                    ).strip()
+                    violation_count = _parse_violation_count(results_line)
+                    logger.warning(
+                        "SHACL validation produced %d warnings: %s (continuing with upload)",
+                        violation_count,
+                        results_line,
+                    )
+                    shacl_warning = f"WARN: SHACL {results_line} — {report[:900]}"
+                else:
+                    logger.info("SHACL validation passed with no violations")
         else:
             logger.info("No SHACL shapes found, skipping validation")
 
@@ -137,7 +178,15 @@ def run_sync(repo_dir: Path | None = None) -> bool:
         final_count = get_triple_count()
         logger.info("Sync complete. %d triples in Jena.", final_count)
 
-        log_sync("success", started_at, entity_count=final_count)
+        # If SHACL produced warnings, record them in the same log row so
+        # the admin dashboard shows both success + warning count in one
+        # place. Row remains status=success — this is informational.
+        log_sync(
+            "success",
+            started_at,
+            entity_count=final_count,
+            error_message=shacl_warning,
+        )
 
         # Notify connected explorer WebSocket clients.
         try:
