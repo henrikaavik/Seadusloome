@@ -88,7 +88,9 @@ def TopBar(  # noqa: ANN201
                 A("Eelnõud", href="/drafts"),  # noqa: F405
                 A("Vestlus", href="/chat"),  # noqa: F405
                 cls="top-nav",
-            ) if user else None,
+            )
+            if user
+            else None,
             Div(  # noqa: F405
                 NotificationBell(unread_count) if user else None,
                 ThemeToggle(theme),

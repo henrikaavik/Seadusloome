@@ -65,10 +65,7 @@ LEADING_TIGHT = "1.25"
 LEADING_NORMAL = "1.5"
 LEADING_RELAXED = "1.75"
 
-FONT_FAMILY = (
-    "'Aino', Verdana, -apple-system, BlinkMacSystemFont, "
-    "'Segoe UI', Roboto, sans-serif"
-)
+FONT_FAMILY = "'Aino', Verdana, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
 
 # ---------------------------------------------------------------------------
 # Spacing (8pt grid)

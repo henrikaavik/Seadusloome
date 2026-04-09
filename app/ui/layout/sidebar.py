@@ -36,19 +36,12 @@ def Sidebar(user: UserDict | None, active: str | None = None):  # noqa: ANN201
         return None
 
     role = user.get("role", "drafter")
-    visible = [
-        (label, href, icon)
-        for (label, href, icon, roles) in NAV_ITEMS
-        if role in roles
-    ]
+    visible = [(label, href, icon) for (label, href, icon, roles) in NAV_ITEMS if role in roles]
 
     return Aside(  # noqa: F405
         Nav(  # noqa: F405
             Ul(  # noqa: F405
-                *[
-                    _nav_link(label, href, icon, active == href)
-                    for (label, href, icon) in visible
-                ],
+                *[_nav_link(label, href, icon, active == href) for (label, href, icon) in visible],
                 cls="sidebar-list",
             ),
             aria_label="Peamenüü",

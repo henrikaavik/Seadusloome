@@ -38,9 +38,7 @@ def index(req: Request):
 def cycle_theme(req: Request):
     """Cycle theme: system → light → dark → system."""
     current = req.cookies.get("theme", "system")
-    next_theme = {"system": "light", "light": "dark", "dark": "system"}.get(
-        current, "system"
-    )
+    next_theme = {"system": "light", "light": "dark", "dark": "system"}.get(current, "system")
     response = Response(status_code=204)
     if next_theme in VALID_THEMES:
         set_theme_cookie(response, next_theme)  # type: ignore[arg-type]
