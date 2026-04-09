@@ -11,10 +11,12 @@ WORKDIR /app
 COPY pyproject.toml uv.lock .python-version ./
 RUN uv sync --frozen --no-dev --no-install-project
 
-# Copy application code
+# Copy application code, helper scripts, and DB migrations.
+# Migrations are applied on container boot by docker/entrypoint.sh.
 COPY app/ app/
 # Only copy runtime scripts (build_icons.py is excluded via .dockerignore)
 COPY scripts/ scripts/
+COPY migrations/ migrations/
 
 # Runtime stage
 FROM python:3.13-slim
@@ -34,6 +36,8 @@ WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /app/app /app/app
 COPY --from=builder /app/scripts /app/scripts
+COPY --from=builder /app/migrations /app/migrations
+COPY docker/entrypoint.sh /app/entrypoint.sh
 
 ENV PATH="/app/.venv/bin:$PATH"
 ENV PYTHONPATH="/app"
@@ -42,8 +46,10 @@ ENV PYTHONPATH="/app"
 # To scale horizontally, add more container replicas (not workers).
 ENV WEB_CONCURRENCY=1
 
-# Non-root user for security
+# Non-root user for security. Ensure the entrypoint is executable
+# and owned by appuser along with the rest of /app.
 RUN adduser --system --no-create-home --group appuser && \
+    chmod +x /app/entrypoint.sh && \
     chown -R appuser:appuser /app
 USER appuser
 
@@ -55,8 +61,10 @@ EXPOSE 5001
 HEALTHCHECK --interval=15s --timeout=5s --start-period=60s --retries=3 \
     CMD curl -fsS http://localhost:5001/api/ping || exit 1
 
-# Invoke uvicorn directly (bypass FastHTML's serve() auto-detection,
+# entrypoint.sh runs pending migrations, then execs uvicorn directly
+# so uvicorn becomes PID 1 (bypassing FastHTML's serve() auto-detection,
 # which assumes the script is run as a top-level file and passes
 # "main:app" to uvicorn — that fails when the app lives at app.main:app).
-# --host 0.0.0.0 lets Traefik reach the container over the internal network.
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "5001"]
+# --host 0.0.0.0 is set inside entrypoint.sh so Traefik can reach the
+# container over the internal network.
+ENTRYPOINT ["/app/entrypoint.sh"]
