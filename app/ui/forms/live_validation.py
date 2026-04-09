@@ -27,6 +27,11 @@ async def _validate_handler(req: Request, validator_name: str) -> HTMLResponse:
         return HTMLResponse("Invalid validator name", status_code=400)
 
     validator = get_validator(validator_name)
+    if validator is None:
+        # Unknown validator — return 404 rather than silently accepting
+        # everything so form typos surface immediately.
+        return HTMLResponse("Unknown validator", status_code=404)
+
     form = await req.form()
     # The field name in the form body matches the validator name by default
     # but the form can also include the actual field name as `field`.
@@ -39,7 +44,7 @@ async def _validate_handler(req: Request, validator_name: str) -> HTMLResponse:
     # Coerce possible UploadFile / list to str
     value = str(value or "")
 
-    error = validator(value) if validator else None
+    error = validator(value)
 
     error_id = f"{field_name}-error"
     # Build via FastHTML so all attribute/text content is auto-escaped.

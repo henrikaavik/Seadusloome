@@ -140,7 +140,7 @@ All colors referenced through semantic tokens, not raw color names. This lets da
 
 - Cookie `theme` stores user preference (`light` | `dark` | `system`)
 - Default `system` — respects `prefers-color-scheme` via `@media (prefers-color-scheme: dark)`
-- Toggle button in `TopBar` component calls `POST /api/theme` with new value
+- Toggle button in `TopBar` uses a small inline JS handler that writes the cookie and sets `data-theme` on `<html>` directly — no server round-trip, no page reload (rationale: CSRF-safe and preserves in-progress form state). See `app/ui/layout/top_bar.py` `_THEME_CYCLE_JS`.
 - Server sets cookie, client inline script applies `data-theme` attribute to `<html>` immediately (no FOUC)
 
 ### 3.3 Explorer exception

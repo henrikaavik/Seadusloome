@@ -213,7 +213,7 @@ def _typography_page(req: Request):
             Span(size, cls="ds-type-size"),  # noqa: F405
             Div(
                 f"Seaduseelnõu {name}",
-                cls=f"ds-type-sample {name}",  # noqa: F405
+                cls="ds-type-sample",  # noqa: F405
                 style=f"font-size:{size}",
             ),
             Span(note, cls="ds-type-note"),  # noqa: F405

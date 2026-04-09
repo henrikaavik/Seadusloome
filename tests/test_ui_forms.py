@@ -194,6 +194,5 @@ def test_live_validation_password_short():
 def test_live_validation_unknown_validator():
     client = TestClient(app)
     resp = client.post("/api/validate/unknown", data={"unknown": "x"})
-    # Unknown validator -> no error reported (no validator to fail)
-    assert resp.status_code == 200
-    assert 'role="alert"' not in resp.text
+    # Unknown validator -> 404 so form typos surface immediately.
+    assert resp.status_code == 404
