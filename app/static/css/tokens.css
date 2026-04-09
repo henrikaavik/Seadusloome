@@ -1,0 +1,247 @@
+/* ===========================================================================
+   Seadusloome Design System — Tokens
+   Based on Estonia Brand (brand.estonia.ee/guidelines/colors)
+   =========================================================================== */
+
+:root {
+  /* ---- Estonia Brand primitives ---- */
+  --estonian-blue: #0030DE;
+  --parnu: #CEE2FD;
+  --liivi: #000087;
+  --paldiski: #0062F5;
+  --narva: #00C3FF;
+  --haapsalu: #FCEEC8;
+
+  --ehakivi: #FFFFFF;
+  --pahkla: #F1F5F9;
+  --hellamaa: #CBD5E1;
+  --kabelikivi: #64748B;
+  --majakivi: #3D4B5E;
+  --mustkivi: #0F172A;
+
+  --success: #15803D;
+  --warning: #CA8A04;
+  --danger: #B91C1C;
+  --info: #0062F5;
+
+  /* ---- Semantic tokens (light theme) ---- */
+  --color-background: var(--pahkla);
+  --color-surface: var(--ehakivi);
+  --color-surface-raised: var(--ehakivi);
+  --color-text: var(--mustkivi);
+  --color-text-muted: var(--kabelikivi);
+  --color-text-inverted: var(--ehakivi);
+  --color-border: var(--hellamaa);
+  --color-border-strong: var(--kabelikivi);
+
+  --color-primary: var(--estonian-blue);
+  --color-primary-hover: var(--liivi);
+  --color-primary-text: var(--ehakivi);
+  --color-primary-subtle: var(--parnu);
+
+  --color-accent: var(--narva);
+
+  --color-success: var(--success);
+  --color-success-bg: #DCFCE7;
+  --color-warning: var(--warning);
+  --color-warning-bg: var(--haapsalu);
+  --color-danger: var(--danger);
+  --color-danger-bg: #FEE2E2;
+  --color-info: var(--info);
+  --color-info-bg: var(--parnu);
+
+  /* Focus ring for accessibility */
+  --color-focus-ring: var(--estonian-blue);
+
+  /* ---- Typography ---- */
+  --font-family: 'Aino', Verdana, -apple-system, BlinkMacSystemFont,
+    'Segoe UI', Roboto, sans-serif;
+  --font-family-mono: 'SF Mono', 'Cascadia Code', 'Roboto Mono', Menlo, Consolas,
+    monospace;
+
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.25rem;
+  --text-2xl: 1.5rem;
+  --text-3xl: 1.875rem;
+  --text-4xl: 2.25rem;
+
+  --leading-tight: 1.25;
+  --leading-normal: 1.5;
+  --leading-relaxed: 1.75;
+
+  --font-normal: 400;
+  --font-medium: 500;
+  --font-bold: 700;
+
+  /* ---- Spacing (8pt grid) ---- */
+  --space-0: 0;
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --space-12: 3rem;
+  --space-16: 4rem;
+  --space-24: 6rem;
+
+  /* ---- Radius ---- */
+  --radius-sm: 4px;
+  --radius: 8px;
+  --radius-lg: 12px;
+  --radius-full: 9999px;
+
+  /* ---- Shadows ---- */
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.05);
+  --shadow: 0 4px 6px -1px rgba(15, 23, 42, 0.08);
+  --shadow-lg: 0 10px 25px -5px rgba(15, 23, 42, 0.12);
+
+  /* ---- Z-index layers ---- */
+  --z-base: 1;
+  --z-sticky: 10;
+  --z-dropdown: 100;
+  --z-modal-backdrop: 900;
+  --z-modal: 1000;
+  --z-toast: 1100;
+  --z-tooltip: 1200;
+
+  /* ---- Animation ---- */
+  --transition-fast: 0.15s ease;
+  --transition: 0.2s ease;
+  --transition-slow: 0.3s ease;
+
+  /* ---- Layout ---- */
+  --container-sm: 640px;
+  --container-md: 768px;
+  --container-lg: 1024px;
+  --container-xl: 1280px;
+  --sidebar-width: 240px;
+  --topbar-height: 64px;
+}
+
+/* ===========================================================================
+   Dark theme overrides
+   =========================================================================== */
+
+[data-theme="dark"] {
+  --color-background: var(--mustkivi);
+  --color-surface: #1e293b;
+  --color-surface-raised: #293548;
+  --color-text: var(--ehakivi);
+  --color-text-muted: var(--hellamaa);
+  --color-text-inverted: var(--mustkivi);
+  --color-border: var(--majakivi);
+  --color-border-strong: var(--kabelikivi);
+
+  --color-primary: var(--narva);
+  --color-primary-hover: var(--paldiski);
+  --color-primary-text: var(--mustkivi);
+  --color-primary-subtle: rgba(0, 195, 255, 0.15);
+
+  --color-accent: var(--narva);
+
+  --color-success-bg: rgba(21, 128, 61, 0.15);
+  --color-warning-bg: rgba(202, 138, 4, 0.15);
+  --color-danger-bg: rgba(185, 28, 28, 0.15);
+  --color-info-bg: rgba(0, 98, 245, 0.15);
+
+  --color-focus-ring: var(--narva);
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 10px 25px -5px rgba(0, 0, 0, 0.5);
+}
+
+/* Respect system preference when no explicit theme is set */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --color-background: var(--mustkivi);
+    --color-surface: #1e293b;
+    --color-surface-raised: #293548;
+    --color-text: var(--ehakivi);
+    --color-text-muted: var(--hellamaa);
+    --color-text-inverted: var(--mustkivi);
+    --color-border: var(--majakivi);
+    --color-primary: var(--narva);
+    --color-primary-hover: var(--paldiski);
+    --color-primary-text: var(--mustkivi);
+    --color-primary-subtle: rgba(0, 195, 255, 0.15);
+    --color-success-bg: rgba(21, 128, 61, 0.15);
+    --color-warning-bg: rgba(202, 138, 4, 0.15);
+    --color-danger-bg: rgba(185, 28, 28, 0.15);
+    --color-info-bg: rgba(0, 98, 245, 0.15);
+    --color-focus-ring: var(--narva);
+  }
+}
+
+/* ===========================================================================
+   Base reset + body defaults
+   =========================================================================== */
+
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html {
+  font-family: var(--font-family);
+  -webkit-text-size-adjust: 100%;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  margin: 0;
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+  color: var(--color-text);
+  background-color: var(--color-background);
+  transition: background-color var(--transition), color var(--transition);
+}
+
+/* Focus ring — accessibility baseline per NFR §10 */
+:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+a {
+  color: var(--color-primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+a:hover {
+  color: var(--color-primary-hover);
+}
+
+h1, h2, h3, h4, h5, h6 {
+  margin: 0;
+  font-weight: var(--font-bold);
+  line-height: var(--leading-tight);
+  color: var(--color-text);
+}
+
+h1 { font-size: var(--text-3xl); }
+h2 { font-size: var(--text-2xl); }
+h3 { font-size: var(--text-xl); }
+h4 { font-size: var(--text-lg); }
+h5 { font-size: var(--text-base); }
+h6 { font-size: var(--text-sm); }
+
+p {
+  margin: 0 0 var(--space-4) 0;
+}
+
+code, pre, kbd, samp {
+  font-family: var(--font-family-mono);
+  font-size: 0.9em;
+}
