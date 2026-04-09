@@ -1,7 +1,6 @@
 import logging
 import os
 import threading
-from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fasthtml.common import *
@@ -38,13 +37,22 @@ _stop_worker = threading.Event()
 _worker_thread: threading.Thread | None = None
 
 
-@asynccontextmanager
 async def lifespan(_app):  # type: ignore[no-untyped-def]
     """ASGI lifespan hook: start the background worker, stop it on shutdown.
 
-    Set ``DISABLE_BACKGROUND_WORKER=1`` to skip startup entirely — the
-    pytest suite uses this flag so mocked DB calls are not racing a
-    real worker thread.
+    FastHTML iterates this with ``async for state in self.ls(app)`` in
+    ``fasthtml/core.py::Lifespan._run``, which means it expects a plain
+    async generator function — NOT an ``@asynccontextmanager``-decorated
+    function. The decorator wraps the generator in an
+    ``_AsyncGeneratorContextManager``, which FastHTML's ``async for``
+    loop cannot iterate, and the lifespan startup crashes with
+    ``TypeError: 'async for' requires an object with __aiter__ method``.
+    That failure brought down every Phase 2 deploy 68e1259..9389d52
+    before the healthcheck could reach ``/api/ping``.
+
+    Set ``DISABLE_BACKGROUND_WORKER=1`` to skip worker startup entirely —
+    the pytest suite uses this flag so mocked DB calls are not racing
+    a real worker thread.
     """
     global _worker_thread
     if os.environ.get("DISABLE_BACKGROUND_WORKER") == "1":
