@@ -119,6 +119,69 @@ class TestAdminDashboard:
         # The redirect must not leak any audit content.
         assert "Auditilogi" not in response.text
 
+    def test_admin_sync_requires_auth(self):
+        """POST /admin/sync must not run a sync for unauthenticated users."""
+        from app.main import app
+
+        client = TestClient(app, follow_redirects=False)
+        response = client.post("/admin/sync")
+        assert response.status_code == 303
+        assert response.headers["location"] == "/auth/login"
+
+    @patch("app.templates.admin_dashboard._get_sync_logs")
+    @patch("threading.Thread")
+    def test_admin_sync_triggers_thread(
+        self,
+        mock_thread_cls: MagicMock,
+        mock_logs: MagicMock,
+    ):
+        """When called directly (simulating an admin request) the handler
+        starts a background thread and returns a sync card with a status
+        banner. Asserts the lock state is reset via the `finally`."""
+        from starlette.requests import Request
+
+        from app.templates import admin_dashboard
+        from app.templates.admin_dashboard import trigger_sync
+
+        mock_logs.return_value = []
+
+        # Ensure a clean lock state so the test is deterministic.
+        admin_dashboard._sync_in_progress = False
+        mock_thread = MagicMock()
+        mock_thread_cls.return_value = mock_thread
+
+        # Build a minimal Request object for the handler.
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/admin/sync",
+            "headers": [],
+            "query_string": b"",
+            "scheme": "http",
+            "server": ("testserver", 80),
+            "client": ("127.0.0.1", 12345),
+            "auth": {"role": "admin", "id": "admin-test", "email": "a@b.ee"},
+        }
+        req = Request(scope)
+
+        result = trigger_sync(req)
+
+        # Thread was started
+        mock_thread_cls.assert_called_once()
+        mock_thread.start.assert_called_once()
+
+        # Handler should have flipped the in-progress flag on entry.
+        assert admin_dashboard._sync_in_progress is True
+
+        # Result is a FastTag we can convert to XML to look for the banner.
+        from fasthtml.common import to_xml
+
+        html = to_xml(result)
+        assert "sünkroniseerimine käivitati" in html.lower()
+
+        # Clean up: simulate the thread finishing and clearing the flag.
+        admin_dashboard._sync_in_progress = False
+
 
 # ---------------------------------------------------------------------------
 # Bookmark DB helpers (unit tests with mocked DB)

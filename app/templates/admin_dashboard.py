@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 
 from fasthtml.common import *
 from starlette.requests import Request
@@ -13,11 +14,17 @@ from app.db import get_connection as _connect
 from app.sync.jena_loader import check_health as jena_check_health
 from app.ui.data.data_table import Column, DataTable
 from app.ui.data.pagination import Pagination
+from app.ui.forms.app_form import AppForm
 from app.ui.layout import PageShell
 from app.ui.primitives.badge import Badge, StatusBadge
-from app.ui.primitives.button import Button  # noqa: F401  -- shadow guard #419
+from app.ui.primitives.button import Button
 from app.ui.surfaces.card import Card, CardBody, CardHeader
 from app.ui.theme import get_theme_from_request
+
+# Module-level lock so two admins clicking "Sync now" at the same time
+# don't trigger two parallel clones.
+_sync_lock = threading.Lock()
+_sync_in_progress = False
 
 logger = logging.getLogger(__name__)
 
@@ -158,8 +165,39 @@ def _health_card(jena_ok: bool, pg_ok: bool):
     )
 
 
-def _sync_card(sync_logs: list[dict]):  # type: ignore[type-arg]
-    """Render the sync status card."""
+def _sync_trigger_form():
+    """Render the 'Sync now' button as an HTMX form.
+
+    Posts to /admin/sync. The endpoint swaps this same card in-place
+    with a confirmation message so the admin gets immediate feedback
+    without a full-page reload.
+    """
+    return AppForm(
+        Button(
+            "Sünkroniseeri kohe",
+            type="submit",
+            variant="primary",
+            size="sm",
+            cls="sync-trigger-btn",
+        ),
+        method="post",
+        action="/admin/sync",
+        hx_post="/admin/sync",
+        hx_target="#sync-card",
+        hx_swap="outerHTML",
+        cls="sync-trigger-form",
+    )
+
+
+def _sync_card(sync_logs: list[dict], *, status_banner: tuple[str, str] | None = None):  # type: ignore[type-arg]
+    """Render the sync status card.
+
+    Args:
+        sync_logs: recent sync_log rows from the DB
+        status_banner: optional (variant, message) tuple shown above the
+            log table — used by POST /admin/sync to surface 'queued' /
+            'already running' feedback.
+    """
     if not sync_logs:
         body = P("Sünkroniseerimisi ei leitud.", cls="muted-text")
     else:
@@ -190,9 +228,17 @@ def _sync_card(sync_logs: list[dict]):  # type: ignore[type-arg]
             )
         body = DataTable(columns=columns, rows=rows)
 
+    body_nodes: list = []
+    if status_banner is not None:
+        variant, message = status_banner
+        body_nodes.append(Div(message, cls=f"sync-banner sync-banner-{variant}", role="status"))
+    body_nodes.append(body)
+    body_nodes.append(_sync_trigger_form())
+
     return Card(
         CardHeader(H3("Sünkroniseerimise staatus", cls="card-title")),
-        CardBody(body),
+        CardBody(*body_nodes),
+        id="sync-card",
     )
 
 
@@ -349,12 +395,57 @@ def health_check(req: Request):
     return JSONResponse({"status": overall, "jena": jena_ok, "postgres": pg_ok})
 
 
+def _run_sync_and_clear_flag():
+    """Background wrapper: runs the sync pipeline and clears the in-progress flag."""
+    global _sync_in_progress
+    try:
+        # Imported here to avoid circular dependency on app.templates during
+        # module load, and to ensure the sync uses the runtime env vars.
+        from app.sync.orchestrator import run_sync
+
+        run_sync()
+    except Exception:
+        logger.exception("Admin-triggered sync raised an unhandled exception")
+    finally:
+        with _sync_lock:
+            _sync_in_progress = False
+
+
+def trigger_sync(req: Request):
+    """POST /admin/sync — admin-only sync trigger.
+
+    Runs the ontology sync pipeline in a background thread so the request
+    returns immediately. Re-renders the sync card with a status banner so
+    an HTMX-capable client gets inline feedback; a plain form submit sees
+    the same card on the next full page load via `/admin`.
+    """
+    global _sync_in_progress
+
+    already_running = False
+    with _sync_lock:
+        if _sync_in_progress:
+            already_running = True
+        else:
+            _sync_in_progress = True
+
+    if already_running:
+        banner = ("warning", "Sünkroniseerimine on juba käimas.")
+    else:
+        thread = threading.Thread(target=_run_sync_and_clear_flag, daemon=True)
+        thread.start()
+        banner = ("info", "Sünkroniseerimine käivitati — vaata tulemust allpool olevast logist.")
+
+    sync_logs = _get_sync_logs()
+    return _sync_card(sync_logs, status_banner=banner)
+
+
 # ---------------------------------------------------------------------------
 # Apply admin role decorator
 # ---------------------------------------------------------------------------
 
 _admin_dashboard = require_role("admin")(admin_dashboard_page)
 _admin_audit = require_role("admin")(admin_audit_page)
+_admin_sync = require_role("admin")(trigger_sync)
 
 
 # ---------------------------------------------------------------------------
@@ -366,4 +457,5 @@ def register_admin_routes(rt) -> None:  # type: ignore[no-untyped-def]
     """Register admin dashboard routes on the FastHTML route decorator *rt*."""
     rt("/admin", methods=["GET"])(_admin_dashboard)
     rt("/admin/audit", methods=["GET"])(_admin_audit)
+    rt("/admin/sync", methods=["POST"])(_admin_sync)
     rt("/api/health", methods=["GET"])(health_check)
