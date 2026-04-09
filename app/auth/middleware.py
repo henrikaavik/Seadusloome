@@ -33,14 +33,18 @@ def _get_provider() -> JWTAuthProvider:
 
 
 # Paths that never require authentication. FastHTML's Beforeware uses
-# ``re.fullmatch`` for skip-pattern matching, so bare ``/explorer`` would
-# only match the exact string; sub-paths like ``/explorer/foo`` need an
-# explicit optional trailing segment.
+# ``re.fullmatch`` for skip-pattern matching.
+#
+# Note (#442): ``/explorer`` is intentionally **not** in this list. The
+# explorer page reads the optional ``?draft=<id>`` query param and uses
+# ``req.scope['auth']`` to scope the overlay to the caller's org; if
+# the page were public the overlay would always come back empty. The
+# explorer JSON APIs under ``/api/explorer/...`` remain public so the
+# graph itself can be fetched without a session.
 SKIP_PATHS: list[str] = [
     r"/auth/login",
     r"/static/.*",
     r"/favicon\.ico",
-    r"/explorer(/.*)?",
     r"/api/explorer/.*",
     r"/api/health",
     r"/api/ping",

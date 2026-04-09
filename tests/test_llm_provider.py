@@ -57,12 +57,28 @@ class TestClaudeStubMode:
 
 class TestClaudeProdMode:
     def test_claude_raises_in_prod_without_key(self, monkeypatch: pytest.MonkeyPatch):
-        """Off-dev + no key must fail ClaudeProvider __init__."""
+        """APP_ENV=production + no key must fail ClaudeProvider __init__.
+
+        #449: only an explicit APP_ENV=production forces real
+        credentials. Dev/test/staging all fall through to stub mode.
+        """
         monkeypatch.setenv("APP_ENV", "production")
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
-        with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
+        with pytest.raises(RuntimeError, match="APP_ENV=production"):
             ClaudeProvider()
+
+    def test_claude_stubbed_in_staging(self, monkeypatch: pytest.MonkeyPatch):
+        """#449: APP_ENV=staging is now explicitly stub-mode-eligible.
+
+        Previously the dev-only check raised here; the unified gate
+        treats anything other than ``production`` as stub-allowed.
+        """
+        monkeypatch.setenv("APP_ENV", "staging")
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+        provider = ClaudeProvider()
+        assert provider._stubbed is True
 
 
 class TestFactory:

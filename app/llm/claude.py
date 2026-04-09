@@ -1,10 +1,12 @@
 """Anthropic Claude concrete ``LLMProvider`` implementation.
 
 Phase 2 ships only the scaffolding: Phase 3 fills in real Anthropic
-API calls. In development mode (``APP_ENV=development``) without an
-``ANTHROPIC_API_KEY`` the provider switches to ``_stubbed = True`` and
-returns canned responses so tests, local dev, and CI never make network
-calls.
+API calls. When ``APP_ENV != production`` (i.e. dev/test/staging/ci)
+and ``ANTHROPIC_API_KEY`` is unset, the provider switches to
+``_stubbed = True`` and returns canned responses so tests, local
+dev, and CI never make network calls. The stub-mode gate goes
+through :func:`app.config.is_stub_allowed` so the rule stays in
+lock-step with the Tika and Fernet stub gates (#449).
 
 The real implementation path (when the SDK is installed and a key is
 set) is also wired up so Phase 3 only needs to flesh out the body of
@@ -20,6 +22,7 @@ import logging
 import os
 from typing import Any
 
+from app.config import is_stub_allowed
 from app.llm.provider import LLMProvider
 
 logger = logging.getLogger(__name__)
@@ -39,10 +42,9 @@ class ClaudeProvider(LLMProvider):
 
     def __init__(self) -> None:
         api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-        env = os.environ.get("APP_ENV", "development")
 
         if not api_key:
-            if env == "development":
+            if is_stub_allowed():
                 logger.warning(
                     "ANTHROPIC_API_KEY not set — ClaudeProvider running in STUB mode. "
                     "All completions return canned responses."
@@ -50,7 +52,7 @@ class ClaudeProvider(LLMProvider):
                 self._stubbed = True
                 self._api_key = ""
             else:
-                raise RuntimeError("ANTHROPIC_API_KEY must be set in non-development environments")
+                raise RuntimeError("ANTHROPIC_API_KEY must be set when APP_ENV=production")
         else:
             self._stubbed = False
             self._api_key = api_key

@@ -39,12 +39,21 @@ logger = logging.getLogger(__name__)
 
 
 @register_handler("extract_entities")
-def extract_entities(payload: dict[str, Any]) -> dict[str, Any]:
+def extract_entities(
+    payload: dict[str, Any],
+    *,
+    attempt: int = 1,
+    max_attempts: int = 3,
+) -> dict[str, Any]:
     """Real ``extract_entities`` handler.
 
     Args:
         payload: ``{"draft_id": "<uuid str>"}`` — the only input the
             job queue hands us.
+        attempt: 1-based current attempt counter. Used to delay the
+            ``status='failed'`` flip until the retry budget is
+            exhausted (#448).
+        max_attempts: Total retry budget for this job.
 
     Returns:
         Summary dict persisted to ``background_jobs.result``. Includes
@@ -134,17 +143,30 @@ def extract_entities(payload: dict[str, Any]) -> dict[str, Any]:
         }
 
     except Exception as exc:
-        # Best-effort status flip; if the DB is down too there's nothing
-        # we can do and the queue's retry logic will eventually fire.
-        try:
-            with get_connection() as conn:
-                update_draft_status(
-                    conn,
+        # Only flip the draft to ``failed`` on the FINAL attempt (#448);
+        # earlier attempts re-raise so the queue can retry without the
+        # UI showing a misleading permanent-failure state.
+        if attempt >= max_attempts:
+            try:
+                with get_connection() as conn:
+                    update_draft_status(
+                        conn,
+                        draft_id,
+                        "failed",
+                        error_message=str(exc)[:500],
+                    )
+                    conn.commit()
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "extract_entities: failed to mark draft %s as failed",
                     draft_id,
-                    "failed",
-                    error_message=str(exc)[:500],
                 )
-                conn.commit()
-        except Exception:  # noqa: BLE001
-            logger.exception("extract_entities: failed to mark draft %s as failed", draft_id)
+        else:
+            logger.warning(
+                "extract_entities attempt %d/%d failed for draft %s, will retry: %s",
+                attempt,
+                max_attempts,
+                draft_id,
+                exc,
+            )
         raise

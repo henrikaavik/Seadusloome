@@ -8,7 +8,12 @@ lifespan hook); running multiple processes on the same database is
 safe because ``JobQueue.claim_next`` uses ``FOR UPDATE SKIP LOCKED``.
 
 Handler contract:
-    - Handlers are plain synchronous functions ``(payload: dict) -> dict | None``.
+    - Handlers are plain synchronous functions with the signature
+      ``(payload: dict, *, attempt: int = 1, max_attempts: int = 3) -> dict | None``.
+      The keyword-only ``attempt``/``max_attempts`` arguments let
+      handlers distinguish "first failure, will retry" from "final
+      failure, give up" so they can hold off on flipping domain rows
+      to ``failed`` until the retry budget is exhausted (#448).
     - The returned dict is persisted in ``background_jobs.result``.
     - Handlers MUST raise to signal failure; raising triggers the
       queue's exponential backoff retry logic automatically.
@@ -45,7 +50,11 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-HandlerFn = Callable[[dict[str, Any]], dict[str, Any] | None]
+# Handlers accept the payload positionally and the attempt counters as
+# keyword-only arguments. We declare the type loosely as ``Callable[..., ...]``
+# so existing handlers that ignore the new kwargs (or accept them under
+# ``**kwargs``) still type-check.
+HandlerFn = Callable[..., dict[str, Any] | None]
 
 _HANDLERS: dict[str, HandlerFn] = {}
 
@@ -139,8 +148,18 @@ class JobWorker:
             return
 
         queue.mark_running(job.id)
+        # Pass the *next* attempt number so handlers can distinguish
+        # "this is attempt 1 of 3, retry remaining" from "this is the
+        # last attempt, mark domain row failed". The job row's
+        # ``attempts`` column is incremented inside ``mark_failed``,
+        # so the value here is the in-flight attempt index (1-based).
+        attempt_number = (job.attempts or 0) + 1
         try:
-            result = handler(job.payload)
+            result = handler(
+                job.payload,
+                attempt=attempt_number,
+                max_attempts=job.max_attempts,
+            )
         except Exception as exc:  # noqa: BLE001 — handler errors flip job to failed
             tb = traceback.format_exc()
             logger.error(

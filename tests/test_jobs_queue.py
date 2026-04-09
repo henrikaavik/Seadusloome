@@ -165,7 +165,7 @@ class TestMarkSuccess:
 class TestMarkFailed:
     @patch("app.jobs.queue.get_connection")
     def test_mark_failed_retries_under_limit(self, mock_get_connection: MagicMock):
-        """attempts=0, max=3 → next_attempts=1 → status='retrying'."""
+        """attempts=0, max=3 → next_attempts=1 → status='pending' (#441)."""
         conn = _mock_conn(mock_get_connection)
         conn.execute.return_value.fetchone.return_value = (0, 3)
 
@@ -175,8 +175,16 @@ class TestMarkFailed:
         # SELECT then UPDATE.
         assert conn.execute.call_count == 2
         update_sql = conn.execute.call_args_list[1].args[0]
-        assert "status = 'retrying'" in update_sql
+        # #441 fix: re-queued jobs go back to 'pending' (not 'retrying')
+        # so the standard claim_next() SELECT picks them up.
+        assert "status = 'pending'" in update_sql
+        assert "status = 'retrying'" not in update_sql
         assert "scheduled_for" in update_sql
+        # Worker bookkeeping must also be reset so the next claim
+        # starts from a clean state.
+        assert "claimed_by = NULL" in update_sql
+        assert "claimed_at = NULL" in update_sql
+        assert "started_at = NULL" in update_sql
         conn.commit.assert_called_once()
 
     @patch("app.jobs.queue.get_connection")
@@ -205,6 +213,153 @@ class TestMarkFailed:
 
         # Only the SELECT ran; no UPDATE.
         assert conn.execute.call_count == 1
+
+
+class TestRetryRoundTrip:
+    """Regression for #441: claim → mark_failed (under limit) → claim again.
+
+    Uses a stateful in-memory ``_FakeRow`` that mimics the columns of the
+    ``background_jobs`` table so we can drive the queue through one full
+    retry cycle without a real Postgres connection. This is the test
+    that would have caught the original bug — under the old code path
+    the second ``claim_next`` returned ``None`` because the row was in
+    ``status='retrying'``.
+    """
+
+    def test_failed_job_is_reclaimable_after_backoff(self):
+        from datetime import timedelta
+
+        # Simulated row state. Only the columns the queue cares about
+        # are tracked.
+        row_state: dict = {
+            "id": 101,
+            "job_type": "parse_draft",
+            "payload": {"draft_id": "abc"},
+            "status": "pending",
+            "priority": 0,
+            "attempts": 0,
+            "max_attempts": 3,
+            "claimed_by": None,
+            "claimed_at": None,
+            "started_at": None,
+            "finished_at": None,
+            "error_message": None,
+            "result": None,
+            "scheduled_for": datetime.now(UTC) - timedelta(seconds=1),
+            "created_at": datetime.now(UTC),
+        }
+
+        def _row_tuple() -> tuple:
+            return (
+                row_state["id"],
+                row_state["job_type"],
+                row_state["payload"],
+                row_state["status"],
+                row_state["priority"],
+                row_state["attempts"],
+                row_state["max_attempts"],
+                row_state["claimed_by"],
+                row_state["claimed_at"],
+                row_state["started_at"],
+                row_state["finished_at"],
+                row_state["error_message"],
+                row_state["result"],
+                row_state["scheduled_for"],
+                row_state["created_at"],
+            )
+
+        # Build a fake conn that interprets each SQL by the keywords in
+        # it. This is just enough to drive the JobQueue methods that the
+        # round-trip exercises (claim_next, mark_failed) without
+        # reproducing real psycopg semantics.
+        def _execute(sql: str, params: tuple | None = None):
+            sql_norm = " ".join(sql.split())  # collapse whitespace
+            cursor = MagicMock()
+
+            if "FROM background_jobs WHERE status = 'pending'" in sql_norm:
+                # claim_next SELECT — only returns the row when status is
+                # pending AND scheduled_for has elapsed.
+                if (
+                    row_state["status"] == "pending" and row_state["scheduled_for"] <= params[0]  # type: ignore[index]
+                ):
+                    cursor.fetchone.return_value = _row_tuple()
+                else:
+                    cursor.fetchone.return_value = None
+                return cursor
+
+            if "SET status = 'claimed'" in sql_norm:
+                row_state["status"] = "claimed"
+                row_state["claimed_by"] = params[0]  # type: ignore[index]
+                row_state["claimed_at"] = params[1]  # type: ignore[index]
+                cursor.rowcount = 1
+                return cursor
+
+            if "SELECT attempts, max_attempts FROM background_jobs" in sql_norm:
+                cursor.fetchone.return_value = (
+                    row_state["attempts"],
+                    row_state["max_attempts"],
+                )
+                return cursor
+
+            if "SET status = 'pending'" in sql_norm:
+                # mark_failed retry path — copy params back into row_state.
+                (
+                    next_attempts,
+                    error_message,
+                    finished_at,
+                    next_scheduled,
+                    _job_id,
+                ) = params  # type: ignore[misc]
+                row_state["status"] = "pending"
+                row_state["attempts"] = next_attempts
+                row_state["error_message"] = error_message
+                row_state["finished_at"] = finished_at
+                row_state["scheduled_for"] = next_scheduled
+                row_state["claimed_by"] = None
+                row_state["claimed_at"] = None
+                row_state["started_at"] = None
+                cursor.rowcount = 1
+                return cursor
+
+            cursor.fetchone.return_value = None
+            return cursor
+
+        conn = MagicMock()
+        conn.execute.side_effect = _execute
+
+        with patch("app.jobs.queue.get_connection") as mock_get_connection:
+            mock_get_connection.return_value.__enter__ = MagicMock(return_value=conn)
+            mock_get_connection.return_value.__exit__ = MagicMock(return_value=False)
+
+            queue = JobQueue()
+
+            # 1) Initial claim works.
+            first = queue.claim_next(worker_id="worker-A")
+            assert first is not None
+            assert first.id == 101
+            assert first.attempts == 0
+
+            # 2) Mark it failed (still under retry limit).
+            queue.mark_failed(job_id=101, error_message="transient")
+
+            # The row must NOT be in 'retrying' (#441 — that would
+            # strand it).
+            assert row_state["status"] == "pending"
+            assert row_state["attempts"] == 1
+
+            # 3) Advance the simulated clock by rewinding ``scheduled_for``
+            #    so the next claim sees the row as eligible. We DON'T
+            #    actually wait — we just simulate time having passed.
+            row_state["scheduled_for"] = datetime.now(UTC) - timedelta(seconds=1)
+
+            # 4) The same row must be reclaimable.
+            second = queue.claim_next(worker_id="worker-B")
+            assert second is not None, (
+                "Failed job stuck in 'pending' was not reclaimed — #441 regression"
+            )
+            assert second.id == 101
+            assert second.attempts == 1
+            assert second.claimed_by == "worker-B"
 
 
 # ---------------------------------------------------------------------------

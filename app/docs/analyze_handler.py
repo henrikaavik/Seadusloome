@@ -43,12 +43,17 @@ from app.docs.graph_builder import build_draft_graph
 from app.docs.impact import ImpactAnalyzer, calculate_impact_score
 from app.docs.reference_resolver import ResolvedRef
 from app.jobs.worker import register_handler
-from app.sync.jena_loader import delete_named_graph, put_named_graph
+from app.sync.jena_loader import put_named_graph
 
 logger = logging.getLogger(__name__)
 
 
-def analyze_impact(payload: dict[str, Any]) -> dict[str, Any]:
+def analyze_impact(
+    payload: dict[str, Any],
+    *,
+    attempt: int = 1,
+    max_attempts: int = 3,
+) -> dict[str, Any]:
     """Run the impact analysis pipeline for one draft.
 
     Args:
@@ -56,6 +61,10 @@ def analyze_impact(payload: dict[str, Any]) -> dict[str, Any]:
             ignored. Missing or unparseable ``draft_id`` raises a
             ``ValueError`` that the job worker will convert into a
             ``failed`` status.
+        attempt: 1-based current attempt counter. Used to delay the
+            ``status='failed'`` transition until the retry budget is
+            exhausted (#448).
+        max_attempts: Total retry budget for this job.
 
     Returns:
         Summary dict persisted in ``background_jobs.result`` — kept
@@ -156,16 +165,30 @@ def analyze_impact(payload: dict[str, Any]) -> dict[str, Any]:
         }
 
     except Exception as exc:
-        # Best-effort cleanup: mark draft failed and drop the named
-        # graph so we don't accumulate stale draft graphs in Jena.
-        logger.exception("analyze_impact failed for draft %s", draft_id)
-        _mark_draft_failed(draft_id, str(exc))
-        try:
-            delete_named_graph(draft.graph_uri)
-        except Exception:  # noqa: BLE001 — best-effort cleanup
+        # #448: only flip the draft to ``failed`` on the FINAL attempt.
+        # Earlier attempts re-raise so the queue's retry loop can take
+        # another swing without the user seeing a permanent-failure
+        # state.
+        #
+        # #456: we deliberately do NOT delete the named graph here.
+        # Graph lifecycle is owned by ``delete_draft_handler`` —
+        # cleaning up here masks transient Jena hiccups (the next
+        # retry would just have to load the graph again) and risks
+        # racing the user's own delete.
+        if attempt >= max_attempts:
+            logger.exception(
+                "analyze_impact permanently failed for draft %s after %d attempts",
+                draft_id,
+                attempt,
+            )
+            _mark_draft_failed(draft_id, str(exc))
+        else:
             logger.warning(
-                "analyze_impact: failed to clean up named graph %s after error",
-                draft.graph_uri,
+                "analyze_impact attempt %d/%d failed for draft %s, will retry: %s",
+                attempt,
+                max_attempts,
+                draft_id,
+                exc,
             )
         raise
 

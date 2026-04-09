@@ -20,10 +20,10 @@ import logging
 from dataclasses import dataclass, field
 
 from app.docs.impact.queries import (
-    AFFECTED_ENTITIES,
-    CONFLICTS,
-    EU_COMPLIANCE,
-    GAPS,
+    build_affected_entities_query,
+    build_conflicts_query,
+    build_eu_compliance_query,
+    build_gaps_query,
 )
 from app.ontology.sparql_client import SparqlClient
 
@@ -103,8 +103,8 @@ class ImpactAnalyzer:
 
     def _find_affected(self, graph_uri: str) -> list[dict[str, str]]:
         """Run the 2-hop BFS query and shape the results."""
-        query = AFFECTED_ENTITIES.format(graph_uri=graph_uri)
         try:
+            query = build_affected_entities_query(graph_uri)
             rows = self.client.query(query)
         except Exception as exc:  # noqa: BLE001 — pass-level isolation
             logger.warning("ImpactAnalyzer._find_affected failed: %s", exc)
@@ -121,8 +121,8 @@ class ImpactAnalyzer:
 
     def _detect_conflicts(self, graph_uri: str) -> list[dict[str, str]]:
         """Run the conflict query and return one dict per hit."""
-        query = CONFLICTS.format(graph_uri=graph_uri)
         try:
+            query = build_conflicts_query(graph_uri)
             rows = self.client.query(query)
         except Exception as exc:  # noqa: BLE001
             logger.warning("ImpactAnalyzer._detect_conflicts failed: %s", exc)
@@ -140,8 +140,8 @@ class ImpactAnalyzer:
 
     def _analyze_gaps(self, graph_uri: str) -> list[dict[str, str]]:
         """Run the gap-analysis query and return one dict per cluster."""
-        query = GAPS.format(graph_uri=graph_uri)
         try:
+            query = build_gaps_query(graph_uri)
             rows = self.client.query(query)
         except Exception as exc:  # noqa: BLE001
             logger.warning("ImpactAnalyzer._analyze_gaps failed: %s", exc)
@@ -167,8 +167,8 @@ class ImpactAnalyzer:
 
     def _check_eu_compliance(self, graph_uri: str) -> list[dict[str, str]]:
         """Run the EU compliance query and return one dict per link."""
-        query = EU_COMPLIANCE.format(graph_uri=graph_uri)
         try:
+            query = build_eu_compliance_query(graph_uri)
             rows = self.client.query(query)
         except Exception as exc:  # noqa: BLE001
             logger.warning("ImpactAnalyzer._check_eu_compliance failed: %s", exc)

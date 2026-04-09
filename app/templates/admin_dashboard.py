@@ -250,12 +250,22 @@ def _get_job_queue_snapshot() -> dict:  # type: ignore[type-arg]
     Postgres is temporarily unreachable — the health card above this
     one will already have flagged the outage.
     """
-    snapshot: dict = {"pending": [], "running": [], "failed": []}  # type: ignore[type-arg]
+    snapshot: dict = {  # type: ignore[type-arg]
+        "pending": [],
+        "running": [],
+        "failed": [],
+        "retrying": [],
+    }
     try:
         queue = JobQueue()
         snapshot["pending"] = queue.list_by_status("pending", limit=5)
         snapshot["running"] = queue.list_by_status("running", limit=5)
         snapshot["failed"] = queue.list_by_status("failed", limit=5)
+        # #455: surface ``retrying`` for operational visibility. After
+        # the #441 fix the queue no longer parks jobs there, but the
+        # CHECK constraint still allows it and we want any drift to
+        # show up loudly on the dashboard rather than silently.
+        snapshot["retrying"] = queue.list_by_status("retrying", limit=5)
     except Exception:
         logger.exception("Failed to fetch job queue snapshot")
     return snapshot
@@ -264,16 +274,17 @@ def _get_job_queue_snapshot() -> dict:  # type: ignore[type-arg]
 def _job_queue_card():
     """Render the background job queue status card.
 
-    Shows counts of pending/running/failed jobs at a glance, plus a
-    table of the most recent failures so an admin can spot broken
-    pipelines without needing to SSH into Postgres.
+    Shows counts of pending/running/failed/retrying jobs at a glance,
+    plus a table of the most recent failures so an admin can spot
+    broken pipelines without needing to SSH into Postgres.
     """
     snapshot = _get_job_queue_snapshot()
     pending: list[Job] = snapshot["pending"]
     running: list[Job] = snapshot["running"]
     failed: list[Job] = snapshot["failed"]
+    retrying: list[Job] = snapshot["retrying"]
 
-    has_any = bool(pending or running or failed)
+    has_any = bool(pending or running or failed or retrying)
 
     if not has_any:
         body: object = P("Taustajobisid pole.", cls="muted-text")
@@ -287,6 +298,10 @@ def _job_queue_card():
         Badge(f"{len(pending)} ootel", variant="default"),
         " ",
         Badge(f"{len(running)} töötab", variant="primary"),
+        " ",
+        # #455: a 4th badge for ``retrying``. After the #441 fix this
+        # should normally be 0; a non-zero value means a row is stuck.
+        Badge(f"{len(retrying)} kordab", variant="warning"),
         " ",
         Badge(f"{len(failed)} ebaõnnestus", variant="danger"),
         cls="job-queue-summary",

@@ -248,7 +248,7 @@ class TestFailurePaths:
         with pytest.raises(ValueError, match="draft_id"):
             extract_entities({})
 
-    def test_extractor_failure_marks_draft_failed(self):
+    def test_extractor_failure_marks_draft_failed_on_final_attempt(self):
         draft_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
         draft = _make_draft(draft_id=draft_id)
         # Connections: 1) get_draft, 2) status→extracting, 3) status→failed
@@ -268,7 +268,11 @@ class TestFailurePaths:
             mock_get_conn.side_effect = [_ConnectCM(c) for c in mock_conns]
 
             with pytest.raises(RuntimeError, match="LLM boom"):
-                extract_entities({"draft_id": str(draft_id)})
+                extract_entities(
+                    {"draft_id": str(draft_id)},
+                    attempt=3,
+                    max_attempts=3,
+                )
 
             # Resolver must not have been called — extractor died first.
             mock_resolve.assert_not_called()
@@ -279,7 +283,38 @@ class TestFailurePaths:
         assert any("update drafts" in call.args[0].lower() for call in last_exec)
         assert any("failed" in str(call.args[1]) for call in last_exec if len(call.args) > 1)
 
-    def test_resolver_failure_marks_draft_failed(self):
+    def test_extractor_failure_does_not_mark_failed_when_retry_pending(self):
+        """#448: a transient extractor error on attempt 1 must not flip the draft."""
+        draft_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
+        draft = _make_draft(draft_id=draft_id)
+        # Only two connections this time — no failed-update conn since
+        # the handler should bail before hitting that path.
+        mock_conns = [MagicMock(), MagicMock()]
+        for c in mock_conns:
+            c.execute.return_value.rowcount = 1
+
+        with (
+            patch("app.docs.extract_handler.get_connection") as mock_get_conn,
+            patch("app.docs.extract_handler.get_draft", return_value=draft),
+            patch(
+                "app.docs.extract_handler.extract_refs_from_text",
+                side_effect=RuntimeError("LLM boom"),
+            ),
+        ):
+            mock_get_conn.side_effect = [_ConnectCM(c) for c in mock_conns]
+
+            with pytest.raises(RuntimeError, match="LLM boom"):
+                extract_entities(
+                    {"draft_id": str(draft_id)},
+                    attempt=1,
+                    max_attempts=3,
+                )
+
+        # Only the get_draft + extracting transitions ran. No third
+        # connection was opened for a failed-status update.
+        assert mock_get_conn.call_count == 2
+
+    def test_resolver_failure_marks_draft_failed_on_final_attempt(self):
         draft_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
         draft = _make_draft(draft_id=draft_id)
         mock_conns = [MagicMock(), MagicMock(), MagicMock()]
@@ -301,7 +336,11 @@ class TestFailurePaths:
             mock_get_conn.side_effect = [_ConnectCM(c) for c in mock_conns]
 
             with pytest.raises(RuntimeError, match="resolver down"):
-                extract_entities({"draft_id": str(draft_id)})
+                extract_entities(
+                    {"draft_id": str(draft_id)},
+                    attempt=3,
+                    max_attempts=3,
+                )
 
         last_exec = mock_conns[2].execute.call_args_list
         assert any("update drafts" in call.args[0].lower() for call in last_exec)

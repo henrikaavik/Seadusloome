@@ -19,6 +19,7 @@ import logging
 import re
 import unicodedata
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -49,6 +50,12 @@ _DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.doc
 # embedded in the impact_reports row and the .docx export contains
 # every row, so this is purely for page-weight control.
 _MAX_INLINE_ROWS = 50
+
+# #457: drop the polling attributes after this many seconds since the
+# export job was created. Without an upper bound the export-status
+# fragment hammers /export-status/<id> forever whenever a worker
+# stalls, and the user has no actionable signal.
+_EXPORT_POLLING_TIMEOUT_SECONDS = 300
 
 
 # Estonian translations for the entity ``type`` short names that show
@@ -653,6 +660,28 @@ def export_status_fragment(req: Request, draft_id: str, job_id: str):
             id="export-status",
             cls="export-status export-status-failed",
         )
+
+    # #457: cap polling at _EXPORT_POLLING_TIMEOUT_SECONDS so the
+    # browser doesn't hammer this endpoint forever when a worker
+    # hangs. After the cap we drop the polling attributes and surface
+    # a yellow alert directing the user to the admin dashboard.
+    job_created = job.created_at
+    if job_created is not None:
+        try:
+            elapsed = (datetime.now(UTC) - job_created).total_seconds()
+        except (TypeError, ValueError):
+            elapsed = 0.0
+        if elapsed > _EXPORT_POLLING_TIMEOUT_SECONDS:
+            return Div(
+                Alert(
+                    "Vajab tähelepanu — töötlemine võtab oodatust kauem aega. "
+                    "Kontrollige administreerimispaneelilt, kas taustajob on kinni jäänud.",
+                    variant="warning",
+                    title="Eksport venib",
+                ),
+                id="export-status",
+                cls="export-status export-status-stale",
+            )
 
     # pending / claimed / running / retrying — keep polling.
     return _export_status_spinner(parsed_draft, parsed_job_id)

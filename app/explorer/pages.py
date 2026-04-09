@@ -23,8 +23,10 @@ def _fetch_draft_overlay(req: Request, draft_id_raw: str) -> list[str]:
 
     Access control rules:
 
-    - Unauthenticated requests get an empty list (the explorer page is
-      public and we never want it to leak draft data).
+    - Unauthenticated requests get an empty list (defensive — the
+      auth middleware should already have redirected to login because
+      ``/explorer`` is no longer in ``SKIP_PATHS`` (#442); this branch
+      survives as a belt-and-braces guard).
     - Drafts owned by another org get an empty list (silently dropped
       so the URL stays browseable without revealing existence).
     - Malformed UUIDs / missing reports also yield an empty list.
@@ -97,7 +99,9 @@ def explorer_page(req: Request):
     tag. The explorer JS reads this blob on load and applies the
     ``d3-node-highlighted`` class to matching nodes. Cross-org or
     malformed draft params are silently dropped (no error UI) so the
-    page stays browseable for unauthenticated visitors as well.
+    page stays usable as a generic ontology browser even when the
+    overlay can't be applied. The page itself requires authentication
+    via the global ``auth_before`` middleware (see #442).
     """
     draft_param = req.query_params.get("draft", "").strip()
     overlay_uris: list[str] = []
@@ -106,9 +110,22 @@ def explorer_page(req: Request):
 
     overlay_tags: list = []
     if overlay_uris:
+        # #464: escape any closing-tag and Unicode line-separator
+        # sequences in the JSON payload before embedding in a
+        # ``<script>`` tag. ``</`` would otherwise terminate the
+        # script element early and let an attacker inject HTML;
+        # U+2028 / U+2029 are valid in JSON strings but not in
+        # JavaScript string literals, so leaving them in causes a
+        # parse error in older browsers and confuses some inline
+        # script parsers. JSON natively decodes ``<\/`` back to
+        # ``</`` so json.loads still works on the rendered payload.
+        payload = json.dumps({"uris": overlay_uris})
+        payload = (
+            payload.replace("</", "<\\/").replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+        )
         overlay_tags.append(
             Script(
-                json.dumps({"uris": overlay_uris}),
+                payload,
                 id="draft-overlay-data",
                 type="application/json",
             )
@@ -154,6 +171,11 @@ def explorer_page(req: Request):
             ),
             # Explorer styles
             Link(rel="stylesheet", href="/static/css/explorer.css"),
+            # Phase 2 additions (#446): the .d3-node-highlighted rule
+            # used by the draft overlay lives in ui.css. Pull the
+            # whole stylesheet in so future Phase 2 additions take
+            # effect on the explorer page without per-rule duplication.
+            Link(rel="stylesheet", href="/static/css/ui.css"),
         ),
         Body(
             # ----- Top bar -----

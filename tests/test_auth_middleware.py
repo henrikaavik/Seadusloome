@@ -28,9 +28,6 @@ PUBLIC_PATHS = [
     "/static/css/tokens.css",
     "/static/js/explorer.js",
     "/favicon.ico",
-    "/explorer",
-    "/explorer/foo",
-    "/explorer/foo/bar",
     "/api/explorer/overview",
     "/api/explorer/category/ABC",
     "/api/health",
@@ -48,6 +45,12 @@ PROTECTED_PATHS = [
     "/admin/users",
     "/org/users",
     "/api/bookmarks",
+    # #442 — explorer page must require auth so the draft overlay can
+    # read req.scope['auth'] and scope by org. The JSON APIs under
+    # /api/explorer/... are still public.
+    "/explorer",
+    "/explorer/foo",
+    "/explorer/foo/bar",
 ]
 
 

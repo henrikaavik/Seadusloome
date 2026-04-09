@@ -58,11 +58,20 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def parse_draft(payload: dict[str, Any]) -> dict[str, Any]:
+def parse_draft(
+    payload: dict[str, Any],
+    *,
+    attempt: int = 1,
+    max_attempts: int = 3,
+) -> dict[str, Any]:
     """Parse an uploaded draft's file via Apache Tika.
 
     Args:
         payload: Must carry ``draft_id`` (a UUID-serialisable string).
+        attempt: 1-based index of the current attempt. Passed by the
+            worker so we can hold off on flipping the draft row to
+            ``failed`` until the retry budget is exhausted (#448).
+        max_attempts: Total retry budget for this job.
 
     Returns:
         ``{"draft_id": ..., "text_length": N, "next_job": "extract_entities"}``
@@ -77,9 +86,10 @@ def parse_draft(payload: dict[str, Any]) -> dict[str, Any]:
 
     All of the above are caught by :class:`app.jobs.worker.JobWorker`,
     which flips the job to ``failed`` (or schedules a retry) and logs
-    the traceback. Before re-raising, this function also flips the
-    draft row to ``status='failed'`` with a truncated error message so
-    the user sees why their upload stalled on the drafts list page.
+    the traceback. The draft row is only flipped to ``status='failed'``
+    on the *final* attempt — earlier failures simply re-raise so the
+    job queue's exponential backoff loop can retry without misleading
+    the UI into showing a permanent failure (#448).
     """
     raw_id = payload.get("draft_id")
     if not raw_id:
@@ -150,20 +160,46 @@ def parse_draft(payload: dict[str, Any]) -> dict[str, Any]:
         }
 
     except (TikaError, FileNotFoundError, DecryptionError, ValueError) as exc:
-        # Flip the draft to failed with the truncated error, then
-        # re-raise so the worker also fails the job and increments the
-        # retry counter (with exponential backoff). Retries are valuable
-        # here — a TikaError might be a transient 502 from the Tika
-        # sidecar during a rolling restart.
-        logger.error("parse_draft failed for draft %s: %s", draft_id, exc)
-        _mark_draft_failed(draft_id, str(exc))
+        # Only flip the draft to ``failed`` on the FINAL attempt (#448).
+        # Earlier attempts just re-raise so the worker increments the
+        # retry counter and re-schedules the job — keeping the user
+        # from seeing "Ebaõnnestus" while a retry is still pending.
+        if attempt >= max_attempts:
+            logger.error(
+                "parse_draft permanently failed for draft %s after %d attempts: %s",
+                draft_id,
+                attempt,
+                exc,
+            )
+            _mark_draft_failed(draft_id, str(exc))
+        else:
+            logger.warning(
+                "parse_draft attempt %d/%d failed for draft %s, will retry: %s",
+                attempt,
+                max_attempts,
+                draft_id,
+                exc,
+            )
         raise
     except Exception as exc:  # noqa: BLE001 — belt-and-braces for handler guarantees
-        # Unknown failure modes still need to surface to the user as a
-        # failed status; the worker's outer ``except Exception`` will
-        # handle job bookkeeping.
-        logger.exception("parse_draft unexpected error for draft %s", draft_id)
-        _mark_draft_failed(draft_id, str(exc))
+        # Unknown failure modes follow the same retry logic. The
+        # worker's outer ``except Exception`` still records the job
+        # row's failure regardless.
+        if attempt >= max_attempts:
+            logger.exception(
+                "parse_draft unexpected permanent error for draft %s after %d attempts",
+                draft_id,
+                attempt,
+            )
+            _mark_draft_failed(draft_id, str(exc))
+        else:
+            logger.warning(
+                "parse_draft unexpected error on attempt %d/%d for draft %s, will retry: %s",
+                attempt,
+                max_attempts,
+                draft_id,
+                exc,
+            )
         raise
 
 

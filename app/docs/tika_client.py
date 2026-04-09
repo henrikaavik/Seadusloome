@@ -52,9 +52,12 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from typing import Any
 
 import httpx
+
+from app.config import is_stub_allowed
 
 logger = logging.getLogger(__name__)
 
@@ -111,8 +114,12 @@ def _load_timeout(explicit: float | None) -> float:
 
 
 def _is_production() -> bool:
-    """Return True when the current environment is production."""
-    return os.environ.get("APP_ENV", "development") == "production"
+    """Return True when the current environment is production.
+
+    Implemented in terms of :func:`app.config.is_stub_allowed` so all
+    three Phase 2 stub gates (Tika, Claude, Fernet) move together (#449).
+    """
+    return not is_stub_allowed()
 
 
 # ---------------------------------------------------------------------------
@@ -145,11 +152,12 @@ class TikaClient:
         """Return ``self.url`` or raise if we're in a prod-missing-url state."""
         if self.url is None:
             # In dev we should have been in stub mode — callers must not
-            # reach here. In prod we raise with a pointer at the README.
+            # reach here. In prod (APP_ENV=production) we raise with a
+            # pointer at the README.
             raise RuntimeError(
-                "TIKA_URL is not set. Apache Tika must be deployed as a "
-                "Coolify service (see README § Deploying Apache Tika) and "
-                "TIKA_URL must point at its internal URL before draft "
+                "TIKA_URL is not set when APP_ENV=production. Apache Tika must "
+                "be deployed as a Coolify service (see README § Deploying Apache "
+                "Tika) and TIKA_URL must point at its internal URL before draft "
                 "parsing can run."
             )
         return self.url
@@ -287,6 +295,8 @@ class TikaClient:
 
 
 _default_client: TikaClient | None = None
+# #453: protect singleton init from concurrent worker threads.
+_default_client_lock = threading.Lock()
 
 
 def get_default_tika_client() -> TikaClient:
@@ -297,14 +307,22 @@ def get_default_tika_client() -> TikaClient:
     that need to patch the client can either monkeypatch this function
     or reset ``_default_client`` via the ``reset_default_tika_client``
     helper below.
+
+    Uses double-checked locking (#453) so two job worker threads
+    racing to parse the first draft after process start cannot
+    construct two clients (which would silently double the env var
+    cost and break tests that introspect the singleton identity).
     """
     global _default_client  # noqa: PLW0603
     if _default_client is None:
-        _default_client = TikaClient()
+        with _default_client_lock:
+            if _default_client is None:
+                _default_client = TikaClient()
     return _default_client
 
 
 def reset_default_tika_client() -> None:
     """Clear the cached singleton. Intended for test isolation only."""
     global _default_client  # noqa: PLW0603
-    _default_client = None
+    with _default_client_lock:
+        _default_client = None

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 
@@ -403,6 +404,8 @@ def _normalise_whitespace(text: str) -> str:
 
 
 _default_resolver: ReferenceResolver | None = None
+# #453: protect singleton init from concurrent worker threads.
+_default_resolver_lock = threading.Lock()
 
 
 def get_default_resolver() -> ReferenceResolver:
@@ -411,10 +414,17 @@ def get_default_resolver() -> ReferenceResolver:
     The singleton lets the law short-name dict survive across
     ``extract_entities`` jobs in a single worker process, saving one
     SPARQL roundtrip per draft after the first warm-up.
+
+    Uses double-checked locking (#453) so two extract jobs landing
+    on a fresh process at the same time can't both pay the warm-up
+    cost (and risk producing two resolvers with subtly different
+    cached state).
     """
     global _default_resolver
     if _default_resolver is None:
-        _default_resolver = ReferenceResolver()
+        with _default_resolver_lock:
+            if _default_resolver is None:
+                _default_resolver = ReferenceResolver()
     return _default_resolver
 
 

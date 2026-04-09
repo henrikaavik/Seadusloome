@@ -25,9 +25,38 @@ explorer queries in ``app/explorer/routes.py`` and
     estleg:definesConcept      LegalProvision -> LegalConcept
     rdfs:label                 human label
     rdf:type                   RDF type
+
+Security: every ``{graph_uri}`` interpolation goes through
+:func:`_validate_graph_uri` (#465). The draft graph URI is generated
+server-side from a UUID, so user input never reaches a query, but the
+validator is a defence-in-depth guard against future code paths that
+might assemble a graph URI from user-supplied data.
 """
 
 from __future__ import annotations
+
+import re
+
+# #465: every ``graph_uri`` value interpolated into a SPARQL template
+# must match this allowlist. The format mirrors the URIs we generate
+# server-side: ``https://data.riik.ee/ontology/estleg/drafts/<uuid>``.
+# Anything outside the alphabet would be either invalid for SPARQL or
+# a sign of injection.
+_SAFE_GRAPH_URI = re.compile(r"^https?://[A-Za-z0-9./:_-]{1,512}$")
+
+
+def _validate_graph_uri(uri: str) -> str:
+    """Return *uri* unchanged after asserting it matches the allowlist.
+
+    Raises:
+        ValueError: When *uri* doesn't fit the safe pattern. The
+            caller (the analyzer) is expected to surface this as a
+            handler-level failure that flips the draft to ``failed``.
+    """
+    if not isinstance(uri, str) or not _SAFE_GRAPH_URI.fullmatch(uri):
+        raise ValueError(f"Unsafe graph URI rejected: {uri!r}")
+    return uri
+
 
 PREFIXES = """
 PREFIX rdf:    <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
@@ -209,3 +238,37 @@ SELECT DISTINCT ?euAct ?euLabel ?estonianProvision ?provisionLabel WHERE {{
 LIMIT 200
 """
 )
+
+
+# ---------------------------------------------------------------------------
+# Builders — single choke point for graph_uri interpolation (#465)
+# ---------------------------------------------------------------------------
+#
+# The analyzer used to call ``TEMPLATE.format(graph_uri=...)`` directly
+# from each pass; centralising the interpolation here means
+# ``_validate_graph_uri`` runs at exactly one place per query type
+# and any future template can plug into the same validator.
+
+
+def build_affected_entities_query(graph_uri: str) -> str:
+    """Return the validated AFFECTED_ENTITIES query."""
+    safe = _validate_graph_uri(graph_uri)
+    return AFFECTED_ENTITIES.format(graph_uri=safe)
+
+
+def build_conflicts_query(graph_uri: str) -> str:
+    """Return the validated CONFLICTS query."""
+    safe = _validate_graph_uri(graph_uri)
+    return CONFLICTS.format(graph_uri=safe)
+
+
+def build_gaps_query(graph_uri: str) -> str:
+    """Return the validated GAPS query."""
+    safe = _validate_graph_uri(graph_uri)
+    return GAPS.format(graph_uri=safe)
+
+
+def build_eu_compliance_query(graph_uri: str) -> str:
+    """Return the validated EU_COMPLIANCE query."""
+    safe = _validate_graph_uri(graph_uri)
+    return EU_COMPLIANCE.format(graph_uri=safe)

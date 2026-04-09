@@ -284,7 +284,7 @@ class TestAnalyzeImpactFailurePaths:
         with pytest.raises(ValueError, match="draft_id"):
             analyze_impact({})
 
-    def test_put_named_graph_failure_marks_draft_failed(self):
+    def test_put_named_graph_failure_marks_draft_failed_on_final_attempt(self):
         draft = _make_draft()
         load_conn = _make_load_conn(entity_rows=[])
         fail_conn = _make_insert_conn()  # used by _mark_draft_failed
@@ -297,26 +297,56 @@ class TestAnalyzeImpactFailurePaths:
                 "app.docs.analyze_handler.put_named_graph",
                 return_value=False,
             ),
-            patch(
-                "app.docs.analyze_handler.delete_named_graph",
-                return_value=True,
-            ) as mock_del,
         ):
             mock_get_conn.side_effect = [
                 _ConnectCM(load_conn),
                 _ConnectCM(fail_conn),  # for _mark_draft_failed
             ]
             with pytest.raises(RuntimeError, match="Failed to load draft graph"):
-                analyze_impact({"draft_id": str(_DRAFT_ID)})
-
-        # Cleanup must have attempted to drop the named graph.
-        mock_del.assert_called_once_with(_GRAPH_URI)
+                analyze_impact(
+                    {"draft_id": str(_DRAFT_ID)},
+                    attempt=3,
+                    max_attempts=3,
+                )
 
         # The failure-path connection must have seen a status='failed' update.
         fail_sql = [c.args[0].lower() for c in fail_conn.execute.call_args_list]
         assert any("update drafts" in s for s in fail_sql)
 
-    def test_analyzer_exception_marks_draft_failed_and_cleans_graph(self):
+    def test_put_named_graph_failure_does_not_mark_failed_when_retry_pending(self):
+        """#448: a transient Jena failure on attempt 1 must not flip the draft."""
+        draft = _make_draft()
+        load_conn = _make_load_conn(entity_rows=[])
+
+        with (
+            patch("app.docs.analyze_handler.get_connection") as mock_get_conn,
+            patch("app.docs.analyze_handler.get_draft", return_value=draft),
+            patch("app.docs.analyze_handler.build_draft_graph", return_value="# t"),
+            patch(
+                "app.docs.analyze_handler.put_named_graph",
+                return_value=False,
+            ),
+        ):
+            # Only one connection is opened — the failed-status update
+            # never runs because the handler defers the flip.
+            mock_get_conn.side_effect = [_ConnectCM(load_conn)]
+            with pytest.raises(RuntimeError, match="Failed to load draft graph"):
+                analyze_impact(
+                    {"draft_id": str(_DRAFT_ID)},
+                    attempt=1,
+                    max_attempts=3,
+                )
+
+        # Only the initial load connection was opened.
+        assert mock_get_conn.call_count == 1
+
+    def test_analyzer_exception_marks_draft_failed_on_final_attempt(self):
+        """#456: cleanup of the named graph is no longer the analyzer's job.
+
+        Graph lifecycle is owned by ``delete_draft_handler`` so we no
+        longer drop the graph on analyse failure (used to mask
+        transient Jena hiccups). Only the draft status flip remains.
+        """
         draft = _make_draft()
         load_conn = _make_load_conn(entity_rows=[])
         fail_conn = _make_insert_conn()
@@ -336,19 +366,21 @@ class TestAnalyzeImpactFailurePaths:
                 "app.docs.analyze_handler.ImpactAnalyzer",
                 return_value=analyzer_mock,
             ),
-            patch(
-                "app.docs.analyze_handler.delete_named_graph",
-                return_value=True,
-            ) as mock_del,
         ):
             mock_get_conn.side_effect = [
                 _ConnectCM(load_conn),
                 _ConnectCM(fail_conn),  # _mark_draft_failed
             ]
             with pytest.raises(RuntimeError, match="sparql boom"):
-                analyze_impact({"draft_id": str(_DRAFT_ID)})
+                analyze_impact(
+                    {"draft_id": str(_DRAFT_ID)},
+                    attempt=3,
+                    max_attempts=3,
+                )
 
-        mock_del.assert_called_once_with(_GRAPH_URI)
+        # The failure-path connection must have seen a status='failed' update.
+        fail_sql = [c.args[0].lower() for c in fail_conn.execute.call_args_list]
+        assert any("update drafts" in s for s in fail_sql)
 
 
 class TestRegistration:

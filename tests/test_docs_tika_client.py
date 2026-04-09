@@ -126,7 +126,12 @@ class TestStubMode:
 
 class TestProductionMode:
     def test_prod_mode_missing_url_raises_at_call_time(self, monkeypatch: pytest.MonkeyPatch):
-        """TIKA_URL unset + APP_ENV=production → RuntimeError on first call."""
+        """TIKA_URL unset + APP_ENV=production → RuntimeError on first call.
+
+        #449: only an explicit ``APP_ENV=production`` forces a real
+        Tika service. Dev / test / staging fall through to the stub
+        path so a missing TIKA_URL there doesn't crash uploads.
+        """
         monkeypatch.delenv("TIKA_URL", raising=False)
         monkeypatch.setenv("APP_ENV", "production")
 
@@ -137,7 +142,7 @@ class TestProductionMode:
         # is_healthy must never raise and must return False.
         assert client.is_healthy() is False
 
-        with pytest.raises(RuntimeError, match="TIKA_URL is not set"):
+        with pytest.raises(RuntimeError, match="APP_ENV=production"):
             client.extract_text(b"hello", "application/pdf")
 
     def test_prod_mode_missing_url_metadata_also_raises(self, monkeypatch: pytest.MonkeyPatch):
@@ -145,8 +150,20 @@ class TestProductionMode:
         monkeypatch.setenv("APP_ENV", "production")
 
         client = TikaClient()
-        with pytest.raises(RuntimeError, match="TIKA_URL is not set"):
+        with pytest.raises(RuntimeError, match="APP_ENV=production"):
             client.extract_metadata(b"hello", "application/pdf")
+
+    def test_staging_mode_falls_through_to_stub(self, monkeypatch: pytest.MonkeyPatch):
+        """#449: APP_ENV=staging is now stub-mode-eligible."""
+        monkeypatch.delenv("TIKA_URL", raising=False)
+        monkeypatch.setenv("APP_ENV", "staging")
+
+        client = TikaClient()
+        # Stub mode active because the gate matches anything that
+        # isn't ``production``.
+        assert client._stub_mode is True
+        result = client.extract_text(b"hello", "application/pdf")
+        assert "[STUB Tika]" in result
 
 
 # ---------------------------------------------------------------------------

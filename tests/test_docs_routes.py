@@ -399,6 +399,39 @@ class TestDraftDetailPage:
         assert "Tika teenus on kättesaamatu." in resp.text
         assert "every 3s" not in resp.text
 
+    @patch("app.docs.routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_delete_draft_has_confirmation(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+    ):
+        """Regression for #443.
+
+        The delete form needs ``hx_post`` so HTMX intercepts the submit
+        and the ``hx-confirm`` prompt actually fires. The native form
+        ``action`` is preserved as a no-JS fallback, and ``onclick``
+        adds a defence-in-depth confirm() for users without HTMX.
+        """
+        mock_get_provider.return_value = _stub_provider()
+        draft = _make_draft(status="ready")
+        mock_fetch.return_value = draft
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{draft.id}")
+
+        assert resp.status_code == 200
+        body = resp.text
+        # Both attributes must be present on the same form so HTMX
+        # intercepts the submit AND prompts for confirmation.
+        assert f'hx-post="/drafts/{draft.id}/delete"' in body
+        assert "hx-confirm=" in body
+        # Native form action remains as the no-JS fallback.
+        assert f'action="/drafts/{draft.id}/delete"' in body
+        # Defense in depth: an inline ``onclick`` confirm so JS-disabled
+        # users still get prompted before the native submit.
+        assert "confirm(" in body
+
 
 # ---------------------------------------------------------------------------
 # GET /drafts/{draft_id}/status — HTMX polling fragment
@@ -477,7 +510,9 @@ class TestDeleteDraftHandler:
         draft = _make_draft()
         mock_fetch.return_value = draft
 
-        # _connect() is a context manager.
+        # _connect() is a context manager. The handler opens it twice
+        # now (once for the row delete, once for cancelling pending
+        # background jobs — #454) so we wire up a generic factory.
         mock_conn = MagicMock()
         mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
         mock_connect.return_value.__exit__ = MagicMock(return_value=False)
@@ -493,6 +528,20 @@ class TestDeleteDraftHandler:
         mock_log.assert_called_once()
         # Named graph cleanup must have been triggered with the draft's URI.
         mock_delete_graph.assert_called_once_with(draft.graph_uri)
+
+        # #454: a DELETE FROM background_jobs ... must have run as part
+        # of the cleanup so any pending/claimed/retrying job for this
+        # draft doesn't outlive the row.
+        delete_job_calls = [
+            c
+            for c in mock_conn.execute.call_args_list
+            if "DELETE FROM background_jobs" in (c.args[0] if c.args else "")
+        ]
+        assert delete_job_calls, "delete_draft_handler must cancel pending background jobs (#454)"
+        # The DELETE must have been parameterised with the draft id so
+        # we don't accidentally cancel jobs from other drafts.
+        delete_call = delete_job_calls[0]
+        assert delete_call.args[1] == (str(draft.id),)
 
     @patch("app.docs.routes.fetch_draft")
     @patch("app.auth.middleware._get_provider")

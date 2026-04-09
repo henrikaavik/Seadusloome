@@ -256,6 +256,70 @@ Without both secrets, the CI `deploy` job gracefully warns and no-ops
 (it logs a skip notice and exits `0`), so the rest of the pipeline still
 passes. You can still trigger manual deploys from the Coolify UI.
 
+### Phase 2 setup — Document Upload + Impact Analysis
+
+Phase 2 adds encrypted file storage, Tika document parsing, Claude entity
+extraction, and impact reports. These require three additional prod
+configuration steps beyond the Phase 1 webhook setup.
+
+**Step 1 — Set APP_ENV=production in Coolify.**
+
+Critical: without this, the storage module falls into dev mode and
+generates a fresh Fernet key per container restart. All previously
+uploaded draft files become permanently undecryptable on the next
+restart. Set `APP_ENV=production` as a Runtime environment variable on
+`seadusloome-app`.
+
+**Step 2 — Generate and set STORAGE_ENCRYPTION_KEY.**
+
+Run this locally to generate a key:
+
+    uv run python -c "from app.storage.encrypted import generate_encryption_key; print(generate_encryption_key())"
+
+Copy the output (a 44-character url-safe base64 string) and set it as
+`STORAGE_ENCRYPTION_KEY` in Coolify's env vars panel. This key is used
+by Fernet (AES-128-CBC + HMAC-SHA256) to encrypt every uploaded draft.
+Guard it like a password — losing it means losing access to all
+previously uploaded drafts.
+
+**Step 3 — Deploy Apache Tika as a separate Coolify application.**
+
+Seadusloome uses Tika to extract plain text from .docx and .pdf
+uploads. Deploy it as a second Coolify application in the same
+project:
+
+1. Coolify → seadusloome project → + Add New Resource → Application
+2. Name: `seadusloome-tika`
+3. Source: Docker Image
+4. Image: `apache/tika:latest-full`
+5. Port (internal): `9998`
+6. Network alias: `seadusloome-tika` (must match the env var below)
+7. Domain: leave empty — Tika is internal only
+8. Deploy
+
+Once it's running, on `seadusloome-app` set:
+- `TIKA_URL=http://seadusloome-tika:9998`
+
+**Step 4 — Add two Coolify persistent volumes to seadusloome-app.**
+
+Encrypted draft files and generated .docx reports need to survive
+container restarts.
+
+1. Coolify → seadusloome-app → Persistent Storage
+2. Add: mount path `/var/seadusloome/drafts` (name: `drafts`)
+3. Add: mount path `/var/seadusloome/exports` (name: `exports`)
+
+Also set on seadusloome-app:
+- `STORAGE_DIR=/var/seadusloome/drafts`
+- `EXPORT_DIR=/var/seadusloome/exports`
+
+**Step 5 — (Optional) Set ANTHROPIC_API_KEY for real Claude extraction.**
+
+Phase 2 entity extraction runs in stub mode when `ANTHROPIC_API_KEY` is
+unset. Set it in Coolify to enable real LLM-powered extraction. Phase 3
+adds the `anthropic` Python package to pyproject.toml; until then the
+real-extraction path raises a helpful error if the package is missing.
+
 ### Troubleshooting deploys
 
 If a deploy is marked **Failed** in Coolify, open the deployment log and
@@ -273,6 +337,15 @@ look for the `Healthcheck` section. Common failure modes we have hit:
 - **Healthcheck passes but the app can't reach Jena** — make sure
   `seadusloome-jena` has a **Network Alias** `jena` configured, otherwise
   `http://jena:3030` won't resolve inside the Coolify network.
+- **Uploads stuck at status=uploaded forever** — check whether
+  `DISABLE_BACKGROUND_WORKER` is set in Coolify. It should NOT be set
+  in production. pytest/conftest.py sets it at test time only.
+- **First upload returns PermissionError** — the Dockerfile should
+  `mkdir -p /var/seadusloome/{drafts,exports}` and `chown -R appuser`
+  before `USER appuser`. If this is missing, see ticket #444.
+- **Draft stuck at parsing forever** — `TIKA_URL` is unset or
+  unreachable. Verify `seadusloome-tika` is running (Coolify →
+  seadusloome-tika → Logs). Check `TIKA_URL` on `seadusloome-app`.
 
 ## Development Phases
 

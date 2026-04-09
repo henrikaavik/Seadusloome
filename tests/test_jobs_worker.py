@@ -108,11 +108,11 @@ class TestWorkerDispatch:
         # First call returns a job, then stop after the single tick.
         queue_instance.claim_next.return_value = job
 
-        calls: list[dict] = []
+        calls: list[tuple[dict, dict]] = []
 
         @register_handler("_dispatch_test")
-        def handler(payload: dict) -> dict:
-            calls.append(payload)
+        def handler(payload: dict, **kwargs) -> dict:
+            calls.append((payload, kwargs))
             return {"processed": True}
 
         stop = threading.Event()
@@ -129,7 +129,13 @@ class TestWorkerDispatch:
         queue_instance.claim_next.side_effect = claim_side_effect
         w.run_forever(stop)
 
-        assert calls == [{"foo": "bar"}]
+        # Payload arrives unchanged; the worker also threads the
+        # ``attempt`` / ``max_attempts`` keyword args (#448).
+        assert len(calls) == 1
+        payload, kwargs = calls[0]
+        assert payload == {"foo": "bar"}
+        assert kwargs.get("attempt") == 1  # job.attempts == 0 → first attempt
+        assert kwargs.get("max_attempts") == 3
         queue_instance.mark_running.assert_called_once_with(1)
         queue_instance.mark_success.assert_called_once_with(1, {"processed": True})
         queue_instance.mark_failed.assert_not_called()
@@ -142,7 +148,7 @@ class TestWorkerDispatch:
         job = _make_job(job_type="_fail_test")
 
         @register_handler("_fail_test")
-        def handler(payload: dict) -> dict:
+        def handler(payload: dict, **kwargs) -> dict:
             raise ValueError("kaboom")
 
         stop = threading.Event()
@@ -202,7 +208,7 @@ class TestWorkerDispatch:
         long = "x" * 1000
 
         @register_handler("_long_err")
-        def handler(payload: dict) -> dict:
+        def handler(payload: dict, **kwargs) -> dict:
             raise RuntimeError(long)
 
         stop = threading.Event()

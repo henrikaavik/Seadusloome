@@ -7,15 +7,24 @@ services:
       - "5001:5001"
     env_file:
       - ../.env
+    environment:
+      TIKA_URL: http://tika:9998
+      STORAGE_DIR: /var/seadusloome/drafts
+      EXPORT_DIR: /var/seadusloome/exports
+    volumes:
+      - draftsdata:/var/seadusloome/drafts
+      - exportsdata:/var/seadusloome/exports
     depends_on:
       postgres:
         condition: service_healthy
       jena:
         condition: service_healthy
+      tika:
+        condition: service_started
     restart: unless-stopped
 
   postgres:
-    image: pgvector/pgvector:pg16
+    image: pgvector/pgvector:pg18
     ports:
       - "5432:5432"
     environment:
@@ -29,6 +38,14 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
+
+  tika:
+    # Local dev only. In production, Tika is a separate Coolify application
+    # with network alias `seadusloome-tika` (set TIKA_URL accordingly).
+    image: apache/tika:latest-full
+    ports:
+      - "9998:9998"
     restart: unless-stopped
 
   jena:
@@ -53,3 +70,5 @@ services:
 volumes:
   pgdata:
   jenadata:
+  draftsdata:
+  exportsdata:

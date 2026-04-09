@@ -29,11 +29,14 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken
+
+from app.config import is_stub_allowed
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +69,8 @@ class StoredFile:
 
 _fernet: Fernet | None = None
 _warned_dev_ephemeral = False
+# #453: protect _fernet singleton init from concurrent worker threads.
+_fernet_lock = threading.Lock()
 
 
 def generate_encryption_key() -> str:
@@ -78,22 +83,27 @@ def generate_encryption_key() -> str:
 
 
 def _load_encryption_key() -> bytes:
-    """Return the Fernet key bytes, enforcing an explicit value off-dev."""
+    """Return the Fernet key bytes, enforcing an explicit value in prod.
+
+    The dev/test/staging ephemeral-key path is gated through
+    :func:`app.config.is_stub_allowed` so all three Phase 2 stubs
+    (Tika, Claude, Fernet) follow the same APP_ENV rule (#449).
+    """
     global _warned_dev_ephemeral
     value = os.environ.get("STORAGE_ENCRYPTION_KEY")
     if value:
         return value.encode()
-    if os.environ.get("APP_ENV", "development") == "development":
+    if is_stub_allowed():
         if not _warned_dev_ephemeral:
             logger.warning(
-                "STORAGE_ENCRYPTION_KEY not set — using ephemeral dev key. "
+                "STORAGE_ENCRYPTION_KEY not set — using ephemeral key. "
                 "Files written with this key will be UNREADABLE after restart. "
-                "Set STORAGE_ENCRYPTION_KEY in your environment for persistent dev."
+                "Set STORAGE_ENCRYPTION_KEY in your environment for persistent storage."
             )
             _warned_dev_ephemeral = True
         return Fernet.generate_key()
     raise RuntimeError(
-        "STORAGE_ENCRYPTION_KEY must be set when APP_ENV is not 'development'. "
+        "STORAGE_ENCRYPTION_KEY must be set when APP_ENV=production. "
         'Generate one with `uv run python -c "from app.storage import '
         'generate_encryption_key; print(generate_encryption_key())"` and '
         "set it in the Coolify environment variables for seadusloome-app."
@@ -101,19 +111,32 @@ def _load_encryption_key() -> bytes:
 
 
 def _get_fernet() -> Fernet:
-    """Lazily construct and cache the module-level Fernet instance."""
+    """Lazily construct and cache the module-level Fernet instance.
+
+    Double-checked locking (#453) so concurrent worker threads racing
+    to encrypt the first upload after process start don't end up
+    constructing two Fernet instances with two different ephemeral
+    keys (which would corrupt the round-trip).
+    """
     global _fernet
     if _fernet is None:
-        _fernet = Fernet(_load_encryption_key())
+        with _fernet_lock:
+            if _fernet is None:
+                _fernet = Fernet(_load_encryption_key())
     return _fernet
 
 
 def _load_storage_dir() -> Path:
-    """Return the root storage directory, with a dev-friendly default."""
+    """Return the root storage directory, with a dev-friendly default.
+
+    Uses the same APP_ENV rule as :func:`is_stub_allowed` (#449) so
+    test/staging/dev all default to the local relative path; only
+    APP_ENV=production falls back to the system-wide ``/var`` path.
+    """
     raw = os.environ.get("STORAGE_DIR")
     if raw:
         return Path(raw)
-    if os.environ.get("APP_ENV", "development") == "development":
+    if is_stub_allowed():
         return Path("./storage/drafts").resolve()
     return Path("/var/seadusloome/drafts")
 

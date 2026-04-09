@@ -245,7 +245,8 @@ class TestMissingDraft:
 
 
 class TestEmptyTikaResult:
-    def test_empty_text_marks_failed_and_reraises(self):
+    def test_empty_text_marks_failed_on_final_attempt(self):
+        """On the final attempt the handler must flip the draft to failed."""
         draft = _make_draft()
 
         with _Patches() as p:
@@ -254,7 +255,11 @@ class TestEmptyTikaResult:
             p.m_tika_client.extract_text.return_value = "   \n\t  "  # whitespace only
 
             with pytest.raises(ValueError, match="empty text"):
-                parse_draft({"draft_id": str(draft.id)})
+                parse_draft(
+                    {"draft_id": str(draft.id)},
+                    attempt=3,
+                    max_attempts=3,
+                )
 
         # parsing → failed transition
         status_calls = [c.args[2] for c in p.m_update_draft_status.call_args_list]
@@ -270,6 +275,34 @@ class TestEmptyTikaResult:
         # No follow-up job was enqueued.
         p.m_queue.enqueue.assert_not_called()
 
+    def test_empty_text_does_not_mark_failed_when_retry_pending(self):
+        """#448: early attempts must NOT flip the draft to failed.
+
+        The user should not see ``Ebaõnnestus`` while the queue still
+        has retry budget left — only the final attempt commits to a
+        permanent failure state.
+        """
+        draft = _make_draft()
+
+        with _Patches() as p:
+            p.m_get_draft.return_value = draft
+            p.m_read_file.return_value = b"data"
+            p.m_tika_client.extract_text.return_value = "   \n\t  "
+
+            with pytest.raises(ValueError, match="empty text"):
+                parse_draft(
+                    {"draft_id": str(draft.id)},
+                    attempt=1,
+                    max_attempts=3,
+                )
+
+        # parsing → (NOT failed) — the handler held off so the next
+        # retry can pick up cleanly.
+        status_calls = [c.args[2] for c in p.m_update_draft_status.call_args_list]
+        assert "parsing" in status_calls
+        assert "failed" not in status_calls
+        p.m_queue.enqueue.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # Failure: Tika raised
@@ -277,7 +310,7 @@ class TestEmptyTikaResult:
 
 
 class TestTikaFailure:
-    def test_tika_error_marks_failed_and_reraises(self):
+    def test_tika_error_marks_failed_on_final_attempt(self):
         draft = _make_draft()
 
         with _Patches() as p:
@@ -286,7 +319,11 @@ class TestTikaFailure:
             p.m_tika_client.extract_text.side_effect = TikaError("connect refused")
 
             with pytest.raises(TikaError, match="connect refused"):
-                parse_draft({"draft_id": str(draft.id)})
+                parse_draft(
+                    {"draft_id": str(draft.id)},
+                    attempt=3,
+                    max_attempts=3,
+                )
 
         status_calls = [c.args[2] for c in p.m_update_draft_status.call_args_list]
         assert "failed" in status_calls
@@ -295,6 +332,26 @@ class TestTikaFailure:
         )
         assert "connect refused" in failed_call.kwargs["error_message"]
         p.m_queue.enqueue.assert_not_called()
+
+    def test_tika_error_does_not_mark_failed_when_retry_pending(self):
+        """#448: a transient TikaError on attempt 1 must not flip the draft."""
+        draft = _make_draft()
+
+        with _Patches() as p:
+            p.m_get_draft.return_value = draft
+            p.m_read_file.return_value = b"data"
+            p.m_tika_client.extract_text.side_effect = TikaError("502 Bad Gateway")
+
+            with pytest.raises(TikaError):
+                parse_draft(
+                    {"draft_id": str(draft.id)},
+                    attempt=1,
+                    max_attempts=3,
+                )
+
+        status_calls = [c.args[2] for c in p.m_update_draft_status.call_args_list]
+        assert "parsing" in status_calls
+        assert "failed" not in status_calls
 
     def test_tika_timeout_error_message_is_truncated_to_500(self):
         draft = _make_draft()
@@ -306,7 +363,11 @@ class TestTikaFailure:
             p.m_tika_client.extract_text.side_effect = TikaError(long_msg)
 
             with pytest.raises(TikaError):
-                parse_draft({"draft_id": str(draft.id)})
+                parse_draft(
+                    {"draft_id": str(draft.id)},
+                    attempt=3,
+                    max_attempts=3,
+                )
 
         failed_call = next(
             c for c in p.m_update_draft_status.call_args_list if c.args[2] == "failed"
@@ -320,7 +381,7 @@ class TestTikaFailure:
 
 
 class TestStorageFailures:
-    def test_missing_file_marks_failed_and_reraises(self):
+    def test_missing_file_marks_failed_on_final_attempt(self):
         draft = _make_draft()
 
         with _Patches() as p:
@@ -330,14 +391,18 @@ class TestStorageFailures:
             )
 
             with pytest.raises(FileNotFoundError):
-                parse_draft({"draft_id": str(draft.id)})
+                parse_draft(
+                    {"draft_id": str(draft.id)},
+                    attempt=3,
+                    max_attempts=3,
+                )
 
         status_calls = [c.args[2] for c in p.m_update_draft_status.call_args_list]
         assert "failed" in status_calls
         p.m_tika_client.extract_text.assert_not_called()
         p.m_queue.enqueue.assert_not_called()
 
-    def test_decryption_error_marks_failed_and_reraises(self):
+    def test_decryption_error_marks_failed_on_final_attempt(self):
         draft = _make_draft()
 
         with _Patches() as p:
@@ -345,7 +410,11 @@ class TestStorageFailures:
             p.m_read_file.side_effect = DecryptionError("invalid token")
 
             with pytest.raises(DecryptionError, match="invalid token"):
-                parse_draft({"draft_id": str(draft.id)})
+                parse_draft(
+                    {"draft_id": str(draft.id)},
+                    attempt=3,
+                    max_attempts=3,
+                )
 
         status_calls = [c.args[2] for c in p.m_update_draft_status.call_args_list]
         assert "failed" in status_calls
@@ -361,7 +430,7 @@ class TestStorageFailures:
 
 
 class TestUnexpectedException:
-    def test_unknown_exception_still_marks_failed(self):
+    def test_unknown_exception_marks_failed_on_final_attempt(self):
         draft = _make_draft()
 
         with _Patches() as p:
@@ -370,7 +439,30 @@ class TestUnexpectedException:
             p.m_tika_client.extract_text.side_effect = RuntimeError("kaboom")
 
             with pytest.raises(RuntimeError, match="kaboom"):
-                parse_draft({"draft_id": str(draft.id)})
+                parse_draft(
+                    {"draft_id": str(draft.id)},
+                    attempt=3,
+                    max_attempts=3,
+                )
 
         status_calls = [c.args[2] for c in p.m_update_draft_status.call_args_list]
         assert "failed" in status_calls
+
+    def test_unknown_exception_does_not_mark_failed_when_retry_pending(self):
+        """#448: belt-and-braces — even unknown exceptions defer."""
+        draft = _make_draft()
+
+        with _Patches() as p:
+            p.m_get_draft.return_value = draft
+            p.m_read_file.return_value = b"data"
+            p.m_tika_client.extract_text.side_effect = RuntimeError("transient")
+
+            with pytest.raises(RuntimeError):
+                parse_draft(
+                    {"draft_id": str(draft.id)},
+                    attempt=1,
+                    max_attempts=3,
+                )
+
+        status_calls = [c.args[2] for c in p.m_update_draft_status.call_args_list]
+        assert "failed" not in status_calls

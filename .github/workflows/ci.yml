@@ -41,9 +41,46 @@ jobs:
       - name: Test
         run: uv run pytest -x -q
 
+  migration-dry-run:
+    name: Migration dry run
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+    services:
+      postgres:
+        image: pgvector/pgvector:pg18
+        env:
+          POSTGRES_USER: seadusloome
+          POSTGRES_PASSWORD: localdev
+          POSTGRES_DB: seadusloome
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U seadusloome"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Set up Python 3.13
+        run: uv python install 3.13
+      - name: Install dependencies
+        run: uv sync
+      - name: Run migrations against live pg18
+        env:
+          DATABASE_URL: postgresql://seadusloome:localdev@localhost:5432/seadusloome
+        run: uv run python scripts/migrate.py
+      - name: Run migrations again (verify idempotency)
+        env:
+          DATABASE_URL: postgresql://seadusloome:localdev@localhost:5432/seadusloome
+        run: uv run python scripts/migrate.py
+
   deploy:
     name: Deploy to Coolify
-    needs: lint-and-test
+    needs: [lint-and-test, migration-dry-run]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:

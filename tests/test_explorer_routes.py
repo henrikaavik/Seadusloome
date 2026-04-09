@@ -402,51 +402,80 @@ def _make_overlay_conn(
 
 
 class TestExplorerDraftOverlay:
-    """The /explorer page is in SKIP_PATHS, so the auth middleware never
-    populates ``req.scope['auth']``. The overlay helper checks scope auth
-    directly, so these tests stub :func:`app.explorer.pages._fetch_draft_overlay`
-    rather than the underlying DB connection — that keeps the test suite
-    independent of auth middleware quirks while still exercising the
-    page's branching on the helper return value.
+    """End-to-end overlay tests using a real authenticated session.
+
+    Rewritten for #442: previously these tests stubbed
+    ``_fetch_draft_overlay`` directly, which masked the bug where
+    ``/explorer`` was in ``SKIP_PATHS`` and ``req.scope['auth']`` was
+    therefore always missing. Now we go through the auth middleware
+    by stubbing ``_get_provider`` (matching the
+    ``tests/test_docs_routes.py`` pattern) and stubbing the underlying
+    DB connection used by ``_fetch_draft_overlay``. Any future
+    regression that bypasses the middleware would surface as a 303
+    redirect to ``/auth/login``.
     """
 
-    @patch("app.explorer.pages._fetch_draft_overlay")
+    @patch("app.explorer.pages._connect")
+    @patch("app.auth.middleware._get_provider")
     def test_own_org_draft_embeds_overlay_data(
         self,
-        mock_overlay: MagicMock,
+        mock_get_provider: MagicMock,
+        mock_connect: MagicMock,
     ):
-        mock_overlay.return_value = ["urn:x:1", "urn:x:2"]
+        mock_get_provider.return_value = _overlay_provider()
+        # First SELECT: draft.org_id matches our user; second SELECT:
+        # impact_reports.report_data carrying two affected entities.
+        report_data = {
+            "affected_entities": [
+                {"uri": "urn:x:1"},
+                {"uri": "urn:x:2"},
+            ]
+        }
+        conn = _make_overlay_conn(
+            draft_org_id=_OVERLAY_ORG_ID,
+            findings=report_data,
+        )
+        mock_connect.return_value = _ConnectCM(conn)
+
         client = _overlay_authed_client()
         resp = client.get(f"/explorer?draft={_OVERLAY_DRAFT_ID}")
 
-        assert resp.status_code == 200
+        assert resp.status_code == 200, (
+            f"explorer page must require auth via cookie (#442); got {resp.status_code}"
+        )
         # The JSON blob is embedded in a <script id="draft-overlay-data"> tag.
         assert 'id="draft-overlay-data"' in resp.text
         assert "urn:x:1" in resp.text
         assert "urn:x:2" in resp.text
+
         # Validate the embedded JSON parses cleanly.
         start = resp.text.find('id="draft-overlay-data"')
         assert start != -1
-        # Pull out the JSON between the script tags after the id attribute.
         script_open = resp.text.find(">", start) + 1
         script_close = resp.text.find("</script>", script_open)
         payload = resp.text[script_open:script_close]
+        # The XSS-escape (#464) writes ``<\/`` for ``</`` so we have to
+        # un-escape before json.loads. JSON allows ``\/`` natively.
         parsed = json.loads(payload)
         assert "uris" in parsed
         assert "urn:x:1" in parsed["uris"]
         assert "urn:x:2" in parsed["uris"]
-        # The helper got the raw draft id.
-        mock_overlay.assert_called_once()
-        assert mock_overlay.call_args.args[1] == str(_OVERLAY_DRAFT_ID)
 
-    @patch("app.explorer.pages._fetch_draft_overlay")
+    @patch("app.explorer.pages._connect")
+    @patch("app.auth.middleware._get_provider")
     def test_cross_org_draft_drops_overlay_silently(
         self,
-        mock_overlay: MagicMock,
+        mock_get_provider: MagicMock,
+        mock_connect: MagicMock,
     ):
-        # The helper does the org-scope check internally and returns
-        # an empty list for cross-org / missing drafts.
-        mock_overlay.return_value = []
+        mock_get_provider.return_value = _overlay_provider()
+        # Draft belongs to a different org — _fetch_draft_overlay
+        # short-circuits on the org check and returns an empty list.
+        conn = _make_overlay_conn(
+            draft_org_id=_OVERLAY_OTHER_ORG_ID,
+            findings=None,
+        )
+        mock_connect.return_value = _ConnectCM(conn)
 
         client = _overlay_authed_client()
         resp = client.get(f"/explorer?draft={_OVERLAY_DRAFT_ID}")
@@ -457,16 +486,14 @@ class TestExplorerDraftOverlay:
         # The explorer page still works (Otsi search button as a smoke check).
         assert "Otsi" in resp.text
 
-    @patch("app.explorer.pages._fetch_draft_overlay")
+    @patch("app.auth.middleware._get_provider")
     def test_malformed_draft_param_drops_overlay_silently(
         self,
-        mock_overlay: MagicMock,
+        mock_get_provider: MagicMock,
     ):
-        # The pages helper short-circuits on UUID parse failure and
-        # never calls _fetch_draft_overlay; we still patch it so any
-        # accidental call fails the test instead of trying to hit the DB.
-        mock_overlay.return_value = []
-
+        mock_get_provider.return_value = _overlay_provider()
+        # _fetch_draft_overlay short-circuits before any DB lookup when
+        # the UUID is malformed, so no _connect mock is needed.
         client = _overlay_authed_client()
         resp = client.get("/explorer?draft=not-a-uuid")
 
@@ -474,3 +501,64 @@ class TestExplorerDraftOverlay:
         assert 'id="draft-overlay-data"' not in resp.text
         # Standard explorer chrome is still present.
         assert "Otsi" in resp.text
+
+    def test_unauthenticated_explorer_redirects_to_login(self):
+        """Regression for #442: /explorer is no longer in SKIP_PATHS."""
+        from app.main import app
+
+        client = TestClient(app, follow_redirects=False)
+        resp = client.get("/explorer")
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/auth/login"
+
+    @patch("app.explorer.pages._connect")
+    @patch("app.auth.middleware._get_provider")
+    def test_xss_escape_in_overlay_payload(
+        self,
+        mock_get_provider: MagicMock,
+        mock_connect: MagicMock,
+    ):
+        """Regression for #464: closing-tag sequences in URIs must be escaped.
+
+        An attacker who can plant an entity URI containing
+        ``</script>`` should not be able to break out of the JSON
+        ``<script>`` tag and inject HTML into the page.
+        """
+        mock_get_provider.return_value = _overlay_provider()
+        report_data = {
+            "affected_entities": [
+                {"uri": "urn:x</script><script>alert(1)</script>"},
+            ]
+        }
+        conn = _make_overlay_conn(
+            draft_org_id=_OVERLAY_ORG_ID,
+            findings=report_data,
+        )
+        mock_connect.return_value = _ConnectCM(conn)
+
+        client = _overlay_authed_client()
+        resp = client.get(f"/explorer?draft={_OVERLAY_DRAFT_ID}")
+
+        assert resp.status_code == 200
+        # The JSON tag must contain the escaped form ``<\/script>``.
+        assert "<\\/script>" in resp.text
+        # The injected literal sequence must NOT appear unescaped within
+        # the draft-overlay-data tag (we look between the tag's opening
+        # ``>`` and the next ``</script>`` close).
+        start = resp.text.find('id="draft-overlay-data"')
+        assert start != -1
+        script_open = resp.text.find(">", start) + 1
+        script_close = resp.text.find("</script>", script_open)
+        payload = resp.text[script_open:script_close]
+        # The closing-tag sequence inside the JSON payload must have
+        # been rewritten so that the script tag is not prematurely
+        # terminated.
+        assert "</script>" not in payload
+        assert "<\\/script>" in payload
+        # And the JSON should still round-trip cleanly.
+        parsed = json.loads(payload)
+        assert "uris" in parsed
+        assert any("</script>" in uri for uri in parsed["uris"]), (
+            "the original payload should still decode back to the literal "
+            "</script> sequence after JSON unescaping"
+        )

@@ -18,8 +18,10 @@ that a draft from another org exists.
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
+from datetime import UTC, datetime
 from typing import Any, cast
 
 from fasthtml.common import *  # noqa: F403
@@ -123,13 +125,33 @@ def _format_timestamp(value: Any) -> str:
         return str(value)
 
 
+# #457: stop polling after this many seconds since the draft was
+# created. Without an upper bound the page hammers /status forever
+# whenever a worker hangs (or the queue is paused), and the user has
+# no actionable signal.
+_POLLING_TIMEOUT_SECONDS = 300
+
+
+def _is_status_polling_stale(draft: Draft) -> bool:
+    """Return True if we should stop polling and surface a warning."""
+    created = draft.created_at
+    if created is None:
+        return False
+    try:
+        elapsed = (datetime.now(UTC) - created).total_seconds()
+    except (TypeError, ValueError):
+        return False
+    return elapsed > _POLLING_TIMEOUT_SECONDS
+
+
 def _status_tracker(draft: Draft):
     """Render the 6-stage horizontal status tracker.
 
     Wrapped in a polling Div so HTMX can refresh it every 3 seconds
-    until the draft reaches a terminal state. The outer div is swapped
-    with ``outerHTML`` so the polling attributes come back with the new
-    fragment.
+    until the draft reaches a terminal state OR the polling timeout
+    elapses (#457). After the timeout we drop the polling attributes
+    and surface a yellow alert nudging the user to check the admin
+    dashboard so they don't sit on the page forever.
     """
     items: list = []
     current_index = -1
@@ -159,9 +181,11 @@ def _status_tracker(draft: Draft):
 
     tracker = Ol(*items, cls="draft-status-tracker", aria_label="Töötluse staatus")  # noqa: F405
 
-    # Build the poll attributes only while the draft is still progressing.
+    # Build the poll attributes only while the draft is still
+    # progressing AND we haven't blown the polling timeout (#457).
+    polling_stale = _is_status_polling_stale(draft)
     poll_attrs: dict[str, Any] = {}
-    if draft.status not in _TERMINAL_STATUSES:
+    if draft.status not in _TERMINAL_STATUSES and not polling_stale:
         poll_attrs = {
             "hx_get": f"/drafts/{draft.id}/status",
             "hx_trigger": "every 3s",
@@ -182,6 +206,18 @@ def _status_tracker(draft: Draft):
                 draft.error_message,
                 variant="danger",
                 title="Töötlemine ebaõnnestus",
+            )
+        )
+    elif polling_stale and draft.status not in _TERMINAL_STATUSES:
+        # The pipeline has been running longer than the polling
+        # timeout. Surface a yellow alert and stop polling so the
+        # user knows to escalate instead of waiting indefinitely.
+        children.append(
+            Alert(
+                "Vajab tähelepanu — töötlemine võtab oodatust kauem aega. "
+                "Kontrollige administreerimispaneelilt, kas taustajob on kinni jäänud.",
+                variant="warning",
+                title="Töötlemine venib",
             )
         )
 
@@ -580,6 +616,17 @@ def _draft_detail_body(draft: Draft) -> list[Any]:
             )
         )
 
+    # #443: the form needs an explicit ``hx_post`` so HTMX intercepts
+    # the submit and ``hx_confirm`` actually fires. Without it, the
+    # browser does a native form POST, the confirmation prompt is
+    # silently skipped, and a single click immediately deletes the
+    # draft. We keep ``action`` and ``method`` set as a no-JS fallback
+    # and add an inline ``onclick`` confirm() on the button as a
+    # defence-in-depth guard for users with JavaScript disabled. The
+    # confirm message is JSON-encoded so the Estonian special chars
+    # ('õ', 'õ') and the apostrophes round-trip safely into the
+    # generated HTML.
+    onclick_js = f"return confirm({json.dumps(_DELETE_CONFIRM)});"
     actions.append(
         Form(  # noqa: F405
             Button(
@@ -587,10 +634,14 @@ def _draft_detail_body(draft: Draft) -> list[Any]:
                 type="submit",
                 variant="danger",
                 size="md",
+                onclick=onclick_js,
             ),
             method="post",
             action=f"/drafts/{draft.id}/delete",
             enctype="application/x-www-form-urlencoded",
+            hx_post=f"/drafts/{draft.id}/delete",
+            hx_target="body",
+            hx_swap="outerHTML",
             hx_confirm=_DELETE_CONFIRM,
             cls="inline-form",
         )
@@ -710,6 +761,31 @@ def delete_draft_handler(req: Request, draft_id: str):
     except Exception:
         logger.exception("Failed to delete draft id=%s", parsed)
         return _not_found_page(req)
+
+    # #454: cancel any pending/claimed/retrying background jobs that
+    # still reference this draft. The handlers all early-return on a
+    # missing draft row, but leaving the rows on the queue keeps a
+    # stale ``Ebaõnnestus``-style error appearing on the admin job
+    # dashboard once the worker fails to find the row. Doing this
+    # *after* the row delete is intentional: it's idempotent and means
+    # any job claimed by the worker between the row delete and this
+    # cleanup is also covered.
+    try:
+        with _connect() as conn:
+            conn.execute(
+                """
+                DELETE FROM background_jobs
+                WHERE payload->>'draft_id' = %s
+                  AND status IN ('pending', 'claimed', 'retrying')
+                """,
+                (str(parsed),),
+            )
+            conn.commit()
+    except Exception:
+        logger.exception(
+            "Failed to cancel pending background jobs for draft id=%s",
+            parsed,
+        )
 
     if storage_path:
         try:

@@ -1779,3 +1779,184 @@
   stroke: var(--color-danger);
   stroke-width: 3;
 }
+
+/* ===========================================================================
+   Phase 2 — Document Upload page chrome (#447)
+   ===========================================================================
+   Status tracker, draft action row, upload form helpers, sync banner, and
+   the job-queue card summary. All token-driven so dark mode works without
+   per-rule overrides.
+*/
+
+/* ---- Page-level helpers used by upload + report pages ---- */
+.page-lead {
+  color: var(--color-text-muted);
+  font-size: var(--text-base);
+  line-height: var(--leading-relaxed);
+  margin: var(--space-2) 0 var(--space-6) 0;
+  max-width: 60ch;
+}
+
+.input-file {
+  /* Native file inputs ignore most font/padding rules in Firefox/Safari;
+     setting cursor + padding is what reliably makes the field look like
+     the rest of the design system inputs. */
+  padding: var(--space-2);
+  cursor: pointer;
+  background: var(--color-surface);
+}
+
+/* ---- Draft status badge ---- */
+.draft-status {
+  /* Badge already brings color/variant; we just want a slightly larger
+     touch target than default badges so the status reads at a glance
+     from across the page. */
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--text-sm);
+}
+
+/* ---- Status tracker (horizontal timeline of pipeline stages) ---- */
+.draft-status-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.draft-status-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.draft-status-label-text {
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+  font-weight: var(--font-medium);
+}
+
+.draft-status-tracker {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  counter-reset: draft-stage;
+}
+
+.draft-stage {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.draft-stage-number {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: var(--radius-full);
+  background: var(--color-background);
+  border: 1px solid var(--color-border);
+  font-weight: var(--font-bold);
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+
+.draft-stage-label {
+  font-weight: var(--font-medium);
+}
+
+/* Done = stage already completed. */
+.draft-stage-done {
+  background: var(--color-success-bg);
+  border-color: var(--color-success);
+  color: var(--color-success);
+}
+
+.draft-stage-done .draft-stage-number {
+  background: var(--color-success);
+  color: var(--color-text-inverted);
+  border-color: var(--color-success);
+}
+
+/* Active = current stage in progress. */
+.draft-stage-active {
+  background: var(--color-primary-subtle);
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+.draft-stage-active .draft-stage-number {
+  background: var(--color-primary);
+  color: var(--color-primary-text);
+  border-color: var(--color-primary);
+}
+
+/* Idle = future stage, not yet started. Default styling above already
+   matches; this rule is here for symmetry / explicit selection. */
+.draft-stage-idle {
+  background: var(--color-surface);
+  border-color: var(--color-border);
+  color: var(--color-text-muted);
+}
+
+/* ---- Action row at the bottom of the draft detail page ---- */
+.draft-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+}
+
+.draft-actions .inline-form {
+  display: inline;
+  margin: 0;
+}
+
+/* ---- Sync card status banners (admin dashboard) ---- */
+.sync-banner {
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  margin-bottom: var(--space-3);
+  font-size: var(--text-sm);
+}
+
+.sync-banner-info {
+  background: var(--color-info-bg);
+  border-color: var(--color-info);
+  color: var(--color-info);
+}
+
+.sync-banner-warning {
+  background: var(--color-warning-bg);
+  border-color: var(--color-warning);
+  color: var(--color-warning);
+}
+
+.sync-banner-danger {
+  background: var(--color-danger-bg);
+  border-color: var(--color-danger);
+  color: var(--color-danger);
+}
+
+/* ---- Job queue summary row ---- */
+.job-queue-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+}

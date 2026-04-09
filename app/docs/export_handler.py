@@ -35,12 +35,22 @@ _REPORT_SELECT_COLUMNS = (
 )
 
 
-def export_report(payload: dict[str, Any]) -> dict[str, Any]:
+def export_report(
+    payload: dict[str, Any],
+    *,
+    attempt: int = 1,
+    max_attempts: int = 3,
+) -> dict[str, Any]:
     """Render the impact report for *payload['draft_id']* as a ``.docx``.
 
     Args:
         payload: Must contain ``draft_id`` and ``report_id``, both
             UUID-serialisable strings. Any other keys are ignored.
+        attempt: 1-based current attempt counter. Accepted for handler
+            signature compatibility (#448); export does not transition
+            any domain row state on failure so we don't actually branch
+            on it, but other handlers do.
+        max_attempts: Total retry budget for this job.
 
     Returns:
         ``{"draft_id": ..., "report_id": ..., "docx_path": ...}``
@@ -52,6 +62,9 @@ def export_report(payload: dict[str, Any]) -> dict[str, Any]:
         ValueError: When ``draft_id`` or ``report_id`` is missing/invalid,
             or when either row no longer exists in Postgres.
     """
+    # ``attempt``/``max_attempts`` are part of the handler contract
+    # (#448) but export doesn't gate domain state on them.
+    del attempt, max_attempts
     raw_draft_id = payload.get("draft_id")
     if not raw_draft_id:
         raise ValueError("export_report payload missing required 'draft_id'")

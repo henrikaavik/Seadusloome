@@ -51,14 +51,24 @@ ENV WEB_CONCURRENCY=1
 RUN adduser --system --no-create-home --group appuser && \
     chmod +x /app/entrypoint.sh && \
     chown -R appuser:appuser /app
+
+# Phase 2: pre-create persistent storage directories so appuser can
+# write to them at runtime. /var is root-owned; mkdir + chown must
+# happen here (as root) before USER appuser. Without this, the first
+# upload or export raises PermissionError because appuser cannot
+# create /var/seadusloome/ on a fresh container.
+RUN mkdir -p /var/seadusloome/drafts /var/seadusloome/exports && \
+    chown -R appuser:appuser /var/seadusloome
+
 USER appuser
 
 EXPOSE 5001
 
 # Liveness probe hits /api/ping (see app/main.py). start_period raised to
-# 60s (#432) because cold-start imports (rdflib, SPARQLWrapper, FastHTML,
-# psycopg) can exceed 30s on a small VPS under load.
-HEALTHCHECK --interval=15s --timeout=5s --start-period=60s --retries=3 \
+# 90s (#458) because Phase 2 adds migration 005, lxml import cost, and
+# background worker thread startup on top of the existing cold-start
+# overhead (rdflib, SPARQLWrapper, FastHTML, psycopg).
+HEALTHCHECK --interval=15s --timeout=5s --start-period=90s --retries=3 \
     CMD curl -fsS http://localhost:5001/api/ping || exit 1
 
 # entrypoint.sh runs pending migrations, then execs uvicorn directly

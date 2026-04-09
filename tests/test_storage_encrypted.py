@@ -115,6 +115,11 @@ class TestProdEnforcement:
         on first ``store_file`` / ``read_file`` call, not at import
         time — otherwise every deploy before the env var is added
         dies before ``/api/ping`` comes up and Coolify rolls back.
+
+        #449: this test now uses ``APP_ENV=production`` explicitly
+        because the unified stub gate only enforces real keys when
+        ``APP_ENV=production``. Dev / test / staging all fall through
+        to the ephemeral key path.
         """
         monkeypatch.setenv("APP_ENV", "production")
         monkeypatch.delenv("STORAGE_ENCRYPTION_KEY", raising=False)
@@ -127,16 +132,42 @@ class TestProdEnforcement:
         assert reloaded.STORAGE_DIR is not None
 
         # First call to a storage function that needs a key should raise.
-        with pytest.raises(RuntimeError, match="STORAGE_ENCRYPTION_KEY"):
+        with pytest.raises(RuntimeError, match="APP_ENV=production"):
             reloaded.store_file(b"x", "x.txt", owner_id="user")
 
         # Subsequent calls still raise (not a one-shot) — store_file goes
         # through _get_fernet() before touching the filesystem, so the
         # key error wins over any path-level validation.
-        with pytest.raises(RuntimeError, match="STORAGE_ENCRYPTION_KEY"):
+        with pytest.raises(RuntimeError, match="APP_ENV=production"):
             reloaded.store_file(b"y", "y.txt", owner_id="other")
 
         # Restore a good key so downstream tests are not affected.
+        monkeypatch.setenv("APP_ENV", "development")
+        monkeypatch.setenv("STORAGE_ENCRYPTION_KEY", Fernet.generate_key().decode())
+        importlib.reload(encrypted_module)
+
+    def test_staging_without_key_uses_ephemeral_key(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        """#449: APP_ENV=staging is now stub-mode-eligible.
+
+        The previous code only allowed development; the unified gate
+        treats anything other than production as stub-allowed so a
+        staging deploy without STORAGE_ENCRYPTION_KEY no longer
+        crashes on the first upload — it just uses an ephemeral key
+        and logs a warning.
+        """
+        monkeypatch.setenv("APP_ENV", "staging")
+        monkeypatch.delenv("STORAGE_ENCRYPTION_KEY", raising=False)
+        monkeypatch.setenv("STORAGE_DIR", str(tmp_path))
+
+        import app.storage.encrypted as encrypted_module
+
+        reloaded = importlib.reload(encrypted_module)
+        # Round-trip should still work with the ephemeral key.
+        stored = reloaded.store_file(b"staging payload", "f.txt", owner_id="user-s")
+        assert reloaded.read_file(stored.storage_path) == b"staging payload"
+
         monkeypatch.setenv("APP_ENV", "development")
         monkeypatch.setenv("STORAGE_ENCRYPTION_KEY", Fernet.generate_key().decode())
         importlib.reload(encrypted_module)

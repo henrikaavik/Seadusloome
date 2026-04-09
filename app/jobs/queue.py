@@ -16,8 +16,15 @@ jobs/second without contention.
 
 State machine:
     pending → claimed → running → success
-                     └→ retrying → (eventually pending again)
-                     └→ failed
+                     └→ pending (re-scheduled with backoff, attempts<max)
+                     └→ failed  (attempts==max)
+
+Note on the ``retrying`` status: the schema CHECK constraint still
+allows it (see ``migrations/005_phase2_document_upload.sql``), but
+the worker no longer parks failed jobs there. Re-queued jobs go
+straight back to ``pending`` with a future ``scheduled_for``, so the
+``claim_next`` SELECT (which only looks at ``status='pending'``)
+picks them up automatically once the backoff window passes (#441).
 """
 
 from __future__ import annotations
@@ -254,6 +261,16 @@ class JobQueue:
 
         Retries back off exponentially: the first retry runs ~2 minutes
         after failure, the second ~4 minutes, the third ~8, and so on.
+
+        IMPORTANT (#441): jobs with attempts < max_attempts go back to
+        ``status='pending'`` (NOT ``'retrying'``). The dequeue query in
+        :meth:`claim_next` only looks at ``WHERE status='pending'``, so
+        parking the row in ``retrying`` would strand it forever — the
+        ``scheduled_for`` gate is the actual retry trigger. Keeping the
+        column on ``pending`` and letting the future ``scheduled_for``
+        timestamp gate the next claim is the simplest, most reliable
+        path. The schema's ``retrying`` value is now unused but kept
+        in the CHECK constraint for backwards compatibility.
         """
         now = datetime.now(UTC)
         with get_connection() as conn:
@@ -272,17 +289,22 @@ class JobQueue:
             if next_attempts < max_attempts:
                 # Schedule a retry. 2^attempts minute backoff keeps total
                 # retry time bounded while still letting transient failures
-                # ride through.
+                # ride through. The row goes back to ``pending`` so the
+                # standard claim_next() SELECT will re-pick it up once the
+                # backoff window has elapsed.
                 backoff = timedelta(minutes=2**next_attempts)
                 next_run = now + backoff
                 conn.execute(
                     """
                     UPDATE background_jobs
-                    SET status = 'retrying',
+                    SET status = 'pending',
                         attempts = %s,
                         error_message = %s,
                         finished_at = %s,
-                        scheduled_for = %s
+                        scheduled_for = %s,
+                        claimed_by = NULL,
+                        claimed_at = NULL,
+                        started_at = NULL
                     WHERE id = %s
                     """,
                     (next_attempts, error_message, now, next_run, job_id),
