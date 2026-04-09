@@ -104,21 +104,56 @@ class TestDelete:
 
 
 class TestProdEnforcement:
-    def test_prod_without_key_raises(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-        """Missing STORAGE_ENCRYPTION_KEY off-dev must fail module import."""
+    def test_prod_without_key_imports_cleanly(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        """Module import must NEVER raise.
+
+        Regression test for the rollback incident where prod container
+        crashed on ``import app.main`` because ``STORAGE_ENCRYPTION_KEY``
+        was unset in Coolify. A missing key should be diagnosed lazily
+        on first ``store_file`` / ``read_file`` call, not at import
+        time — otherwise every deploy before the env var is added
+        dies before ``/api/ping`` comes up and Coolify rolls back.
+        """
         monkeypatch.setenv("APP_ENV", "production")
         monkeypatch.delenv("STORAGE_ENCRYPTION_KEY", raising=False)
         monkeypatch.setenv("STORAGE_DIR", str(tmp_path))
 
         import app.storage.encrypted as encrypted_module
 
-        with pytest.raises(RuntimeError, match="STORAGE_ENCRYPTION_KEY"):
-            importlib.reload(encrypted_module)
+        # Must NOT raise.
+        reloaded = importlib.reload(encrypted_module)
+        assert reloaded.STORAGE_DIR is not None
 
-        # Restore a good key so the next test that imports the module
-        # (e.g. through test_import_safety) doesn't inherit the bad state.
+        # First call to a storage function that needs a key should raise.
+        with pytest.raises(RuntimeError, match="STORAGE_ENCRYPTION_KEY"):
+            reloaded.store_file(b"x", "x.txt", owner_id="user")
+
+        # Subsequent calls still raise (not a one-shot) — store_file goes
+        # through _get_fernet() before touching the filesystem, so the
+        # key error wins over any path-level validation.
+        with pytest.raises(RuntimeError, match="STORAGE_ENCRYPTION_KEY"):
+            reloaded.store_file(b"y", "y.txt", owner_id="other")
+
+        # Restore a good key so downstream tests are not affected.
         monkeypatch.setenv("APP_ENV", "development")
         monkeypatch.setenv("STORAGE_ENCRYPTION_KEY", Fernet.generate_key().decode())
+        importlib.reload(encrypted_module)
+
+    def test_prod_with_key_works(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+        """With a valid key set, prod mode stores and reads normally."""
+        monkeypatch.setenv("APP_ENV", "production")
+        monkeypatch.setenv("STORAGE_ENCRYPTION_KEY", Fernet.generate_key().decode())
+        monkeypatch.setenv("STORAGE_DIR", str(tmp_path))
+
+        import app.storage.encrypted as encrypted_module
+
+        reloaded = importlib.reload(encrypted_module)
+        stored = reloaded.store_file(b"payload", "f.txt", owner_id="user-prod")
+        assert reloaded.read_file(stored.storage_path) == b"payload"
+
+        monkeypatch.setenv("APP_ENV", "development")
         importlib.reload(encrypted_module)
 
     def test_dev_generates_ephemeral_key(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):

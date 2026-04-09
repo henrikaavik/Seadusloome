@@ -10,9 +10,18 @@ Env vars:
     STORAGE_DIR              root directory for encrypted files
     APP_ENV                  'development' (default) or 'production'
 
-Production enforcement follows the same pattern as ``SECRET_KEY`` in
-``app/auth/jwt_provider.py``: a missing key is a hard failure off-dev.
-In dev an ephemeral key is generated at import time so local work is
+Production enforcement is **deferred to first use** (same pattern as
+``app/docs/tika_client.py``): the module imports cleanly even when
+``STORAGE_ENCRYPTION_KEY`` is unset, and raises ``RuntimeError`` only
+when ``store_file``/``read_file`` is actually called. This matters for
+prod deploys — Coolify's container healthcheck probes ``/api/ping``
+before the upload path is exercised, and we do not want a missing
+env var to block the whole app from starting. The trade-off is that
+a misconfigured prod will look healthy until the first upload; the
+alternative (crash on import) bricks every deploy until the env var
+is set, which is exactly how batches 68e1259 and 66ada63 rolled back.
+
+In dev an ephemeral key is generated on first use so local work is
 frictionless, with a loud warning so nobody accidentally ships it.
 """
 
@@ -49,8 +58,14 @@ class StoredFile:
 
 
 # ---------------------------------------------------------------------------
-# Key + directory loading (module-level, with prod enforcement)
+# Lazy Fernet initialisation — NEVER raise at import time. See module
+# docstring for the rationale. The _get_fernet() helper is the single
+# choke point through which both store_file and read_file go.
 # ---------------------------------------------------------------------------
+
+
+_fernet: Fernet | None = None
+_warned_dev_ephemeral = False
 
 
 def generate_encryption_key() -> str:
@@ -64,18 +79,33 @@ def generate_encryption_key() -> str:
 
 def _load_encryption_key() -> bytes:
     """Return the Fernet key bytes, enforcing an explicit value off-dev."""
+    global _warned_dev_ephemeral
     value = os.environ.get("STORAGE_ENCRYPTION_KEY")
     if value:
         return value.encode()
     if os.environ.get("APP_ENV", "development") == "development":
-        ephemeral = Fernet.generate_key()
-        logger.warning(
-            "STORAGE_ENCRYPTION_KEY not set — using ephemeral dev key. "
-            "Files written with this key will be UNREADABLE after restart. "
-            "Set STORAGE_ENCRYPTION_KEY in your environment for persistent dev."
-        )
-        return ephemeral
-    raise RuntimeError("STORAGE_ENCRYPTION_KEY must be set in non-development environments")
+        if not _warned_dev_ephemeral:
+            logger.warning(
+                "STORAGE_ENCRYPTION_KEY not set — using ephemeral dev key. "
+                "Files written with this key will be UNREADABLE after restart. "
+                "Set STORAGE_ENCRYPTION_KEY in your environment for persistent dev."
+            )
+            _warned_dev_ephemeral = True
+        return Fernet.generate_key()
+    raise RuntimeError(
+        "STORAGE_ENCRYPTION_KEY must be set when APP_ENV is not 'development'. "
+        'Generate one with `uv run python -c "from app.storage import '
+        'generate_encryption_key; print(generate_encryption_key())"` and '
+        "set it in the Coolify environment variables for seadusloome-app."
+    )
+
+
+def _get_fernet() -> Fernet:
+    """Lazily construct and cache the module-level Fernet instance."""
+    global _fernet
+    if _fernet is None:
+        _fernet = Fernet(_load_encryption_key())
+    return _fernet
 
 
 def _load_storage_dir() -> Path:
@@ -88,8 +118,20 @@ def _load_storage_dir() -> Path:
     return Path("/var/seadusloome/drafts")
 
 
-_KEY = _load_encryption_key()
-_FERNET = Fernet(_KEY)
+def _get_storage_dir() -> Path:
+    """Re-read STORAGE_DIR on every call so tests can monkeypatch env vars.
+
+    The cost of an env-var lookup per upload is negligible compared to
+    the I/O cost of writing the encrypted file itself.
+    """
+    return _load_storage_dir()
+
+
+# Module-level export kept for backwards compatibility with existing
+# callers and tests that import `STORAGE_DIR` directly. Read at import
+# time so ``from app.storage.encrypted import STORAGE_DIR`` works, but
+# functions below always go through ``_get_storage_dir()`` so monkey-
+# patched env vars are respected at call time.
 STORAGE_DIR = _load_storage_dir()
 
 
@@ -111,7 +153,7 @@ def _build_storage_path(owner_id: str) -> Path:
         raise ValueError("owner_id must be a non-empty string")
     shard = owner_id[:2]
     file_id = uuid.uuid4().hex
-    return STORAGE_DIR / shard / owner_id / f"{file_id}.enc"
+    return _get_storage_dir() / shard / owner_id / f"{file_id}.enc"
 
 
 def store_file(contents: bytes, filename: str, owner_id: str) -> StoredFile:
@@ -124,11 +166,17 @@ def store_file(contents: bytes, filename: str, owner_id: str) -> StoredFile:
 
     Returns:
         A ``StoredFile`` pointing at the encrypted artifact.
+
+    Raises:
+        RuntimeError: If ``STORAGE_ENCRYPTION_KEY`` is unset and
+            ``APP_ENV`` is not ``'development'``. The error message
+            includes generation instructions.
     """
+    fernet = _get_fernet()
     target = _build_storage_path(owner_id)
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    ciphertext = _FERNET.encrypt(contents)
+    ciphertext = fernet.encrypt(contents)
     target.write_bytes(ciphertext)
 
     logger.info(
@@ -150,14 +198,16 @@ def read_file(storage_path: str) -> bytes:
     Raises:
         FileNotFoundError: If *storage_path* does not exist.
         DecryptionError: If the ciphertext is corrupt or the key is wrong.
+        RuntimeError: If ``STORAGE_ENCRYPTION_KEY`` is unset in prod.
     """
     path = Path(storage_path)
     if not path.exists():
         raise FileNotFoundError(f"Encrypted file not found: {storage_path}")
 
+    fernet = _get_fernet()
     ciphertext = path.read_bytes()
     try:
-        return _FERNET.decrypt(ciphertext)
+        return fernet.decrypt(ciphertext)
     except InvalidToken as exc:
         raise DecryptionError(
             f"Failed to decrypt {storage_path}: invalid token or wrong key"
