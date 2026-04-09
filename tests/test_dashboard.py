@@ -79,6 +79,19 @@ class TestHealthCheck:
         response = client.get("/api/health")
         # Should not redirect to login
         assert response.status_code == 200
+        data = response.json()
+        assert data["status"] in {"ok", "degraded"}
+        assert "jena" in data
+        assert "postgres" in data
+
+    def test_ping_no_auth_required(self):
+        """/api/ping is a lightweight liveness probe that must work anon."""
+        from app.main import app
+
+        client = TestClient(app, follow_redirects=False)
+        response = client.get("/api/ping")
+        assert response.status_code == 200
+        assert response.text == "ok"
 
 
 # ---------------------------------------------------------------------------

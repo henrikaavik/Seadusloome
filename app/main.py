@@ -28,10 +28,11 @@ _STATIC_DIR = Path(__file__).parent / "static"
 # before the first paint to avoid a flash of the wrong theme (FOUC); it is
 # included here rather than in page handlers because inline Script() tags
 # returned from handlers land in <body>, not <head>.
+# FastHTML's `fast_app(default_hdrs=True)` already injects `<meta charset>`
+# and a viewport meta, so we do NOT add them here (#430 — duplicate meta
+# tags are invalid HTML5).
 _HDRS = (
     Script(THEME_INIT_SCRIPT),
-    Meta(charset="utf-8"),
-    Meta(name="viewport", content="width=device-width, initial-scale=1"),
     Meta(name="color-scheme", content="light dark"),
     Link(rel="stylesheet", href="/static/css/fonts.css"),
     Link(rel="stylesheet", href="/static/css/tokens.css"),
@@ -42,11 +43,14 @@ bware = Beforeware(auth_before, skip=SKIP_PATHS)
 # pico=False: using custom design system (app/ui) instead of Pico CSS.
 app, rt = fast_app(before=bware, pico=False, hdrs=_HDRS)
 
-# Trust X-Forwarded-* headers from the reverse proxy (Traefik/Coolify) so
-# that request.url.scheme, request.client.host, etc. reflect the original
-# client request rather than the proxy hop.
-app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
-
+# Middleware order matters: Starlette's `add_middleware` prepends to the
+# user_middleware list, so the LAST middleware added becomes the OUTERMOST
+# (runs first on incoming requests). We want the request to hit
+# ProxyHeadersMiddleware first so `scope['scheme']` is rewritten from the
+# `X-Forwarded-Proto` header BEFORE any downstream middleware inspects the
+# scheme — so TrustedHostMiddleware is added first and ProxyHeadersMiddleware
+# second (#431).
+#
 # TrustedHostMiddleware is too strict for local dev (it rejects the
 # `testserver` host used by Starlette's TestClient and plain `localhost`),
 # so enable it only when we're running in a non-development environment.
@@ -55,6 +59,11 @@ if os.environ.get("APP_ENV", "development") != "development":
         TrustedHostMiddleware,
         allowed_hosts=["seadusloome.sixtyfour.ee", "*.sixtyfour.ee"],
     )
+
+# Trust X-Forwarded-* headers from the reverse proxy (Traefik/Coolify) so
+# that request.url.scheme, request.client.host, etc. reflect the original
+# client request rather than the proxy hop.
+app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
 
 # FastHTML adds a default static-file route at `/{fname:path}.{ext:static}`
 # that serves from the current working directory. Our assets live under
@@ -89,9 +98,7 @@ def ping():
     Returns 200 OK without touching the database or Jena. Use `/api/health`
     for full readiness checks that include downstream dependencies.
     """
-    from starlette.responses import PlainTextResponse
-
-    return PlainTextResponse("ok")
+    return "ok"
 
 
 # In production, uvicorn is invoked directly via the Dockerfile CMD, and

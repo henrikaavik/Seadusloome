@@ -229,6 +229,22 @@ flowchart LR
 | Linting | ruff + pyright |
 | Package Manager | uv |
 
+## Deploying
+
+Every push to `main` runs lint + type-check + tests via GitHub Actions. On
+green CI, a `deploy` job fires a Coolify webhook which rebuilds and
+redeploys the container.
+
+**One-time setup (required after cloning the repo into a new GitHub org):**
+
+1. In Coolify, open the Seadusloome application → **Deployments** → **Webhooks** → copy the *Deploy* URL.
+2. In GitHub, go to **Settings → Secrets and variables → Actions → New repository secret**.
+3. Name: `COOLIFY_DEPLOY_HOOK_URL` · Value: *the URL from step 1*.
+
+Without the secret, the CI `deploy` job gracefully no-ops (it logs a
+skip notice and exits `0`), so the rest of the pipeline still passes.
+You can still trigger manual deploys from the Coolify UI.
+
 ## Development Phases
 
 ```mermaid

@@ -1,6 +1,20 @@
-# docker-compose.override.yml — loaded automatically in local dev (docker compose up)
-# Mounts the local app/ directory so code changes are reflected without rebuilding the image.
-# In production (Coolify), only docker-compose.yml is used; this file is not present there.
+# docker-compose.override.yml — loaded automatically by `docker compose up`
+# in local development. Production (Coolify) ignores this file.
+#
+# What this override does:
+#   - Bind-mounts the host `app/` directory over `/app/app` inside the
+#     container so Python source edits are picked up without rebuilding
+#     the image (hot reload via `uvicorn --reload` is NOT enabled; you
+#     still need to restart the container, but you skip the rebuild).
+#
+# What this override does NOT do:
+#   - It does NOT shadow `/app/.venv`. Python dependencies come from the
+#     built image, so after changing `pyproject.toml` / `uv.lock` you must
+#     rebuild: `docker compose build app && docker compose up -d app`.
+#   - It does NOT change any env vars. `.env` is still the source of truth.
+#
+# To test the prod image locally without hot-reload, skip the override:
+#   docker compose -f docker-compose.yml up
 services:
   app:
     volumes:

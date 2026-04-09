@@ -3,6 +3,7 @@
 from fasthtml.common import *  # noqa: F403
 
 from app.auth.provider import UserDict
+from app.ui.forms.app_form import AppForm
 
 _THEME_CYCLE_JS = (
     "const t = (document.cookie.match(/theme=([^;]+)/) || [])[1] || 'system';"
@@ -55,7 +56,7 @@ def UserMenu(user: UserDict | None):  # noqa: ANN201
             A("Töölaud", href="/dashboard"),  # noqa: F405
             A("Minu profiil", href="/profile"),  # noqa: F405
             Hr(),  # noqa: F405
-            Form(  # noqa: F405
+            AppForm(
                 Button("Logi välja", type="submit", cls="user-menu-logout"),  # noqa: F405
                 method="post",
                 action="/auth/logout",

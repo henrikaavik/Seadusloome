@@ -42,8 +42,10 @@ USER appuser
 
 EXPOSE 5001
 
-# /api/ping liveness endpoint is added by the fasthtml-builder agent in parallel (see app/main.py).
-HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 \
+# Liveness probe hits /api/ping (see app/main.py). start_period raised to
+# 60s (#432) because cold-start imports (rdflib, SPARQLWrapper, FastHTML,
+# psycopg) can exceed 30s on a small VPS under load.
+HEALTHCHECK --interval=15s --timeout=5s --start-period=60s --retries=3 \
     CMD curl -fsS http://localhost:5001/api/ping || exit 1
 
 # Invoke uvicorn directly (bypass FastHTML's serve() auto-detection,

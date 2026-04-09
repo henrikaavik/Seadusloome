@@ -39,6 +39,9 @@ services:
       ADMIN_PASSWORD: ${FUSEKI_ADMIN_PASSWORD:-localdev}
     volumes:
       - jenadata:/fuseki
+      # Fuseki assembler config — auto-loaded on startup to create the
+      # `ontology` dataset deterministically on a fresh volume (#429).
+      - ./fuseki-config:/fuseki/configuration:ro
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:3030/$$/ping || exit 1"]
       interval: 10s
