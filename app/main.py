@@ -16,7 +16,10 @@ from app.ui.forms.live_validation import register_validation_routes
 
 bware = Beforeware(auth_before, skip=SKIP_PATHS)
 # pico=False: using custom design system (app/ui) instead of Pico CSS.
-app, rt = fast_app(before=bware, pico=False)
+# static_path: FastHTML serves static files from this directory at /static/*.
+# Since the working directory is the project root (/app in the container),
+# the static files live at app/static/ on disk.
+app, rt = fast_app(before=bware, pico=False, static_path="app/static")
 
 register_auth_routes(rt)
 register_org_routes(rt)
