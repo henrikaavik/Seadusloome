@@ -10,6 +10,13 @@ from starlette.responses import RedirectResponse
 
 from app.auth.audit import log_action
 from app.db import get_connection as _connect
+from app.ui.data.data_table import Column, DataTable
+from app.ui.forms.form_field import FormField
+from app.ui.layout import PageShell
+from app.ui.primitives.badge import Badge
+from app.ui.primitives.button import Button
+from app.ui.surfaces.card import Card, CardBody, CardHeader
+from app.ui.theme import get_theme_from_request
 
 logger = logging.getLogger(__name__)
 
@@ -143,73 +150,115 @@ _ROLE_LABELS = {
 }
 
 
-def _render_activity_section(activity: list[dict]) -> list:  # type: ignore[type-arg]
-    """Render the recent activity section."""
+def _activity_card(activity: list[dict]):  # type: ignore[type-arg]
+    """Render the recent activity card."""
     if not activity:
-        return [P("Tegevusi ei leitud.", style="color:gray")]
-
-    rows = []
-    for entry in activity:
-        ts = entry["created_at"]
-        ts_str = ts.strftime("%d.%m.%Y %H:%M") if ts else "—"
-        rows.append(
-            Tr(
-                Td(ts_str),
-                Td(entry["action"]),
-                Td(str(entry["detail"]) if entry["detail"] else "—"),
+        body = P("Tegevusi ei leitud.", cls="muted-text")
+    else:
+        columns = [
+            Column(key="time", label="Aeg", sortable=False),
+            Column(key="action", label="Tegevus", sortable=False),
+            Column(key="detail", label="Detailid", sortable=False),
+        ]
+        rows = []
+        for entry in activity:
+            ts = entry["created_at"]
+            rows.append(
+                {
+                    "time": ts.strftime("%d.%m.%Y %H:%M") if ts else "—",
+                    "action": entry["action"],
+                    "detail": str(entry["detail"]) if entry["detail"] else "—",
+                }
             )
+        body = DataTable(
+            columns=columns,
+            rows=rows,
+            empty_message="Tegevusi ei leitud.",
         )
-    return [
-        Table(
-            Thead(Tr(Th("Aeg"), Th("Tegevus"), Th("Detailid"))),
-            Tbody(*rows),
-        )
-    ]
+    return Card(
+        CardHeader(H3("Viimased tegevused", cls="card-title")),
+        CardBody(body),
+    )
 
 
-def _render_bookmarks_section(bookmarks: list[dict]) -> list:  # type: ignore[type-arg]
-    """Render the bookmarks section."""
+def _bookmarks_card(bookmarks: list[dict]):  # type: ignore[type-arg]
+    """Render the bookmarks card (list + add form)."""
     if not bookmarks:
-        return [P("Järjehoidjaid ei leitud.", style="color:gray")]
-
-    rows = []
-    for bm in bookmarks:
-        rows.append(
-            Tr(
-                Td(bm["label"] or bm["entity_uri"]),
-                Td(A(bm["entity_uri"], href=bm["entity_uri"])),
-                Td(
-                    Form(
-                        Button("Eemalda", type="submit", cls="button secondary"),
-                        method="post",
-                        action=f"/api/bookmarks/{bm['id']}/delete",
-                        style="display:inline",
-                    )
+        table: object = P("Järjehoidjaid ei leitud.", cls="muted-text")
+    else:
+        columns = [
+            Column(key="label", label="Nimi", sortable=False),
+            Column(
+                key="entity_uri",
+                label="URI",
+                sortable=False,
+                render=lambda r: A(r["entity_uri"], href=r["entity_uri"]),
+            ),
+            Column(
+                key="actions",
+                label="Tegevused",
+                sortable=False,
+                render=lambda r: Form(
+                    Button(
+                        "Eemalda",
+                        type="submit",
+                        variant="secondary",
+                        size="sm",
+                    ),
+                    method="post",
+                    action=f"/api/bookmarks/{r['id']}/delete",
+                    cls="inline-form",
                 ),
-            )
-        )
-    return [
-        Table(
-            Thead(Tr(Th("Nimi"), Th("URI"), Th("Tegevused"))),
-            Tbody(*rows),
-        )
-    ]
+            ),
+        ]
+        rows = [
+            {
+                "id": bm["id"],
+                "label": bm["label"] or bm["entity_uri"],
+                "entity_uri": bm["entity_uri"],
+            }
+            for bm in bookmarks
+        ]
+        table = DataTable(columns=columns, rows=rows)
+
+    add_form = Form(
+        FormField(name="entity_uri", label="URI", type="text", required=True),
+        FormField(name="label", label="Nimi", type="text"),
+        Button("Lisa järjehoidja", type="submit", variant="primary"),
+        method="post",
+        action="/api/bookmarks",
+        cls="bookmark-add-form",
+    )
+
+    return Card(
+        CardHeader(H3("Järjehoidjad", cls="card-title")),
+        CardBody(table, add_form),
+    )
 
 
-def _render_org_section(org_info: dict | None) -> list:  # type: ignore[type-arg]
-    """Render the organization info section."""
+def _org_card(org_info: dict | None):  # type: ignore[type-arg]
+    """Render the organisation info card."""
     if org_info is None:
-        return [P("Te ei kuulu ühtegi organisatsiooni.", style="color:gray")]
-
-    return [
-        Table(
-            Tbody(
-                Tr(Th("Organisatsioon"), Td(org_info["org_name"])),
-                Tr(Th("Teie roll"), Td(_ROLE_LABELS.get(org_info["role"], org_info["role"]))),
-                Tr(Th("Liikmeid"), Td(str(org_info["member_count"]))),
-            )
+        body = P("Te ei kuulu ühtegi organisatsiooni.", cls="muted-text")
+    else:
+        body = Dl(
+            Dt("Organisatsioon"),
+            Dd(org_info["org_name"]),
+            Dt("Teie roll"),
+            Dd(
+                Badge(
+                    _ROLE_LABELS.get(org_info["role"], org_info["role"]),
+                    variant="primary",
+                )
+            ),
+            Dt("Liikmeid"),
+            Dd(str(org_info["member_count"])),
+            cls="info-list",
         )
-    ]
+    return Card(
+        CardHeader(H3("Organisatsioon", cls="card-title")),
+        CardBody(body),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -220,6 +269,7 @@ def _render_org_section(org_info: dict | None) -> list:  # type: ignore[type-arg
 def dashboard_page(req: Request):
     """GET /dashboard — personal dashboard for authenticated users."""
     auth = req.scope.get("auth", {})
+    theme = get_theme_from_request(req)
     user_id = auth.get("id")
     full_name = auth.get("full_name", "Kasutaja")
 
@@ -227,31 +277,20 @@ def dashboard_page(req: Request):
     bookmarks = _get_bookmarks(user_id) if user_id else []
     org_info = _get_user_org_info(user_id) if user_id else None
 
-    content = [
-        P(f"Tere tulemast, {full_name}!"),
-        H3("Organisatsioon"),
-        *_render_org_section(org_info),
-        H3("Järjehoidjad"),
-        *_render_bookmarks_section(bookmarks),
-        Form(
-            Fieldset(
-                Label("URI", Input(name="entity_uri", type="text", required=True)),
-                Label("Nimi", Input(name="label", type="text")),
-            ),
-            Button("Lisa järjehoidja", type="submit"),
-            method="post",
-            action="/api/bookmarks",
-        ),
-        H3("Viimased tegevused"),
-        *_render_activity_section(activity),
-        Form(
-            Button("Logi välja", type="submit"),
-            method="post",
-            action="/auth/logout",
-        ),
-    ]
+    content = (
+        H1(f"Tere tulemast, {full_name}!", cls="page-title"),
+        _org_card(org_info),
+        _bookmarks_card(bookmarks),
+        _activity_card(activity),
+    )
 
-    return Titled("Töölaud", *content)
+    return PageShell(
+        *content,
+        title="Töölaud",
+        user=auth or None,
+        theme=theme,
+        active_nav="/dashboard",
+    )
 
 
 def add_bookmark(req: Request, entity_uri: str, label: str = ""):

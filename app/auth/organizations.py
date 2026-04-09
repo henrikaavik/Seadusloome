@@ -11,6 +11,13 @@ from starlette.requests import Request
 from app.auth.audit import log_action
 from app.auth.roles import require_role
 from app.db import get_connection as _connect
+from app.ui.data.data_table import Column, DataTable
+from app.ui.forms.form_field import FormField
+from app.ui.layout import PageShell
+from app.ui.primitives.button import Button
+from app.ui.surfaces.alert import Alert
+from app.ui.surfaces.card import Card, CardBody, CardHeader
+from app.ui.theme import get_theme_from_request
 
 logger = logging.getLogger(__name__)
 
@@ -133,86 +140,174 @@ def get_org_user_count(org_id: str) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Route handlers
+# Rendering helpers
 # ---------------------------------------------------------------------------
 
 
-def _org_list_page(orgs: list[dict], message: str | None = None):  # type: ignore[type-arg]
+def _error_page(req: Request, message: str, back_href: str = "/admin/organizations"):
+    """Render an error page wrapped in the PageShell."""
+    auth = req.scope.get("auth")
+    theme = get_theme_from_request(req)
+    return PageShell(
+        H1("Viga", cls="page-title"),
+        Alert(message, variant="danger"),
+        P(A("← Tagasi", href=back_href), cls="back-link"),
+        title="Viga",
+        user=auth,
+        theme=theme,
+        active_nav="/admin",
+    )
+
+
+def _org_list_page(req: Request, orgs: list[dict], message: str | None = None):  # type: ignore[type-arg]
     """Render the organization list page."""
-    rows = []
+    auth = req.scope.get("auth")
+    theme = get_theme_from_request(req)
+
+    org_rows = []
     for org in orgs:
         count = get_org_user_count(org["id"])
-        rows.append(
-            Tr(
-                Td(org["name"]),
-                Td(org["slug"]),
-                Td(str(count)),
-                Td(
-                    A("Muuda", href=f"/admin/organizations/{org['id']}/edit", cls="button"),
-                    " ",
-                    Form(
-                        Button("Kustuta", type="submit", cls="button secondary"),
-                        method="post",
-                        action=f"/admin/organizations/{org['id']}/delete",
-                        style="display:inline",
-                    )
-                    if count == 0
-                    else Span(""),
-                ),
+        org_rows.append(
+            {
+                "id": org["id"],
+                "name": org["name"],
+                "slug": org["slug"],
+                "user_count": str(count),
+                "_user_count": count,
+            }
+        )
+
+    def _render_actions(row: dict) -> object:  # type: ignore[type-arg]
+        actions: list = [
+            A(
+                "Muuda",
+                href=f"/admin/organizations/{row['id']}/edit",
+                cls="btn btn-secondary btn-sm",
             )
-        )
+        ]
+        if row["_user_count"] == 0:
+            actions.append(
+                Form(
+                    Button(
+                        "Kustuta",
+                        type="submit",
+                        variant="danger",
+                        size="sm",
+                    ),
+                    method="post",
+                    action=f"/admin/organizations/{row['id']}/delete",
+                    cls="inline-form",
+                )
+            )
+        return Div(*actions, cls="table-actions")
 
-    content = [
-        A("Lisa uus organisatsioon", href="/admin/organizations/new", cls="button"),
+    columns = [
+        Column(key="name", label="Nimi", sortable=False),
+        Column(key="slug", label="Lühitunnus", sortable=False),
+        Column(key="user_count", label="Kasutajaid", sortable=False, align="right"),
+        Column(key="actions", label="Tegevused", sortable=False, render=_render_actions),
     ]
-    if message:
-        content.append(P(message, style="color:green"))
-    content.append(
-        Table(
-            Thead(Tr(Th("Nimi"), Th("Lühitunnus"), Th("Kasutajaid"), Th("Tegevused"))),
-            Tbody(*rows),
+
+    table_or_empty: object
+    if org_rows:
+        table_or_empty = DataTable(
+            columns=columns,
+            rows=org_rows,
+            empty_message="Organisatsioone ei leitud.",
         )
-        if rows
-        else P("Organisatsioone ei leitud.")
+    else:
+        table_or_empty = P("Organisatsioone ei leitud.", cls="muted-text")
+
+    card_body_children: list = []
+    if message:
+        card_body_children.append(Alert(message, variant="success"))
+    card_body_children.append(table_or_empty)
+
+    content = (
+        H1("Organisatsioonid", cls="page-title"),
+        Div(
+            A(
+                "Lisa uus organisatsioon",
+                href="/admin/organizations/new",
+                cls="btn btn-primary btn-md",
+            ),
+            cls="page-actions",
+        ),
+        Card(
+            CardHeader(H3("Kõik organisatsioonid", cls="card-title")),
+            CardBody(*card_body_children),
+        ),
     )
-    return Titled("Organisatsioonid", *content)
+
+    return PageShell(
+        *content,
+        title="Organisatsioonid",
+        user=auth,
+        theme=theme,
+        active_nav="/admin",
+    )
 
 
-def _org_form(org: dict | None = None):  # type: ignore[type-arg]
+def _org_form_page(req: Request, org: dict | None = None):  # type: ignore[type-arg]
     """Render create/edit form for an organization."""
+    auth = req.scope.get("auth")
+    theme = get_theme_from_request(req)
+
     is_edit = org is not None
     title = "Muuda organisatsiooni" if is_edit else "Uus organisatsioon"
     action = f"/admin/organizations/{org['id']}" if is_edit else "/admin/organizations"
     name_val = org["name"] if is_edit else ""
     slug_val = org["slug"] if is_edit else ""
 
-    return Titled(
-        title,
-        Form(
-            Fieldset(
-                Label("Nimi", Input(name="name", type="text", required=True, value=name_val)),
-                Label(
-                    "Lühitunnus (slug)",
-                    Input(name="slug", type="text", required=True, value=slug_val),
-                ),
-            ),
-            Button("Salvesta", type="submit"),
-            " ",
-            A("Tühista", href="/admin/organizations"),
-            method="post",
-            action=action,
+    form = Form(
+        FormField(
+            name="name",
+            label="Nimi",
+            type="text",
+            required=True,
+            value=name_val,
         ),
+        FormField(
+            name="slug",
+            label="Lühitunnus (slug)",
+            type="text",
+            required=True,
+            value=slug_val,
+        ),
+        Div(
+            Button("Salvesta", type="submit", variant="primary"),
+            A("Tühista", href="/admin/organizations", cls="btn btn-ghost btn-md"),
+            cls="form-actions",
+        ),
+        method="post",
+        action=action,
     )
+
+    return PageShell(
+        H1(title, cls="page-title"),
+        Card(
+            CardBody(form),
+        ),
+        title=title,
+        user=auth,
+        theme=theme,
+        active_nav="/admin",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Route handlers
+# ---------------------------------------------------------------------------
 
 
 def org_list(req: Request):
     """GET /admin/organizations — list all organizations."""
-    return _org_list_page(list_orgs())
+    return _org_list_page(req, list_orgs())
 
 
 def org_new_form(req: Request):
     """GET /admin/organizations/new — show create form."""
-    return _org_form()
+    return _org_form_page(req)
 
 
 def org_create(req: Request, name: str, slug: str):
@@ -220,13 +315,9 @@ def org_create(req: Request, name: str, slug: str):
     slug = slug.strip() or slugify(name)
     org = create_org(name.strip(), slug)
     if org is None:
-        return Titled(
-            "Viga",
-            P(
-                "Organisatsiooni loomine ebaõnnestus. "
-                "Nimi või lühitunnus võib olla juba kasutusel."
-            ),
-            A("Tagasi", href="/admin/organizations"),
+        return _error_page(
+            req,
+            "Organisatsiooni loomine ebaõnnestus. Nimi või lühitunnus võib olla juba kasutusel.",
         )
     auth = req.scope.get("auth", {})
     log_action(auth.get("id"), "org.create", {"org_id": org["id"], "name": name, "slug": slug})
@@ -237,12 +328,8 @@ def org_edit_form(req: Request, org_id: str):
     """GET /admin/organizations/{org_id}/edit — show edit form."""
     org = get_org(org_id)
     if org is None:
-        return Titled(
-            "Viga",
-            P("Organisatsiooni ei leitud."),
-            A("Tagasi", href="/admin/organizations"),
-        )
-    return _org_form(org)
+        return _error_page(req, "Organisatsiooni ei leitud.")
+    return _org_form_page(req, org)
 
 
 def org_update(req: Request, org_id: str, name: str, slug: str):
@@ -250,11 +337,7 @@ def org_update(req: Request, org_id: str, name: str, slug: str):
     slug = slug.strip() or slugify(name)
     org = update_org(org_id, name.strip(), slug)
     if org is None:
-        return Titled(
-            "Viga",
-            P("Organisatsiooni muutmine ebaõnnestus."),
-            A("Tagasi", href="/admin/organizations"),
-        )
+        return _error_page(req, "Organisatsiooni muutmine ebaõnnestus.")
     auth = req.scope.get("auth", {})
     log_action(auth.get("id"), "org.update", {"org_id": org_id, "name": name, "slug": slug})
     return RedirectResponse(url="/admin/organizations", status_code=303)
@@ -264,13 +347,10 @@ def org_delete(req: Request, org_id: str):
     """POST /admin/organizations/{org_id}/delete — delete an organization."""
     success = delete_org(org_id)
     if not success:
-        return Titled(
-            "Viga",
-            P(
-                "Organisatsiooni kustutamine ebaõnnestus. "
-                "Veenduge, et organisatsioonil pole kasutajaid."
-            ),
-            A("Tagasi", href="/admin/organizations"),
+        return _error_page(
+            req,
+            "Organisatsiooni kustutamine ebaõnnestus. "
+            "Veenduge, et organisatsioonil pole kasutajaid.",
         )
     auth = req.scope.get("auth", {})
     log_action(auth.get("id"), "org.delete", {"org_id": org_id})

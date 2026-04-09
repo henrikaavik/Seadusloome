@@ -8,8 +8,49 @@ from starlette.responses import RedirectResponse
 
 from app.auth.cookies import clear_auth_cookie, set_auth_cookie
 from app.auth.jwt_provider import JWTAuthProvider
+from app.ui.forms.form_field import FormField
+from app.ui.layout import PageShell
+from app.ui.primitives.button import Button
+from app.ui.surfaces.alert import Alert
+from app.ui.surfaces.card import Card, CardBody, CardHeader
+from app.ui.theme import get_theme_from_request
 
 _provider = JWTAuthProvider()
+
+
+# ---------------------------------------------------------------------------
+# View helpers
+# ---------------------------------------------------------------------------
+
+
+def _login_form(email: str = "", error: str | None = None):
+    """Render the login form, optionally with an error message."""
+    return Card(
+        CardHeader(H2("Sisselogimine", cls="card-title")),
+        CardBody(
+            Alert("Vale e-post või parool.", variant="danger") if error else None,
+            Form(
+                FormField(
+                    name="email",
+                    label="E-post",
+                    type="email",
+                    value=email,
+                    required=True,
+                ),
+                FormField(
+                    name="password",
+                    label="Parool",
+                    type="password",
+                    required=True,
+                ),
+                Button("Logi sisse", type="submit", variant="primary"),
+                method="post",
+                action="/auth/login",
+                cls="auth-form",
+            ),
+        ),
+        cls="auth-card",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -17,19 +58,15 @@ _provider = JWTAuthProvider()
 # ---------------------------------------------------------------------------
 
 
-def login_page():
+def login_page(req: Request):
     """GET /auth/login — render the login form."""
-    return Titled(
-        "Sisselogimine",
-        Form(
-            Fieldset(
-                Label("E-post", Input(name="email", type="email", required=True)),
-                Label("Parool", Input(name="password", type="password", required=True)),
-            ),
-            Button("Logi sisse", type="submit"),
-            method="post",
-            action="/auth/login",
-        ),
+    theme = get_theme_from_request(req)
+    return PageShell(
+        _login_form(),
+        title="Sisselogimine",
+        user=None,
+        theme=theme,
+        container_size="sm",
     )
 
 
@@ -37,18 +74,13 @@ def login_post(req: Request, email: str, password: str):
     """POST /auth/login — authenticate and set cookies."""
     user = _provider.authenticate(email, password)
     if user is None:
-        return Titled(
-            "Sisselogimine",
-            P("Vale e-post v\u00f5i parool.", style="color:red"),
-            Form(
-                Fieldset(
-                    Label("E-post", Input(name="email", type="email", required=True, value=email)),
-                    Label("Parool", Input(name="password", type="password", required=True)),
-                ),
-                Button("Logi sisse", type="submit"),
-                method="post",
-                action="/auth/login",
-            ),
+        theme = get_theme_from_request(req)
+        return PageShell(
+            _login_form(email=email, error="Vale e-post või parool."),
+            title="Sisselogimine",
+            user=None,
+            theme=theme,
+            container_size="sm",
         )
 
     access_token, refresh_token = _provider.create_tokens(user)

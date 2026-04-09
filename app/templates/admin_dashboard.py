@@ -11,6 +11,12 @@ from starlette.responses import JSONResponse
 from app.auth.roles import require_role
 from app.db import get_connection as _connect
 from app.sync.jena_loader import check_health as jena_check_health
+from app.ui.data.data_table import Column, DataTable
+from app.ui.data.pagination import Pagination
+from app.ui.layout import PageShell
+from app.ui.primitives.badge import Badge, StatusBadge
+from app.ui.surfaces.card import Card, CardBody, CardHeader
+from app.ui.theme import get_theme_from_request
 
 logger = logging.getLogger(__name__)
 
@@ -123,89 +129,115 @@ def _get_audit_log_page(page: int = 1, per_page: int = 25) -> tuple[list[dict], 
 # Rendering helpers
 # ---------------------------------------------------------------------------
 
-_STATUS_LABELS = {
-    "running": "Käimas",
-    "success": "Õnnestus",
-    "failed": "Ebaõnnestus",
-}
-
-_STATUS_COLORS = {
-    "running": "orange",
-    "success": "green",
-    "failed": "red",
+_SYNC_STATUS_MAP = {
+    "running": ("running", "Käimas"),
+    "success": ("ok", "Õnnestus"),
+    "failed": ("failed", "Ebaõnnestus"),
 }
 
 
-def _render_health_section(jena_ok: bool, pg_ok: bool) -> list:
-    """Render the system health section."""
-
-    def _status_badge(ok: bool) -> Span:  # type: ignore[type-arg]
-        color = "green" if ok else "red"
-        text = "OK" if ok else "Viga"
-        return Span(text, style=f"color:{color};font-weight:bold")
-
-    return [
-        Table(
-            Tbody(
-                Tr(Th("Apache Jena Fuseki"), Td(_status_badge(jena_ok))),
-                Tr(Th("PostgreSQL"), Td(_status_badge(pg_ok))),
-            )
-        )
-    ]
+def _sync_status_badge(status: str):
+    """Return a StatusBadge for a sync_log status value."""
+    key, _ = _SYNC_STATUS_MAP.get(status, ("pending", status))
+    return StatusBadge(key)  # type: ignore[arg-type]
 
 
-def _render_sync_section(sync_logs: list[dict]) -> list:  # type: ignore[type-arg]
-    """Render the sync status section."""
+def _health_card(jena_ok: bool, pg_ok: bool):
+    """Render the system health card."""
+    body = Dl(
+        Dt("Apache Jena Fuseki"),
+        Dd(StatusBadge("ok") if jena_ok else StatusBadge("failed")),
+        Dt("PostgreSQL"),
+        Dd(StatusBadge("ok") if pg_ok else StatusBadge("failed")),
+        cls="info-list",
+    )
+    return Card(
+        CardHeader(H3("Süsteemi tervis", cls="card-title")),
+        CardBody(body),
+    )
+
+
+def _sync_card(sync_logs: list[dict]):  # type: ignore[type-arg]
+    """Render the sync status card."""
     if not sync_logs:
-        return [P("Sünkroniseerimisi ei leitud.", style="color:gray")]
-
-    rows = []
-    for entry in sync_logs:
-        started = entry["started_at"]
-        started_str = started.strftime("%d.%m.%Y %H:%M") if started else "—"
-        status = entry["status"]
-        color = _STATUS_COLORS.get(status, "black")
-        label = _STATUS_LABELS.get(status, status)
-        rows.append(
-            Tr(
-                Td(started_str),
-                Td(Span(label, style=f"color:{color};font-weight:bold")),
-                Td(str(entry["entity_count"]) if entry["entity_count"] is not None else "—"),
-                Td(entry["error_message"] or "—"),
+        body = P("Sünkroniseerimisi ei leitud.", cls="muted-text")
+    else:
+        columns = [
+            Column(key="started", label="Algusaeg", sortable=False),
+            Column(
+                key="status",
+                label="Staatus",
+                sortable=False,
+                render=lambda r: _sync_status_badge(r["status_raw"]),
+            ),
+            Column(key="entity_count", label="Olemeid", sortable=False),
+            Column(key="error_message", label="Veateade", sortable=False),
+        ]
+        rows = []
+        for entry in sync_logs:
+            started = entry["started_at"]
+            rows.append(
+                {
+                    "started": started.strftime("%d.%m.%Y %H:%M") if started else "—",
+                    "status_raw": entry["status"],
+                    "status": entry["status"],
+                    "entity_count": (
+                        str(entry["entity_count"]) if entry["entity_count"] is not None else "—"
+                    ),
+                    "error_message": entry["error_message"] or "—",
+                }
             )
-        )
-    return [
-        Table(
-            Thead(Tr(Th("Algusaeg"), Th("Staatus"), Th("Olemeid"), Th("Veateade"))),
-            Tbody(*rows),
-        )
-    ]
+        body = DataTable(columns=columns, rows=rows)
+
+    return Card(
+        CardHeader(H3("Sünkroniseerimise staatus", cls="card-title")),
+        CardBody(body),
+    )
 
 
-def _render_user_stats_section(stats: dict) -> list:  # type: ignore[type-arg]
-    """Render the user stats section."""
-    content: list = [
-        Table(
-            Tbody(
-                Tr(Th("Kasutajaid kokku"), Td(str(stats["total_users"]))),
-                Tr(Th("Aktiivseid seansse"), Td(str(stats["active_sessions"]))),
-            )
-        )
-    ]
+def _user_stats_card(stats: dict):  # type: ignore[type-arg]
+    """Render the user statistics card."""
+    summary = Dl(
+        Dt("Kasutajaid kokku"),
+        Dd(Badge(str(stats["total_users"]), variant="primary")),
+        Dt("Aktiivseid seansse"),
+        Dd(Badge(str(stats["active_sessions"]), variant="default")),
+        cls="info-list",
+    )
+
+    body_children: list = [summary]
 
     if stats["users_per_org"]:
-        org_rows = [
-            Tr(Td(org["org_name"]), Td(str(org["user_count"]))) for org in stats["users_per_org"]
+        columns = [
+            Column(key="org_name", label="Organisatsioon", sortable=False),
+            Column(key="user_count", label="Kasutajaid", sortable=False),
         ]
-        content.append(H4("Kasutajaid organisatsioonide kaupa"))
-        content.append(
-            Table(
-                Thead(Tr(Th("Organisatsioon"), Th("Kasutajaid"))),
-                Tbody(*org_rows),
-            )
-        )
+        rows = [
+            {"org_name": org["org_name"], "user_count": str(org["user_count"])}
+            for org in stats["users_per_org"]
+        ]
+        body_children.append(H4("Kasutajaid organisatsioonide kaupa", cls="section-subtitle"))
+        body_children.append(DataTable(columns=columns, rows=rows))
 
-    return content
+    return Card(
+        CardHeader(H3("Kasutajate statistika", cls="card-title")),
+        CardBody(*body_children),
+    )
+
+
+def _quick_links_card():
+    """Render the quick links card."""
+    return Card(
+        CardHeader(H3("Kiirlingid", cls="card-title")),
+        CardBody(
+            Ul(
+                Li(A("Organisatsioonid", href="/admin/organizations")),
+                Li(A("Kasutajad", href="/admin/users")),
+                Li(A("Auditilogi", href="/admin/audit")),
+                cls="quick-links",
+            )
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -215,31 +247,36 @@ def _render_user_stats_section(stats: dict) -> list:  # type: ignore[type-arg]
 
 def admin_dashboard_page(req: Request):
     """GET /admin — admin dashboard with system overview."""
+    auth = req.scope.get("auth")
+    theme = get_theme_from_request(req)
+
     jena_ok = jena_check_health()
     pg_ok = _check_postgres()
     sync_logs = _get_sync_logs()
     user_stats = _get_user_stats()
 
-    content = [
-        H3("Süsteemi tervis"),
-        *_render_health_section(jena_ok, pg_ok),
-        H3("Sünkroniseerimise staatus"),
-        *_render_sync_section(sync_logs),
-        H3("Kasutajate statistika"),
-        *_render_user_stats_section(user_stats),
-        H3("Kiirlingid"),
-        Ul(
-            Li(A("Organisatsioonid", href="/admin/organizations")),
-            Li(A("Kasutajad", href="/admin/users")),
-            Li(A("Auditilogi", href="/admin/audit")),
-        ),
-    ]
+    content = (
+        H1("Administreerimise töölaud", cls="page-title"),
+        _health_card(jena_ok, pg_ok),
+        _sync_card(sync_logs),
+        _user_stats_card(user_stats),
+        _quick_links_card(),
+    )
 
-    return Titled("Administreerimise töölaud", *content)
+    return PageShell(
+        *content,
+        title="Administreerimise töölaud",
+        user=auth,
+        theme=theme,
+        active_nav="/admin",
+    )
 
 
 def admin_audit_page(req: Request):
     """GET /admin/audit — paginated audit log viewer."""
+    auth = req.scope.get("auth")
+    theme = get_theme_from_request(req)
+
     page_str = req.query_params.get("page", "1")
     try:
         page = max(1, int(page_str))
@@ -251,38 +288,50 @@ def admin_audit_page(req: Request):
     total_pages = max(1, (total + per_page - 1) // per_page)
 
     if not entries:
-        table = P("Auditilogis kirjeid ei leitud.", style="color:gray")
+        body: object = P("Auditilogis kirjeid ei leitud.", cls="muted-text")
     else:
+        columns = [
+            Column(key="time", label="Aeg", sortable=False),
+            Column(key="user_name", label="Kasutaja", sortable=False),
+            Column(key="action", label="Tegevus", sortable=False),
+            Column(key="detail", label="Detailid", sortable=False),
+        ]
         rows = []
         for entry in entries:
             ts = entry["created_at"]
-            ts_str = ts.strftime("%d.%m.%Y %H:%M") if ts else "—"
             rows.append(
-                Tr(
-                    Td(ts_str),
-                    Td(entry["user_name"]),
-                    Td(entry["action"]),
-                    Td(str(entry["detail"]) if entry["detail"] else "—"),
-                )
+                {
+                    "time": ts.strftime("%d.%m.%Y %H:%M") if ts else "—",
+                    "user_name": entry["user_name"],
+                    "action": entry["action"],
+                    "detail": str(entry["detail"]) if entry["detail"] else "—",
+                }
             )
-        table = Table(
-            Thead(Tr(Th("Aeg"), Th("Kasutaja"), Th("Tegevus"), Th("Detailid"))),
-            Tbody(*rows),
-        )
+        body = DataTable(columns=columns, rows=rows)
 
-    # Pagination nav
-    nav_items = []
-    if page > 1:
-        nav_items.append(A("Eelmine", href=f"/admin/audit?page={page - 1}"))
-    nav_items.append(Span(f" Lehekülg {page}/{total_pages} ({total} kirjet) "))
-    if page < total_pages:
-        nav_items.append(A("Järgmine", href=f"/admin/audit?page={page + 1}"))
+    pagination = Pagination(
+        current_page=page,
+        total_pages=total_pages,
+        base_url="/admin/audit",
+        page_size=per_page,
+        total=total,
+    )
 
-    return Titled(
-        "Auditilogi",
-        A("Tagasi adminipaneelile", href="/admin"),
-        table,
-        P(*nav_items),
+    content = (
+        H1("Auditilogi", cls="page-title"),
+        P(A("← Tagasi adminipaneelile", href="/admin"), cls="back-link"),
+        Card(
+            CardHeader(H3("Kirjed", cls="card-title")),
+            CardBody(body, pagination),
+        ),
+    )
+
+    return PageShell(
+        *content,
+        title="Auditilogi",
+        user=auth,
+        theme=theme,
+        active_nav="/admin",
     )
 
 
