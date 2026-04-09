@@ -16,6 +16,8 @@ from typing import Literal
 
 from fasthtml.common import *  # noqa: F403
 
+from app.ui.primitives.icon import Icon, IconSize
+
 ButtonVariant = Literal["primary", "secondary", "ghost", "danger"]
 ButtonSize = Literal["sm", "md", "lg"]
 
@@ -25,9 +27,9 @@ def _spinner():
     return Span(cls="btn-spinner", aria_hidden="true")
 
 
-def _icon_placeholder(name: str):
-    """Placeholder for Lucide icon integration — rendered as a span for now."""
-    return Span(cls=f"btn-icon-glyph icon-{name}", data_icon=name, aria_hidden="true")
+def _button_icon_size(size: ButtonSize) -> IconSize:
+    """Map a button size to the matching Icon size."""
+    return "sm" if size == "sm" else "md"
 
 
 def Button(
@@ -52,7 +54,7 @@ def Button(
     if loading:
         inner.append(_spinner())
     elif icon:
-        inner.append(_icon_placeholder(icon))
+        inner.append(Icon(icon, size=_button_icon_size(size)))
     inner.extend(children)
 
     return ft_hx(
@@ -84,7 +86,7 @@ def IconButton(
 
     return ft_hx(
         "button",
-        _icon_placeholder(icon),
+        Icon(icon, size=_button_icon_size(size)),
         cls=classes,
         type=kwargs.pop("type", "button"),
         aria_label=aria_label,

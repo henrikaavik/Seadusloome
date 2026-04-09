@@ -45,9 +45,11 @@ def FormField(
     error_id = f"{name}-error"
     help_id = f"{name}-help"
 
-    # Link input to help and error for a11y. When a live validator is wired
-    # OR an error is currently rendered, the error id is always referenced
-    # so that screen readers pick up later DOM updates from HTMX swaps.
+    # Link input to help and error for a11y. The error id is referenced
+    # only when there is an error currently rendered or a live validator
+    # may stream one in via HTMX. Without either, exposing an empty error
+    # div via ``aria-describedby`` makes screen readers announce a stray
+    # blank label on every focus, which we do not want (#421).
     described_by = []
     if help:
         described_by.append(help_id)
@@ -86,11 +88,22 @@ def FormField(
     if required:
         label_children.append(Span(" *", cls="form-field-required", aria_hidden="true"))
 
+    # Hide the error placeholder from assistive tech when no validator is
+    # attached and no error is present, so screen readers do not announce
+    # an empty alert region (#421).
+    error_div = Div(
+        error or "",
+        id=error_id,
+        cls="form-field-error",
+        role="alert" if error else None,
+        hidden=(not error and not validator),
+    )
+
     return Div(
         Label(*label_children, fr=field_id, cls="form-field-label"),
         input_el,
         Small(help, id=help_id, cls="form-field-help") if help else None,
-        Div(error or "", id=error_id, cls="form-field-error", role="alert" if error else None),
+        error_div,
         cls=wrapper_cls,
         **kwargs,
     )

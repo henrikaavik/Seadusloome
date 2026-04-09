@@ -1,5 +1,11 @@
+import os
+from pathlib import Path
+
 from fasthtml.common import *
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.requests import Request
+from starlette.staticfiles import StaticFiles
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app.auth.middleware import SKIP_PATHS, auth_before
 from app.auth.organizations import register_org_routes
@@ -13,20 +19,50 @@ from app.templates.admin_dashboard import register_admin_routes
 from app.templates.dashboard import index_redirect, register_dashboard_routes
 from app.ui.design_system_pages import register_design_system_routes
 from app.ui.forms.live_validation import register_validation_routes
+from app.ui.primitives.button import Button  # noqa: F401  -- shadow guard #419
+from app.ui.theme import THEME_INIT_SCRIPT
+
+_STATIC_DIR = Path(__file__).parent / "static"
+
+# Head tags hoisted into <head> by FastHTML. The theme init script must run
+# before the first paint to avoid a flash of the wrong theme (FOUC); it is
+# included here rather than in page handlers because inline Script() tags
+# returned from handlers land in <body>, not <head>.
+_HDRS = (
+    Script(THEME_INIT_SCRIPT),
+    Meta(charset="utf-8"),
+    Meta(name="viewport", content="width=device-width, initial-scale=1"),
+    Meta(name="color-scheme", content="light dark"),
+    Link(rel="stylesheet", href="/static/css/fonts.css"),
+    Link(rel="stylesheet", href="/static/css/tokens.css"),
+    Link(rel="stylesheet", href="/static/css/ui.css"),
+)
 
 bware = Beforeware(auth_before, skip=SKIP_PATHS)
 # pico=False: using custom design system (app/ui) instead of Pico CSS.
-app, rt = fast_app(before=bware, pico=False)
+app, rt = fast_app(before=bware, pico=False, hdrs=_HDRS)
+
+# Trust X-Forwarded-* headers from the reverse proxy (Traefik/Coolify) so
+# that request.url.scheme, request.client.host, etc. reflect the original
+# client request rather than the proxy hop.
+app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
+
+# TrustedHostMiddleware is too strict for local dev (it rejects the
+# `testserver` host used by Starlette's TestClient and plain `localhost`),
+# so enable it only when we're running in a non-development environment.
+if os.environ.get("APP_ENV", "development") != "development":
+    app.add_middleware(
+        TrustedHostMiddleware,
+        allowed_hosts=["seadusloome.sixtyfour.ee", "*.sixtyfour.ee"],
+    )
 
 # FastHTML adds a default static-file route at `/{fname:path}.{ext:static}`
 # that serves from the current working directory. Our assets live under
 # `app/static/` and are referenced via absolute URLs like
 # `/static/css/tokens.css`, so we strip the default route and mount an
 # explicit StaticFiles at /static pointing at the correct directory.
-from starlette.staticfiles import StaticFiles  # noqa: E402
-
 app.routes[:] = [r for r in app.routes if getattr(r, "name", None) != "static_route_exts_get"]
-app.mount("/static", StaticFiles(directory="app/static"), name="static")
+app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
 register_auth_routes(rt)
 register_org_routes(rt)

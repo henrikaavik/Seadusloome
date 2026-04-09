@@ -6,6 +6,7 @@ credential rejection without requiring a running PostgreSQL instance.
 
 from __future__ import annotations
 
+import importlib
 from datetime import UTC, datetime, timedelta
 
 import jwt
@@ -226,3 +227,62 @@ class TestGetCurrentUser:
         payload = {"sub": "uid", "email": "a@b.ee", "exp": now + timedelta(hours=1)}
         token = jwt.encode(payload, SECRET_KEY, algorithm=JWT_ALGORITHM)
         assert provider.get_current_user(token) is None
+
+
+# ---------------------------------------------------------------------------
+# SECRET_KEY environment enforcement (#398)
+# ---------------------------------------------------------------------------
+
+
+class TestSecretKeyEnv:
+    """``SECRET_KEY`` must be required outside development.
+
+    The module reads ``SECRET_KEY`` at import time, so we reimport
+    ``app.auth.jwt_provider`` after mutating ``os.environ`` via
+    ``monkeypatch`` to exercise both branches of ``_load_secret_key``.
+    """
+
+    def test_dev_env_allows_missing_secret(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.delenv("SECRET_KEY", raising=False)
+        monkeypatch.setenv("APP_ENV", "development")
+        module = importlib.reload(importlib.import_module("app.auth.jwt_provider"))
+        try:
+            assert module.SECRET_KEY == module._DEV_SECRET_KEY
+        finally:
+            importlib.reload(module)  # restore real value for later tests
+
+    def test_non_dev_env_requires_secret(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.delenv("SECRET_KEY", raising=False)
+        monkeypatch.setenv("APP_ENV", "production")
+        # reload() re-executes module top-level and should raise.
+        with pytest.raises(RuntimeError, match="SECRET_KEY"):
+            importlib.reload(importlib.import_module("app.auth.jwt_provider"))
+        # Restore a working module state for downstream tests.
+        monkeypatch.setenv("APP_ENV", "development")
+        importlib.reload(importlib.import_module("app.auth.jwt_provider"))
+
+
+# ---------------------------------------------------------------------------
+# DATABASE_URL environment enforcement (#399)
+# ---------------------------------------------------------------------------
+
+
+class TestDatabaseUrlEnv:
+    """``DATABASE_URL`` must be required outside development."""
+
+    def test_dev_env_allows_missing_database_url(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        monkeypatch.setenv("APP_ENV", "development")
+        module = importlib.reload(importlib.import_module("app.db"))
+        try:
+            assert module.DATABASE_URL == module._DEV_DATABASE_URL
+        finally:
+            importlib.reload(module)
+
+    def test_non_dev_env_requires_database_url(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        monkeypatch.setenv("APP_ENV", "production")
+        with pytest.raises(RuntimeError, match="DATABASE_URL"):
+            importlib.reload(importlib.import_module("app.db"))
+        monkeypatch.setenv("APP_ENV", "development")
+        importlib.reload(importlib.import_module("app.db"))

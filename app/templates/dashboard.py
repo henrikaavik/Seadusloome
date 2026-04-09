@@ -11,6 +11,7 @@ from starlette.responses import RedirectResponse
 from app.auth.audit import log_action
 from app.db import get_connection as _connect
 from app.ui.data.data_table import Column, DataTable
+from app.ui.forms.app_form import AppForm
 from app.ui.forms.form_field import FormField
 from app.ui.layout import PageShell
 from app.ui.primitives.badge import Badge
@@ -198,7 +199,7 @@ def _bookmarks_card(bookmarks: list[dict]):  # type: ignore[type-arg]
                 key="actions",
                 label="Tegevused",
                 sortable=False,
-                render=lambda r: Form(
+                render=lambda r: AppForm(
                     Button(
                         "Eemalda",
                         type="submit",
@@ -221,7 +222,7 @@ def _bookmarks_card(bookmarks: list[dict]):  # type: ignore[type-arg]
         ]
         table = DataTable(columns=columns, rows=rows)
 
-    add_form = Form(
+    add_form = AppForm(
         FormField(name="entity_uri", label="URI", type="text", required=True),
         FormField(name="label", label="Nimi", type="text"),
         Button("Lisa järjehoidja", type="submit", variant="primary"),

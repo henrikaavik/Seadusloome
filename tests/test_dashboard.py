@@ -19,6 +19,10 @@ class TestDashboardAuth:
         response = client.get("/dashboard")
         assert response.status_code == 303
         assert response.headers["location"] == "/auth/login"
+        # Make sure the redirect carried no auth cookies (#423).
+        for h in response.headers.get_list("set-cookie"):
+            assert "access_token=" not in h
+            assert "refresh_token=" not in h
 
     def test_index_redirects_unauthenticated(self):
         from app.main import app
@@ -90,6 +94,7 @@ class TestAdminDashboard:
         response = client.get("/admin")
         assert response.status_code == 303
         assert response.headers["location"] == "/auth/login"
+        assert response.text == "" or "Sisselogimine" not in response.text
 
     def test_admin_audit_redirects_unauthenticated(self):
         from app.main import app
@@ -98,6 +103,8 @@ class TestAdminDashboard:
         response = client.get("/admin/audit")
         assert response.status_code == 303
         assert response.headers["location"] == "/auth/login"
+        # The redirect must not leak any audit content.
+        assert "Auditilogi" not in response.text
 
 
 # ---------------------------------------------------------------------------

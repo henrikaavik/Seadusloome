@@ -8,6 +8,7 @@ from starlette.responses import RedirectResponse
 
 from app.auth.cookies import clear_auth_cookie, set_auth_cookie
 from app.auth.jwt_provider import JWTAuthProvider
+from app.ui.forms.app_form import AppForm
 from app.ui.forms.form_field import FormField
 from app.ui.layout import PageShell
 from app.ui.primitives.button import Button
@@ -29,7 +30,7 @@ def _login_form(email: str = "", error: str | None = None):
         CardHeader(H2("Sisselogimine", cls="card-title")),
         CardBody(
             Alert("Vale e-post või parool.", variant="danger") if error else None,
-            Form(
+            AppForm(
                 FormField(
                     name="email",
                     label="E-post",

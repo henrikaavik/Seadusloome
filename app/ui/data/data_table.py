@@ -6,9 +6,12 @@ NFR §10.2 (sortable columns announce sort state via ``aria-sort``).
 Design notes:
     - Columns are declared as ``Column`` dataclasses with optional custom
       ``render`` callables for per-cell markup.
-    - Sortable headers toggle direction via an HTMX ``hx-get`` to the same
-      URL with ``?sort=<key>&dir=<asc|desc>`` query params. The server
-      re-renders the table and HTMX swaps it in place.
+    - Sortable headers toggle direction via a normal anchor link to the
+      same URL with ``?sort=<key>&dir=<asc|desc>`` query params, causing
+      a full-page reload. Phase 2 will introduce per-table HTMX endpoints
+      that return just the table partial; until then sort/paginate is
+      plain navigation so we don't accidentally swap a full PageShell
+      document into the page body.
     - On viewports narrower than 768px the table collapses to a stacked
       card layout via CSS alone (``data-label`` attributes drive the
       pseudo-element labels — no JS needed).
@@ -84,12 +87,12 @@ def _header_cell(col: Column, sort_by: str | None, sort_dir: SortDir):
     next_dir = _next_dir(col, sort_by, sort_dir)
     indicator = _sort_indicator(col, sort_by, sort_dir)
     classes = f"data-table-th data-table-sortable {align_cls}".strip()
+    # Plain anchor: handlers re-render the full PageShell on sort, so an
+    # HTMX swap would replace the page body with another full document.
+    # Phase 2 will introduce table-partial endpoints; see module docstring.
     link = A(  # noqa: F405
         f"{col.label}{indicator}",
         href=f"?sort={col.key}&dir={next_dir}",
-        hx_get=f"?sort={col.key}&dir={next_dir}",
-        hx_target="closest .data-table-wrapper",
-        hx_swap="outerHTML",
         cls="data-table-sort-link",
     )
     return Th(link, cls=classes, scope="col", aria_sort=aria_sort)  # noqa: F405

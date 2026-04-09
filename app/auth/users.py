@@ -14,6 +14,7 @@ from app.auth.organizations import list_orgs
 from app.auth.roles import require_role
 from app.db import get_connection as _connect
 from app.ui.data.data_table import Column, DataTable
+from app.ui.forms.app_form import AppForm
 from app.ui.forms.form_field import FormField, FormSelectField
 from app.ui.layout import PageShell
 from app.ui.primitives.badge import Badge, StatusBadge
@@ -247,7 +248,7 @@ def _user_table(users: list[dict], *, show_org: bool, base_path: str):  # type: 
         ]
         if row["_is_active"]:
             actions.append(
-                Form(
+                AppForm(
                     Button(
                         "Deaktiveeri",
                         type="submit",
@@ -340,7 +341,7 @@ def admin_user_new_form(req: Request):
     org_options: list = [("", "— Ei kuulu —")] + [(o["id"], o["name"]) for o in orgs]
     role_options = [(r, _ROLE_LABELS.get(r, r)) for r in VALID_ROLES]
 
-    form = Form(
+    form = AppForm(
         FormField(name="email", label="E-post", type="email", required=True),
         FormField(name="password", label="Parool", type="password", required=True),
         FormField(name="full_name", label="Täisnimi", type="text", required=True),
@@ -406,7 +407,7 @@ def admin_user_role_form(req: Request, user_id: str):
 
     role_options = [(r, _ROLE_LABELS.get(r, r)) for r in VALID_ROLES]
 
-    form = Form(
+    form = AppForm(
         FormSelectField(
             name="role",
             label="Roll",
@@ -527,7 +528,7 @@ def org_user_new_form(req: Request):
 
     role_options = [(r, _ROLE_LABELS.get(r, r)) for r in ORG_ASSIGNABLE_ROLES]
 
-    form = Form(
+    form = AppForm(
         FormField(name="email", label="E-post", type="email", required=True),
         FormField(name="password", label="Parool", type="password", required=True),
         FormField(name="full_name", label="Täisnimi", type="text", required=True),
@@ -598,7 +599,7 @@ def org_user_role_form(req: Request, user_id: str):
 
     role_options = [(r, _ROLE_LABELS.get(r, r)) for r in ORG_ASSIGNABLE_ROLES]
 
-    form = Form(
+    form = AppForm(
         FormSelectField(
             name="role",
             label="Roll",

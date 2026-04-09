@@ -87,14 +87,16 @@ def test_pagination_shows_current_and_total():
 def test_pagination_first_page_disables_prev():
     html = to_xml(Pagination(current_page=1, total_pages=5, base_url="/x"))
     assert "pagination-disabled" in html
-    # Prev link should be rendered as disabled span, not anchor
-    assert 'aria-disabled="true"' in html
+    # Prev control should be a real <button disabled>, not a span (#406).
+    assert "<button" in html
+    assert "disabled" in html
 
 
 def test_pagination_last_page_disables_next():
     html = to_xml(Pagination(current_page=5, total_pages=5, base_url="/x"))
     assert "pagination-disabled" in html
-    assert 'aria-disabled="true"' in html
+    assert "<button" in html
+    assert "disabled" in html
 
 
 def test_pagination_with_zero_rows():
@@ -117,3 +119,26 @@ def test_pagination_preserves_existing_query_params():
     assert "sort=name" in html
     assert "dir=asc" in html
     assert "page=2" in html
+
+
+def test_pagination_does_not_double_encode_multibyte_query():
+    """``_build_url`` must not re-encode already-percent-encoded values (#405)."""
+    html = to_xml(Pagination(current_page=1, total_pages=3, base_url="/drafts?q=%C3%BC&page=1"))
+    # The single-encoded value should survive untouched.
+    assert "q=%C3%BC" in html
+    # And must not be double-encoded into %25C3%25BC.
+    assert "%25C3%25BC" not in html
+
+
+def test_data_table_sort_link_has_no_hx_attrs():
+    """Sort headers must be plain anchors after the #404 fix."""
+    html = to_xml(DataTable(_cols(), _rows(), sort_by="name", sort_dir="asc"))
+    assert "hx-get" not in html
+    assert "hx-target" not in html
+
+
+def test_pagination_links_have_no_hx_attrs():
+    """Pagination links must be plain anchors after the #404 fix."""
+    html = to_xml(Pagination(current_page=2, total_pages=5, base_url="/x"))
+    assert "hx-get" not in html
+    assert "hx-target" not in html

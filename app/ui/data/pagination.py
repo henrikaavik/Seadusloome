@@ -2,9 +2,14 @@
 
 Follows the design system spec §4.3 and NFR §10 (accessible nav landmark,
 ``aria-current="page"`` on the active link, Estonian copy).
+
+Pagination links navigate via plain ``<a href>`` anchors. The HTMX swap
+behaviour was removed in Phase 1.5 because the matching handlers return
+full PageShell documents, not partials; partial swap is deferred to
+Phase 2 when we add table-specific HTMX endpoints.
 """
 
-from urllib.parse import urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from fasthtml.common import *  # noqa: F403
 
@@ -16,15 +21,11 @@ def _build_url(base_url: str, page: int) -> str:
 
     Preserves any existing query string on ``base_url`` so callers can pass
     URLs that already include filters such as ``?sort=name&dir=asc``.
+    Uses ``parse_qsl`` so percent-encoded values are decoded once and
+    re-encoded once — no double encoding of multibyte characters.
     """
     parts = urlparse(base_url)
-    existing = [
-        (k, v)
-        for kv in parts.query.split("&")
-        if kv
-        for k, _, v in [kv.partition("=")]
-        if k != "page"
-    ]
+    existing = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k != "page"]
     existing.append(("page", str(page)))
     new_query = urlencode(existing)
     return urlunparse(parts._replace(query=new_query))
@@ -49,9 +50,20 @@ def _page_window(current: int, total: int) -> list[int | str]:
 
 
 def _link(label: str, url: str | None, *, active: bool = False, disabled: bool = False):
-    """Render a single pagination anchor — or a disabled span when inactive."""
+    """Render a single pagination control.
+
+    Active page numbers and reachable navigation steps are anchors so they
+    keep working without JavaScript. The disabled state is rendered as a
+    real ``<button disabled>`` instead of a span — ``aria-disabled`` on a
+    non-focusable element is invalid and AT-confusing.
+    """
     if disabled or url is None:
-        return Span(label, cls="pagination-link pagination-disabled", aria_disabled="true")  # noqa: F405
+        return Button(  # noqa: F405
+            label,
+            type="button",
+            cls="pagination-link pagination-disabled",
+            disabled=True,
+        )
 
     classes = "pagination-link"
     attrs: dict = {}
@@ -62,9 +74,6 @@ def _link(label: str, url: str | None, *, active: bool = False, disabled: bool =
     return A(  # noqa: F405
         label,
         href=url,
-        hx_get=url,
-        hx_target="closest .pagination-wrapper",
-        hx_swap="outerHTML",
         cls=classes,
         **attrs,
     )

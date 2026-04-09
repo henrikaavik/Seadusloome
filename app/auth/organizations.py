@@ -12,6 +12,7 @@ from app.auth.audit import log_action
 from app.auth.roles import require_role
 from app.db import get_connection as _connect
 from app.ui.data.data_table import Column, DataTable
+from app.ui.forms.app_form import AppForm
 from app.ui.forms.form_field import FormField
 from app.ui.layout import PageShell
 from app.ui.primitives.button import Button
@@ -187,7 +188,7 @@ def _org_list_page(req: Request, orgs: list[dict], message: str | None = None): 
         ]
         if row["_user_count"] == 0:
             actions.append(
-                Form(
+                AppForm(
                     Button(
                         "Kustuta",
                         type="submit",
@@ -259,7 +260,7 @@ def _org_form_page(req: Request, org: dict | None = None):  # type: ignore[type-
     name_val = org["name"] if is_edit else ""
     slug_val = org["slug"] if is_edit else ""
 
-    form = Form(
+    form = AppForm(
         FormField(
             name="name",
             label="Nimi",

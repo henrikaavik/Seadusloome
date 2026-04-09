@@ -1,5 +1,6 @@
 """Form building blocks: FormField wrapper, validators, live validation."""
 
+from app.ui.forms.app_form import AppForm
 from app.ui.forms.form_field import FormField
 from app.ui.forms.live_validation import register_validation_routes
 from app.ui.forms.validators import (
@@ -15,6 +16,7 @@ from app.ui.forms.validators import (
 )
 
 __all__ = [
+    "AppForm",
     "FormField",
     "ValidationError",
     "get_validator",

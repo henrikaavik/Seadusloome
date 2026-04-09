@@ -143,6 +143,29 @@ def test_form_field_htmx_validator():
     assert 'hx-target="#email-error"' in html
 
 
+def test_form_field_empty_error_is_hidden_from_a11y():
+    """No error and no validator -> the placeholder div must be hidden (#421)."""
+    field = FormField(name="email", label="E-post")
+    html = str(field)
+    # The placeholder div is still in the DOM, but hidden from AT.
+    assert 'id="email-error"' in html
+    error_div_chunk = html.split('id="email-error"', 1)[0].rsplit("<div", 1)[1]
+    assert "hidden" in error_div_chunk
+    # And the input must NOT advertise the error id via aria-describedby
+    # at all when there is no error and no validator wired.
+    assert "aria-describedby" not in html
+
+
+def test_form_field_with_validator_keeps_error_visible_to_a11y():
+    """A live validator means HTMX may stream an error in -- keep visible."""
+    field = FormField(name="email", label="E-post", validator="email")
+    html = str(field)
+    # The placeholder div is in the DOM and NOT hidden so HTMX swaps work.
+    assert 'id="email-error"' in html
+    error_div = html.split('id="email-error"', 1)[1].split(">", 1)[0]
+    assert "hidden" not in error_div
+
+
 def test_form_textarea_field():
     field = FormTextareaField(name="bio", label="Bio", rows=5)
     html = str(field)
@@ -168,27 +191,47 @@ def test_form_select_field():
 
 
 def test_live_validation_email_valid():
+    from bs4 import BeautifulSoup
+    from bs4.element import Tag
+
     client = TestClient(app)
     resp = client.post("/api/validate/email", data={"email": "user@example.ee"})
     assert resp.status_code == 200
-    assert "form-field-error" in resp.text
-    # No visible error content
-    assert "kehtiv" not in resp.text
+    soup = BeautifulSoup(resp.text, "html.parser")
+    error_div = soup.find(id="email-error")
+    assert isinstance(error_div, Tag)
+    classes = error_div.get("class") or []
+    assert "form-field-error" in classes
+    # Empty error placeholder for the success branch.
+    assert error_div.get_text(strip=True) == ""
+    assert error_div.get("role") is None
 
 
 def test_live_validation_email_invalid():
+    from bs4 import BeautifulSoup
+    from bs4.element import Tag
+
     client = TestClient(app)
     resp = client.post("/api/validate/email", data={"email": "bad"})
     assert resp.status_code == 200
-    assert 'role="alert"' in resp.text
-    assert "kehtiv" in resp.text
+    soup = BeautifulSoup(resp.text, "html.parser")
+    error_div = soup.find(id="email-error")
+    assert isinstance(error_div, Tag)
+    assert error_div.get("role") == "alert"
+    assert "kehtiv" in error_div.get_text()
 
 
 def test_live_validation_password_short():
+    from bs4 import BeautifulSoup
+    from bs4.element import Tag
+
     client = TestClient(app)
     resp = client.post("/api/validate/password", data={"password": "short"})
     assert resp.status_code == 200
-    assert "8 tähemärki" in resp.text
+    soup = BeautifulSoup(resp.text, "html.parser")
+    error_div = soup.find(id="password-error")
+    assert isinstance(error_div, Tag)
+    assert "8 tähemärki" in error_div.get_text()
 
 
 def test_live_validation_unknown_validator():
@@ -196,3 +239,4 @@ def test_live_validation_unknown_validator():
     resp = client.post("/api/validate/unknown", data={"unknown": "x"})
     # Unknown validator -> 404 so form typos surface immediately.
     assert resp.status_code == 404
+    assert "Unknown validator" in resp.text

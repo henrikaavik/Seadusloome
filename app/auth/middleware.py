@@ -16,16 +16,34 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_provider = JWTAuthProvider()
+_provider: JWTAuthProvider | None = None
 
-# Paths that never require authentication.
+
+def _get_provider() -> JWTAuthProvider:
+    """Return a cached JWTAuthProvider, instantiated on first use.
+
+    Lazy construction lets ``import app.main`` succeed in test/dev
+    environments that do not export SECRET_KEY / DATABASE_URL at import
+    time, as long as tests never actually exercise the middleware.
+    """
+    global _provider
+    if _provider is None:
+        _provider = JWTAuthProvider()
+    return _provider
+
+
+# Paths that never require authentication. FastHTML's Beforeware uses
+# ``re.fullmatch`` for skip-pattern matching, so bare ``/explorer`` would
+# only match the exact string; sub-paths like ``/explorer/foo`` need an
+# explicit optional trailing segment.
 SKIP_PATHS: list[str] = [
     r"/auth/login",
     r"/static/.*",
     r"/favicon\.ico",
-    r"/explorer",
+    r"/explorer(/.*)?",
     r"/api/explorer/.*",
     r"/api/health",
+    r"/api/ping",
     r"/ws/explorer",
     r"/webhooks/github",
     r"/api/validate/.*",
@@ -45,20 +63,22 @@ def auth_before(req: Request) -> Response | None:
     access_token: str | None = req.cookies.get("access_token")
     refresh_token: str | None = req.cookies.get("refresh_token")
 
+    provider = _get_provider()
+
     # Try the access token first.
     if access_token:
-        user = _provider.get_current_user(access_token)
+        user = provider.get_current_user(access_token)
         if user is not None:
             req.scope["auth"] = user
             return None
 
     # Access token missing or invalid -- attempt silent refresh.
     if refresh_token:
-        user = _provider.verify_refresh_token(refresh_token)
+        user = provider.verify_refresh_token(refresh_token)
         if user is not None:
             # Rotate tokens: delete old refresh session, create new pair.
-            _provider.delete_refresh_token(refresh_token)
-            new_access, new_refresh = _provider.create_tokens(user)
+            provider.delete_refresh_token(refresh_token)
+            new_access, new_refresh = provider.create_tokens(user)
 
             # We cannot simply set cookies on the current response because the
             # Beforeware runs *before* the handler and the response object does

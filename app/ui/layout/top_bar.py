@@ -7,7 +7,7 @@ from app.auth.provider import UserDict
 _THEME_CYCLE_JS = (
     "const t = (document.cookie.match(/theme=([^;]+)/) || [])[1] || 'system';"
     "const next = {system:'light', light:'dark', dark:'system'}[t];"
-    "document.cookie = 'theme=' + next + '; path=/; max-age=31536000; samesite=lax';"
+    "document.cookie = 'theme=' + next + '; path=/; max-age=31536000; SameSite=Lax';"
     "if (next === 'system') document.documentElement.removeAttribute('data-theme');"
     "else document.documentElement.setAttribute('data-theme', next);"
     "const icons = {light: '\u2600', dark: '\u263e', system: '\u25d0'};"

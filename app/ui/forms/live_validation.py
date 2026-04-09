@@ -12,7 +12,7 @@ import re
 
 from fasthtml.common import *  # noqa: F403
 from starlette.requests import Request
-from starlette.responses import HTMLResponse
+from starlette.responses import PlainTextResponse
 
 from app.ui.forms.validators import get_validator
 
@@ -21,16 +21,21 @@ from app.ui.forms.validators import get_validator
 _NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
 
-async def _validate_handler(req: Request, validator_name: str) -> HTMLResponse:
-    """POST /api/validate/{validator_name} — validate a single field."""
+async def _validate_handler(req: Request, validator_name: str):
+    """POST /api/validate/{validator_name} — validate a single field.
+
+    Returns a bare ``Div`` FT for the success path so FastHTML's normal
+    HTML rendering kicks in (and HTMX swap-target attributes work). Error
+    paths return a plain-text response with the appropriate status code.
+    """
     if not _NAME_RE.match(validator_name):
-        return HTMLResponse("Invalid validator name", status_code=400)
+        return PlainTextResponse("Invalid validator name", status_code=400)
 
     validator = get_validator(validator_name)
     if validator is None:
         # Unknown validator — return 404 rather than silently accepting
         # everything so form typos surface immediately.
-        return HTMLResponse("Unknown validator", status_code=404)
+        return PlainTextResponse("Unknown validator", status_code=404)
 
     form = await req.form()
     # The field name in the form body matches the validator name by default
@@ -38,7 +43,7 @@ async def _validate_handler(req: Request, validator_name: str) -> HTMLResponse:
     field_name_raw = form.get("field") or validator_name
     field_name = str(field_name_raw)
     if not _NAME_RE.match(field_name):
-        return HTMLResponse("Invalid field name", status_code=400)
+        return PlainTextResponse("Invalid field name", status_code=400)
 
     value = form.get(field_name) or form.get("value") or ""
     # Coerce possible UploadFile / list to str
@@ -47,22 +52,22 @@ async def _validate_handler(req: Request, validator_name: str) -> HTMLResponse:
     error = validator(value)
 
     error_id = f"{field_name}-error"
-    # Build via FastHTML so all attribute/text content is auto-escaped.
+    # Return the bare FT div — FastHTML auto-escapes attribute/text content
+    # and serialises it to HTML for us. Avoiding the manual ``to_xml`` +
+    # ``HTMLResponse`` wrap keeps the partial pipeline consistent with
+    # other HTMX endpoints.
     if error:
-        div = Div(  # noqa: F405
+        return Div(  # noqa: F405
             error,
             id=error_id,
             cls="form-field-error",
             role="alert",
         )
-    else:
-        div = Div(  # noqa: F405
-            "",
-            id=error_id,
-            cls="form-field-error",
-        )
-
-    return HTMLResponse(to_xml(div))  # noqa: F405
+    return Div(  # noqa: F405
+        "",
+        id=error_id,
+        cls="form-field-error",
+    )
 
 
 def register_validation_routes(rt) -> None:  # type: ignore[no-untyped-def]

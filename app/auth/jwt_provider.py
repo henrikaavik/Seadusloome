@@ -14,7 +14,23 @@ import psycopg
 from app.auth.provider import AuthProvider, UserDict
 from app.db import get_connection
 
-SECRET_KEY = os.environ.get("SECRET_KEY", "dev-secret")
+# Dev-only fallback. We refuse to start in any non-development environment
+# without an explicitly set SECRET_KEY so a misconfigured deployment cannot
+# silently sign tokens with a well-known value.
+_DEV_SECRET_KEY = "dev-secret-do-not-use-in-production"
+
+
+def _load_secret_key() -> str:
+    """Return the JWT signing secret, enforcing an explicit value off-dev."""
+    value = os.environ.get("SECRET_KEY")
+    if value:
+        return value
+    if os.environ.get("APP_ENV", "development") == "development":
+        return _DEV_SECRET_KEY
+    raise RuntimeError("SECRET_KEY must be set in non-development environments")
+
+
+SECRET_KEY = _load_secret_key()
 
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 REFRESH_TOKEN_EXPIRE_DAYS = 30

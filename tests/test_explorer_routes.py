@@ -120,10 +120,15 @@ class TestExplorerOverview:
             resp = client.get("/api/explorer/overview")
 
         assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("application/json")
         data = resp.json()
         assert "data" in data
         assert "meta" in data
         assert isinstance(data["data"], list)
+        # Each row should carry name + count after the route's transform.
+        for row in data["data"]:
+            assert "name" in row
+            assert "count" in row
 
     def test_returns_category_names(self):
         with patch("app.explorer.routes._get_client") as mock_get:
@@ -132,6 +137,7 @@ class TestExplorerOverview:
             client = TestClient(app)
             resp = client.get("/api/explorer/overview")
 
+        assert resp.status_code == 200
         categories = resp.json()["data"]
         names = [c["name"] for c in categories]
         assert "Class" in names
@@ -150,10 +156,15 @@ class TestExplorerCategory:
             )
 
         assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("application/json")
         data = resp.json()
         assert data["meta"]["page"] == 1
         assert data["meta"]["total"] == 2
         assert len(data["data"]) == 2
+        # Each entity row carries the fields the D3 client expects.
+        for row in data["data"]:
+            assert "uri" in row
+            assert "label" in row
 
     def test_pagination_params(self):
         with patch("app.explorer.routes._get_client") as mock_get:
@@ -166,15 +177,20 @@ class TestExplorerCategory:
                 "?page=3&size=10"
             )
 
+        assert resp.status_code == 200
         data = resp.json()
         assert data["meta"]["page"] == 3
         assert data["meta"]["size"] == 10
+        assert data["meta"]["total"] == 100
 
     def test_invalid_category_returns_400(self):
         client = TestClient(app)
         resp = client.get("/api/explorer/category/not-a-uri")
         assert resp.status_code == 400
-        assert "error" in resp.json()
+        body = resp.json()
+        assert "error" in body
+        assert isinstance(body["error"], str)
+        assert len(body["error"]) > 0
 
 
 class TestExplorerEntity:

@@ -5,6 +5,10 @@ from __future__ import annotations
 from fasthtml.common import *
 from starlette.requests import Request
 
+# Re-import our design-system Button after the wildcard so the symbol does
+# not silently fall back to FastHTML's unstyled Button (#419).
+from app.ui.primitives.button import Button  # noqa: E402
+
 
 def explorer_page(req: Request):
     """GET /explorer -- full-screen interactive ontology graph."""

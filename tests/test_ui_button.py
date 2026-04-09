@@ -38,10 +38,30 @@ def test_button_loading_shows_spinner_and_disables():
     assert "btn-disabled" in html
 
 
-def test_button_icon_renders_placeholder_when_not_loading():
+def test_button_icon_renders_svg_use_when_not_loading():
+    """Buttons with ``icon=`` must render the real Icon primitive (#402).
+
+    Previously a span placeholder was emitted; now the Icon component
+    references the self-hosted Lucide sprite.
+    """
     html = to_xml(Button("Lisa", icon="plus"))
-    assert "btn-icon-glyph" in html
-    assert 'data-icon="plus"' in html
+    assert "<svg" in html
+    assert "/static/icons/sprite.svg#plus" in html
+    assert "icon icon-md" in html
+    # Spinner is mutually exclusive with icon — must not appear here.
+    assert "btn-spinner" not in html
+
+
+def test_button_sm_icon_uses_sm_size():
+    html = to_xml(Button("Add", icon="plus", size="sm"))
+    assert "icon icon-sm" in html
+
+
+def test_icon_button_renders_real_icon_svg():
+    """IconButton must render the real Icon primitive too (#402)."""
+    html = to_xml(IconButton("trash", aria_label="Kustuta"))
+    assert "<svg" in html
+    assert "/static/icons/sprite.svg#trash" in html
 
 
 def test_button_custom_cls_is_appended_not_replaced():

@@ -15,6 +15,7 @@ from app.ui.data.data_table import Column, DataTable
 from app.ui.data.pagination import Pagination
 from app.ui.layout import PageShell
 from app.ui.primitives.badge import Badge, StatusBadge
+from app.ui.primitives.button import Button  # noqa: F401  -- shadow guard #419
 from app.ui.surfaces.card import Card, CardBody, CardHeader
 from app.ui.theme import get_theme_from_request
 
