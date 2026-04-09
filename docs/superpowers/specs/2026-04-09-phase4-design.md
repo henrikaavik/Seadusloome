@@ -1,8 +1,12 @@
 # Phase 4 Design: Collaboration + Admin
 
-**Status:** Approved
+**Status:** Approved (reconciled 2026-04-09 against `docs/nfr-baseline.md`)
 **Date:** 2026-04-09
-**Depends on:** Phase 1 (auth, orgs, users), Phase 2 (drafts, reports), Phase 3 (chat, drafter)
+**Depends on:** Phase 1 (auth, orgs, users), Phase 2 (drafts, reports, notifications infrastructure), Phase 3 (chat, drafter)
+
+**Non-functional requirements:** This phase must meet all requirements in [`docs/nfr-baseline.md`](../../nfr-baseline.md). Annotation access is org-scoped per NFR §4.4 permission matrix. Annotation events are audited per NFR §5. Admin dashboard respects the role matrix — `cost dashboard` visible to `org_admin` for their own org only.
+
+**Note on notifications:** The notifications table and bell UI infrastructure are **created in Phase 2**, not Phase 4. Phase 4 adds the remaining notification wire-ups (annotation_reply, drafter_session_complete, sync_failed, cost_alert) on top of Phase 2's infrastructure.
 
 ---
 

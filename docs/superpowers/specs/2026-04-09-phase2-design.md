@@ -1,8 +1,10 @@
 # Phase 2 Design: Document Upload + Impact Analysis
 
-**Status:** Approved
+**Status:** Approved (reconciled 2026-04-09 against `docs/nfr-baseline.md`)
 **Date:** 2026-04-09
-**Depends on:** Phase 1 (auth, Jena, Postgres, Explorer API)
+**Depends on:** Phase 1 (auth, Jena, Postgres, Explorer API), Phase 1.5 (Design System Foundation)
+
+**Non-functional requirements:** This phase must meet all requirements in [`docs/nfr-baseline.md`](../../nfr-baseline.md). Every DoD in this spec inherits the NFR checklist (§15 of the NFR baseline). Contradictions between this spec and the NFR baseline are resolved in favour of the NFR baseline.
 
 ---
 
@@ -690,7 +692,7 @@ Estonian legislative formatting conventions (margins, font sizes, numbering) are
 Per CLAUDE.md and Q10 decision:
 
 - Draft files encrypted at rest (AES-256-GCM)
-- Database columns with draft content (`parsed_text`) in plain text but DB-level encryption assumed (Postgres TDE or encrypted volume)
+- Database columns with draft content (`parsed_text`, parsed metadata in `drafts`) **encrypted at application layer via Fernet** using the `DRAFT_ENCRYPTION_KEY`. DB-level volume encryption is a defense-in-depth second layer, not the primary control. ("Assumed" is not a control — see NFR baseline §6.)
 - Every access to a draft logged in `audit_log` with action, user, timestamp
 - Drafts scoped to their owner's org (reviewers can see org members' drafts, but not other orgs')
 - LLM API calls for entity extraction include only the draft text, not metadata like user ID
@@ -710,6 +712,37 @@ New audit action types:
 - `draft.delete`
 
 ---
+
+## 11a. Ontology Version Snapshots (reproducibility)
+
+Every `impact_reports` row stores `ontology_version` (git SHA of the ontology repo at analysis time). The report view shows this version prominently. If the ontology has changed since the report was generated, the report page displays a "Re-run against current ontology" banner.
+
+Implementation:
+- Sync pipeline records the latest ontology git SHA in `sync_log.ontology_version`
+- `analyze_impact` handler reads the current value from the most recent successful sync log and writes it to `impact_reports.ontology_version`
+- Sync pipeline refuses to start a new sync while any `analyze_impact` job is `running` (cooperative flag in `sync_log`)
+- Schema change: add `ontology_version TEXT NOT NULL` to `impact_reports`
+
+## 11b. Durable Notifications (moved from Phase 4)
+
+The WebSocket toast approach to async completion is brittle: if a user closes the tab during a 2-minute analysis, they miss the completion signal. To fix this, the `notifications` table and bell UI from the Phase 4 spec are **pulled forward to Phase 2**:
+
+- `notifications` table created as part of migration 004
+- Bell icon in `TopBar` shows unread count
+- `analyze_impact` handler creates a notification with a link to the report
+- Draft detail page uses HTMX polling (every 3s) as a fallback when WebSocket is unavailable
+
+Phase 4 retains the annotation-reply, drafter-complete, sync-failed, and cost-alert notification wire-ups but inherits the table and infrastructure from Phase 2.
+
+## 11c. Worker Process Isolation Option
+
+The Phase 2 spec describes an in-process thread pool. That is acceptable for the **pilot** but not for production deployment with 20+ active users. Before production rollout, the worker must be runnable as a separate Coolify container.
+
+Implementation:
+- Single entry point script `scripts/run_worker.py` that creates the queue + worker pool and runs the job loop standalone (no FastHTML)
+- Coolify service definition in `docker/docker-compose.yml` with a commented-out worker container (enable when needed)
+- Environment variable `WORKER_MODE=inproc|standalone` controls whether the FastHTML app also starts workers
+- Both modes share the same handler code
 
 ## 12. Dependencies
 

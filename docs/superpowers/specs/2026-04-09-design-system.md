@@ -1,8 +1,11 @@
 # Design System Spec
 
-**Status:** Approved
+**Status:** Approved (reconciled 2026-04-09 against `docs/nfr-baseline.md`)
 **Date:** 2026-04-09
 **Dependencies:** Phase 1 (foundation for all subsequent phases)
+**Delivery:** This is **Phase 1.5** — a gating milestone that blocks Phase 2. Cannot be treated as optional.
+
+**Non-functional requirements:** This phase must meet all accessibility requirements in [`docs/nfr-baseline.md`](../../nfr-baseline.md) §10. WCAG 2.1 AA is the baseline for every component — **not** a follow-up. Every component ships with focus rings, proper contrast, ARIA labels, semantic HTML, keyboard navigation, and axe-core tests.
 
 ---
 

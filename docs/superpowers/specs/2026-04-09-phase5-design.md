@@ -1,8 +1,10 @@
 # Phase 5 Design: Public API + MCP Server
 
-**Status:** Approved
+**Status:** Approved (reconciled 2026-04-09 against `docs/nfr-baseline.md`)
 **Date:** 2026-04-09
 **Depends on:** Phase 1-4 (all internal service functions must be stable)
+
+**Non-functional requirements:** This phase must meet all requirements in [`docs/nfr-baseline.md`](../../nfr-baseline.md). The raw SPARQL endpoint (`POST /api/v1/ontology/sparql`) must implement all hardening controls from NFR §9 (read-only enforcement, 30-second timeout, 1000-row cap, 5 MB byte cap, complexity analysis, full audit). Webhook secrets encrypted per NFR §6. API key audit events per NFR §5. MCP tool calls audited per NFR §5 and rate-limited per NFR §8.3.
 
 ---
 

@@ -1,8 +1,12 @@
 # Phase 3 Design: AI Advisory Chat + AI Law Drafter
 
-**Status:** Approved
+**Status:** Approved (reconciled 2026-04-09 against `docs/nfr-baseline.md`)
 **Date:** 2026-04-09
-**Depends on:** Phase 2 (drafts, impact analysis, LLMProvider stub)
+**Depends on:** Phase 2 (drafts, impact analysis, LLMProvider stub, notifications infrastructure)
+
+**Non-functional requirements:** This phase must meet all requirements in [`docs/nfr-baseline.md`](../../nfr-baseline.md). In particular: chat transcripts and drafter content must be encrypted at rest (NFR §6), all LLM calls must pass through the PII scrubber (NFR §7), rate limits per NFR §8, uncertainty UX per NFR §11, and audit events per NFR §5.
+
+**LLM provider policy:** Both Claude and Codex are first-class adapters (NFR §3). Claude is the default. Both `ClaudeProvider` and `CodexProvider` must implement the full `LLMProvider` interface. Tests must use VCR cassettes recorded against both providers for the critical paths.
 
 ---
 

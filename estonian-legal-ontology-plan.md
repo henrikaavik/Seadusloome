@@ -9,7 +9,7 @@ Version 1.2 | April 2026 | CONFIDENTIAL
 
 This document defines the architecture and phased development plan for an advisory software system that assists Estonian government officials in the law creation process. The system uses the Estonian Legal Ontology as its knowledge base and provides intelligent analysis, visualization, AI-powered guidance, and AI-driven law drafting from scratch.
 
-The core value proposition: when a government official uploads a draft law — or describes the *intent* of a new law in natural language — the system maps it against 615 enacted laws, 22,832 draft legislation items, 12,137 Supreme Court decisions, and 55,000+ EU legal acts and court decisions, showing exactly how the new draft connects to and impacts the existing legal framework. The system tracks the full temporal history of legal provisions and the complete legislative lifecycle from VTK (Väljatöötamiskavatsus) through drafting to enactment, so users always have the historical context they need.
+The core value proposition: when a government official uploads a draft law — or describes the *intent* of a new law in natural language — the system maps it against 615 enacted laws, 22,832 draft legislation items, 12,137 Supreme Court decisions, 33,242 EU legal acts, and 22,290 EU court decisions (total ~55,500 EU items), showing exactly how the new draft connects to and impacts the existing legal framework. The system tracks the full temporal history of legal provisions and the complete legislative lifecycle from VTK (Väljatöötamiskavatsus) through drafting to enactment, so users always have the historical context they need.
 
 ### 1.1 Project Parameters
 
@@ -19,7 +19,7 @@ The core value proposition: when a government official uploads a draft law — o
 | Primary language | Estonian (UI and legal text analysis) |
 | Expected users | 5–50 concurrent (department-level) |
 | Deployment | Cloud SaaS via **Coolify** (self-hosted PaaS on VPS) |
-| AI backend | Pluggable LLM layer (Claude API primary, swappable) |
+| AI backend | Pluggable LLM layer (Claude and Codex both supported; Claude is the default) |
 | Ontology source | github.com/henrikaavik/estonian-legal-ontology |
 | Visualization | D3.js force-directed graph engine |
 | Future access | REST API + MCP server for third-party integrations (post-MVP) |
@@ -78,7 +78,7 @@ Your GitHub repository is an excellent source of truth for the ontology definiti
 
 - **Query performance:** SPARQL queries across 90,000+ entities complete in milliseconds on Jena Fuseki, versus loading and traversing JSON-LD files which would take seconds.
 - **Relationship traversal:** Finding all laws connected to a draft within 3 hops requires a graph database. Jena handles this natively with SPARQL property paths.
-- **Temporary integration:** When a user uploads a draft, the system creates a temporary named graph in Jena. This lets the draft participate in SPARQL queries without modifying the base ontology.
+- **Named-graph integration:** When a user uploads a draft, the system creates a dedicated named graph in Jena. This lets the draft participate in SPARQL queries without modifying the base ontology. Draft named graphs persist until the owner explicitly deletes them, with mandatory compensating controls (see §9 and §11 for retention policy and security).
 - **Inference:** Jena supports OWL/RDFS reasoning, which can derive implicit relationships (e.g., if Law A implements Directive B, and Directive B is superseded by Directive C, the system can flag this).
 
 The recommended approach: GitHub remains the canonical source. A sync pipeline converts JSON-LD to RDF and loads it into Jena Fuseki on a schedule (or triggered by GitHub webhooks). This gives you version control on the source data and query performance on the serving side.
@@ -175,7 +175,7 @@ The ontology is designed to be extended with new domains without code changes. T
 | Future API | REST API + MCP Server | Public API for third-party integrations and MCP protocol support for AI tool ecosystems (post-MVP) |
 | Triplestore | Apache Jena Fuseki | Industry-standard SPARQL endpoint; handles RDF/OWL natively; supports named graphs for temporary draft integration |
 | App Database | PostgreSQL 16 | User accounts, sessions, document metadata, audit logs, chat history; robust for 5–50 users |
-| AI / LLM | Pluggable adapter (Claude primary) | Abstract LLMProvider interface; start with Claude API, add OpenAI/local later; litellm as optional unified client |
+| AI / LLM | Pluggable adapter (Claude and Codex supported, Claude default) | Abstract `LLMProvider` interface. Both Claude and Codex adapters are first-class. Default is Claude; Codex can be activated via config. Future providers (MS AI Foundry, Ollama, local) plug into the same interface. |
 | RAG Pipeline | LangChain or custom | Chunk ontology data + user documents; embed with multilingual model supporting Estonian; vector search via pgvector |
 | Vector Store | pgvector (PostgreSQL ext.) | Keeps infrastructure simple — reuses Postgres; sufficient for your scale |
 | Document Parser | Apache Tika / python-docx | Extract text from uploaded .docx/.pdf drafts for analysis |
@@ -360,11 +360,16 @@ The project is divided into five phases, designed so each phase produces a usabl
 
 | Phase | Deliverables | Duration | Dependencies |
 |-------|-------------|----------|--------------|
-| Phase 1 | Core Infrastructure + Ontology Explorer + Versioning Schema (Modules 1–2) | 6–8 weeks | None |
-| Phase 2 | Document Upload + Impact Analysis (Modules 3–4) | 8–10 weeks | Phase 1 |
-| Phase 3 | AI Advisory Chat + AI Law Drafter (Modules 5–6) | 10–12 weeks | Phase 2 |
-| Phase 4 | Collaboration + Admin (Modules 7, 9) | 4–6 weeks | Phase 1 (auth) |
-| Phase 5 | Public API + MCP Server (Module 8) | 4–6 weeks | Phase 3 |
+| Phase | Scope | Dependencies |
+|-------|-------|--------------|
+| Phase 1 | Core Infrastructure + Ontology Explorer + Versioning Schema (Modules 1–2) | None |
+| Phase 1.5 | Design System Foundation (Estonia Brand tokens, core components, live reference) | Phase 1 |
+| Phase 2 | Document Upload + Impact Analysis (Modules 3–4) | Phase 1, Phase 1.5 |
+| Phase 3 | AI Advisory Chat + AI Law Drafter (Modules 5–6) | Phase 2 (uses LLMProvider, drafts, impact reports) |
+| Phase 4 | Collaboration + Admin (Modules 7, 9) | Phase 1 (auth); annotations target drafts (Phase 2), chat messages (Phase 3), and drafter clauses (Phase 3) — so Phase 4 cannot fully complete until Phase 3 targets exist |
+| Phase 5 | Public API + MCP Server (Module 8) | Phase 1–4 (API exposes all features) |
+
+**Note on duration estimates:** Previous versions of this plan carried week-level estimates (e.g. "6–8 weeks per phase"). Those numbers were baselined against a much smaller backlog and are no longer reliable. The current backlog contains ~300 detailed issues across Phases 2–5, and work happens in bursts rather than a continuous sprint. Duration estimates have been removed until the team can rebaseline them against observed velocity after the first few Phase 2 epics land. For planning purposes, use **issue count per phase** (see GitHub milestones) as the primary scope signal.
 
 ### 5.2 Phase 1: Foundation (Weeks 1–8)
 
@@ -548,7 +553,7 @@ Coolify handles: TLS certificates (Let's Encrypt auto-renewal), reverse proxy ro
 
 ### 8.2 Security Considerations
 
-Given that draft legislation may be sensitive prior to publication, the system must enforce: TLS everywhere (handled by Coolify/Traefik), encrypted-at-rest storage for Jena and PostgreSQL, role-based API authorization, session-scoped temporary graphs (no cross-session data leakage), audit logging of all document uploads and AI interactions, LLM API calls made server-side only (no client-side API keys), and API keys stored as Coolify encrypted secrets.
+Given that draft legislation may be sensitive prior to publication, the system must enforce: TLS everywhere (handled by Coolify/Traefik), **mandatory** encryption-at-rest for draft files (AES-256-GCM via Fernet) and encrypted storage of parsed text in PostgreSQL, strict org-scoped role-based API authorization, persistent draft named graphs with cascade delete on explicit removal, audit logging of all document uploads, draft accesses, and AI interactions, LLM API calls made server-side only (no client-side API keys), PII scrubbing before every LLM prompt, and API keys stored as Coolify encrypted secrets. Draft retention is "persistent until owner deletes" with a mandatory 90-day auto-archive warning requiring user action (keep or delete).
 
 ---
 
@@ -561,7 +566,7 @@ Given that draft legislation may be sensitive prior to publication, the system m
 | AI-drafted law quality | Generated legal text may not meet formal drafting standards. Mitigate by using existing laws as structural templates, training prompts on Õigustehnika reeglid (Estonian legislative drafting rules), and mandatory human review. |
 | D3 performance at scale | Rendering 90k+ nodes is not feasible. Lazy-load subgraphs via SPARQL LIMIT/OFFSET; show overview at category level, drill into details on demand. |
 | Jena Fuseki learning curve | Team may not have SPARQL experience. Provide pre-built query templates for common patterns; use the AI chat to generate SPARQL from natural language. |
-| Data sensitivity | Pre-publication drafts are politically sensitive. Session-scoped temp graphs, encryption at rest, audit logging, no persistent storage of draft content beyond session TTL. |
+| Data sensitivity | Pre-publication drafts are politically sensitive. Drafts persist until the owner explicitly deletes them; compensating controls are mandatory: AES-256-GCM file encryption, encrypted parsed-text columns, strict org-scoped access control, full audit logging of every access, 90-day auto-archive warning requiring user action, and explicit delete cascade (file + Jena named graph + DB rows + RAG chunks). |
 | Ontology evolution | Schema changes in GitHub may break Jena mappings. SHACL validation in sync pipeline; reject loads that fail validation; alert on schema drift. |
 | Version data completeness | Riigi Teataja version histories may have gaps for older laws. Accept incomplete version chains gracefully; mark provisions with `versionCoverage: partial` and surface this in the UI so users know when historical data is incomplete. |
 | Version chain integrity | Amendments can be complex (partial paragraph changes, restructuring). Ensure the sync pipeline validates that every ProvisionVersion has a valid `previousVersion` link and that `validFrom`/`validUntil` ranges don't overlap. |

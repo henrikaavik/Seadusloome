@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
 ## Project Overview
 
@@ -65,5 +65,5 @@ The architecture plan is in `estonian-legal-ontology-plan.md`. The ontology sour
 | 1.5 | Design System Foundation (Estonia Brand, components, themes) | Phase 1 |
 | 2 | Document Upload + Impact Analysis (Modules 3-4) | Phase 1, Phase 1.5 |
 | 3 | AI Advisory Chat + AI Law Drafter (Modules 5-6) | Phase 2 |
-| 4 | Collaboration + Admin (Modules 7, 9) | Phase 1 (auth); annotations require Phase 2 and Phase 3 targets |
+| 4 | Collaboration + Admin (Modules 7, 9) | Phase 1 (auth); annotations require Phase 2 (drafts) and Phase 3 (chat/drafter) targets |
 | 5 | Public API + MCP Server (Module 8) | Phase 1-4 |
