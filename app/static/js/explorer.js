@@ -22,6 +22,15 @@ const CATEGORY_COLORS = {
   'LegalProvision':   '#60a5fa',
   'TopicCluster':     '#c084fc',
   'LegalConcept':     '#fbbf24',
+  // Structural sub-categories
+  'Section':            '#7dd3fc',
+  'Division':           '#6ee7b7',
+  'Chapter':            '#93c5fd',
+  'Subdivision':        '#a5b4fc',
+  'LegalPart':          '#86efac',
+  'CaseType':           '#fdba74',
+  'LegislativePhase':   '#d8b4fe',
+  'ProcedureStage':     '#cbd5e1',
 };
 
 // Human-readable labels for categories (Estonian)
@@ -46,6 +55,14 @@ const CATEGORY_LABELS_EN = {
   'LegalProvision':   'Legal Provision',
   'TopicCluster':     'Topic Cluster',
   'LegalConcept':     'Legal Concept',
+  'Section':          'Section',
+  'Division':         'Division',
+  'Chapter':          'Chapter',
+  'Subdivision':      'Subdivision',
+  'LegalPart':        'Legal Part',
+  'CaseType':         'Case Type',
+  'LegislativePhase': 'Legislative Phase',
+  'ProcedureStage':   'Procedure Stage',
 };
 
 const CATEGORY_POSITIONS = {
