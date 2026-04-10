@@ -174,6 +174,7 @@ def _extract_from_chunk(
     """
     prompt = _EXTRACTION_PROMPT.replace("{text}", span.text)
     try:
+        # TODO(#491): pass feature="extract_entities" once callers are updated
         reply = provider.extract_json(prompt, schema=_REF_SCHEMA)
     except Exception as exc:  # noqa: BLE001 — extraction must not crash the pipeline
         logger.warning(

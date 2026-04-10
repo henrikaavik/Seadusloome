@@ -21,6 +21,8 @@ class LLMProvider(ABC):
         *,
         max_tokens: int = 1024,
         temperature: float = 0.0,
+        system: str | None = None,
+        feature: str = "complete",
     ) -> str:
         """Return a free-form completion for *prompt*.
 
@@ -28,10 +30,14 @@ class LLMProvider(ABC):
             prompt: Fully formatted prompt string.
             max_tokens: Upper bound on generated tokens.
             temperature: Sampling temperature (0.0 = deterministic).
+            system: Optional system prompt for the model.
+            feature: Cost-tracking feature label (e.g. ``"drafter_clarify"``).
         """
 
     @abstractmethod
-    def extract_json(self, prompt: str, *, schema: dict | None = None) -> dict:
+    def extract_json(
+        self, prompt: str, *, schema: dict | None = None, feature: str = "extract_json"
+    ) -> dict:
         """Run *prompt* through the model and parse the reply as JSON.
 
         Args:

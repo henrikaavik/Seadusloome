@@ -1,9 +1,8 @@
 """Pluggable LLM provider abstraction.
 
-Phase 2 only scaffolds the interface; real API calls land in Phase 3
-(AI Advisory Chat + AI Law Drafter). Downstream code should depend on
-the abstract ``LLMProvider`` so swapping Claude for Codex or a local
-model later doesn't require touching call sites.
+Downstream code should depend on the abstract ``LLMProvider`` so
+swapping Claude for Codex or a local model later doesn't require
+touching call sites.
 
 Typical usage:
 
