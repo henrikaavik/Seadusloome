@@ -7,6 +7,7 @@ import logging
 import threading
 import time
 import uuid
+from datetime import datetime
 
 from fasthtml.common import *
 from starlette.requests import Request
@@ -220,8 +221,11 @@ def explorer_page(req: Request):
                 "d3.select(this).select('circle.outer').classed('d3-node-highlighted',hit);"
                 "});"
                 "}"
-                "setInterval(apply,500);"
+                "var overlayInterval=setInterval(apply,500);"
                 "apply();"
+                "if(typeof htmx!=='undefined'){"
+                "htmx.on('htmx:beforeSwap',function(){clearInterval(overlayInterval);});"
+                "}"
                 "})();"
             )
         )
@@ -359,11 +363,11 @@ def explorer_page(req: Request):
                         id="timeline-slider",
                         type="range",
                         min="1990",
-                        max="2026",
-                        value="2026",
+                        max=str(datetime.now().year + 1),
+                        value=str(datetime.now().year + 1),
                         step="1",
                     ),
-                    Span("2026", cls="tl-label"),
+                    Span(str(datetime.now().year + 1), cls="tl-label"),
                     cls="tl-slider-row",
                 ),
                 Div(

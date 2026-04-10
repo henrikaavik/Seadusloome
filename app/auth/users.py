@@ -98,6 +98,7 @@ def list_users(org_id: str | None = None) -> list[dict]:  # type: ignore[type-ar
             for r in rows
         ]
     except Exception:
+        # TODO: Phase 4 — let exceptions propagate to route layer
         logger.exception("Failed to list users")
         return []
 
@@ -125,6 +126,7 @@ def get_user(user_id: str) -> dict | None:  # type: ignore[type-arg]
             "org_name": row[6] or "—",
         }
     except Exception:
+        # TODO: Phase 4 — let exceptions propagate to route layer
         logger.exception("Failed to get user %s", user_id)
         return None
 
@@ -161,6 +163,7 @@ def create_user(
             "is_active": row[5],
         }
     except Exception:
+        # TODO: Phase 4 — let exceptions propagate to route layer
         logger.exception("Failed to create user email=%s", email)
         return None
 
@@ -176,6 +179,7 @@ def update_user_role(user_id: str, role: str) -> bool:
             conn.commit()
         return True
     except Exception:
+        # TODO: Phase 4 — let exceptions propagate to route layer
         logger.exception("Failed to update role for user %s", user_id)
         return False
 
@@ -192,6 +196,7 @@ def deactivate_user(user_id: str) -> bool:
             conn.commit()
         return True
     except Exception:
+        # TODO: Phase 4 — let exceptions propagate to route layer
         logger.exception("Failed to deactivate user %s", user_id)
         return False
 

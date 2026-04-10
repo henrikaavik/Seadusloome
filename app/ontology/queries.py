@@ -40,15 +40,12 @@ ENTITIES_BY_CATEGORY = (
     PREFIXES
     + """
 SELECT ?entity ?label ?type
-WHERE {{
+WHERE {
     ?entity rdf:type ?categoryType .
     ?entity rdf:type ?type .
-    OPTIONAL {{ ?entity rdfs:label ?label }}
-    VALUES ?categoryType {{ <{category_uri}> }}
-}}
+    OPTIONAL { ?entity rdfs:label ?label }
+}
 ORDER BY ?label
-LIMIT {limit}
-OFFSET {offset}
 """
 )
 
@@ -56,9 +53,9 @@ ENTITIES_BY_CATEGORY_COUNT = (
     PREFIXES
     + """
 SELECT (COUNT(DISTINCT ?entity) AS ?count)
-WHERE {{
-    ?entity rdf:type <{category_uri}> .
-}}
+WHERE {
+    ?entity rdf:type ?categoryType .
+}
 """
 )
 
@@ -72,10 +69,11 @@ ENTITY_DETAIL_OUTGOING = (
     PREFIXES
     + """
 SELECT ?predicate ?object ?objectLabel
-WHERE {{
-    <{entity_uri}> ?predicate ?object .
-    OPTIONAL {{ ?object rdfs:label ?objectLabel }}
-}}
+WHERE {
+    ?entityUri ?predicate ?object .
+    OPTIONAL { ?object rdfs:label ?objectLabel }
+}
+LIMIT 500
 """
 )
 
@@ -83,10 +81,10 @@ ENTITY_DETAIL_INCOMING = (
     PREFIXES
     + """
 SELECT ?subject ?subjectLabel ?predicate
-WHERE {{
-    ?subject ?predicate <{entity_uri}> .
-    OPTIONAL {{ ?subject rdfs:label ?subjectLabel }}
-}}
+WHERE {
+    ?subject ?predicate ?entityUri .
+    OPTIONAL { ?subject rdfs:label ?subjectLabel }
+}
 LIMIT 100
 """
 )
@@ -95,10 +93,11 @@ ENTITY_METADATA = (
     PREFIXES
     + """
 SELECT ?predicate ?value
-WHERE {{
-    <{entity_uri}> ?predicate ?value .
+WHERE {
+    ?entityUri ?predicate ?value .
     FILTER(isLiteral(?value))
-}}
+}
+LIMIT 500
 """
 )
 
@@ -121,6 +120,12 @@ ORDER BY ?label
 LIMIT {limit}
 """
 )
+# NOTE: SEARCH_ENTITIES uses Python .format() for the regex pattern and
+# limit because the search term goes inside a SPARQL FILTER(REGEX(...))
+# string literal — not a URI context. The search_pattern is pre-escaped
+# via re.escape() + backslash/quote doubling in the route layer. The
+# double braces are required because .format() needs them for literal
+# SPARQL curly braces.
 
 # ---------------------------------------------------------------------------
 # ENTITIES_AT_DATE

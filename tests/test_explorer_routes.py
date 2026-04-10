@@ -93,7 +93,36 @@ _TIMELINE_DATA = [
 ]
 
 
-def _mock_query(sparql: str, bindings: dict[str, str] | None = None) -> list[dict[str, str]]:
+def _api_user() -> dict:
+    """Return a minimal auth user dict for API tests."""
+    return {
+        "id": "api-test-user",
+        "email": "api@seadusloome.ee",
+        "full_name": "API Tester",
+        "role": "drafter",
+        "org_id": "org-1",
+    }
+
+
+def _api_provider() -> MagicMock:
+    """Return a mock JWT provider that recognises 'stub-token'."""
+    provider = MagicMock()
+    provider.get_current_user.return_value = _api_user()
+    return provider
+
+
+def _api_client() -> TestClient:
+    """Return a TestClient with a valid auth cookie set."""
+    client = TestClient(app, follow_redirects=False)
+    client.cookies.set("access_token", "stub-token")
+    return client
+
+
+def _mock_query(
+    sparql: str,
+    bindings: dict[str, str] | None = None,
+    uri_bindings: dict[str, str] | None = None,
+) -> list[dict[str, str]]:
     """Route mock SPARQL queries to appropriate test data."""
     sparql_upper = sparql.upper()
     if "COUNT" in sparql_upper and "GROUP BY" not in sparql_upper:
@@ -131,12 +160,13 @@ def _mock_count(sparql: str) -> int:
 
 
 class TestExplorerOverview:
-    def test_returns_json(self):
+    @patch("app.auth.middleware._get_provider")
+    def test_returns_json(self, mock_get_provider: MagicMock):
+        mock_get_provider.return_value = _api_provider()
         with patch("app.explorer.routes._get_client") as mock_get:
             mock_client = mock_get.return_value
             mock_client.query.return_value = _OVERVIEW_DATA
-            client = TestClient(app)
-            resp = client.get("/api/explorer/overview")
+            resp = _api_client().get("/api/explorer/overview")
 
         assert resp.status_code == 200
         assert resp.headers["content-type"].startswith("application/json")
@@ -149,12 +179,13 @@ class TestExplorerOverview:
             assert "name" in row
             assert "count" in row
 
-    def test_returns_category_names(self):
+    @patch("app.auth.middleware._get_provider")
+    def test_returns_category_names(self, mock_get_provider: MagicMock):
+        mock_get_provider.return_value = _api_provider()
         with patch("app.explorer.routes._get_client") as mock_get:
             mock_client = mock_get.return_value
             mock_client.query.return_value = _OVERVIEW_DATA
-            client = TestClient(app)
-            resp = client.get("/api/explorer/overview")
+            resp = _api_client().get("/api/explorer/overview")
 
         assert resp.status_code == 200
         categories = resp.json()["data"]
@@ -164,13 +195,15 @@ class TestExplorerOverview:
 
 
 class TestExplorerCategory:
-    def test_returns_paginated_entities(self):
+    @patch("app.auth.middleware._get_provider")
+    def test_returns_paginated_entities(self, mock_get_provider: MagicMock):
+        mock_get_provider.return_value = _api_provider()
         with patch("app.explorer.routes._get_client") as mock_get:
             mock_client = mock_get.return_value
             mock_client.query.return_value = _ENTITIES_DATA
             mock_client.count.return_value = 2
-            client = TestClient(app)
-            resp = client.get(
+            mock_client._inject_uri_bindings.side_effect = lambda sparql, bindings: sparql
+            resp = _api_client().get(
                 "/api/explorer/category/https%3A%2F%2Fdata.riik.ee%2Fontology%2Festleg%23Act"
             )
 
@@ -185,13 +218,15 @@ class TestExplorerCategory:
             assert "uri" in row
             assert "label" in row
 
-    def test_pagination_params(self):
+    @patch("app.auth.middleware._get_provider")
+    def test_pagination_params(self, mock_get_provider: MagicMock):
+        mock_get_provider.return_value = _api_provider()
         with patch("app.explorer.routes._get_client") as mock_get:
             mock_client = mock_get.return_value
             mock_client.query.return_value = []
             mock_client.count.return_value = 100
-            client = TestClient(app)
-            resp = client.get(
+            mock_client._inject_uri_bindings.side_effect = lambda sparql, bindings: sparql
+            resp = _api_client().get(
                 "/api/explorer/category/https%3A%2F%2Fdata.riik.ee%2Fontology%2Festleg%23Act"
                 "?page=3&size=10"
             )
@@ -202,9 +237,10 @@ class TestExplorerCategory:
         assert data["meta"]["size"] == 10
         assert data["meta"]["total"] == 100
 
-    def test_invalid_category_returns_400(self):
-        client = TestClient(app)
-        resp = client.get("/api/explorer/category/not-a-uri")
+    @patch("app.auth.middleware._get_provider")
+    def test_invalid_category_returns_400(self, mock_get_provider: MagicMock):
+        mock_get_provider.return_value = _api_provider()
+        resp = _api_client().get("/api/explorer/category/not-a-uri")
         assert resp.status_code == 400
         body = resp.json()
         assert "error" in body
@@ -213,12 +249,13 @@ class TestExplorerCategory:
 
 
 class TestExplorerEntity:
-    def test_returns_entity_detail(self):
+    @patch("app.auth.middleware._get_provider")
+    def test_returns_entity_detail(self, mock_get_provider: MagicMock):
+        mock_get_provider.return_value = _api_provider()
         with patch("app.explorer.routes._get_client") as mock_get:
             mock_client = mock_get.return_value
             mock_client.query.side_effect = _mock_query
-            client = TestClient(app)
-            resp = client.get(
+            resp = _api_client().get(
                 "/api/explorer/entity/https%3A%2F%2Fdata.riik.ee%2Fontology%2Festleg%23Act_1"
             )
 
@@ -229,19 +266,21 @@ class TestExplorerEntity:
         assert "outgoing" in data
         assert "incoming" in data
 
-    def test_invalid_entity_uri_returns_400(self):
-        client = TestClient(app)
-        resp = client.get("/api/explorer/entity/not-a-uri")
+    @patch("app.auth.middleware._get_provider")
+    def test_invalid_entity_uri_returns_400(self, mock_get_provider: MagicMock):
+        mock_get_provider.return_value = _api_provider()
+        resp = _api_client().get("/api/explorer/entity/not-a-uri")
         assert resp.status_code == 400
 
 
 class TestExplorerSearch:
-    def test_search_returns_results(self):
+    @patch("app.auth.middleware._get_provider")
+    def test_search_returns_results(self, mock_get_provider: MagicMock):
+        mock_get_provider.return_value = _api_provider()
         with patch("app.explorer.routes._get_client") as mock_get:
             mock_client = mock_get.return_value
             mock_client.query.return_value = _SEARCH_DATA
-            client = TestClient(app)
-            resp = client.get("/api/explorer/search?q=Töölepingu")
+            resp = _api_client().get("/api/explorer/search?q=Töölepingu")
 
         assert resp.status_code == 200
         data = resp.json()
@@ -249,42 +288,46 @@ class TestExplorerSearch:
         assert data["data"][0]["label"] == "Töölepingu seadus"
         assert data["meta"]["query"] == "Töölepingu"
 
-    def test_search_with_estonian_chars(self):
-        """Ensure Estonian characters (ä, ö, ü, õ, š, ž) work in searches."""
+    @patch("app.auth.middleware._get_provider")
+    def test_search_with_estonian_chars(self, mock_get_provider: MagicMock):
+        """Ensure Estonian characters (a, o, u, o, s, z) work in searches."""
+        mock_get_provider.return_value = _api_provider()
         with patch("app.explorer.routes._get_client") as mock_get:
             mock_client = mock_get.return_value
             mock_client.query.return_value = [
                 {
-                    "entity": "https://data.riik.ee/ontology/estleg#Act_Äri",
-                    "label": "Äriseadustik",
+                    "entity": "https://data.riik.ee/ontology/estleg#Act_Ari",
+                    "label": "Ariseadustik",
                     "type": "https://data.riik.ee/ontology/estleg#Act",
                 },
             ]
-            client = TestClient(app)
-            resp = client.get("/api/explorer/search?q=Äriseadustik")
+            resp = _api_client().get("/api/explorer/search?q=Ariseadustik")
 
         assert resp.status_code == 200
-        assert resp.json()["data"][0]["label"] == "Äriseadustik"
-        assert resp.json()["meta"]["query"] == "Äriseadustik"
+        assert resp.json()["data"][0]["label"] == "Ariseadustik"
+        assert resp.json()["meta"]["query"] == "Ariseadustik"
 
-    def test_empty_query_returns_empty(self):
-        client = TestClient(app)
-        resp = client.get("/api/explorer/search?q=")
-        assert resp.status_code == 200
-        assert resp.json()["data"] == []
-
-    def test_missing_query_returns_empty(self):
-        client = TestClient(app)
-        resp = client.get("/api/explorer/search")
+    @patch("app.auth.middleware._get_provider")
+    def test_empty_query_returns_empty(self, mock_get_provider: MagicMock):
+        mock_get_provider.return_value = _api_provider()
+        resp = _api_client().get("/api/explorer/search?q=")
         assert resp.status_code == 200
         assert resp.json()["data"] == []
 
-    def test_search_limit_param(self):
+    @patch("app.auth.middleware._get_provider")
+    def test_missing_query_returns_empty(self, mock_get_provider: MagicMock):
+        mock_get_provider.return_value = _api_provider()
+        resp = _api_client().get("/api/explorer/search")
+        assert resp.status_code == 200
+        assert resp.json()["data"] == []
+
+    @patch("app.auth.middleware._get_provider")
+    def test_search_limit_param(self, mock_get_provider: MagicMock):
+        mock_get_provider.return_value = _api_provider()
         with patch("app.explorer.routes._get_client") as mock_get:
             mock_client = mock_get.return_value
             mock_client.query.return_value = _SEARCH_DATA
-            client = TestClient(app)
-            resp = client.get("/api/explorer/search?q=test&limit=5")
+            resp = _api_client().get("/api/explorer/search?q=test&limit=5")
 
         assert resp.status_code == 200
         # Check that the query was called (we just verify the endpoint works)
@@ -292,13 +335,14 @@ class TestExplorerSearch:
 
 
 class TestExplorerTimeline:
-    def test_timeline_returns_entities(self):
+    @patch("app.auth.middleware._get_provider")
+    def test_timeline_returns_entities(self, mock_get_provider: MagicMock):
+        mock_get_provider.return_value = _api_provider()
         with patch("app.explorer.routes._get_client") as mock_get:
             mock_client = mock_get.return_value
             mock_client.query.return_value = _TIMELINE_DATA
             mock_client.count.return_value = 1
-            client = TestClient(app)
-            resp = client.get("/api/explorer/timeline?date=2024-01-01")
+            resp = _api_client().get("/api/explorer/timeline?date=2024-01-01")
 
         assert resp.status_code == 200
         data = resp.json()
@@ -306,50 +350,48 @@ class TestExplorerTimeline:
         assert data["meta"]["date"] == "2024-01-01"
         assert data["meta"]["total"] == 1
 
-    def test_missing_date_returns_400(self):
-        client = TestClient(app)
-        resp = client.get("/api/explorer/timeline")
+    @patch("app.auth.middleware._get_provider")
+    def test_missing_date_returns_400(self, mock_get_provider: MagicMock):
+        mock_get_provider.return_value = _api_provider()
+        resp = _api_client().get("/api/explorer/timeline")
         assert resp.status_code == 400
         assert "error" in resp.json()
 
-    def test_invalid_date_format_returns_400(self):
-        client = TestClient(app)
-        resp = client.get("/api/explorer/timeline?date=not-a-date")
+    @patch("app.auth.middleware._get_provider")
+    def test_invalid_date_format_returns_400(self, mock_get_provider: MagicMock):
+        mock_get_provider.return_value = _api_provider()
+        resp = _api_client().get("/api/explorer/timeline?date=not-a-date")
         assert resp.status_code == 400
 
-    def test_timeline_pagination(self):
+    @patch("app.auth.middleware._get_provider")
+    def test_timeline_pagination(self, mock_get_provider: MagicMock):
+        mock_get_provider.return_value = _api_provider()
         with patch("app.explorer.routes._get_client") as mock_get:
             mock_client = mock_get.return_value
             mock_client.query.return_value = []
             mock_client.count.return_value = 50
-            client = TestClient(app)
-            resp = client.get("/api/explorer/timeline?date=2024-01-01&page=2&size=10")
+            resp = _api_client().get("/api/explorer/timeline?date=2024-01-01&page=2&size=10")
 
         data = resp.json()
         assert data["meta"]["page"] == 2
         assert data["meta"]["size"] == 10
 
 
-class TestExplorerAuthSkip:
-    """Verify that explorer endpoints do not require authentication."""
+class TestExplorerAuthRequired:
+    """Verify that explorer API endpoints require authentication."""
 
-    def test_overview_no_auth_required(self):
-        with patch("app.explorer.routes._get_client") as mock_get:
-            mock_client = mock_get.return_value
-            mock_client.query.return_value = []
-            client = TestClient(app, follow_redirects=False)
-            resp = client.get("/api/explorer/overview")
+    def test_overview_requires_auth(self):
+        client = TestClient(app, follow_redirects=False)
+        resp = client.get("/api/explorer/overview")
+        # Should redirect to login (303) when unauthenticated
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/auth/login"
 
-        # Should NOT redirect to login (303)
-        assert resp.status_code == 200
-
-    def test_search_no_auth_required(self):
+    def test_search_requires_auth(self):
         client = TestClient(app, follow_redirects=False)
         resp = client.get("/api/explorer/search?q=test")
-        # Even without mock, empty query returns 200
-        # But with mock we get 200 for sure
-        # Without Jena running the query returns empty due to error handling
-        assert resp.status_code == 200
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/auth/login"
 
 
 # ---------------------------------------------------------------------------

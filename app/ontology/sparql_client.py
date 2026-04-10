@@ -124,7 +124,40 @@ class SparqlClient:
             return sparql
         return sparql[:last_brace] + "\n" + values_block + "\n" + sparql[last_brace:]
 
-    def query(self, sparql: str, bindings: dict[str, str] | None = None) -> list[dict[str, str]]:
+    def _inject_uri_bindings(self, sparql: str, bindings: dict[str, str]) -> str:
+        """Inject URI variable bindings using a SPARQL VALUES clause.
+
+        Like :meth:`_inject_bindings` but wraps values in ``<...>`` for
+        URI terms instead of ``"..."`` for string literals.  Each URI is
+        validated against a strict allowlist before injection.
+
+        Raises ``ValueError`` if any URI contains characters that could
+        break out of the ``<...>`` context (angle brackets, braces, etc.).
+        """
+        if not bindings:
+            return sparql
+
+        safe_uri_re = re.compile(r"^https?://[A-Za-z0-9./:_#\-]{1,512}$")
+        values_parts: list[str] = []
+        for var, val in bindings.items():
+            clean_var = re.sub(r"[^a-zA-Z0-9_]", "", var)
+            if not safe_uri_re.fullmatch(val):
+                raise ValueError(f"Unsafe URI rejected for SPARQL binding: {val!r}")
+            values_parts.append(f"  VALUES ?{clean_var} {{ <{val}> }}")
+
+        values_block = "\n".join(values_parts)
+
+        last_brace = sparql.rfind("}")
+        if last_brace == -1:
+            return sparql
+        return sparql[:last_brace] + "\n" + values_block + "\n" + sparql[last_brace:]
+
+    def query(
+        self,
+        sparql: str,
+        bindings: dict[str, str] | None = None,
+        uri_bindings: dict[str, str] | None = None,
+    ) -> list[dict[str, str]]:
         """Execute a SPARQL SELECT query and return a list of result dicts.
 
         Each dict maps variable names to their string values.
@@ -134,10 +167,15 @@ class SparqlClient:
         sparql:
             The SPARQL SELECT query string.
         bindings:
-            Optional variable bindings injected via VALUES clause.
+            Optional string variable bindings injected via VALUES clause.
+        uri_bindings:
+            Optional URI variable bindings injected via VALUES clause with
+            ``<uri>`` syntax.  Validates each URI against a strict pattern.
         """
         if bindings:
             sparql = self._inject_bindings(sparql, bindings)
+        if uri_bindings:
+            sparql = self._inject_uri_bindings(sparql, uri_bindings)
         raw = self._execute(sparql)
         return _extract_bindings(raw)
 

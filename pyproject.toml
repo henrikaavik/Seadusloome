@@ -5,14 +5,14 @@ description = "Estonian Legal Ontology Advisory Software"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "python-fasthtml",
-    "rdflib",
+    "python-fasthtml>=0.12.0",
+    "rdflib>=7.0.0",
     "pyshacl",
     "PyJWT",
     "bcrypt",
     "authlib",
     "requests",
-    "psycopg[binary]",
+    "psycopg[binary]>=3.2.0",
     "httpx",
     "python-docx",
     "anthropic>=0.93.0",

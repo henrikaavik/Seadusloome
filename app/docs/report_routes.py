@@ -21,14 +21,14 @@ import unicodedata
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from fasthtml.common import *  # noqa: F403
 from starlette.requests import Request
-from starlette.responses import FileResponse, RedirectResponse, Response
+from starlette.responses import FileResponse, Response
 
 from app.auth.audit import log_action
-from app.auth.provider import UserDict
+from app.auth.helpers import require_auth as _require_auth
 from app.db import get_connection as _connect
 from app.docs.draft_model import Draft, fetch_draft
 from app.jobs.queue import JobQueue
@@ -75,16 +75,8 @@ _TYPE_LABELS_ET: dict[str, str] = {
 
 
 # ---------------------------------------------------------------------------
-# Auth + lookup helpers (mirror app.docs.routes)
+# Auth + lookup helpers
 # ---------------------------------------------------------------------------
-
-
-def _require_auth(req: Request) -> Response | UserDict:
-    """Return the auth dict or a 303 to /auth/login when missing."""
-    auth = req.scope.get("auth")
-    if not auth or not auth.get("id"):
-        return RedirectResponse(url="/auth/login", status_code=303)
-    return cast(UserDict, auth)
 
 
 def _parse_uuid(raw: str) -> uuid.UUID | None:

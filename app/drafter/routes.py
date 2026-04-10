@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from typing import Any, cast
+from typing import Any
 from urllib.parse import quote as url_quote
 
 from fasthtml.common import *  # noqa: F403
@@ -32,6 +32,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, RedirectResponse, Response
 
 from app.auth.audit import log_action
+from app.auth.helpers import require_auth as _require_auth
 from app.auth.provider import UserDict
 from app.db import get_connection as _connect
 from app.drafter.audit import (
@@ -139,14 +140,6 @@ def _step_tracker(current_step: int):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _require_auth(req: Request) -> Response | UserDict:
-    """Return the auth dict or a 303 redirect to the login page."""
-    auth = req.scope.get("auth")
-    if not auth or not auth.get("id"):
-        return RedirectResponse(url="/auth/login", status_code=303)
-    return cast(UserDict, auth)
 
 
 def _parse_uuid(raw: str) -> uuid.UUID | None:

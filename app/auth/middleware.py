@@ -39,13 +39,12 @@ def _get_provider() -> JWTAuthProvider:
 # explorer page reads the optional ``?draft=<id>`` query param and uses
 # ``req.scope['auth']`` to scope the overlay to the caller's org; if
 # the page were public the overlay would always come back empty. The
-# explorer JSON APIs under ``/api/explorer/...`` remain public so the
-# graph itself can be fetched without a session.
+# explorer JSON APIs under ``/api/explorer/...`` also require auth so
+# that ontology data queries are not publicly accessible.
 SKIP_PATHS: list[str] = [
     r"/auth/login",
     r"/static/.*",
     r"/favicon\.ico",
-    r"/api/explorer/.*",
     r"/api/health",
     r"/api/ping",
     r"/ws/explorer",

@@ -65,9 +65,16 @@ def _sanitize_regex(pattern: str) -> str:
     return re.escape(pattern)
 
 
+_SAFE_URI_RE = re.compile(r"^https?://[A-Za-z0-9./:_#\-]{1,512}$")
+
+
 def _validate_uri(uri: str) -> bool:
-    """Basic validation that a string looks like a URI."""
-    return uri.startswith("http://") or uri.startswith("https://")
+    """Validate that a string is a safe URI (no SPARQL injection vectors).
+
+    Rejects URIs containing closing angle brackets, braces, quotes, or
+    other characters that could break out of a ``<uri>`` context in SPARQL.
+    """
+    return bool(_SAFE_URI_RE.fullmatch(uri))
 
 
 def _validate_date(date_str: str) -> bool:
@@ -123,17 +130,17 @@ def explorer_category(req: Request, name: str) -> JSONResponse:
 
     client = _get_client()
 
-    # Get total count
-    count_query = ENTITIES_BY_CATEGORY_COUNT.format(category_uri=category_uri)
-    total = client.count(count_query)
-
-    # Get paginated entities
-    query = ENTITIES_BY_CATEGORY.format(
-        category_uri=category_uri,
-        limit=size,
-        offset=offset,
+    # Get total count — use VALUES URI binding to prevent SPARQL injection
+    total = client.count(
+        client._inject_uri_bindings(ENTITIES_BY_CATEGORY_COUNT, {"categoryType": category_uri})
     )
-    rows = client.query(query)
+
+    # Get paginated entities — use VALUES URI binding + append LIMIT/OFFSET
+    entities_sparql = ENTITIES_BY_CATEGORY + f"\nLIMIT {size}\nOFFSET {offset}\n"
+    rows = client.query(
+        entities_sparql,
+        uri_bindings={"categoryType": category_uri},
+    )
 
     entities = []
     for row in rows:
@@ -164,9 +171,8 @@ def explorer_entity(req: Request, entity_id: str) -> JSONResponse:
 
     client = _get_client()
 
-    # Get literal metadata
-    meta_query = ENTITY_METADATA.format(entity_uri=entity_uri)
-    meta_rows = client.query(meta_query)
+    # Get literal metadata — use VALUES URI binding to prevent SPARQL injection
+    meta_rows = client.query(ENTITY_METADATA, uri_bindings={"entityUri": entity_uri})
     metadata: dict[str, str] = {}
     for row in meta_rows:
         pred = row.get("predicate", "")
@@ -174,8 +180,7 @@ def explorer_entity(req: Request, entity_id: str) -> JSONResponse:
         metadata[short_pred] = row.get("value", "")
 
     # Get outgoing triples (entity -> predicate -> object)
-    out_query = ENTITY_DETAIL_OUTGOING.format(entity_uri=entity_uri)
-    out_rows = client.query(out_query)
+    out_rows = client.query(ENTITY_DETAIL_OUTGOING, uri_bindings={"entityUri": entity_uri})
     outgoing = []
     for row in out_rows:
         pred = row.get("predicate", "")
@@ -190,8 +195,7 @@ def explorer_entity(req: Request, entity_id: str) -> JSONResponse:
         )
 
     # Get incoming triples (subject -> predicate -> entity)
-    in_query = ENTITY_DETAIL_INCOMING.format(entity_uri=entity_uri)
-    in_rows = client.query(in_query)
+    in_rows = client.query(ENTITY_DETAIL_INCOMING, uri_bindings={"entityUri": entity_uri})
     incoming = []
     for row in in_rows:
         pred = row.get("predicate", "")

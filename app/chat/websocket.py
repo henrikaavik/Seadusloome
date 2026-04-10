@@ -124,6 +124,11 @@ def register_chat_ws_routes(app: Any) -> None:
 
     Uses the same ``app.ws()`` pattern as
     :func:`app.explorer.websocket.register_ws_routes`.
+
+    Note: ``/ws/chat`` is deliberately **not** in ``SKIP_PATHS`` because
+    the WS handshake does not go through the HTTP Beforeware. Instead,
+    authentication is handled by extracting the ``access_token`` cookie
+    from the raw ASGI headers inside ``_ws_handler`` below.
     """
 
     # Shared provider instance for cookie verification; lazily created

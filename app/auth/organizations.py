@@ -56,6 +56,7 @@ def list_orgs() -> list[dict]:  # type: ignore[type-arg]
             ).fetchall()
         return [{"id": str(r[0]), "name": r[1], "slug": r[2], "created_at": r[3]} for r in rows]
     except Exception:
+        # TODO: Phase 4 — let exceptions propagate to route layer
         logger.exception("Failed to list organizations")
         return []
 
@@ -72,6 +73,7 @@ def get_org(org_id: str) -> dict | None:  # type: ignore[type-arg]
             return None
         return {"id": str(row[0]), "name": row[1], "slug": row[2], "created_at": row[3]}
     except Exception:
+        # TODO: Phase 4 — let exceptions propagate to route layer
         logger.exception("Failed to get organization %s", org_id)
         return None
 
@@ -90,6 +92,7 @@ def create_org(name: str, slug: str) -> dict | None:  # type: ignore[type-arg]
             return None
         return {"id": str(row[0]), "name": row[1], "slug": row[2], "created_at": row[3]}
     except Exception:
+        # TODO: Phase 4 — let exceptions propagate to route layer
         logger.exception("Failed to create organization name=%s", name)
         return None
 
@@ -108,6 +111,7 @@ def update_org(org_id: str, name: str, slug: str) -> dict | None:  # type: ignor
             return None
         return {"id": str(row[0]), "name": row[1], "slug": row[2], "created_at": row[3]}
     except Exception:
+        # TODO: Phase 4 — let exceptions propagate to route layer
         logger.exception("Failed to update organization %s", org_id)
         return None
 
@@ -123,6 +127,7 @@ def delete_org(org_id: str) -> bool:
             conn.commit()
         return True
     except Exception:
+        # TODO: Phase 4 — let exceptions propagate to route layer
         logger.exception("Failed to delete organization %s", org_id)
         return False
 
@@ -136,6 +141,7 @@ def get_org_user_count(org_id: str) -> int:
             ).fetchone()
         return row[0] if row else 0
     except Exception:
+        # TODO: Phase 4 — let exceptions propagate to route layer
         logger.exception("Failed to count users for org %s", org_id)
         return 0
 

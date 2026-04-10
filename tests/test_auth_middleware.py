@@ -28,8 +28,6 @@ PUBLIC_PATHS = [
     "/static/css/tokens.css",
     "/static/js/explorer.js",
     "/favicon.ico",
-    "/api/explorer/overview",
-    "/api/explorer/category/ABC",
     "/api/health",
     "/api/ping",
     "/ws/explorer",
@@ -46,11 +44,14 @@ PROTECTED_PATHS = [
     "/org/users",
     "/api/bookmarks",
     # #442 — explorer page must require auth so the draft overlay can
-    # read req.scope['auth'] and scope by org. The JSON APIs under
-    # /api/explorer/... are still public.
+    # read req.scope['auth'] and scope by org.
     "/explorer",
     "/explorer/foo",
     "/explorer/foo/bar",
+    # Explorer API endpoints also require auth — ontology data queries
+    # should not be publicly accessible.
+    "/api/explorer/overview",
+    "/api/explorer/category/ABC",
 ]
 
 

@@ -16,13 +16,13 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime
-from typing import Any, cast
+from typing import Any
 
 from fasthtml.common import *  # noqa: F403
 from starlette.requests import Request
 from starlette.responses import RedirectResponse, Response
 
-from app.auth.provider import UserDict
+from app.auth.helpers import require_auth as _require_auth
 from app.chat.audit import (
     log_chat_conversation_create,
     log_chat_conversation_delete,
@@ -53,14 +53,6 @@ _PAGE_SIZE = 25
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _require_auth(req: Request) -> Response | UserDict:
-    """Return the auth dict or a 303 redirect to the login page."""
-    auth = req.scope.get("auth")
-    if not auth or not auth.get("id"):
-        return RedirectResponse(url="/auth/login", status_code=303)
-    return cast(UserDict, auth)
 
 
 def _parse_uuid(raw: str) -> uuid.UUID | None:
@@ -624,6 +616,7 @@ def conversation_view_page(req: Request, conv_id: str):
         method="post",
         action=f"/chat/{parsed}/delete",
         hx_post=f"/chat/{parsed}/delete",
+        hx_confirm="Kas olete kindel, et soovite vestluse kustutada?",
         hx_target="body",
         hx_swap="outerHTML",
         cls="chat-delete-form",

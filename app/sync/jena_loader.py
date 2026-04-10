@@ -289,6 +289,7 @@ def named_graph_exists(graph_uri: str) -> bool:
     should not treat this as "the graph is empty" in critical paths,
     but the impact-report flow can safely re-PUT on ``False``.
     """
+    _validate_graph_uri(graph_uri)
     # ASK queries aren't covered by the module-level sparql_query helper
     # (which hardcodes the SELECT results shape), so talk to the SPARQL
     # endpoint directly with a tiny inline helper.
@@ -319,6 +320,7 @@ def get_named_graph_triple_count(graph_uri: str) -> int:
     query fails — use :func:`named_graph_exists` first if you need to
     distinguish "empty" from "missing".
     """
+    _validate_graph_uri(graph_uri)
     sparql_query_text = (
         f"SELECT (COUNT(*) AS ?count) WHERE {{ GRAPH <{graph_uri}> {{ ?s ?p ?o }} }}"
     )
