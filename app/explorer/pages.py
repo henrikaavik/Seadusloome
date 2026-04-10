@@ -522,15 +522,15 @@ def explorer_page(req: Request):
                 "if(!uri){panelBtn.style.display='none';return;}"
                 "var safeId=encodeURIComponent(uri).replace(/'/g,'%27');"
                 "panelBtn.innerHTML="
-                "'<div class=\"annotation-button-wrapper\">"
-                "<button type=\"button\" class=\"annotation-button\""
+                '\'<div class="annotation-button-wrapper">'
+                '<button type="button" class="annotation-button"'
                 " hx-get=\"/api/annotations?target_type=entity&target_id='+safeId+'\""
                 " hx-target=\"#annotation-popover-entity-'+safeId+'\""
-                " hx-swap=\"innerHTML\""
-                " aria-label=\"Markused\""
-                " title=\"Markused\">&#128172;</button>"
+                ' hx-swap="innerHTML"'
+                ' aria-label="Markused"'
+                ' title="Markused">&#128172;</button>'
                 "<div id=\"annotation-popover-entity-'+safeId+'\""
-                " class=\"annotation-popover-container\"></div></div>';"
+                ' class="annotation-popover-container"></div></div>\';'
                 "panelBtn.style.display='block';"
                 "if(typeof htmx!=='undefined'){htmx.process(panelBtn);}"
                 "});"
