@@ -25,6 +25,7 @@ import json
 import logging
 import uuid
 from typing import Any, cast
+from urllib.parse import quote as url_quote
 
 from fasthtml.common import *  # noqa: F403
 from starlette.requests import Request
@@ -609,13 +610,24 @@ def _step_1_content(
     )
 
 
-def _find_latest_job(session_id: uuid.UUID, job_type: str) -> dict[str, Any] | None:
+def _find_latest_job(
+    session_id: uuid.UUID,
+    job_type: str,
+    extra_filter: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     """Find the most recent background job of *job_type* for this session.
 
     Queries ``background_jobs`` for rows whose JSONB payload contains
-    ``session_id``. Returns a dict with keys ``status``, ``result``,
-    ``error_message``, or ``None`` if no job exists.
+    ``session_id`` (and optionally ``extra_filter`` fields — e.g.
+    ``{"clause_index": 3}`` for regenerate-clause lookups so concurrent
+    regenerations of different clauses don't cross-pollinate).
+
+    Returns a dict with keys ``status``, ``result``, ``error_message``,
+    or ``None`` if no job exists.
     """
+    filter_payload: dict[str, Any] = {"session_id": str(session_id)}
+    if extra_filter:
+        filter_payload.update(extra_filter)
     try:
         with _connect() as conn:
             row = conn.execute(
@@ -627,7 +639,7 @@ def _find_latest_job(session_id: uuid.UUID, job_type: str) -> dict[str, Any] | N
                 ORDER BY created_at DESC
                 LIMIT 1
                 """,
-                (job_type, json.dumps({"session_id": str(session_id)})),
+                (job_type, json.dumps(filter_payload)),
             ).fetchone()
     except Exception:
         logger.exception("Failed to look up job %s for session %s", job_type, session_id)
@@ -1033,7 +1045,12 @@ def _step_5_page(session: DraftingSession, auth: UserDict, theme: str):
         citation_links: list[Any] = []
         for cit in citations:
             citation_links.append(
-                A(cit, href=f"/explorer?search={cit}", cls="citation-link", target="_blank")  # noqa: F405
+                A(
+                    cit,
+                    href=f"/explorer?search={url_quote(cit)}",
+                    cls="citation-link",
+                    target="_blank",
+                )  # noqa: F405
             )
 
         clause_items.append(
@@ -2269,8 +2286,9 @@ def regenerate_clause_status(req: Request, session_id: str, clause_idx: str):
     except (ValueError, TypeError):
         return Div("Vigane indeks.", id=f"clause-{clause_idx}")  # noqa: F405
 
-    # Check background job status
-    job = _find_latest_job(parsed, "drafter_regenerate_clause")
+    # Check background job status — filter by BOTH session_id AND clause_index
+    # so concurrent regenerations of different clauses don't cross-pollinate.
+    job = _find_latest_job(parsed, "drafter_regenerate_clause", extra_filter={"clause_index": idx})
     if job and job["status"] == "success":
         # Re-read session to get updated clauses
         session = fetch_session(parsed) or session
@@ -2288,7 +2306,12 @@ def regenerate_clause_status(req: Request, session_id: str, clause_idx: str):
             citation_links: list[Any] = []
             for cit in citations:
                 citation_links.append(
-                    A(cit, href=f"/explorer?search={cit}", cls="citation-link", target="_blank")  # noqa: F405
+                    A(
+                        cit,
+                        href=f"/explorer?search={url_quote(cit)}",
+                        cls="citation-link",
+                        target="_blank",
+                    )  # noqa: F405
                 )
 
             return Div(  # noqa: F405
