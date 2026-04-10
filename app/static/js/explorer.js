@@ -11,12 +11,17 @@
 // Constants
 // ---------------------------------------------------------------------------
 
+const DEFAULT_COLOR = '#94a3b8';
+
 const CATEGORY_COLORS = {
   'EnactedLaw':       '#38bdf8',
   'DraftLegislation': '#a78bfa',
   'CourtDecision':    '#fb923c',
   'EULegislation':    '#34d399',
   'EUCourtDecision':  '#f472b6',
+  'LegalProvision':   '#60a5fa',
+  'TopicCluster':     '#c084fc',
+  'LegalConcept':     '#fbbf24',
 };
 
 // Human-readable labels for categories (Estonian)
@@ -26,6 +31,9 @@ const CATEGORY_LABELS = {
   'CourtDecision':    'Kohtulahend',
   'EULegislation':    'EL \u00f5igusakt',
   'EUCourtDecision':  'EL kohtulahend',
+  'LegalProvision':   '\u00d5igusnorm',
+  'TopicCluster':     'Teemaklaster',
+  'LegalConcept':     '\u00d5igusm\u00f5iste',
 };
 
 // English labels used in legend (matching demo)
@@ -35,6 +43,9 @@ const CATEGORY_LABELS_EN = {
   'CourtDecision':    'Court Decisions',
   'EULegislation':    'EU Legislation',
   'EUCourtDecision':  'EU Court Decisions',
+  'LegalProvision':   'Legal Provision',
+  'TopicCluster':     'Topic Cluster',
+  'LegalConcept':     'Legal Concept',
 };
 
 const CATEGORY_POSITIONS = {
@@ -43,6 +54,9 @@ const CATEGORY_POSITIONS = {
   'CourtDecision':    { x: -200, y:  150 },
   'EULegislation':    { x:  200, y:  150 },
   'EUCourtDecision':  { x:    0, y:  250 },
+  'LegalProvision':   { x:    0, y: -250 },
+  'TopicCluster':     { x: -300, y:    0 },
+  'LegalConcept':     { x:  300, y:    0 },
 };
 
 const MAX_NODES = 500;
@@ -110,6 +124,27 @@ Object.entries(CATEGORY_COLORS).forEach(([cat, color]) => {
     .attr('fill', color)
     .attr('opacity', 0.5);
 });
+
+// Default glow filter for unknown categories
+const defaultGlow = defs.append('filter').attr('id', 'glow-default');
+defaultGlow.append('feGaussianBlur').attr('stdDeviation', '4').attr('result', 'blur');
+defaultGlow.append('feFlood').attr('flood-color', DEFAULT_COLOR).attr('flood-opacity', '0.4').attr('result', 'color');
+defaultGlow.append('feComposite').attr('in', 'color').attr('in2', 'blur').attr('operator', 'in').attr('result', 'shadow');
+const defaultGlowMerge = defaultGlow.append('feMerge');
+defaultGlowMerge.append('feMergeNode').attr('in', 'shadow');
+defaultGlowMerge.append('feMergeNode').attr('in', 'SourceGraphic');
+
+// Default arrow marker for unknown categories
+defs.append('marker')
+  .attr('id', 'arrow-default')
+  .attr('viewBox', '0 -4 8 8')
+  .attr('refX', 8).attr('refY', 0)
+  .attr('markerWidth', 6).attr('markerHeight', 6)
+  .attr('orient', 'auto')
+  .append('path')
+  .attr('d', 'M0,-3L8,0L0,3')
+  .attr('fill', DEFAULT_COLOR)
+  .attr('opacity', 0.5);
 
 // Cross-category arrow
 defs.append('marker')
@@ -193,16 +228,23 @@ function categoryFromUri(typeUri) {
   if (CATEGORY_COLORS[short]) return short;
   // Fuzzy match
   const lower = short.toLowerCase();
-  if (lower.includes('enacted') || lower.includes('provision') || lower.includes('legalprovision')) return 'EnactedLaw';
+  if (lower.includes('legalprovision') || lower.includes('legal_provision')) return 'LegalProvision';
+  if (lower.includes('topiccluster') || lower.includes('topic_cluster')) return 'TopicCluster';
+  if (lower.includes('legalconcept') || lower.includes('legal_concept')) return 'LegalConcept';
+  if (lower.includes('enacted')) return 'EnactedLaw';
+  if (lower.includes('provision')) return 'LegalProvision';
   if (lower.includes('draft')) return 'DraftLegislation';
   if (lower.includes('eucourt') || lower.includes('eu_court')) return 'EUCourtDecision';
   if (lower.includes('court') || lower.includes('decision')) return 'CourtDecision';
   if (lower.includes('eu') || lower.includes('directive') || lower.includes('regulation')) return 'EULegislation';
-  return 'EnactedLaw';
+  if (lower.includes('concept')) return 'LegalConcept';
+  if (lower.includes('topic') || lower.includes('cluster')) return 'TopicCluster';
+  // Return the raw short name — colorFor() will apply DEFAULT_COLOR
+  return short;
 }
 
 function colorFor(category) {
-  return CATEGORY_COLORS[category] || '#94a3b8';
+  return CATEGORY_COLORS[category] || DEFAULT_COLOR;
 }
 
 // ---------------------------------------------------------------------------
@@ -453,7 +495,8 @@ function render() {
     .attr('marker-end', d => {
       if (isCrossCategory(d)) return 'url(#arrow-cross)';
       const cat = typeof d.source === 'object' ? d.source.category : '';
-      return cat ? `url(#arrow-${cat})` : '';
+      if (!cat) return '';
+      return CATEGORY_COLORS[cat] ? `url(#arrow-${cat})` : 'url(#arrow-default)';
     });
 
   linkSel.transition().duration(400).attr('stroke-opacity', d => isCrossCategory(d) ? 0.3 : 0.25);
@@ -508,7 +551,7 @@ function render() {
     .attr('stroke', d => colorFor(d.category))
     .attr('stroke-width', 2)
     .attr('stroke-opacity', 0.7)
-    .attr('filter', d => `url(#glow-${d.category})`);
+    .attr('filter', d => CATEGORY_COLORS[d.category] ? `url(#glow-${d.category})` : 'url(#glow-default)');
 
   // Inner filled circle
   nodeEnter.append('circle')
@@ -559,6 +602,9 @@ function render() {
   // Update pinned visual
   nodeSel.selectAll('circle.outer')
     .attr('stroke-dasharray', d => state.pinnedNodes.has(d.id) ? '4,2' : null);
+
+  // --- Update legend to reflect current categories ---
+  updateLegend();
 
   // --- Restart simulation ---
   simulation.nodes(state.nodes);
@@ -662,6 +708,43 @@ async function onNodeClick(event, d) {
     // Show detail panel
     await showEntityDetail(d);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic legend — reflects categories present in current data
+// ---------------------------------------------------------------------------
+
+function updateLegend() {
+  const legendEl = document.getElementById('legend');
+  if (!legendEl) return;
+
+  // Collect unique categories present in the current node set
+  const presentCats = new Set();
+  state.nodes.forEach(n => {
+    if (n.category) presentCats.add(n.category);
+  });
+
+  // Clear existing items but keep the heading
+  legendEl.innerHTML = '';
+  const heading = document.createElement('h3');
+  heading.textContent = 'Kategooriad';
+  legendEl.appendChild(heading);
+
+  if (presentCats.size === 0) return;
+
+  // Render a legend item for each category in the data
+  presentCats.forEach(cat => {
+    const item = document.createElement('div');
+    item.className = 'legend-item';
+
+    const dot = document.createElement('div');
+    dot.className = 'legend-dot';
+    dot.style.background = colorFor(cat);
+
+    item.appendChild(dot);
+    item.appendChild(document.createTextNode(CATEGORY_LABELS_EN[cat] || cat));
+    legendEl.appendChild(item);
+  });
 }
 
 // ---------------------------------------------------------------------------

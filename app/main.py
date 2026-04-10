@@ -20,12 +20,12 @@ from app.chat.websocket import register_chat_ws_routes
 from app.docs.report_routes import register_report_routes
 from app.docs.routes import register_draft_routes
 from app.drafter.routes import register_drafter_routes
-from app.explorer.pages import register_explorer_pages
+from app.explorer.pages import explorer_page, register_explorer_pages
 from app.explorer.routes import register_explorer_routes
 from app.explorer.websocket import register_ws_routes
 from app.notifications.routes import register_notification_routes
 from app.sync.webhook import register_webhook_routes
-from app.templates.dashboard import index_redirect, register_dashboard_routes
+from app.templates.dashboard import register_dashboard_routes
 from app.ui.design_system_pages import register_design_system_routes
 from app.ui.forms.live_validation import register_validation_routes
 from app.ui.primitives.button import Button  # noqa: F401  -- shadow guard #419
@@ -183,7 +183,10 @@ register_notification_routes(rt)
 
 @rt("/")
 def index(req: Request):
-    return index_redirect(req)
+    auth = req.scope.get("auth")
+    if auth is None:
+        return RedirectResponse(url="/auth/login", status_code=303)
+    return explorer_page(req)
 
 
 @rt("/api/ping", methods=["GET"])

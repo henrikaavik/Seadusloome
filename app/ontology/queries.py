@@ -23,6 +23,7 @@ CATEGORY_OVERVIEW = (
 SELECT ?type (COUNT(?entity) AS ?count)
 WHERE {
     ?entity rdf:type ?type .
+    FILTER(STRSTARTS(STR(?type), "https://data.riik.ee/ontology/estleg#"))
 }
 GROUP BY ?type
 ORDER BY DESC(?count)
