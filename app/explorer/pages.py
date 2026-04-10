@@ -288,7 +288,6 @@ def explorer_page(req: Request):
         )
 
     return Html(
-        data_theme="dark",
         Head(
             Meta(charset="UTF-8"),
             Meta(name="viewport", content="width=device-width, initial-scale=1.0"),
@@ -542,6 +541,7 @@ def explorer_page(req: Request):
             *overlay_tags,
             cls="explorer-page",
         ),
+        data_theme="dark",
     )
 
 
