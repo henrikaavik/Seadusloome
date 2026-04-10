@@ -32,7 +32,10 @@ class TestTARAStub:
 class TestTARAEnvVarsDocumented:
     def test_env_vars_in_env_example(self):
         """Verify that TARA env vars are listed in .env.example."""
-        env_example = open("/Users/henrikaavik/progemoge/Seadusloome/.env.example").read()
+        from pathlib import Path
+
+        project_root = Path(__file__).resolve().parent.parent
+        env_example = (project_root / ".env.example").read_text()
         assert "TARA_CLIENT_ID" in env_example
         assert "TARA_CLIENT_SECRET" in env_example
         assert "TARA_REDIRECT_URI" in env_example
