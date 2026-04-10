@@ -360,36 +360,35 @@ def explorer_page(req: Request):
                     cls="ctrl-btn",
                     onclick="explorerCollapseToOverview()",
                 ),
-                id="controls",
-            ),
-            # ----- Navigation -----
-            Div(
-                A(
+                # ----- Divider -----
+                Div(cls="ctrl-divider"),
+                # ----- Navigation -----
+                Button(
                     "Töölaud",
-                    href="/dashboard",
                     cls="nav-btn",
+                    onclick="location.href='/dashboard'",
                 ),
-                A(
+                Button(
                     "Eelnõud",
-                    href="/drafts",
                     cls="nav-btn",
+                    onclick="location.href='/drafts'",
                 ),
-                A(
+                Button(
                     "Koostaja",
-                    href="/drafter",
                     cls="nav-btn",
+                    onclick="location.href='/drafter'",
                 ),
-                A(
+                Button(
                     "Vestlus",
-                    href="/chat",
                     cls="nav-btn",
+                    onclick="location.href='/chat'",
                 ),
-                A(
+                Button(
                     "Admin",
-                    href="/admin",
                     cls="nav-btn",
+                    onclick="location.href='/admin'",
                 ),
-                id="nav-links",
+                id="controls",
             ),
             # ----- Breadcrumb -----
             Div(id="breadcrumb"),
