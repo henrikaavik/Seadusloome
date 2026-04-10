@@ -55,8 +55,8 @@ def _flush_buffer() -> None:
 
     try:
         with _connect() as conn:
-            # Use executemany for bulk insert
-            conn.executemany(
+            cur = conn.cursor()
+            cur.executemany(
                 "INSERT INTO metrics (name, value, labels) VALUES (%s, %s, %s::jsonb)",
                 items,
             )
