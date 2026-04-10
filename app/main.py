@@ -196,7 +196,6 @@ def ping():
     return "ok"
 
 
-
 # In production, uvicorn is invoked directly via the Dockerfile CMD, and
 # this module is imported by it. Guard serve() so it only runs when the
 # file is executed directly for local development
