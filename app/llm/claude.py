@@ -17,9 +17,10 @@ import logging
 import os
 import re
 import time
+from collections.abc import AsyncIterator
 from typing import Any
 
-from app.llm.provider import LLMProvider
+from app.llm.provider import LLMProvider, StreamEvent
 
 logger = logging.getLogger(__name__)
 
@@ -52,9 +53,10 @@ class ClaudeProvider(LLMProvider):
             self._api_key = api_key
 
         self._model = os.environ.get("CLAUDE_MODEL", DEFAULT_MODEL)
-        # Lazy-initialised SDK client; only built on first real call so
+        # Lazy-initialised SDK clients; only built on first real call so
         # stub users never need the ``anthropic`` package installed.
         self._client: Any = None
+        self._async_client: Any = None
 
     # -- helpers ------------------------------------------------------------
 
@@ -246,6 +248,173 @@ class ClaudeProvider(LLMProvider):
             result: Any = count_fn(text)
             return int(result)
         return len(text) // 4
+
+    # -- async helpers ---------------------------------------------------------
+
+    def _get_async_client(self) -> Any:
+        """Return a lazily-constructed Anthropic AsyncAnthropic client.
+
+        Raises:
+            RuntimeError: If the ``anthropic`` package isn't installed.
+        """
+        if self._async_client is not None:
+            return self._async_client
+        try:
+            import anthropic  # type: ignore[import-not-found]
+        except ImportError as exc:  # pragma: no cover
+            raise RuntimeError(
+                "ClaudeProvider: the 'anthropic' package is not installed. "
+                "Run `uv add anthropic` to add it."
+            ) from exc
+        self._async_client = anthropic.AsyncAnthropic(api_key=self._api_key)
+        return self._async_client
+
+    # -- async LLMProvider interface -------------------------------------------
+
+    async def acomplete(
+        self,
+        prompt: str,
+        *,
+        max_tokens: int = 1024,
+        temperature: float = 0.0,
+        system: str | None = None,
+        feature: str = "acomplete",
+        user_id: Any = None,
+        org_id: Any = None,
+    ) -> str:
+        """Async variant of :meth:`complete`.
+
+        Stub mode returns a deterministic marker string so tests can
+        assert on it without network I/O.
+        """
+        if self._stubbed:
+            return f"[STUB Claude async] {prompt[:40]}..."
+
+        import anthropic as _anthropic
+
+        client = self._get_async_client()
+
+        create_kwargs: dict[str, Any] = {
+            "model": self._model,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if system:
+            create_kwargs["system"] = system
+
+        try:
+            response = await client.messages.create(**create_kwargs)
+        except _anthropic.RateLimitError:
+            logger.warning(
+                "Anthropic async rate limit hit (prompt length=%d). Retrying...",
+                len(prompt),
+            )
+            try:
+                response = await client.messages.create(**create_kwargs)
+            except Exception:
+                logger.exception(
+                    "Anthropic async retry failed after rate limit (prompt length=%d)",
+                    len(prompt),
+                )
+                raise
+        except _anthropic.APITimeoutError:
+            logger.warning(
+                "Anthropic async timeout (prompt length=%d). Retrying...",
+                len(prompt),
+            )
+            try:
+                response = await client.messages.create(**create_kwargs)
+            except Exception:
+                logger.exception(
+                    "Anthropic async retry failed after timeout (prompt length=%d)",
+                    len(prompt),
+                )
+                raise
+        except _anthropic.APIError:
+            logger.exception(
+                "Anthropic async API error (prompt length=%d)",
+                len(prompt),
+            )
+            raise
+
+        content = response.content[0].text if response.content else ""
+
+        self._log_cost(
+            feature=feature,
+            tokens_input=response.usage.input_tokens,
+            tokens_output=response.usage.output_tokens,
+            user_id=user_id,
+            org_id=org_id,
+        )
+
+        return content
+
+    async def astream(
+        self,
+        prompt: str,
+        *,
+        max_tokens: int = 1024,
+        temperature: float = 0.0,
+        system: str | None = None,
+        feature: str = "astream",
+        user_id: Any = None,
+        org_id: Any = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """Async streaming completion yielding :class:`StreamEvent` objects.
+
+        Stub mode yields a few canned events then ``StreamEvent(type="stop")``.
+        Real mode wraps ``AsyncAnthropic.messages.stream()``.
+        """
+        if self._stubbed:
+            yield StreamEvent(type="content", delta="[STUB] ")
+            yield StreamEvent(type="content", delta="Tere! ")
+            yield StreamEvent(type="content", delta="See on stub-vastus.")
+            yield StreamEvent(type="stop")
+            return
+
+        client = self._get_async_client()
+
+        create_kwargs: dict[str, Any] = {
+            "model": self._model,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if system:
+            create_kwargs["system"] = system
+
+        tokens_input = 0
+        tokens_output = 0
+
+        async with client.messages.stream(**create_kwargs) as stream:
+            async for event in stream:
+                if hasattr(event, "type"):
+                    if event.type == "content_block_delta":
+                        delta_obj = event.delta
+                        if hasattr(delta_obj, "text"):
+                            yield StreamEvent(type="content", delta=delta_obj.text)
+                    elif event.type == "message_delta":
+                        # End of message — capture final usage
+                        usage = getattr(event, "usage", None)
+                        if usage:
+                            tokens_output = getattr(usage, "output_tokens", 0)
+                    elif event.type == "message_start":
+                        msg = getattr(event, "message", None)
+                        if msg:
+                            usage = getattr(msg, "usage", None)
+                            if usage:
+                                tokens_input = getattr(usage, "input_tokens", 0)
+
+        self._log_cost(
+            feature=feature,
+            tokens_input=tokens_input,
+            tokens_output=tokens_output,
+            user_id=user_id,
+            org_id=org_id,
+        )
+
+        yield StreamEvent(type="stop")
 
 
 def get_default_provider() -> LLMProvider:

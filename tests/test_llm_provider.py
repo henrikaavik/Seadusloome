@@ -7,12 +7,13 @@ The real-mode tests mock the ``anthropic`` SDK.
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.llm import ClaudeProvider, LLMProvider, get_default_provider
+from app.llm import ClaudeProvider, LLMProvider, StreamEvent, get_default_provider
 
 
 class TestLLMProviderAbstract:
@@ -312,3 +313,188 @@ class TestFactory:
         provider = get_default_provider()
         assert isinstance(provider, ClaudeProvider)
         assert isinstance(provider, LLMProvider)
+
+
+# ---------------------------------------------------------------------------
+# Async methods — stub mode
+# ---------------------------------------------------------------------------
+
+
+class TestAsyncStubMode:
+    def test_acomplete_stub_mode(self, monkeypatch: pytest.MonkeyPatch):
+        """Dev + no API key -> stubbed acomplete() returns a marker."""
+        monkeypatch.setenv("APP_ENV", "development")
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+        provider = ClaudeProvider()
+        assert provider._stubbed is True
+
+        result = asyncio.run(provider.acomplete("Mis on tsiviilseadustik?"))
+        assert result.startswith("[STUB Claude async]")
+        assert "Mis on tsiviilseadustik" in result
+
+    def test_astream_stub_yields_events(self, monkeypatch: pytest.MonkeyPatch):
+        """Stub astream yields content events then a stop event."""
+        monkeypatch.setenv("APP_ENV", "development")
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+        provider = ClaudeProvider()
+
+        async def _collect():
+            events = []
+            async for event in provider.astream("test prompt"):
+                events.append(event)
+            return events
+
+        events = asyncio.run(_collect())
+
+        # Should have content events followed by a stop event
+        assert len(events) >= 2
+        content_events = [e for e in events if e.type == "content"]
+        stop_events = [e for e in events if e.type == "stop"]
+        assert len(content_events) >= 1
+        assert len(stop_events) == 1
+        assert stop_events[0] == StreamEvent(type="stop")
+
+        # Content deltas should contain stub text
+        full_text = "".join(e.delta or "" for e in content_events)
+        assert "[STUB]" in full_text
+
+
+# ---------------------------------------------------------------------------
+# Async methods — real mode (mocked)
+# ---------------------------------------------------------------------------
+
+
+class TestAsyncRealMode:
+    """Tests for non-stubbed async code paths. SDK calls are mocked."""
+
+    def _make_provider(self, monkeypatch: pytest.MonkeyPatch) -> ClaudeProvider:
+        """Create a non-stubbed ClaudeProvider with a fake key."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-key")
+        monkeypatch.setenv("CLAUDE_MODEL", "claude-sonnet-4-6")
+        return ClaudeProvider()
+
+    def _make_response(
+        self,
+        text: str = "Hello",
+        input_tokens: int = 10,
+        output_tokens: int = 5,
+    ) -> SimpleNamespace:
+        """Build a mock Anthropic response object."""
+        block = SimpleNamespace(text=text)
+        usage = SimpleNamespace(input_tokens=input_tokens, output_tokens=output_tokens)
+        return SimpleNamespace(content=[block], usage=usage)
+
+    @patch("app.llm.claude.ClaudeProvider._log_cost")
+    def test_acomplete_real_mode(
+        self,
+        mock_log_cost: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Real mode acomplete calls messages.create on the async client."""
+        provider = self._make_provider(monkeypatch)
+        mock_client = MagicMock()
+        provider._async_client = mock_client
+
+        mock_client.messages.create = AsyncMock(return_value=self._make_response("Tere!"))
+
+        result = asyncio.run(
+            provider.acomplete(
+                "Mis on tsiviilseadustik?",
+                max_tokens=512,
+                temperature=0.3,
+            )
+        )
+
+        assert result == "Tere!"
+        mock_client.messages.create.assert_called_once()
+        kw = mock_client.messages.create.call_args[1]
+        assert kw["model"] == "claude-sonnet-4-6"
+        assert kw["max_tokens"] == 512
+        assert kw["temperature"] == 0.3
+        assert kw["messages"] == [{"role": "user", "content": "Mis on tsiviilseadustik?"}]
+
+        # Cost tracking was called
+        mock_log_cost.assert_called_once_with(
+            feature="acomplete", tokens_input=10, tokens_output=5, user_id=None, org_id=None
+        )
+
+    @patch("app.llm.claude.ClaudeProvider._log_cost")
+    def test_astream_real_mode(
+        self,
+        mock_log_cost: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Real mode astream yields events from the streaming API."""
+        provider = self._make_provider(monkeypatch)
+        mock_client = MagicMock()
+        provider._async_client = mock_client
+
+        # Build mock streaming events
+        event_content = SimpleNamespace(
+            type="content_block_delta",
+            delta=SimpleNamespace(text="Tere maailm"),
+        )
+        event_msg_start = SimpleNamespace(
+            type="message_start",
+            message=SimpleNamespace(
+                usage=SimpleNamespace(input_tokens=15),
+            ),
+        )
+        event_msg_delta = SimpleNamespace(
+            type="message_delta",
+            usage=SimpleNamespace(output_tokens=8),
+        )
+
+        # Create an async iterator for the mock stream
+        class _MockStream:
+            def __init__(self):
+                self._events = [event_msg_start, event_content, event_msg_delta]
+                self._idx = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self._idx >= len(self._events):
+                    raise StopAsyncIteration
+                evt = self._events[self._idx]
+                self._idx += 1
+                return evt
+
+        mock_stream = _MockStream()
+
+        # Mock the async context manager
+        class _MockStreamCtx:
+            async def __aenter__(self):
+                return mock_stream
+
+            async def __aexit__(self, *args):
+                pass
+
+        mock_client.messages.stream = MagicMock(return_value=_MockStreamCtx())
+
+        async def _collect():
+            events = []
+            async for event in provider.astream("test prompt"):
+                events.append(event)
+            return events
+
+        events = asyncio.run(_collect())
+
+        # Should have content + stop events
+        content_events = [e for e in events if e.type == "content"]
+        stop_events = [e for e in events if e.type == "stop"]
+        assert len(content_events) == 1
+        assert content_events[0].delta == "Tere maailm"
+        assert len(stop_events) == 1
+
+        # Cost tracking was called with captured usage
+        mock_log_cost.assert_called_once_with(
+            feature="astream",
+            tokens_input=15,
+            tokens_output=8,
+            user_id=None,
+            org_id=None,
+        )

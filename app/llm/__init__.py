@@ -13,6 +13,6 @@ Typical usage:
 """
 
 from app.llm.claude import ClaudeProvider, get_default_provider
-from app.llm.provider import LLMProvider
+from app.llm.provider import LLMProvider, StreamEvent
 
-__all__ = ["ClaudeProvider", "LLMProvider", "get_default_provider"]
+__all__ = ["ClaudeProvider", "LLMProvider", "StreamEvent", "get_default_provider"]
