@@ -1,7 +1,8 @@
 """AI Advisory Chat — Phase 3B.
 
 This package contains conversation/message CRUD, tool schemas and
-executors, and (later) the WebSocket streaming chat routes.
+executors, the orchestrator, WebSocket streaming, chat routes, and
+audit logging.
 """
 
 from app.chat.models import (
