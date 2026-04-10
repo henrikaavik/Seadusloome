@@ -291,7 +291,7 @@ project:
 1. Coolify → seadusloome project → + Add New Resource → Application
 2. Name: `seadusloome-tika`
 3. Source: Docker Image
-4. Image: `apache/tika:3.2.3.1-full`
+4. Image: `apache/tika:3.3.0.0-full`
 5. Port (internal): `9998`
 6. Network alias: `seadusloome-tika` (must match the env var below)
 7. Domain: leave empty — Tika is internal only
