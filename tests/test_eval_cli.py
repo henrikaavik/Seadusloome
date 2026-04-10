@@ -8,6 +8,9 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from pathlib import Path
+
+_PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
 
 
 class TestEvalCLI:
@@ -17,7 +20,7 @@ class TestEvalCLI:
             [sys.executable, "scripts/run_evals.py", "--scenario", "all"],
             capture_output=True,
             text=True,
-            cwd="/Users/henrikaavik/progemoge/Seadusloome",
+            cwd=_PROJECT_ROOT,
         )
         assert result.returncode == 0
         output = json.loads(result.stdout)
@@ -38,7 +41,7 @@ class TestEvalCLI:
             [sys.executable, "scripts/run_evals.py", "--scenario", "chat"],
             capture_output=True,
             text=True,
-            cwd="/Users/henrikaavik/progemoge/Seadusloome",
+            cwd=_PROJECT_ROOT,
         )
         assert result.returncode == 0
         output = json.loads(result.stdout)
@@ -55,7 +58,7 @@ class TestEvalCLI:
             [sys.executable, "scripts/run_evals.py", "--scenario", "drafter"],
             capture_output=True,
             text=True,
-            cwd="/Users/henrikaavik/progemoge/Seadusloome",
+            cwd=_PROJECT_ROOT,
         )
         assert result.returncode == 0
         output = json.loads(result.stdout)
@@ -70,7 +73,7 @@ class TestEvalCLI:
             [sys.executable, "scripts/run_evals.py", "--scenario", "all"],
             capture_output=True,
             text=True,
-            cwd="/Users/henrikaavik/progemoge/Seadusloome",
+            cwd=_PROJECT_ROOT,
         )
         output = json.loads(result.stdout)
         for r in output["results"]:
@@ -85,7 +88,7 @@ class TestEvalCLI:
             [sys.executable, "scripts/run_evals.py"],
             capture_output=True,
             text=True,
-            cwd="/Users/henrikaavik/progemoge/Seadusloome",
+            cwd=_PROJECT_ROOT,
         )
         output = json.loads(result.stdout)
         summary = output["summary"]
@@ -100,7 +103,7 @@ class TestEvalCLI:
             [sys.executable, "scripts/run_evals.py"],
             capture_output=True,
             text=True,
-            cwd="/Users/henrikaavik/progemoge/Seadusloome",
+            cwd=_PROJECT_ROOT,
         )
         output = json.loads(result.stdout)
         # Should not raise
