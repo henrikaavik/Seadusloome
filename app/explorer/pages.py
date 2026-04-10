@@ -362,6 +362,35 @@ def explorer_page(req: Request):
                 ),
                 id="controls",
             ),
+            # ----- Navigation -----
+            Div(
+                A(
+                    "Töölaud",
+                    href="/dashboard",
+                    cls="nav-btn",
+                ),
+                A(
+                    "Eelnõud",
+                    href="/drafts",
+                    cls="nav-btn",
+                ),
+                A(
+                    "Koostaja",
+                    href="/drafter",
+                    cls="nav-btn",
+                ),
+                A(
+                    "Vestlus",
+                    href="/chat",
+                    cls="nav-btn",
+                ),
+                A(
+                    "Admin",
+                    href="/admin",
+                    cls="nav-btn",
+                ),
+                id="nav-links",
+            ),
             # ----- Breadcrumb -----
             Div(id="breadcrumb"),
             # ----- Tooltip -----
