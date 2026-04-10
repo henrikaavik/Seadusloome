@@ -32,6 +32,7 @@ from app.ontology.sparql_client import SparqlClient
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_ROUNDS = 5
+_MAX_HISTORY_MESSAGES = 50
 
 # ---------------------------------------------------------------------------
 # Draft context loader
@@ -187,6 +188,7 @@ class ChatOrchestrator:
         tokens_in = 0
         tokens_out = 0
         tool_rounds = 0
+        completed = False
 
         # Build conversation messages for the LLM
         messages = _build_llm_messages(history, user_message)
@@ -230,6 +232,7 @@ class ChatOrchestrator:
 
                 # If no tool use requested, we're done
                 if pending_tool is None:
+                    completed = True
                     break
 
                 # Execute tool
@@ -237,7 +240,7 @@ class ChatOrchestrator:
                 tool_name = pending_tool["name"]
                 tool_input = pending_tool["input"]
 
-                tool_result = await execute_tool(tool_name, tool_input, self.sparql)
+                tool_result = await execute_tool(tool_name, tool_input, self.sparql, auth=auth)
 
                 await send(
                     {
@@ -277,35 +280,52 @@ class ChatOrchestrator:
                             "delta": "\n\n(Tööriistade kasutamise limiit saavutatud.)",
                         }
                     )
+                    completed = True
                     break
 
         except Exception:
             logger.exception("LLM streaming failed for conversation %s", conversation_id)
+            # M1: persist partial content with error suffix when streaming fails
+            if full_content:
+                full_content += " [Viga: vastus katkestati]"
+                try:
+                    with get_connection() as conn:
+                        create_message(
+                            conn,
+                            conversation_id,
+                            "assistant",
+                            full_content,
+                            model=getattr(self.llm, "_model", None),
+                        )
+                        conn.commit()
+                except Exception:
+                    logger.exception("Failed to persist partial assistant message")
             await send({"type": "error", "message": "Vastuse genereerimine ebaonnestus."})
             return
 
-        # 7. Persist assistant message
+        # 7. Persist assistant message (only when streaming completed successfully)
         assistant_msg_id: uuid.UUID | None = None
-        try:
-            with get_connection() as conn:
-                assistant_msg = create_message(
-                    conn,
-                    conversation_id,
-                    "assistant",
-                    full_content,
-                    tokens_input=tokens_in if tokens_in else None,
-                    tokens_output=tokens_out if tokens_out else None,
-                    model=getattr(self.llm, "_model", None),
-                )
-                # Also bump conversation updated_at
-                conn.execute(
-                    "UPDATE conversations SET updated_at = now() WHERE id = %s",
-                    (str(conversation_id),),
-                )
-                conn.commit()
-                assistant_msg_id = assistant_msg.id
-        except Exception:
-            logger.exception("Failed to persist assistant message")
+        if completed:
+            try:
+                with get_connection() as conn:
+                    assistant_msg = create_message(
+                        conn,
+                        conversation_id,
+                        "assistant",
+                        full_content,
+                        tokens_input=tokens_in if tokens_in else None,
+                        tokens_output=tokens_out if tokens_out else None,
+                        model=getattr(self.llm, "_model", None),
+                    )
+                    # Also bump conversation updated_at
+                    conn.execute(
+                        "UPDATE conversations SET updated_at = now() WHERE id = %s",
+                        (str(conversation_id),),
+                    )
+                    conn.commit()
+                    assistant_msg_id = assistant_msg.id
+            except Exception:
+                logger.exception("Failed to persist assistant message")
 
         # 8. Send done event
         await send(
@@ -330,9 +350,18 @@ def _build_llm_messages(
     The LLM's ``astream`` currently takes a single prompt string, so we
     concatenate history into a multi-turn prompt format that the model
     can follow.
+
+    History is capped to the most recent ``_MAX_HISTORY_MESSAGES``
+    entries to prevent context window overflow for long conversations.
     """
+    # M2: cap history to most recent N messages
+    if len(history) > _MAX_HISTORY_MESSAGES:
+        capped_history = history[-_MAX_HISTORY_MESSAGES:]
+    else:
+        capped_history = history
+
     parts: list[str] = []
-    for msg in history:
+    for msg in capped_history:
         role_label = msg.role.upper()
         parts.append(f"[{role_label}]: {msg.content}")
     parts.append(f"[USER]: {user_message}")

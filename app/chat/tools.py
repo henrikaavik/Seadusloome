@@ -15,6 +15,7 @@ import json
 import logging
 import re
 from typing import Any
+from uuid import UUID
 
 from app.db import get_connection
 from app.ontology.sparql_client import SparqlClient, _sanitize_sparql_value
@@ -105,20 +106,55 @@ CHAT_TOOLS: list[dict[str, Any]] = [
 # SPARQL safety
 # ---------------------------------------------------------------------------
 
-# Pattern to detect mutation keywords in a SPARQL query. Case-insensitive.
-_MUTATION_PATTERN = re.compile(
-    r"\b(INSERT|DELETE|DROP|CLEAR|CREATE|LOAD|COPY|MOVE|ADD)\b",
+# Strip SPARQL single-line comments before validation so attackers cannot
+# hide mutation keywords behind ``# SELECT ...`` misdirection.
+# Only match ``#`` that is NOT inside a URI (``<...>``) by requiring
+# the ``#`` to appear at start-of-line or after whitespace.
+_COMMENT_PATTERN = re.compile(r"(?:^|(?<=\s))#[^\n]*", re.MULTILINE)
+
+# Allowed SPARQL query forms (whitelist approach).
+_ALLOWED_QUERY_FORMS = re.compile(
+    r"^(SELECT|ASK|DESCRIBE|CONSTRUCT)\b",
     re.IGNORECASE,
 )
 
+# Block SERVICE keyword to prevent SSRF via federated queries.
+_SERVICE_PATTERN = re.compile(r"\bSERVICE\b", re.IGNORECASE)
+
 
 def _is_read_only_sparql(query: str) -> bool:
-    """Return True if *query* appears to be a read-only SPARQL query.
+    """Return True if *query* is a safe read-only SPARQL query.
 
-    Rejects queries containing INSERT, DELETE, DROP, CLEAR, CREATE,
-    LOAD, COPY, MOVE, or ADD keywords.
+    Uses a whitelist approach:
+    1. Strip comments (``#...`` to end of line).
+    2. Strip leading PREFIX/BASE declarations.
+    3. Verify the query body starts with SELECT, ASK, DESCRIBE, or CONSTRUCT.
+    4. Block the SERVICE keyword anywhere (prevents SSRF via federated queries).
     """
-    return _MUTATION_PATTERN.search(query) is None
+    # Strip comments
+    cleaned = _COMMENT_PATTERN.sub("", query)
+
+    # Block SERVICE keyword anywhere in the query
+    if _SERVICE_PATTERN.search(cleaned):
+        return False
+
+    # Strip leading whitespace and PREFIX/BASE declarations line by line
+    body = cleaned.strip()
+    while True:
+        m = re.match(r"(?i)\s*PREFIX\s+\S+:\s*<[^>]*>\s*", body)
+        if m:
+            body = body[m.end() :]
+            continue
+        m = re.match(r"(?i)\s*BASE\s*<[^>]*>\s*", body)
+        if m:
+            body = body[m.end() :]
+            continue
+        break
+
+    body = body.lstrip()
+
+    # Verify the query starts with an allowed form
+    return _ALLOWED_QUERY_FORMS.match(body) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -194,23 +230,43 @@ async def _exec_search_provisions(
 async def _exec_get_draft_impact(
     tool_input: dict[str, Any],
     sparql: SparqlClient,
+    auth: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Read the latest impact report for a given draft from the DB."""
+    """Read the latest impact report for a given draft from the DB.
+
+    The query joins with the ``drafts`` table and filters by the
+    caller's ``org_id`` to prevent cross-organisation data access.
+    """
     draft_id = tool_input.get("draft_id", "")
     if not draft_id.strip():
         return {"error": "Empty draft_id"}
+
+    # M3: validate draft_id is a proper UUID
+    try:
+        UUID(draft_id)
+    except (ValueError, TypeError):
+        return {"error": "Invalid draft_id format"}
+
+    # H2: org-scoping — require auth with org_id
+    org_id: str | None = None
+    if auth:
+        org_id = auth.get("org_id")
+
+    if not org_id:
+        return {"error": "Authentication with org_id required"}
 
     try:
         with get_connection() as conn:
             row = conn.execute(
                 """
-                SELECT report_data
-                FROM impact_reports
-                WHERE draft_id = %s
-                ORDER BY generated_at DESC
+                SELECT ir.report_data
+                FROM impact_reports ir
+                JOIN drafts d ON d.id = ir.draft_id
+                WHERE ir.draft_id = %s AND d.org_id = %s
+                ORDER BY ir.generated_at DESC
                 LIMIT 1
                 """,
-                (draft_id,),
+                (draft_id, org_id),
             ).fetchone()
     except Exception:
         logger.exception("Failed to fetch impact report for draft_id=%s", draft_id)
@@ -308,16 +364,29 @@ async def execute_tool(
     tool_name: str,
     tool_input: dict[str, Any],
     sparql: SparqlClient,
+    auth: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Dispatch a tool call to the appropriate executor.
 
     Returns a dict with either the tool's results or an ``"error"`` key.
     Executor exceptions are caught and returned as error dicts (never crash).
+
+    Parameters
+    ----------
+    auth:
+        Auth dict from the caller (must have ``org_id`` for tools that
+        require org-scoping, e.g. ``get_draft_impact``).
     """
     fn = _EXECUTORS.get(tool_name)
     if fn is None:
         return {"error": f"Unknown tool: {tool_name}"}
     try:
+        # Thread auth to executors that accept it.
+        import inspect
+
+        sig = inspect.signature(fn)
+        if "auth" in sig.parameters:
+            return await fn(tool_input, sparql, auth=auth)
         return await fn(tool_input, sparql)
     except Exception as e:
         logger.exception("Tool %s failed", tool_name)

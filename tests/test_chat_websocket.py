@@ -14,7 +14,12 @@ import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from app.chat.websocket import on_connect, on_disconnect, ws_chat
+from app.chat.websocket import (
+    _extract_cookie_from_headers,
+    on_connect,
+    on_disconnect,
+    ws_chat,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -194,3 +199,147 @@ class TestWsChatDelegatesToOrchestrator:
         assert str(call_args[0][0]) == _CONV_ID  # conversation_id
         assert call_args[0][1] == "Kuidas see seadus moju avaldab?"  # content
         assert call_args[0][2]["id"] == _USER_ID  # auth
+
+
+# ---------------------------------------------------------------------------
+# C1: WebSocket auth via JWT cookie extraction
+# ---------------------------------------------------------------------------
+
+
+class TestExtractCookieFromHeaders:
+    def test_extracts_access_token_from_cookie_header(self):
+        headers = [
+            (b"cookie", b"access_token=my-jwt-value; other=abc"),
+        ]
+        result = _extract_cookie_from_headers(headers, "access_token")
+        assert result == "my-jwt-value"
+
+    def test_returns_none_when_cookie_absent(self):
+        headers = [
+            (b"cookie", b"other=abc"),
+        ]
+        result = _extract_cookie_from_headers(headers, "access_token")
+        assert result is None
+
+    def test_returns_none_when_no_cookie_header(self):
+        headers = [
+            (b"host", b"localhost"),
+        ]
+        result = _extract_cookie_from_headers(headers, "access_token")
+        assert result is None
+
+
+class TestWsHandlerAuthExtraction:
+    """Test _ws_handler extracts JWT from WS scope and passes auth to ws_chat."""
+
+    @patch("app.chat.websocket.ChatOrchestrator")
+    @patch("app.chat.websocket.get_default_provider")
+    @patch("app.chat.websocket.JWTAuthProvider")
+    def test_ws_handler_with_valid_jwt_cookie(self, mock_jwt_cls, mock_provider, mock_orch_cls):
+        """A valid JWT cookie in the handshake headers populates auth."""
+        mock_jwt_instance = MagicMock()
+        mock_jwt_instance.get_current_user.return_value = {
+            "id": _USER_ID,
+            "email": "test@test.ee",
+            "full_name": "Test User",
+            "role": "drafter",
+            "org_id": _ORG_ID,
+        }
+        mock_jwt_cls.return_value = mock_jwt_instance
+
+        mock_orch_instance = MagicMock()
+        mock_orch_instance.handle_message = AsyncMock()
+        mock_orch_cls.return_value = mock_orch_instance
+
+        from app.chat.websocket import register_chat_ws_routes
+
+        # Capture the registered handler
+        mock_app = MagicMock()
+        captured_handler = None
+
+        def capture_ws(path, conn=None, disconn=None):
+            def decorator(fn):
+                nonlocal captured_handler
+                captured_handler = fn
+                return fn
+
+            return decorator
+
+        mock_app.ws = capture_ws
+        register_chat_ws_routes(mock_app)
+
+        assert captured_handler is not None
+
+        # Build a scope with Cookie header containing a JWT token
+        scope = {
+            "headers": [
+                (b"cookie", b"access_token=valid-jwt-token-here"),
+            ],
+        }
+
+        collector = _Collector()
+        msg = json.dumps(
+            {
+                "type": "send_message",
+                "conversation_id": _CONV_ID,
+                "content": "Tere!",
+            }
+        )
+
+        asyncio.run(captured_handler(msg, collector, scope))
+
+        # JWT provider was called with the token
+        mock_jwt_instance.get_current_user.assert_called_once_with("valid-jwt-token-here")
+
+        # Orchestrator was called (auth was populated so ws_chat proceeded)
+        mock_orch_instance.handle_message.assert_called_once()
+        call_args = mock_orch_instance.handle_message.call_args
+        assert call_args[0][2]["id"] == _USER_ID
+
+    @patch("app.chat.websocket.JWTAuthProvider")
+    def test_ws_handler_without_cookie_sends_error(self, mock_jwt_cls):
+        """No JWT cookie in the handshake headers -> auth error."""
+        mock_jwt_instance = MagicMock()
+        mock_jwt_cls.return_value = mock_jwt_instance
+
+        from app.chat.websocket import register_chat_ws_routes
+
+        mock_app = MagicMock()
+        captured_handler = None
+
+        def capture_ws(path, conn=None, disconn=None):
+            def decorator(fn):
+                nonlocal captured_handler
+                captured_handler = fn
+                return fn
+
+            return decorator
+
+        mock_app.ws = capture_ws
+        register_chat_ws_routes(mock_app)
+
+        assert captured_handler is not None
+
+        # Scope with no cookie header
+        scope = {
+            "headers": [
+                (b"host", b"localhost"),
+            ],
+        }
+
+        collector = _Collector()
+        msg = json.dumps(
+            {
+                "type": "send_message",
+                "conversation_id": _CONV_ID,
+                "content": "Tere!",
+            }
+        )
+
+        asyncio.run(captured_handler(msg, collector, scope))
+
+        # Should send error event (auth required)
+        assert len(collector.sent) == 1
+        parsed = json.loads(collector.sent[0])
+        assert parsed["type"] == "error"
+        assert "autentimine" in parsed["message"].lower()

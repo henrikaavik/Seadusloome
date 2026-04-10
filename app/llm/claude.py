@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -417,11 +418,31 @@ class ClaudeProvider(LLMProvider):
         yield StreamEvent(type="stop")
 
 
+_default_provider: ClaudeProvider | None = None
+_default_provider_lock = threading.Lock()
+
+
+def _reset_default_provider() -> None:
+    """Reset the singleton (for tests only)."""
+    global _default_provider
+    with _default_provider_lock:
+        _default_provider = None
+
+
 def get_default_provider() -> LLMProvider:
-    """Return the project default ``LLMProvider`` instance.
+    """Return the project default ``LLMProvider`` singleton.
+
+    Uses a module-level lock + singleton pattern (same approach as the
+    Phase 2 #453 fix) to avoid creating a new ``ClaudeProvider`` on
+    every call.
 
     Today that's Claude. Phase 3+ may read a ``LLM_PROVIDER`` env var
     here to choose between Claude and alternatives without changing
     every call site.
     """
-    return ClaudeProvider()
+    global _default_provider
+    if _default_provider is None:
+        with _default_provider_lock:
+            if _default_provider is None:
+                _default_provider = ClaudeProvider()
+    return _default_provider

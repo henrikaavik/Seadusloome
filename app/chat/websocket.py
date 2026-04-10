@@ -11,8 +11,10 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from http.cookies import SimpleCookie
 from typing import Any
 
+from app.auth.jwt_provider import JWTAuthProvider
 from app.chat.orchestrator import ChatOrchestrator
 from app.llm.claude import get_default_provider
 
@@ -101,6 +103,22 @@ async def ws_chat(msg: str, send: Any, scope: dict[str, Any] | None = None) -> N
     await orchestrator.handle_message(conversation_id, content, auth, send_event)
 
 
+def _extract_cookie_from_headers(headers: list[tuple[bytes, bytes]], name: str) -> str | None:
+    """Parse the ``Cookie`` header from raw ASGI *headers* and return the value for *name*.
+
+    Returns ``None`` when the cookie is absent or the headers contain no
+    ``Cookie`` entry.
+    """
+    for hdr_name, hdr_value in headers:
+        if hdr_name.lower() == b"cookie":
+            cookie: SimpleCookie = SimpleCookie()
+            cookie.load(hdr_value.decode("latin-1"))
+            morsel = cookie.get(name)
+            if morsel is not None:
+                return morsel.value
+    return None
+
+
 def register_chat_ws_routes(app: Any) -> None:
     """Register the chat WebSocket route on the FastHTML *app*.
 
@@ -108,11 +126,30 @@ def register_chat_ws_routes(app: Any) -> None:
     :func:`app.explorer.websocket.register_ws_routes`.
     """
 
-    async def _ws_handler(msg: str, send: Any) -> None:
-        """Thin wrapper that passes scope through from the outer handler."""
-        # FastHTML's WS handler doesn't directly pass scope to the
-        # function, so we use a closure-captured reference. The real
-        # auth is injected by the Beforeware before the WS upgrade.
-        await ws_chat(msg, send)
+    # Shared provider instance for cookie verification; lazily created
+    # the first time a WS message arrives (avoids import-time DB hits).
+    _jwt_provider: list[JWTAuthProvider | None] = [None]
+
+    def _get_jwt_provider() -> JWTAuthProvider:
+        if _jwt_provider[0] is None:
+            _jwt_provider[0] = JWTAuthProvider()
+        return _jwt_provider[0]
+
+    async def _ws_handler(msg: str, send: Any, scope: dict[str, Any] | None = None) -> None:
+        """Extract JWT from WS handshake cookies and pass auth scope to ws_chat."""
+        auth_scope: dict[str, Any] = {}
+
+        if scope is not None:
+            # Try to extract the access_token from handshake headers.
+            raw_headers: list[tuple[bytes, bytes]] = scope.get("headers", [])
+            access_token = _extract_cookie_from_headers(raw_headers, "access_token")
+
+            if access_token:
+                provider = _get_jwt_provider()
+                user = provider.get_current_user(access_token)
+                if user is not None:
+                    auth_scope["auth"] = dict(user)
+
+        await ws_chat(msg, send, auth_scope if auth_scope else None)
 
     app.ws("/ws/chat", conn=on_connect, disconn=on_disconnect)(_ws_handler)

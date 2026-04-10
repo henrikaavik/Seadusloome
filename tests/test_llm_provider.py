@@ -13,7 +13,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.llm import ClaudeProvider, LLMProvider, StreamEvent, get_default_provider
+from app.llm import (
+    ClaudeProvider,
+    LLMProvider,
+    StreamEvent,
+    _reset_default_provider,
+    get_default_provider,
+)
 
 
 class TestLLMProviderAbstract:
@@ -307,12 +313,23 @@ class TestClaudeRealMode:
 class TestFactory:
     def test_get_default_provider_returns_claude(self, monkeypatch: pytest.MonkeyPatch):
         """The factory currently returns a ClaudeProvider instance."""
+        _reset_default_provider()
         monkeypatch.setenv("APP_ENV", "development")
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
         provider = get_default_provider()
         assert isinstance(provider, ClaudeProvider)
         assert isinstance(provider, LLMProvider)
+
+    def test_get_default_provider_returns_singleton(self, monkeypatch: pytest.MonkeyPatch):
+        """H3: Two calls to get_default_provider return the same instance."""
+        _reset_default_provider()
+        monkeypatch.setenv("APP_ENV", "development")
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+        p1 = get_default_provider()
+        p2 = get_default_provider()
+        assert p1 is p2
 
 
 # ---------------------------------------------------------------------------

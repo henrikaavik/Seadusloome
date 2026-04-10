@@ -12,7 +12,13 @@ Typical usage:
     answer = provider.complete("Mis on Tsiviilseadustiku üldosa?")
 """
 
-from app.llm.claude import ClaudeProvider, get_default_provider
+from app.llm.claude import ClaudeProvider, _reset_default_provider, get_default_provider
 from app.llm.provider import LLMProvider, StreamEvent
 
-__all__ = ["ClaudeProvider", "LLMProvider", "StreamEvent", "get_default_provider"]
+__all__ = [
+    "ClaudeProvider",
+    "LLMProvider",
+    "StreamEvent",
+    "_reset_default_provider",
+    "get_default_provider",
+]

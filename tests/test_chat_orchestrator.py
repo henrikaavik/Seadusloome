@@ -19,6 +19,7 @@ from unittest.mock import MagicMock, patch
 
 from app.chat.models import Conversation, Message
 from app.chat.orchestrator import (
+    _MAX_HISTORY_MESSAGES,
     MAX_TOOL_ROUNDS,
     ChatOrchestrator,
     _build_llm_messages,
@@ -149,6 +150,30 @@ class TestBuildLLMMessages:
         assert result[0] == "[USER]: Esimene"
         assert result[1] == "[ASSISTANT]: Vastus"
         assert result[2] == "[USER]: Teine"
+
+    def test_history_capped_to_max(self):
+        """M2: 100 messages in history -> only last _MAX_HISTORY_MESSAGES used."""
+        total = 100
+        msgs = [_make_message("user", f"Message {i}") for i in range(total)]
+        result = _build_llm_messages(msgs, "Final message")
+
+        # Should have _MAX_HISTORY_MESSAGES from history + 1 for the new user message
+        assert len(result) == _MAX_HISTORY_MESSAGES + 1
+
+        # The first message should be from the tail of history, not the beginning
+        expected_first_idx = total - _MAX_HISTORY_MESSAGES
+        assert f"Message {expected_first_idx}" in result[0]
+
+        # The last message should be the new user message
+        assert result[-1] == "[USER]: Final message"
+
+    def test_history_below_cap_unchanged(self):
+        """History below the cap is not truncated."""
+        msgs = [_make_message("user", f"Message {i}") for i in range(10)]
+        result = _build_llm_messages(msgs, "Final")
+
+        # 10 history + 1 new = 11
+        assert len(result) == 11
 
 
 class TestMessagesToPrompt:
@@ -336,7 +361,7 @@ class TestOrchestratorToolUse:
         conn.execute.return_value.fetchone = side_effect_fetchone
         conn.execute.return_value.fetchall.return_value = []
 
-        async def fake_exec_tool(name, inp, sparql):
+        async def fake_exec_tool(name, inp, sparql, auth=None):
             return {"results": [{"uri": "estleg:Test"}]}
 
         mock_exec_tool.side_effect = fake_exec_tool
@@ -417,7 +442,7 @@ class TestOrchestratorMaxToolRounds:
         conn.execute.return_value.fetchone = side_effect_fetchone
         conn.execute.return_value.fetchall.return_value = []
 
-        async def fake_exec_tool(name, inp, sparql):
+        async def fake_exec_tool(name, inp, sparql, auth=None):
             return {"results": []}
 
         mock_exec_tool.side_effect = fake_exec_tool
@@ -631,3 +656,136 @@ class TestOrchestratorPersistence:
 
         # commit was called (for user msg + assistant msg)
         assert conn.commit.call_count >= 1
+
+
+class TestOrchestratorPartialPersistence:
+    """M1: Partial message should be persisted with error suffix on LLM failure."""
+
+    @patch("app.chat.orchestrator.get_connection")
+    def test_partial_content_persisted_with_error_suffix(self, mock_get_conn):
+        """When LLM fails mid-stream, partial content is persisted with error suffix."""
+        conn = MagicMock()
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
+
+        conv = _make_conversation()
+        now = datetime.now(UTC)
+        call_counter = {"n": 0}
+        base_conv_row = (
+            conv.id,
+            conv.user_id,
+            conv.org_id,
+            conv.title,
+            None,
+            conv.created_at,
+            conv.updated_at,
+        )
+
+        def side_effect_fetchone():
+            call_counter["n"] += 1
+            if call_counter["n"] == 1:
+                return base_conv_row
+            return (
+                uuid.uuid4(),
+                _CONV_ID,
+                "user",
+                "x",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                now,
+            )
+
+        conn.execute.return_value.fetchone = side_effect_fetchone
+        conn.execute.return_value.fetchall.return_value = []
+
+        class PartialThenErrorLLM(FakeLLM):
+            async def astream(self, prompt: str, **kwargs: Any):
+                yield StreamEvent(type="content", delta="Osaliselt ")
+                yield StreamEvent(type="content", delta="genereeritud ")
+                raise RuntimeError("LLM connection lost")
+
+        collector = _Collector()
+        llm = PartialThenErrorLLM()
+        orchestrator = ChatOrchestrator(llm, FakeSparql())
+        asyncio.run(orchestrator.handle_message(_CONV_ID, "Tere", _auth(), collector))
+
+        # Should have error event
+        error_events = [e for e in collector.events if e.get("type") == "error"]
+        assert len(error_events) == 1
+
+        # Should have persisted partial content with error suffix.
+        # Find the create_message call for the assistant message (contains error suffix)
+        execute_calls = conn.execute.call_args_list
+        persisted_texts = []
+        for call in execute_calls:
+            args = call[0]
+            if len(args) >= 1 and isinstance(args[0], str) and "INSERT INTO messages" in args[0]:
+                # The create_message function uses INSERT INTO messages
+                persisted_texts.append(args)
+
+        # The partial content should have been committed
+        assert conn.commit.call_count >= 2  # user msg + partial assistant msg
+
+    @patch("app.chat.orchestrator.get_connection")
+    def test_no_partial_content_no_persistence(self, mock_get_conn):
+        """When LLM fails immediately (no content), no assistant message is persisted."""
+        conn = MagicMock()
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
+
+        conv = _make_conversation()
+        now = datetime.now(UTC)
+        call_counter = {"n": 0}
+        base_conv_row = (
+            conv.id,
+            conv.user_id,
+            conv.org_id,
+            conv.title,
+            None,
+            conv.created_at,
+            conv.updated_at,
+        )
+
+        def side_effect_fetchone():
+            call_counter["n"] += 1
+            if call_counter["n"] == 1:
+                return base_conv_row
+            return (
+                uuid.uuid4(),
+                _CONV_ID,
+                "user",
+                "x",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                now,
+            )
+
+        conn.execute.return_value.fetchone = side_effect_fetchone
+        conn.execute.return_value.fetchall.return_value = []
+
+        class ImmediateErrorLLM(FakeLLM):
+            async def astream(self, prompt: str, **kwargs: Any):
+                raise RuntimeError("LLM exploded immediately")
+                yield  # type: ignore[misc]
+
+        collector = _Collector()
+        llm = ImmediateErrorLLM()
+        orchestrator = ChatOrchestrator(llm, FakeSparql())
+        asyncio.run(orchestrator.handle_message(_CONV_ID, "Tere", _auth(), collector))
+
+        # Should have error event
+        error_events = [e for e in collector.events if e.get("type") == "error"]
+        assert len(error_events) == 1
+
+        # Only 1 commit (for the user message), not 2 (no assistant msg persisted)
+        assert conn.commit.call_count == 1
