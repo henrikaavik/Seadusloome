@@ -1,809 +1,157 @@
-"""Admin dashboard with system health, sync status, user stats, and audit log."""
+"""Admin dashboard — backward-compatible shim.
+
+The real implementation lives in ``app.admin.*`` sub-modules.  This module
+re-exports every public and "underscore-public" name so that existing code
+doing ``from app.templates.admin_dashboard import X`` or
+``@patch("app.templates.admin_dashboard.X")`` continues to work.
+
+A handful of functions are *rebound* (their ``__globals__`` dict is swapped
+to point at **this** module) so that ``@patch`` decorators that replace
+``_connect``, ``jena_check_health``, ``_check_postgres``, or
+``_get_sync_logs`` on this module actually affect the function at call-time.
+Without rebinding, the function objects would resolve those names from the
+sub-module where they were originally defined, and the patches would have
+no effect.
+"""
 
 from __future__ import annotations
 
 import logging
 import threading
+import types as _types
 
-from fasthtml.common import *
-from starlette.requests import Request
-from starlette.responses import JSONResponse
+from fasthtml.common import *  # noqa: F403, F401
+from starlette.responses import JSONResponse  # noqa: F401  -- used by rebound health_check
 
+from app.admin._shared import _tooltip  # noqa: F401
+from app.admin.audit import (
+    _get_audit_log_page as _get_audit_log_page_impl,
+)
+from app.admin.audit import (
+    admin_audit_page as _admin_audit_page_impl,
+)
+from app.admin.dashboard import (
+    admin_dashboard_page as _admin_dashboard_page_impl,
+)
+from app.admin.health import (
+    _check_postgres as _check_postgres_impl,
+)
+from app.admin.health import (
+    _health_card,  # noqa: F401
+)
+from app.admin.health import (
+    health_check as _health_check_impl,
+)
+from app.admin.jobs import (
+    _get_job_queue_snapshot,  # noqa: F401
+    _job_queue_card,  # noqa: F401
+)
+from app.admin.llm_usage import (
+    _get_llm_usage_stats,  # noqa: F401
+    _llm_usage_card,  # noqa: F401
+)
+from app.admin.rate_limits import (
+    _get_rate_limit_stats,  # noqa: F401
+    _rate_limit_card,  # noqa: F401
+)
+from app.admin.sync import (
+    _get_sync_logs as _get_sync_logs_impl,
+)
+from app.admin.sync import (
+    _run_sync_and_clear_flag as _run_sync_and_clear_flag_impl,
+)
+from app.admin.sync import (
+    _sync_card,  # noqa: F401
+    _sync_status_badge,  # noqa: F401
+    _sync_trigger_form,  # noqa: F401
+)
+from app.admin.sync import (
+    trigger_sync as _trigger_sync_impl,
+)
+from app.admin.users import (
+    _get_user_stats as _get_user_stats_impl,
+)
+from app.admin.users import (
+    _quick_links_card,  # noqa: F401
+    _user_stats_card,  # noqa: F401
+)
 from app.auth.roles import require_role
-from app.db import get_connection as _connect
-from app.jobs.queue import Job, JobQueue
-from app.sync.jena_loader import check_health as jena_check_health
-from app.ui.data.data_table import Column, DataTable
-from app.ui.data.pagination import Pagination
-from app.ui.forms.app_form import AppForm
-from app.ui.layout import PageShell
-from app.ui.primitives.badge import Badge, StatusBadge
-from app.ui.primitives.button import Button
-from app.ui.surfaces.card import Card, CardBody, CardHeader
-from app.ui.surfaces.info_box import InfoBox
-from app.ui.theme import get_theme_from_request
+from app.db import get_connection as _connect  # noqa: F401
+from app.sync.jena_loader import check_health as jena_check_health  # noqa: F401
+from app.ui.primitives.button import Button  # noqa: F401, F811  -- shadow guard #419
 
-# Module-level lock so two admins clicking "Sync now" at the same time
-# don't trigger two parallel clones.
+# Module-level state expected by tests (e.g. ``admin_dashboard._sync_in_progress``).
 _sync_lock = threading.Lock()
 _sync_in_progress = False
 
 logger = logging.getLogger(__name__)
 
-
-def _tooltip(text: str):
-    """Return a small (?) icon with a CSS-only hover tooltip."""
-    return Span("?", cls="admin-tooltip", data_tooltip=text)
-
-
-# ---------------------------------------------------------------------------
-# DB helpers
-# ---------------------------------------------------------------------------
-
-
-def _check_postgres() -> bool:
-    """Check if PostgreSQL is reachable."""
-    try:
-        with _connect() as conn:
-            conn.execute("SELECT 1")
-        return True
-    except Exception:
-        logger.exception("PostgreSQL health check failed")
-        return False
-
-
-def _get_sync_logs(limit: int = 5) -> list[dict]:  # type: ignore[type-arg]
-    """Return the most recent sync_log entries."""
-    try:
-        with _connect() as conn:
-            rows = conn.execute(
-                "SELECT id, started_at, finished_at, status, entity_count, error_message "
-                "FROM sync_log ORDER BY started_at DESC LIMIT %s",
-                (limit,),
-            ).fetchall()
-        return [
-            {
-                "id": r[0],
-                "started_at": r[1],
-                "finished_at": r[2],
-                "status": r[3],
-                "entity_count": r[4],
-                "error_message": r[5],
-            }
-            for r in rows
-        ]
-    except Exception:
-        logger.exception("Failed to fetch sync logs")
-        return []
-
-
-def _get_user_stats() -> dict:  # type: ignore[type-arg]
-    """Return user statistics: total count, users per org, active sessions."""
-    stats: dict = {  # type: ignore[type-arg]
-        "total_users": 0,
-        "users_per_org": [],
-        "active_sessions": 0,
-    }
-    try:
-        with _connect() as conn:
-            # Total users
-            row = conn.execute("SELECT COUNT(*) FROM users").fetchone()
-            stats["total_users"] = row[0] if row else 0
-
-            # Users per org
-            rows = conn.execute(
-                "SELECT o.name, COUNT(u.id) AS user_count "
-                "FROM organizations o "
-                "LEFT JOIN users u ON u.org_id = o.id "
-                "GROUP BY o.id, o.name ORDER BY o.name"
-            ).fetchall()
-            stats["users_per_org"] = [{"org_name": r[0], "user_count": r[1]} for r in rows]
-
-            # Active sessions (not expired)
-            row = conn.execute("SELECT COUNT(*) FROM sessions WHERE expires_at > now()").fetchone()
-            stats["active_sessions"] = row[0] if row else 0
-    except Exception:
-        logger.exception("Failed to fetch user stats")
-    return stats
-
-
-def _get_audit_log_page(page: int = 1, per_page: int = 25) -> tuple[list[dict], int]:  # type: ignore[type-arg]
-    """Return a page of audit_log entries and total count."""
-    entries: list[dict] = []  # type: ignore[type-arg]
-    total = 0
-    try:
-        with _connect() as conn:
-            row = conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()
-            total = row[0] if row else 0
-
-            offset = (page - 1) * per_page
-            rows = conn.execute(
-                "SELECT a.id, a.user_id, u.full_name, a.action, a.detail, a.created_at "
-                "FROM audit_log a "
-                "LEFT JOIN users u ON u.id = a.user_id "
-                "ORDER BY a.created_at DESC LIMIT %s OFFSET %s",
-                (per_page, offset),
-            ).fetchall()
-            entries = [
-                {
-                    "id": r[0],
-                    "user_id": str(r[1]) if r[1] else None,
-                    "user_name": r[2] or "Süsteem",
-                    "action": r[3],
-                    "detail": r[4],
-                    "created_at": r[5],
-                }
-                for r in rows
-            ]
-    except Exception:
-        logger.exception("Failed to fetch audit log page %d", page)
-    return entries, total
-
-
-# ---------------------------------------------------------------------------
-# Rendering helpers
-# ---------------------------------------------------------------------------
-
 _SYNC_STATUS_MAP = {
-    "running": ("running", "Käimas"),
-    "success": ("ok", "Õnnestus"),
-    "failed": ("failed", "Ebaõnnestus"),
+    "running": ("running", "K\u00e4imas"),
+    "success": ("ok", "\u00d5nnestus"),
+    "failed": ("failed", "Eba\u00f5nnestus"),
 }
 
-
-def _sync_status_badge(status: str):
-    """Return a StatusBadge for a sync_log status value."""
-    key, _ = _SYNC_STATUS_MAP.get(status, ("pending", status))
-    return StatusBadge(key)  # type: ignore[arg-type]
-
-
-def _health_card(jena_ok: bool, pg_ok: bool):
-    """Render the system health card."""
-    body = Dl(
-        Dt("Apache Jena Fuseki"),
-        Dd(StatusBadge("ok") if jena_ok else StatusBadge("failed")),
-        Dt("PostgreSQL"),
-        Dd(StatusBadge("ok") if pg_ok else StatusBadge("failed")),
-        cls="info-list",
-    )
-    return Card(
-        CardHeader(
-            H3(
-                "S\u00fcsteemi tervis",
-                _tooltip("Jena ja Postgres \u00fchenduse staatus"),
-                cls="card-title",
-            )
-        ),
-        CardBody(body),
-    )
-
-
-def _sync_trigger_form():
-    """Render the 'Sync now' button as an HTMX form.
-
-    Posts to /admin/sync. The endpoint swaps this same card in-place
-    with a confirmation message so the admin gets immediate feedback
-    without a full-page reload.
-    """
-    return AppForm(
-        Button(
-            "Sünkroniseeri kohe",
-            type="submit",
-            variant="primary",
-            size="sm",
-            cls="sync-trigger-btn",
-        ),
-        method="post",
-        action="/admin/sync",
-        hx_post="/admin/sync",
-        hx_target="#sync-card",
-        hx_swap="outerHTML",
-        cls="sync-trigger-form",
-    )
-
-
-def _sync_card(sync_logs: list[dict], *, status_banner: tuple[str, str] | None = None):  # type: ignore[type-arg]
-    """Render the sync status card.
-
-    Args:
-        sync_logs: recent sync_log rows from the DB
-        status_banner: optional (variant, message) tuple shown above the
-            log table — used by POST /admin/sync to surface 'queued' /
-            'already running' feedback.
-    """
-    if not sync_logs:
-        body = P("Sünkroniseerimisi ei leitud.", cls="muted-text")
-    else:
-        columns = [
-            Column(key="started", label="Algusaeg", sortable=False),
-            Column(
-                key="status",
-                label="Staatus",
-                sortable=False,
-                render=lambda r: _sync_status_badge(r["status_raw"]),
-            ),
-            Column(key="entity_count", label="Olemeid", sortable=False),
-            Column(key="error_message", label="Veateade", sortable=False),
-        ]
-        rows = []
-        for entry in sync_logs:
-            started = entry["started_at"]
-            rows.append(
-                {
-                    "started": started.strftime("%d.%m.%Y %H:%M") if started else "—",
-                    "status_raw": entry["status"],
-                    "status": entry["status"],
-                    "entity_count": (
-                        str(entry["entity_count"]) if entry["entity_count"] is not None else "—"
-                    ),
-                    "error_message": entry["error_message"] or "—",
-                }
-            )
-        body = DataTable(columns=columns, rows=rows)
-
-    body_nodes: list = []
-    if status_banner is not None:
-        variant, message = status_banner
-        body_nodes.append(Div(message, cls=f"sync-banner sync-banner-{variant}", role="status"))
-    body_nodes.append(body)
-    body_nodes.append(_sync_trigger_form())
-
-    return Card(
-        CardHeader(
-            H3(
-                "S\u00fcnkroniseerimise staatus",
-                _tooltip("GitHub \u2192 RDF \u2192 Jena s\u00fcnkroniseerimise ajalugu"),
-                cls="card-title",
-            )
-        ),
-        CardBody(*body_nodes),
-        id="sync-card",
-    )
-
-
-def _get_job_queue_snapshot() -> dict:  # type: ignore[type-arg]
-    """Fetch recent jobs grouped by status for the admin card.
-
-    Swallows DB errors so the rest of the dashboard still renders if
-    Postgres is temporarily unreachable — the health card above this
-    one will already have flagged the outage.
-    """
-    snapshot: dict = {  # type: ignore[type-arg]
-        "pending": [],
-        "running": [],
-        "failed": [],
-        "retrying": [],
-    }
-    try:
-        queue = JobQueue()
-        snapshot["pending"] = queue.list_by_status("pending", limit=5)
-        snapshot["running"] = queue.list_by_status("running", limit=5)
-        snapshot["failed"] = queue.list_by_status("failed", limit=5)
-        # #455: surface ``retrying`` for operational visibility. After
-        # the #441 fix the queue no longer parks jobs there, but the
-        # CHECK constraint still allows it and we want any drift to
-        # show up loudly on the dashboard rather than silently.
-        snapshot["retrying"] = queue.list_by_status("retrying", limit=5)
-    except Exception:
-        logger.exception("Failed to fetch job queue snapshot")
-    return snapshot
-
-
-def _job_queue_card():
-    """Render the background job queue status card.
-
-    Shows counts of pending/running/failed/retrying jobs at a glance,
-    plus a table of the most recent failures so an admin can spot
-    broken pipelines without needing to SSH into Postgres.
-    """
-    snapshot = _get_job_queue_snapshot()
-    pending: list[Job] = snapshot["pending"]
-    running: list[Job] = snapshot["running"]
-    failed: list[Job] = snapshot["failed"]
-    retrying: list[Job] = snapshot["retrying"]
-
-    has_any = bool(pending or running or failed or retrying)
-
-    if not has_any:
-        body: object = P("Taustajobisid pole.", cls="muted-text")
-        return Card(
-            CardHeader(
-                H3(
-                    "Taustajobide j\u00e4rjekord",
-                    _tooltip("Parse, anal\u00fc\u00fcs ja ekspordi t\u00f6\u00f6d"),
-                    cls="card-title",
-                )
-            ),
-            CardBody(body),
-            id="job-queue-card",
-        )
-
-    # #477: the retrying badge should only render when there's
-    # actually something to retry. After the #441 fix this should
-    # normally be 0; keeping a ``0 kordab`` badge permanently in the
-    # UI made it look like a live metric rather than a drift guard.
-    # The underlying query still runs so drift still surfaces loudly
-    # the moment a row ends up in ``retrying``.
-    summary_children: list = [
-        Badge(f"{len(pending)} ootel", variant="default"),
-        " ",
-        Badge(f"{len(running)} töötab", variant="primary"),
-        " ",
-    ]
-    if len(retrying) > 0:
-        summary_children.append(Badge(f"{len(retrying)} kordab", variant="warning"))
-        summary_children.append(" ")
-    summary_children.append(Badge(f"{len(failed)} ebaõnnestus", variant="danger"))
-    summary = Div(*summary_children, cls="job-queue-summary")
-
-    body_children: list = [summary]
-
-    if failed:
-        columns = [
-            Column(key="job_type", label="Tüüp", sortable=False),
-            Column(key="error_message", label="Viga", sortable=False),
-            Column(key="attempts", label="Katseid", sortable=False),
-            Column(key="finished_at", label="Lõpetatud", sortable=False),
-        ]
-        rows = []
-        for job in failed:
-            error_raw = job.error_message or "—"
-            # Truncate long error messages for readability in the card.
-            if len(error_raw) > 120:
-                error_raw = error_raw[:117] + "..."
-            finished = job.finished_at
-            rows.append(
-                {
-                    "job_type": job.job_type,
-                    "error_message": error_raw,
-                    "attempts": f"{job.attempts}/{job.max_attempts}",
-                    "finished_at": finished.strftime("%d.%m.%Y %H:%M") if finished else "—",
-                }
-            )
-        body_children.append(H4("Viimased ebaõnnestunud jobid", cls="section-subtitle"))
-        body_children.append(DataTable(columns=columns, rows=rows))
-
-    return Card(
-        CardHeader(
-            H3(
-                "Taustajobide j\u00e4rjekord",
-                _tooltip("Parse, anal\u00fc\u00fcs ja ekspordi t\u00f6\u00f6d"),
-                cls="card-title",
-            )
-        ),
-        CardBody(*body_children),
-        id="job-queue-card",
-    )
-
-
-def _get_llm_usage_stats() -> dict:  # type: ignore[type-arg]
-    """Return LLM usage stats for the current month."""
-    stats: dict = {  # type: ignore[type-arg]
-        "total_input": 0,
-        "total_output": 0,
-        "total_cost": 0.0,
-        "top_features": [],
-    }
-    try:
-        with _connect() as conn:
-            # Totals for the current month
-            row = conn.execute(
-                "SELECT COALESCE(SUM(tokens_input), 0), "
-                "COALESCE(SUM(tokens_output), 0), "
-                "COALESCE(SUM(cost_usd), 0) "
-                "FROM llm_usage WHERE created_at >= date_trunc('month', now())"
-            ).fetchone()
-            if row:
-                stats["total_input"] = row[0]
-                stats["total_output"] = row[1]
-                stats["total_cost"] = float(row[2])
-
-            # Top 3 features by cost
-            rows = conn.execute(
-                "SELECT feature, SUM(tokens_input), SUM(tokens_output), SUM(cost_usd) "
-                "FROM llm_usage WHERE created_at >= date_trunc('month', now()) "
-                "GROUP BY feature ORDER BY SUM(cost_usd) DESC LIMIT 3"
-            ).fetchall()
-            stats["top_features"] = [
-                {
-                    "feature": r[0],
-                    "tokens_input": r[1],
-                    "tokens_output": r[2],
-                    "cost_usd": float(r[3]),
-                }
-                for r in rows
-            ]
-    except Exception:
-        logger.exception("Failed to fetch LLM usage stats")
-    return stats
-
-
-def _llm_usage_card():
-    """Render the LLM usage card for the admin dashboard."""
-    stats = _get_llm_usage_stats()
-
-    total_tokens = stats["total_input"] + stats["total_output"]
-    summary = Dl(
-        Dt("Tokeneid kokku (kuu)"),
-        Dd(Badge(f"{total_tokens:,}", variant="primary")),
-        Dt("Sisend-tokenid"),
-        Dd(Badge(f"{stats['total_input']:,}", variant="default")),
-        Dt("Väljund-tokenid"),
-        Dd(Badge(f"{stats['total_output']:,}", variant="default")),
-        Dt("Kulu kokku (USD)"),
-        Dd(Badge(f"${stats['total_cost']:.4f}", variant="primary")),
-        cls="info-list",
-    )
-
-    body_children: list = [summary]
-
-    if stats["top_features"]:
-        columns = [
-            Column(key="feature", label="Funktsioon", sortable=False),
-            Column(key="tokens", label="Tokeneid", sortable=False),
-            Column(key="cost", label="Kulu (USD)", sortable=False),
-        ]
-        rows = [
-            {
-                "feature": f["feature"],
-                "tokens": f"{f['tokens_input'] + f['tokens_output']:,}",
-                "cost": f"${f['cost_usd']:.4f}",
-            }
-            for f in stats["top_features"]
-        ]
-        body_children.append(H4("Top 3 funktsiooni kulu järgi", cls="section-subtitle"))
-        body_children.append(DataTable(columns=columns, rows=rows))
-
-    return Card(
-        CardHeader(
-            H3(
-                "LLM kasutus",
-                _tooltip("Tokenite ja kulu statistika jooksvast kuust"),
-                cls="card-title",
-            )
-        ),
-        CardBody(*body_children),
-        id="llm-usage-card",
-    )
-
-
-def _get_rate_limit_stats() -> dict:  # type: ignore[type-arg]
-    """Return per-org cost vs budget and top-user message rates for the admin card."""
-    import os
-
-    max_cost = float(os.environ.get("ORG_MAX_MONTHLY_COST_USD", "50.0"))
-    max_msgs = int(os.environ.get("CHAT_MAX_MESSAGES_PER_HOUR", "100"))
-
-    stats: dict = {  # type: ignore[type-arg]
-        "max_monthly_cost_usd": max_cost,
-        "max_messages_per_hour": max_msgs,
-        "org_costs": [],
-        "top_users_hourly": [],
-    }
-    try:
-        with _connect() as conn:
-            # Per-org monthly cost
-            rows = conn.execute(
-                "SELECT o.name, COALESCE(SUM(u.cost_usd), 0) AS total_cost "
-                "FROM organizations o "
-                "LEFT JOIN llm_usage u ON u.org_id = o.id "
-                "AND u.created_at >= date_trunc('month', now()) "
-                "GROUP BY o.id, o.name ORDER BY total_cost DESC LIMIT 10"
-            ).fetchall()
-            stats["org_costs"] = [{"org_name": r[0], "cost_usd": float(r[1])} for r in rows]
-
-            # Top users by message count in the last hour
-            rows = conn.execute(
-                "SELECT usr.full_name, COUNT(m.id) AS msg_count "
-                "FROM messages m "
-                "JOIN conversations c ON c.id = m.conversation_id "
-                "JOIN users usr ON usr.id = c.user_id "
-                "WHERE m.role = 'user' "
-                "AND m.created_at > now() - interval '1 hour' "
-                "GROUP BY usr.id, usr.full_name ORDER BY msg_count DESC LIMIT 5"
-            ).fetchall()
-            stats["top_users_hourly"] = [{"user_name": r[0], "message_count": r[1]} for r in rows]
-    except Exception:
-        logger.exception("Failed to fetch rate limit stats")
-    return stats
-
-
-def _rate_limit_card():
-    """Render the usage vs limits card for the admin dashboard."""
-    stats = _get_rate_limit_stats()
-
-    summary = Dl(
-        Dt("Sonumite limiit (tunnis)"),
-        Dd(Badge(f"{stats['max_messages_per_hour']}", variant="default")),
-        Dt("Kulu limiit (kuus, USD)"),
-        Dd(Badge(f"${stats['max_monthly_cost_usd']:.2f}", variant="default")),
-        cls="info-list",
-    )
-
-    body_children: list = [summary]
-
-    if stats["org_costs"]:
-        columns = [
-            Column(key="org_name", label="Organisatsioon", sortable=False),
-            Column(key="cost", label="Kulu (USD)", sortable=False),
-            Column(key="budget_pct", label="Eelarvest", sortable=False),
-        ]
-        rows = []
-        for oc in stats["org_costs"]:
-            max_cost = stats["max_monthly_cost_usd"]
-            pct = (oc["cost_usd"] / max_cost * 100) if max_cost > 0 else 0
-            variant = "danger" if pct >= 90 else ("warning" if pct >= 70 else "default")
-            rows.append(
-                {
-                    "org_name": oc["org_name"],
-                    "cost": f"${oc['cost_usd']:.4f}",
-                    "budget_pct": Badge(f"{pct:.0f}%", variant=variant),
-                }
-            )
-        body_children.append(H4("Organisatsioonide kulu vs eelarve", cls="section-subtitle"))
-        body_children.append(DataTable(columns=columns, rows=rows))
-
-    if stats["top_users_hourly"]:
-        columns = [
-            Column(key="user_name", label="Kasutaja", sortable=False),
-            Column(key="msg_count", label="Sonumeid (tund)", sortable=False),
-            Column(key="limit_pct", label="Limiidist", sortable=False),
-        ]
-        rows = []
-        for tu in stats["top_users_hourly"]:
-            max_msgs = stats["max_messages_per_hour"]
-            pct = (tu["message_count"] / max_msgs * 100) if max_msgs > 0 else 0
-            variant = "danger" if pct >= 90 else ("warning" if pct >= 70 else "default")
-            rows.append(
-                {
-                    "user_name": tu["user_name"],
-                    "msg_count": str(tu["message_count"]),
-                    "limit_pct": Badge(f"{pct:.0f}%", variant=variant),
-                }
-            )
-        body_children.append(H4("Aktiivsemad kasutajad (viimane tund)", cls="section-subtitle"))
-        body_children.append(DataTable(columns=columns, rows=rows))
-
-    return Card(
-        CardHeader(
-            H3(
-                "Kasutuslimiidid",
-                _tooltip("Org kulu vs eelarve, kasutajate s\u00f5numite limiidid"),
-                cls="card-title",
-            )
-        ),
-        CardBody(*body_children),
-        id="rate-limit-card",
-    )
-
-
-def _user_stats_card(stats: dict):  # type: ignore[type-arg]
-    """Render the user statistics card."""
-    summary = Dl(
-        Dt("Kasutajaid kokku"),
-        Dd(Badge(str(stats["total_users"]), variant="primary")),
-        Dt("Aktiivseid seansse"),
-        Dd(Badge(str(stats["active_sessions"]), variant="default")),
-        cls="info-list",
-    )
-
-    body_children: list = [summary]
-
-    if stats["users_per_org"]:
-        columns = [
-            Column(key="org_name", label="Organisatsioon", sortable=False),
-            Column(key="user_count", label="Kasutajaid", sortable=False),
-        ]
-        rows = [
-            {"org_name": org["org_name"], "user_count": str(org["user_count"])}
-            for org in stats["users_per_org"]
-        ]
-        body_children.append(H4("Kasutajaid organisatsioonide kaupa", cls="section-subtitle"))
-        body_children.append(DataTable(columns=columns, rows=rows))
-
-    return Card(
-        CardHeader(
-            H3(
-                "Kasutajate statistika",
-                _tooltip("Kasutajate arv, seansid, jaotus organisatsioonide kaupa"),
-                cls="card-title",
-            )
-        ),
-        CardBody(*body_children),
-    )
-
-
-def _quick_links_card():
-    """Render the quick links card."""
-    return Card(
-        CardHeader(H3("Kiirlingid", cls="card-title")),
-        CardBody(
-            Ul(
-                Li(A("Organisatsioonid", href="/admin/organizations")),
-                Li(A("Kasutajad", href="/admin/users")),
-                Li(A("Auditilogi", href="/admin/audit")),
-                cls="quick-links",
-            )
-        ),
-    )
-
-
 # ---------------------------------------------------------------------------
-# Route handlers
+# Rebinding helper
 # ---------------------------------------------------------------------------
 
 
-def admin_dashboard_page(req: Request):
-    """GET /admin — admin dashboard with system overview."""
-    auth = req.scope.get("auth")
-    theme = get_theme_from_request(req)
+def _rebind(fn):
+    """Return a copy of *fn* whose ``__globals__`` point to THIS module.
 
-    jena_ok = jena_check_health()
-    pg_ok = _check_postgres()
-    sync_logs = _get_sync_logs()
-    user_stats = _get_user_stats()
-
-    content = (
-        H1("Administreerimise t\u00f6\u00f6laud", cls="page-title"),
-        InfoBox(
-            P(
-                "Administreerimise t\u00f6\u00f6laud n\u00e4itab s\u00fcsteemi "
-                "tervist, s\u00fcnkroniseerimise staatust, taustajobisid, "
-                "LLM kasutust ja kasutajate statistikat."
-            ),
-            variant="info",
-            dismissible=True,
-        ),
-        _health_card(jena_ok, pg_ok),
-        _sync_card(sync_logs),
-        _job_queue_card(),
-        _llm_usage_card(),
-        _rate_limit_card(),
-        _user_stats_card(user_stats),
-        _quick_links_card(),
-    )
-
-    return PageShell(
-        *content,
-        title="Administreerimise töölaud",
-        user=auth,
-        theme=theme,
-        active_nav="/admin",
-    )
-
-
-def admin_audit_page(req: Request):
-    """GET /admin/audit — paginated audit log viewer."""
-    auth = req.scope.get("auth")
-    theme = get_theme_from_request(req)
-
-    page_str = req.query_params.get("page", "1")
-    try:
-        page = max(1, int(page_str))
-    except ValueError:
-        page = 1
-
-    per_page = 25
-    entries, total = _get_audit_log_page(page, per_page)
-    total_pages = max(1, (total + per_page - 1) // per_page)
-
-    if not entries:
-        body: object = P("Auditilogis kirjeid ei leitud.", cls="muted-text")
-    else:
-        columns = [
-            Column(key="time", label="Aeg", sortable=False),
-            Column(key="user_name", label="Kasutaja", sortable=False),
-            Column(key="action", label="Tegevus", sortable=False),
-            Column(key="detail", label="Detailid", sortable=False),
-        ]
-        rows = []
-        for entry in entries:
-            ts = entry["created_at"]
-            rows.append(
-                {
-                    "time": ts.strftime("%d.%m.%Y %H:%M") if ts else "—",
-                    "user_name": entry["user_name"],
-                    "action": entry["action"],
-                    "detail": str(entry["detail"]) if entry["detail"] else "—",
-                }
-            )
-        body = DataTable(columns=columns, rows=rows)
-
-    pagination = Pagination(
-        current_page=page,
-        total_pages=total_pages,
-        base_url="/admin/audit",
-        page_size=per_page,
-        total=total,
-    )
-
-    content = (
-        H1("Auditilogi", cls="page-title"),
-        P(A("← Tagasi adminipaneelile", href="/admin"), cls="back-link"),
-        Card(
-            CardHeader(H3("Kirjed", cls="card-title")),
-            CardBody(body, pagination),
-        ),
-    )
-
-    return PageShell(
-        *content,
-        title="Auditilogi",
-        user=auth,
-        theme=theme,
-        active_nav="/admin",
-    )
-
-
-def health_check(req: Request):
-    """GET /api/health — JSON health check endpoint (unauthenticated).
-
-    Returns a JSON response suitable for Coolify or uptime monitoring:
-    {"status": "ok", "jena": true/false, "postgres": true/false}
+    This lets ``@patch("app.templates.admin_dashboard.X")`` affect the
+    function when it looks up ``X`` at call-time, because it now resolves
+    names from this module's dict rather than the sub-module's.
     """
-    jena_ok = jena_check_health()
-    pg_ok = _check_postgres()
-    overall = "ok" if (jena_ok and pg_ok) else "degraded"
-
-    return JSONResponse({"status": overall, "jena": jena_ok, "postgres": pg_ok})
-
-
-def _run_sync_and_clear_flag():
-    """Background wrapper: runs the sync pipeline and clears the in-progress flag."""
-    global _sync_in_progress
-    try:
-        # Imported here to avoid circular dependency on app.templates during
-        # module load, and to ensure the sync uses the runtime env vars.
-        from app.sync.orchestrator import run_sync
-
-        run_sync()
-    except Exception:
-        logger.exception("Admin-triggered sync raised an unhandled exception")
-    finally:
-        with _sync_lock:
-            _sync_in_progress = False
-
-
-def trigger_sync(req: Request):
-    """POST /admin/sync — admin-only sync trigger.
-
-    Runs the ontology sync pipeline in a background thread so the request
-    returns immediately. Re-renders the sync card with a status banner so
-    an HTMX-capable client gets inline feedback; a plain form submit sees
-    the same card on the next full page load via `/admin`.
-    """
-    global _sync_in_progress
-
-    already_running = False
-    with _sync_lock:
-        if _sync_in_progress:
-            already_running = True
-        else:
-            _sync_in_progress = True
-
-    if already_running:
-        banner = ("warning", "Sünkroniseerimine on juba käimas.")
-    else:
-        thread = threading.Thread(target=_run_sync_and_clear_flag, daemon=True)
-        thread.start()
-        banner = ("info", "Sünkroniseerimine käivitati — vaata tulemust allpool olevast logist.")
-
-    sync_logs = _get_sync_logs()
-    return _sync_card(sync_logs, status_banner=banner)
+    rebound = _types.FunctionType(
+        fn.__code__,
+        globals(),  # THIS module's global dict
+        fn.__name__,
+        fn.__defaults__,
+        fn.__closure__,
+    )
+    rebound.__module__ = __name__
+    rebound.__qualname__ = fn.__qualname__
+    rebound.__doc__ = fn.__doc__
+    if fn.__kwdefaults__:
+        rebound.__kwdefaults__ = fn.__kwdefaults__
+    rebound.__annotations__ = fn.__annotations__
+    return rebound
 
 
 # ---------------------------------------------------------------------------
-# Apply admin role decorator
+# Rebound functions — tests patch names on THIS module and expect these
+# functions to see the patched values.
+# ---------------------------------------------------------------------------
+
+_check_postgres = _rebind(_check_postgres_impl)
+_get_sync_logs = _rebind(_get_sync_logs_impl)
+_get_user_stats = _rebind(_get_user_stats_impl)
+_get_audit_log_page = _rebind(_get_audit_log_page_impl)
+health_check = _rebind(_health_check_impl)
+
+# trigger_sync and _run_sync_and_clear_flag use ``global _sync_in_progress``
+# which writes to __globals__["_sync_in_progress"] — after rebinding that
+# points to THIS module's _sync_in_progress, which is exactly what the
+# tests assert against.
+_run_sync_and_clear_flag = _rebind(_run_sync_and_clear_flag_impl)
+trigger_sync = _rebind(_trigger_sync_impl)
+
+# admin_dashboard_page calls _check_postgres, jena_check_health,
+# _get_sync_logs, _get_user_stats — all patchable names.  Rebind it so
+# patches on this module take effect when the page is rendered.
+admin_dashboard_page = _rebind(_admin_dashboard_page_impl)
+admin_audit_page = _rebind(_admin_audit_page_impl)
+
+
+# ---------------------------------------------------------------------------
+# Apply admin role decorator & route registration
 # ---------------------------------------------------------------------------
 
 _admin_dashboard = require_role("admin")(admin_dashboard_page)
 _admin_audit = require_role("admin")(admin_audit_page)
 _admin_sync = require_role("admin")(trigger_sync)
-
-
-# ---------------------------------------------------------------------------
-# Route registration
-# ---------------------------------------------------------------------------
 
 
 def register_admin_routes(rt) -> None:  # type: ignore[no-untyped-def]
