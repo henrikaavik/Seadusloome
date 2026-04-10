@@ -295,7 +295,7 @@ def explorer_page(req: Request):
             # D3.js v7
             Script(
                 src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js",
-                integrity="sha512-jmDsOHNPGMbOkS50n+TJaZNJBaJCz5Z+3dqzsPe9C5Vs7BVrL/9r8g9EDR0+vRYHFjpFa2cmNqzO+wFLZBkKg==",
+                integrity="sha512-vc58qvvBdrDR4etbxMdlTt4GBQk1qjvyORR2nrsPsFPyrs+/u5c3+1Ct6upOgdZoIl7eq6k3a1UPDSNAQi/32A==",
                 crossorigin="anonymous",
             ),
             # Explorer styles
@@ -520,15 +520,15 @@ def explorer_page(req: Request):
                 "if(!uri){panelBtn.style.display='none';return;}"
                 "var safeId=encodeURIComponent(uri).replace(/'/g,'%27');"
                 "panelBtn.innerHTML="
-                '\'<div class="annotation-button-wrapper">'
-                '<button type="button" class="annotation-button"'
-                " hx-get=\"/api/annotations?target_type=entity&target_id='+safeId+'\"'"
-                " hx-target=\"#annotation-popover-entity-'+safeId+'\"'"
-                ' hx-swap="innerHTML"\''
-                ' aria-label="Markused"\''
-                ' title="Markused">&#128172;</button>'
-                "<div id=\"annotation-popover-entity-'+safeId+'\"'"
-                ' class="annotation-popover-container"></div></div>\';'
+                "'<div class=\"annotation-button-wrapper\">"
+                "<button type=\"button\" class=\"annotation-button\""
+                " hx-get=\"/api/annotations?target_type=entity&target_id='+safeId+'\""
+                " hx-target=\"#annotation-popover-entity-'+safeId+'\""
+                " hx-swap=\"innerHTML\""
+                " aria-label=\"Markused\""
+                " title=\"Markused\">&#128172;</button>"
+                "<div id=\"annotation-popover-entity-'+safeId+'\""
+                " class=\"annotation-popover-container\"></div></div>';"
                 "panelBtn.style.display='block';"
                 "if(typeof htmx!=='undefined'){htmx.process(panelBtn);}"
                 "});"
