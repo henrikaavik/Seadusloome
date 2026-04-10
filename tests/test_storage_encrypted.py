@@ -218,3 +218,38 @@ class TestGenerateKey:
         fernet = Fernet(key.encode())
         ct = fernet.encrypt(b"hello")
         assert fernet.decrypt(ct) == b"hello"
+
+
+class TestEncryptDecryptText:
+    def test_encrypt_decrypt_text_round_trip(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        """encrypt_text → decrypt_text returns the original string."""
+        encrypted = _reload_storage(monkeypatch, tmp_path)
+
+        plaintext = "§ 1. Käesolev seadus reguleerib."
+        ciphertext = encrypted.encrypt_text(plaintext)
+
+        # Ciphertext must be bytes, not a plain string.
+        assert isinstance(ciphertext, bytes)
+        # Must not be the raw UTF-8 encoding (i.e. it is actually encrypted).
+        assert ciphertext != plaintext.encode("utf-8")
+
+        # Round-trip must recover the original string exactly.
+        recovered = encrypted.decrypt_text(ciphertext)
+        assert recovered == plaintext
+
+    def test_decrypt_text_wrong_key_raises(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+        """Decrypting with a different key must raise DecryptionError."""
+        # Encrypt with key A.
+        encrypted_a = _reload_storage(monkeypatch, tmp_path)
+        ciphertext = encrypted_a.encrypt_text("tundlik eelnõu sisu")
+
+        # Swap to key B and reload.
+        monkeypatch.setenv("STORAGE_ENCRYPTION_KEY", Fernet.generate_key().decode())
+        import app.storage.encrypted as encrypted_module
+
+        encrypted_b = importlib.reload(encrypted_module)
+
+        with pytest.raises(encrypted_b.DecryptionError, match="invalid token"):
+            encrypted_b.decrypt_text(ciphertext)

@@ -180,7 +180,7 @@ def _make_conn_factory(state: _State):
                 storage_path,
                 graph_uri,
                 "uploaded",
-                None,  # parsed_text
+                None,  # parsed_text_encrypted
                 None,  # entity_count
                 None,  # error_message
                 now,
@@ -215,13 +215,14 @@ def _make_conn_factory(state: _State):
         if "update drafts" in sql_lower and "status" in sql_lower:
             # update_draft_status / pipeline status flips. ``params`` for
             # update_draft_status is (status, error_message, draft_id);
-            # for the parse_handler "set parsed_text=..." flow it's
-            # (parsed_text, draft_id) — extract the new status from
-            # the SQL string instead of guessing the param order.
+            # for the parse_handler "set parsed_text_encrypted=..." flow
+            # it's (ciphertext_bytes, draft_id) — extract the new status
+            # from the SQL string instead of guessing the param order.
             assert state.draft_row is not None
             row = list(state.draft_row)
-            if "set parsed_text" in sql_lower:
-                # Parse handler combined update: parsed_text + status='extracting'.
+            if "set parsed_text_encrypted" in sql_lower:
+                # Parse handler combined update: parsed_text_encrypted
+                # (Fernet bytes) + status='extracting'.
                 row[10] = params[0] if params else None
                 row[9] = "extracting"
             elif "status = 'analyzing'" in sql_lower:
@@ -572,7 +573,7 @@ class TestDocsPipelineE2E:
             "/tmp/fake.enc",
             f"https://data.riik.ee/ontology/estleg/drafts/{draft_id}",
             "parsing",  # index 9: already parked in parsing
-            None,  # parsed_text
+            None,  # parsed_text_encrypted
             None,  # entity_count
             None,  # error_message
             now,

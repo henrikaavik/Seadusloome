@@ -34,6 +34,7 @@ from app.docs.entity_extractor import extract_refs_from_text
 from app.docs.reference_resolver import resolve_refs
 from app.jobs import JobQueue
 from app.jobs.worker import register_handler
+from app.storage import decrypt_text
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +76,10 @@ def extract_entities(
         draft = get_draft(conn, draft_id)
     if draft is None:
         raise ValueError(f"Draft {draft_id} not found")
-    if draft.parsed_text is None or not draft.parsed_text.strip():
+    if draft.parsed_text_encrypted is None:
+        raise ValueError(f"Draft {draft_id} has no parsed text — was parse_draft skipped?")
+    parsed_text = decrypt_text(draft.parsed_text_encrypted)
+    if not parsed_text.strip():
         raise ValueError(f"Draft {draft_id} has no parsed text — was parse_draft skipped?")
 
     # -- 2. Mark 'extracting' ------------------------------------------
@@ -100,7 +104,7 @@ def extract_entities(
 
     try:
         # -- 3. Extract refs via LLM -----------------------------------
-        extracted = extract_refs_from_text(draft.parsed_text)
+        extracted = extract_refs_from_text(parsed_text)
         logger.info(
             "extract_entities: extracted %d refs from draft %s",
             len(extracted),

@@ -3,6 +3,12 @@
 Never touches a real Postgres connection, real Jena, or a real LLM:
 every external dependency is mocked out so we can verify the control
 flow, state transitions, and error handling in isolation.
+
+``parsed_text_encrypted`` is a BYTEA column (migration 006). Tests that
+exercise the happy path patch ``app.docs.extract_handler.decrypt_text``
+so they do not need a real Fernet key. Tests that verify the
+``None``-encrypted-column guard pass ``parsed_text_encrypted=None``
+directly — the handler raises before it ever calls ``decrypt_text``.
 """
 
 from __future__ import annotations
@@ -20,11 +26,16 @@ from app.docs.entity_extractor import ExtractedRef
 from app.docs.extract_handler import extract_entities
 from app.docs.reference_resolver import ResolvedRef
 
+# Sentinel ciphertext used in tests that need a non-None bytes value.
+# The actual bytes don't matter because decrypt_text is always patched
+# in those tests.
+_FAKE_CIPHERTEXT = b"gAAAA_fake_ciphertext_bytes_for_tests"
+
 
 def _make_draft(
     draft_id: uuid.UUID | None = None,
     *,
-    parsed_text: str | None = "§ 1. Test. KarS § 133.",
+    parsed_text_encrypted: bytes | None = _FAKE_CIPHERTEXT,
     status: str = "uploaded",
 ) -> Draft:
     now = datetime.now(UTC)
@@ -39,7 +50,7 @@ def _make_draft(
         storage_path="/tmp/ciphertext.enc",
         graph_uri="https://data.riik.ee/ontology/estleg/drafts/test",
         status=status,
-        parsed_text=parsed_text,
+        parsed_text_encrypted=parsed_text_encrypted,
         entity_count=None,
         error_message=None,
         created_at=now,
@@ -72,7 +83,7 @@ def _ref(text: str = "KarS § 133", rtype: str = "provision") -> ExtractedRef:
 class TestHappyPath:
     def test_happy_path_inserts_entities_and_enqueues_next_job(self):
         draft_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
-        draft = _make_draft(draft_id=draft_id, parsed_text="§ 1. Test.")
+        draft = _make_draft(draft_id=draft_id)
 
         # Four conn mocks for four ``with get_connection()`` blocks:
         # 1) initial get_draft
@@ -111,6 +122,10 @@ class TestHappyPath:
         with (
             patch("app.docs.extract_handler.get_connection") as mock_get_conn,
             patch("app.docs.extract_handler.get_draft") as mock_get_draft,
+            patch(
+                "app.docs.extract_handler.decrypt_text",
+                return_value="§ 1. Test.",
+            ),
             patch("app.docs.extract_handler.extract_refs_from_text") as mock_extract,
             patch("app.docs.extract_handler.resolve_refs") as mock_resolve,
             patch("app.docs.extract_handler.JobQueue") as mock_queue_cls,
@@ -201,6 +216,10 @@ class TestHappyPath:
             patch("app.docs.extract_handler.get_connection") as mock_get_conn,
             patch("app.docs.extract_handler.get_draft") as mock_get_draft,
             patch(
+                "app.docs.extract_handler.decrypt_text",
+                return_value="KarS § 133 säte.",
+            ),
+            patch(
                 "app.docs.extract_handler.extract_refs_from_text",
                 return_value=extracted,
             ),
@@ -251,6 +270,10 @@ class TestHappyPath:
             patch("app.docs.extract_handler.get_connection") as mock_get_conn,
             patch("app.docs.extract_handler.get_draft", return_value=draft),
             patch(
+                "app.docs.extract_handler.decrypt_text",
+                return_value="KarS § 133 säte.",
+            ),
+            patch(
                 "app.docs.extract_handler.extract_refs_from_text",
                 return_value=extracted,
             ),
@@ -291,19 +314,25 @@ class TestFailurePaths:
                 extract_entities({"draft_id": str(draft_id)})
 
     def test_empty_parsed_text_raises(self):
+        """Encrypted column is present but decrypts to whitespace-only text."""
         draft_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
-        draft = _make_draft(draft_id=draft_id, parsed_text="   \n\t")
+        draft = _make_draft(draft_id=draft_id)  # non-None ciphertext
         with (
             patch("app.docs.extract_handler.get_connection") as mock_get_conn,
             patch("app.docs.extract_handler.get_draft", return_value=draft),
+            patch(
+                "app.docs.extract_handler.decrypt_text",
+                return_value="   \n\t",
+            ),
         ):
             mock_get_conn.return_value = _ConnectCM(MagicMock())
             with pytest.raises(ValueError, match="no parsed text"):
                 extract_entities({"draft_id": str(draft_id)})
 
     def test_none_parsed_text_raises(self):
+        """parsed_text_encrypted column is NULL — parse_draft was not run."""
         draft_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
-        draft = _make_draft(draft_id=draft_id, parsed_text=None)
+        draft = _make_draft(draft_id=draft_id, parsed_text_encrypted=None)
         with (
             patch("app.docs.extract_handler.get_connection") as mock_get_conn,
             patch("app.docs.extract_handler.get_draft", return_value=draft),
@@ -328,6 +357,10 @@ class TestFailurePaths:
         with (
             patch("app.docs.extract_handler.get_connection") as mock_get_conn,
             patch("app.docs.extract_handler.get_draft", return_value=draft),
+            patch(
+                "app.docs.extract_handler.decrypt_text",
+                return_value="§ 1. Test.",
+            ),
             patch(
                 "app.docs.extract_handler.extract_refs_from_text",
                 side_effect=RuntimeError("LLM boom"),
@@ -367,6 +400,10 @@ class TestFailurePaths:
             patch("app.docs.extract_handler.get_connection") as mock_get_conn,
             patch("app.docs.extract_handler.get_draft", return_value=draft),
             patch(
+                "app.docs.extract_handler.decrypt_text",
+                return_value="§ 1. Test.",
+            ),
+            patch(
                 "app.docs.extract_handler.extract_refs_from_text",
                 side_effect=RuntimeError("LLM boom"),
             ),
@@ -395,6 +432,10 @@ class TestFailurePaths:
         with (
             patch("app.docs.extract_handler.get_connection") as mock_get_conn,
             patch("app.docs.extract_handler.get_draft", return_value=draft),
+            patch(
+                "app.docs.extract_handler.decrypt_text",
+                return_value="§ 1. Test.",
+            ),
             patch(
                 "app.docs.extract_handler.extract_refs_from_text",
                 return_value=[_ref()],

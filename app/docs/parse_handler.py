@@ -31,11 +31,10 @@ also records the job as failed and consumes a retry attempt. We do
 raise a ``ValueError`` and the worker handles it the same way it
 handles any other handler exception (no draft row exists to mark).
 
-Security note (#349): ``parsed_text`` is still stored as plain
-``TEXT`` in Postgres for Phase 2 Batch 2A. Moving it behind an
-encrypted JSONB column is tracked separately and will need a fresh
-migration. The comment in
-``migrations/005_phase2_document_upload.sql`` flags this follow-up.
+Security note (#488): ``parsed_text_encrypted`` is a Fernet-encrypted
+BYTEA column (migration 006). The plaintext is encrypted via
+``encrypt_text`` before the UPDATE so no cleartext legislative content
+ever lands in Postgres.
 """
 
 from __future__ import annotations
@@ -48,7 +47,7 @@ from app.db import get_connection
 from app.docs.draft_model import get_draft, update_draft_status
 from app.docs.tika_client import TikaError, get_default_tika_client
 from app.jobs import JobQueue
-from app.storage import DecryptionError, read_file
+from app.storage import DecryptionError, encrypt_text, read_file
 
 logger = logging.getLogger(__name__)
 
@@ -127,22 +126,26 @@ def parse_draft(
         if not parsed_text.strip():
             raise ValueError("Tika returned empty text — file may be corrupt or an image-only PDF")
 
-        # Step 6: persist parsed_text and flip to extracting.
+        # Step 6: encrypt parsed text and persist alongside status flip.
         # Use a direct UPDATE because ``update_draft_status`` doesn't
-        # know about the parsed_text column; the two need to land in
-        # the same row update so observers never see an inconsistent
-        # (parsed_text NULL, status=extracting) snapshot.
+        # know about the parsed_text_encrypted column; the two need to
+        # land in the same row update so observers never see an
+        # inconsistent (parsed_text_encrypted NULL, status=extracting)
+        # snapshot. encrypt_text raises RuntimeError if the key is unset
+        # in prod — that propagates to the except block below and flips
+        # the draft to failed on the final attempt.
+        encrypted = encrypt_text(parsed_text)
         with get_connection() as conn:
             conn.execute(
                 """
                 update drafts
-                set parsed_text = %s,
+                set parsed_text_encrypted = %s,
                     status = 'extracting',
                     error_message = null,
                     updated_at = now()
                 where id = %s
                 """,
-                (parsed_text, str(draft_id)),
+                (encrypted, str(draft_id)),
             )
             conn.commit()
 

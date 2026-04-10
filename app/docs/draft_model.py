@@ -46,7 +46,7 @@ class Draft:
 
     ``id``, ``user_id`` and ``org_id`` are real ``uuid.UUID`` values so
     callers can pass them back into queries without string round-trips.
-    Optional columns (``parsed_text``, ``entity_count``, ``error_message``)
+    Optional columns (``parsed_text_encrypted``, ``entity_count``, ``error_message``)
     are ``None`` until the background pipeline populates them.
     """
 
@@ -60,7 +60,7 @@ class Draft:
     storage_path: str
     graph_uri: str
     status: str
-    parsed_text: str | None
+    parsed_text_encrypted: bytes | None
     entity_count: int | None
     error_message: str | None
     created_at: datetime
@@ -71,7 +71,7 @@ class Draft:
 # ``_row_to_draft`` so the two never drift.
 _DRAFT_COLUMNS = (
     "id, user_id, org_id, title, filename, content_type, file_size, "
-    "storage_path, graph_uri, status, parsed_text, entity_count, "
+    "storage_path, graph_uri, status, parsed_text_encrypted, entity_count, "
     "error_message, created_at, updated_at"
 )
 
@@ -96,7 +96,7 @@ def _row_to_draft(row: tuple[Any, ...]) -> Draft:
         storage_path,
         graph_uri,
         status,
-        parsed_text,
+        parsed_text_encrypted,
         entity_count,
         error_message,
         created_at,
@@ -113,7 +113,7 @@ def _row_to_draft(row: tuple[Any, ...]) -> Draft:
         storage_path=storage_path,
         graph_uri=graph_uri,
         status=status,
-        parsed_text=parsed_text,
+        parsed_text_encrypted=parsed_text_encrypted,
         entity_count=entity_count,
         error_message=error_message,
         created_at=created_at,

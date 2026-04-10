@@ -249,3 +249,39 @@ def delete_file(storage_path: str) -> None:
         logger.info("Deleted encrypted file path=%s", storage_path)
     except FileNotFoundError:
         logger.debug("delete_file: path already absent path=%s", storage_path)
+
+
+def encrypt_text(plaintext: str) -> bytes:
+    """Encrypt a string via Fernet and return ciphertext bytes.
+
+    Used for ``parsed_text_encrypted`` and ``draft_content_encrypted``
+    columns where the content is a string (not a file). The caller
+    writes the returned bytes to a BYTEA column.
+
+    Raises:
+        RuntimeError: If ``STORAGE_ENCRYPTION_KEY`` is unset and
+            ``APP_ENV`` is not ``'development'``. Same lazy enforcement
+            as ``store_file`` / ``read_file``.
+    """
+    fernet = _get_fernet()
+    return fernet.encrypt(plaintext.encode("utf-8"))
+
+
+def decrypt_text(ciphertext: bytes) -> str:
+    """Decrypt Fernet ciphertext bytes back to a string.
+
+    Args:
+        ciphertext: Raw bytes previously returned by ``encrypt_text``.
+
+    Returns:
+        The original UTF-8 string.
+
+    Raises:
+        DecryptionError: If the key is wrong or the data is corrupt.
+        RuntimeError: If ``STORAGE_ENCRYPTION_KEY`` is unset in prod.
+    """
+    fernet = _get_fernet()
+    try:
+        return fernet.decrypt(ciphertext).decode("utf-8")
+    except InvalidToken as exc:
+        raise DecryptionError("Failed to decrypt text: invalid token or wrong key") from exc

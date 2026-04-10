@@ -73,7 +73,7 @@ def _make_draft(draft_id: uuid.UUID | None = None) -> Draft:
         storage_path="/tmp/fake/abcd.enc",
         graph_uri="urn:draft:test",
         status="uploaded",
-        parsed_text=None,
+        parsed_text_encrypted=None,
         entity_count=None,
         error_message=None,
         created_at=now,
@@ -168,14 +168,20 @@ class TestParseDraftHappyPath:
         assert "parsing" in status_calls
         assert "failed" not in status_calls
 
-        # 3. The parsed_text + status='extracting' UPDATE must have run
-        #    on one of the connections.
+        # 3. The parsed_text_encrypted + status='extracting' UPDATE must
+        #    have run on one of the connections; the first param must be
+        #    bytes (Fernet ciphertext), not a plain string.
         updated_ids = []
         for conn in p.conns:
             for call in conn.execute.call_args_list:
                 sql = call.args[0]
-                if "parsed_text" in sql and "extracting" in sql:
-                    updated_ids.append(call.args[1][1])
+                if "parsed_text_encrypted" in sql and "extracting" in sql:
+                    params = call.args[1]
+                    assert isinstance(params[0], bytes), (
+                        "parsed_text_encrypted must be bytes (Fernet ciphertext), "
+                        f"got {type(params[0])}"
+                    )
+                    updated_ids.append(params[1])
         assert str(draft.id) in updated_ids
 
         # 4. extract_entities was enqueued with the draft id.

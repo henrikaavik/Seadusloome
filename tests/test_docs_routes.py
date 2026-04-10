@@ -68,7 +68,7 @@ def _make_draft(
         storage_path="/tmp/ciphertext.enc",
         graph_uri=f"https://data.riik.ee/ontology/estleg/drafts/{resolved_id}",
         status=status,
-        parsed_text=None,
+        parsed_text_encrypted=None,
         entity_count=None,
         error_message=error_message,
         created_at=created_at or now,

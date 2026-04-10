@@ -12,12 +12,16 @@ Public exports:
     - ``read_file``            read + decrypt
     - ``delete_file``          idempotent delete
     - ``generate_encryption_key`` helper for dev/migration setup
+    - ``encrypt_text``         encrypt a UTF-8 string → BYTEA ciphertext
+    - ``decrypt_text``         decrypt BYTEA ciphertext → UTF-8 string
 """
 
 from app.storage.encrypted import (
     DecryptionError,
     StoredFile,
+    decrypt_text,
     delete_file,
+    encrypt_text,
     generate_encryption_key,
     read_file,
     store_file,
@@ -27,6 +31,8 @@ __all__ = [
     "DecryptionError",
     "StoredFile",
     "delete_file",
+    "decrypt_text",
+    "encrypt_text",
     "generate_encryption_key",
     "read_file",
     "store_file",
