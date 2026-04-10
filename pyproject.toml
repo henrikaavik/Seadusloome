@@ -16,6 +16,7 @@ dependencies = [
     "httpx",
     "python-docx",
     "anthropic>=0.93.0",
+    "voyageai>=0.3.7",
 ]
 
 [dependency-groups]
@@ -23,6 +24,8 @@ dev = [
     "ruff",
     "pyright",
     "pytest",
+    "vcrpy>=8.1.1",
+    "pytest-recording>=0.13.4",
 ]
 
 [tool.ruff]

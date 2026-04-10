@@ -50,6 +50,34 @@ logger = logging.getLogger(__name__)
 ONTOLOGY_REPO = "https://github.com/henrikaavik/estonian-legal-ontology.git"
 
 
+def _trigger_rag_ingestion() -> None:
+    """Trigger a lightweight RAG re-ingestion after successful sync.
+
+    Runs the async ingestion in a new event loop since the sync
+    pipeline is synchronous. Non-critical — failures are logged but
+    don't break the sync.
+    """
+    import asyncio
+
+    from scripts.ingest_rag import ingest_modified_entities
+
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # If there's already a running loop (e.g. inside FastHTML),
+            # schedule the ingestion as a task. The caller catches
+            # exceptions so a fire-and-forget approach is fine.
+            loop.create_task(ingest_modified_entities())
+            logger.info("RAG re-ingestion scheduled as background task")
+        else:
+            asyncio.run(ingest_modified_entities())
+            logger.info("RAG re-ingestion completed synchronously")
+    except RuntimeError:
+        # No event loop available — create one
+        asyncio.run(ingest_modified_entities())
+        logger.info("RAG re-ingestion completed in new event loop")
+
+
 def log_sync(
     status: str,
     started_at: datetime,
@@ -195,6 +223,12 @@ def run_sync(repo_dir: Path | None = None) -> bool:
                 fn()
         except Exception:
             logger.debug("WS notification after sync failed (non-critical)")
+
+        # Trigger RAG re-ingestion for modified entities.
+        try:
+            _trigger_rag_ingestion()
+        except Exception:
+            logger.debug("RAG re-ingestion after sync failed (non-critical)")
 
         return True
 

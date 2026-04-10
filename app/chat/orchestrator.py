@@ -8,6 +8,18 @@ messages. Streaming content is pushed back to the caller via an async
 
 Tool-use rounds are capped at :data:`MAX_TOOL_ROUNDS` to prevent
 infinite loops.
+
+Phase 3C additions:
+
+- **RAG integration**: Before calling the LLM, the orchestrator retrieves
+  relevant chunks via :class:`app.rag.retriever.Retriever` and injects
+  them into the system prompt. When the retriever or embedding provider
+  is in stub mode (no ``VOYAGE_API_KEY``), RAG is skipped gracefully.
+
+- **Rate limiting**: :func:`check_message_rate` and
+  :func:`check_org_cost_budget` are called at the top of
+  :meth:`ChatOrchestrator.handle_message` to enforce per-user and
+  per-org usage limits.
 """
 
 from __future__ import annotations
@@ -23,11 +35,25 @@ from app.chat.models import (
     get_conversation,
     list_messages,
 )
+from app.chat.rate_limiter import (
+    CostBudgetExceededError,
+    RateLimitExceededError,
+    check_message_rate,
+    check_org_cost_budget,
+)
 from app.chat.system_prompt import build_system_prompt
 from app.chat.tools import execute_tool
 from app.db import get_connection
 from app.llm.provider import LLMProvider, StreamEvent
 from app.ontology.sparql_client import SparqlClient
+
+# RAG integration — import defensively so the chat still works if
+# the parallel agent hasn't deployed app.rag yet.
+try:
+    from app.rag.retriever import RetrievedChunk, Retriever
+except ImportError:  # pragma: no cover
+    Retriever = None  # type: ignore[assignment,misc]
+    RetrievedChunk = None  # type: ignore[assignment,misc]
 
 logger = logging.getLogger(__name__)
 
@@ -92,15 +118,44 @@ class ChatOrchestrator:
     sparql:
         Optional SPARQL client for tool execution. A default
         ``SparqlClient()`` is constructed when omitted.
+    retriever:
+        Optional RAG retriever for grounding the LLM in relevant legal
+        context. When ``None``, a default :class:`Retriever` is
+        constructed if the module is available. If the retriever or its
+        embedding provider is in stub mode, RAG is skipped gracefully.
     """
 
     def __init__(
         self,
         llm: LLMProvider,
         sparql: SparqlClient | None = None,
+        retriever: Any | None = None,
     ) -> None:
         self.llm = llm
         self.sparql = sparql or SparqlClient()
+        # Lazily initialise the retriever; None means "try once, then skip"
+        self._retriever = retriever
+        self._retriever_initialised = retriever is not None
+
+    def _get_retriever(self) -> Any | None:
+        """Return the RAG retriever, lazily constructing one on first call.
+
+        Returns ``None`` when the ``app.rag`` module is unavailable or
+        the retriever cannot be constructed (e.g. missing API key).
+        """
+        if self._retriever_initialised:
+            return self._retriever
+
+        self._retriever_initialised = True
+        if Retriever is None:
+            logger.info("app.rag not available — RAG disabled")
+            return None
+        try:
+            self._retriever = Retriever()
+            return self._retriever
+        except Exception:
+            logger.warning("Failed to construct Retriever — RAG disabled", exc_info=True)
+            return None
 
     async def handle_message(
         self,
@@ -134,6 +189,19 @@ class ChatOrchestrator:
         """
         user_id = auth.get("id")
         org_id = auth.get("org_id")
+
+        # 0. Rate / budget checks
+        try:
+            if user_id:
+                check_message_rate(user_id)
+            if org_id:
+                check_org_cost_budget(org_id)
+        except RateLimitExceededError as exc:
+            await send({"type": "error", "message": str(exc)})
+            return
+        except CostBudgetExceededError as exc:
+            await send({"type": "error", "message": str(exc)})
+            return
 
         # 1. Load conversation
         try:
@@ -172,6 +240,37 @@ class ChatOrchestrator:
             draft_context_id=draft_context_id,
             impact_summary=impact_summary,
         )
+
+        # 2b. RAG retrieval
+        rag_chunks: list[Any] = []
+        rag_context_json: list[dict[str, Any]] | None = None
+
+        if Retriever is not None:
+            retriever = self._get_retriever()
+            if retriever is not None:
+                try:
+                    await send({"type": "retrieval_started"})
+                    rag_chunks = await retriever.retrieve(user_message, k=10)
+                    await send({"type": "retrieval_done", "chunk_count": len(rag_chunks)})
+                except Exception:
+                    logger.warning(
+                        "RAG retrieval failed for conversation %s; proceeding without",
+                        conversation_id,
+                        exc_info=True,
+                    )
+                    rag_chunks = []
+
+            if rag_chunks:
+                chunks_text = "\n---\n".join(chunk.content for chunk in rag_chunks)
+                system_prompt += "\n\nRelevant legal context:\n" + chunks_text
+                rag_context_json = [
+                    {
+                        "content": chunk.content,
+                        "source_uri": chunk.metadata.get("source_uri"),
+                        "score": chunk.score,
+                    }
+                    for chunk in rag_chunks
+                ]
 
         # 3. Persist user message
         try:
@@ -316,6 +415,7 @@ class ChatOrchestrator:
                         tokens_input=tokens_in if tokens_in else None,
                         tokens_output=tokens_out if tokens_out else None,
                         model=getattr(self.llm, "_model", None),
+                        rag_context=rag_context_json,
                     )
                     # Also bump conversation updated_at
                     conn.execute(

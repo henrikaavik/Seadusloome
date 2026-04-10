@@ -21,6 +21,7 @@ import logging
 from typing import Any
 from uuid import UUID
 
+from app.chat.rate_limiter import check_org_cost_budget
 from app.db import get_connection
 from app.drafter.prompts import (
     CLARIFY_PROMPT,
@@ -309,6 +310,10 @@ def drafter_clarify(
     if session is None:
         raise ValueError(f"Drafting session {session_id} not found")
 
+    # Cost budget guard — fail fast before burning LLM tokens
+    if session.org_id:
+        check_org_cost_budget(session.org_id)
+
     logger.info("drafter_clarify: starting for session %s", session_id)
 
     # Find related laws via SPARQL
@@ -448,6 +453,10 @@ def drafter_structure(
     if session is None:
         raise ValueError(f"Drafting session {session_id} not found")
 
+    # Cost budget guard — fail fast before burning LLM tokens
+    if session.org_id:
+        check_org_cost_budget(session.org_id)
+
     logger.info("drafter_structure: starting for session %s", session_id)
 
     # VTK workflow: use fixed structure, skip LLM call
@@ -563,6 +572,10 @@ def drafter_draft(
     if session is None:
         raise ValueError(f"Drafting session {session_id} not found")
 
+    # Cost budget guard — fail fast before burning LLM tokens
+    if session.org_id:
+        check_org_cost_budget(session.org_id)
+
     logger.info("drafter_draft: starting for session %s", session_id)
 
     structure = session.proposed_structure
@@ -673,6 +686,10 @@ def drafter_regenerate_clause(
     session = fetch_session(session_id)
     if session is None:
         raise ValueError(f"Drafting session {session_id} not found")
+
+    # Cost budget guard — fail fast before burning LLM tokens
+    if session.org_id:
+        check_org_cost_budget(session.org_id)
 
     logger.info(
         "drafter_regenerate_clause: starting for session %s clause %d",
