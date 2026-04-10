@@ -247,13 +247,12 @@ class TestCreateAnnotation:
 
 
 class TestReplyAnnotation:
+    @patch("app.notifications.wire.notify_annotation_reply")
     @patch("app.annotations.routes.log_annotation_reply")
-    @patch("app.annotations.routes._load_annotations_with_replies")
     @patch("app.annotations.routes._connect")
     @patch("app.auth.middleware._get_provider")
-    def test_reply_returns_updated_fragment(self, mock_prov, mock_conn, mock_load, mock_audit):
+    def test_reply_returns_updated_fragment(self, mock_prov, mock_conn, mock_audit, mock_notify):
         mock_prov.return_value = _stub_provider()
-        mock_load.return_value = []
 
         ann = _make_annotation()
         reply = _make_reply()
@@ -265,6 +264,7 @@ class TestReplyAnnotation:
         with (
             patch("app.annotations.routes.get_annotation", return_value=ann),
             patch("app.annotations.routes.create_reply", return_value=reply),
+            patch("app.annotations.routes.list_replies", return_value=[]),
         ):
             client = _authed_client()
             resp = client.post(
@@ -273,7 +273,7 @@ class TestReplyAnnotation:
             )
 
         assert resp.status_code == 200
-        assert "annotation-popover" in resp.text
+        assert "annotation-thread" in resp.text
 
     @patch("app.annotations.routes._connect")
     @patch("app.auth.middleware._get_provider")
@@ -302,14 +302,11 @@ class TestReplyAnnotation:
 
 class TestResolveAnnotation:
     @patch("app.annotations.routes.log_annotation_resolve")
-    @patch("app.annotations.routes._load_annotations_with_replies")
     @patch("app.annotations.routes._connect")
     @patch("app.auth.middleware._get_provider")
-    def test_resolve_returns_updated_fragment(self, mock_prov, mock_conn, mock_load, mock_audit):
+    def test_resolve_returns_updated_fragment(self, mock_prov, mock_conn, mock_audit):
         mock_prov.return_value = _stub_provider()
-        mock_load.return_value = []
 
-        ann = _make_annotation()
         resolved_ann = _make_annotation(resolved=True)
 
         mock_db = MagicMock()
@@ -317,14 +314,15 @@ class TestResolveAnnotation:
         mock_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         with (
-            patch("app.annotations.routes.get_annotation", return_value=ann),
+            patch("app.annotations.routes.get_annotation", return_value=resolved_ann),
             patch("app.annotations.routes.resolve_annotation", return_value=resolved_ann),
+            patch("app.annotations.routes.list_replies", return_value=[]),
         ):
             client = _authed_client()
             resp = client.post(f"/api/annotations/{_ANN_ID}/resolve")
 
         assert resp.status_code == 200
-        assert "annotation-popover" in resp.text
+        assert "annotation-thread" in resp.text
 
 
 # ---------------------------------------------------------------------------

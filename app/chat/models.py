@@ -26,6 +26,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from app.db_utils import coerce_uuid, parse_jsonb
+
 logger = logging.getLogger(__name__)
 
 
@@ -77,25 +79,6 @@ _MESSAGE_COLUMNS = (
 )
 
 
-def _coerce_uuid(value: Any) -> uuid.UUID:
-    """Return a ``UUID`` from either a string or a ``UUID`` instance."""
-    if isinstance(value, uuid.UUID):
-        return value
-    return uuid.UUID(str(value))
-
-
-def _parse_jsonb(value: Any) -> Any:
-    """Parse a JSONB value that psycopg may return as a string or dict/list."""
-    if value is None:
-        return None
-    if isinstance(value, (dict, list)):
-        return value
-    try:
-        return json.loads(value)
-    except (TypeError, json.JSONDecodeError):
-        return value
-
-
 def _row_to_conversation(row: tuple[Any, ...]) -> Conversation:
     """Build a ``Conversation`` from a raw cursor row."""
     (
@@ -109,11 +92,11 @@ def _row_to_conversation(row: tuple[Any, ...]) -> Conversation:
     ) = row
 
     return Conversation(
-        id=_coerce_uuid(conv_id),
-        user_id=_coerce_uuid(user_id),
-        org_id=_coerce_uuid(org_id),
+        id=coerce_uuid(conv_id),
+        user_id=coerce_uuid(user_id),
+        org_id=coerce_uuid(org_id),
         title=title,
-        context_draft_id=_coerce_uuid(context_draft_id) if context_draft_id else None,
+        context_draft_id=coerce_uuid(context_draft_id) if context_draft_id else None,
         created_at=created_at,
         updated_at=updated_at,
     )
@@ -136,21 +119,21 @@ def _row_to_message(row: tuple[Any, ...]) -> Message:
         created_at,
     ) = row
 
-    tool_input = _parse_jsonb(tool_input_raw)
+    tool_input = parse_jsonb(tool_input_raw)
     if tool_input is not None and not isinstance(tool_input, dict):
         tool_input = None
 
-    tool_output = _parse_jsonb(tool_output_raw)
+    tool_output = parse_jsonb(tool_output_raw)
     if tool_output is not None and not isinstance(tool_output, dict):
         tool_output = None
 
-    rag_context = _parse_jsonb(rag_context_raw)
+    rag_context = parse_jsonb(rag_context_raw)
     if rag_context is not None and not isinstance(rag_context, list):
         rag_context = None
 
     return Message(
-        id=_coerce_uuid(msg_id),
-        conversation_id=_coerce_uuid(conversation_id),
+        id=coerce_uuid(msg_id),
+        conversation_id=coerce_uuid(conversation_id),
         role=role,
         content=content,
         tool_name=tool_name,

@@ -126,6 +126,7 @@ def _retry_job(job_id: int) -> bool:
                 "    claimed_by = NULL, "
                 "    claimed_at = NULL, "
                 "    started_at = NULL, "
+                "    attempts = 0, "
                 "    scheduled_for = %s "
                 "WHERE id = %s AND status = 'failed'",
                 (datetime.now(UTC), job_id),

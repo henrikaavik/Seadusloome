@@ -518,7 +518,7 @@ def explorer_page(req: Request):
                 "var obs=new MutationObserver(function(){"
                 "var uri=panelTitle.dataset.entityUri||panelTitle.textContent.trim();"
                 "if(!uri){panelBtn.style.display='none';return;}"
-                "var safeId=encodeURIComponent(uri);"
+                "var safeId=encodeURIComponent(uri).replace(/'/g,'%27');"
                 "panelBtn.innerHTML="
                 '\'<div class="annotation-button-wrapper">'
                 '<button type="button" class="annotation-button"'

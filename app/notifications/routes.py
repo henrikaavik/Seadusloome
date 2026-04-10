@@ -5,7 +5,7 @@ Route map:
     GET  /notifications                   -- notification inbox page
     POST /notifications/{id}/read         -- mark single as read (HTMX)
     POST /notifications/read-all          -- mark all as read (HTMX)
-    GET  /api/notifications/unread-count  -- JSON endpoint for bell badge polling
+    GET  /api/notifications/unread-count  -- OOB HTML badge for bell polling
     GET  /api/notifications               -- HTMX partial: recent notifications list
 
 All routes require authentication (they are NOT in ``SKIP_PATHS``).
@@ -18,7 +18,7 @@ from typing import Any
 
 from fasthtml.common import *  # noqa: F403
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import Response
 
 from app.auth.helpers import require_auth as _require_auth
 from app.auth.provider import UserDict
@@ -188,6 +188,7 @@ def mark_single_read(req: Request, id: str):
     auth_or_redirect = _require_auth(req)
     if isinstance(auth_or_redirect, Response):
         return auth_or_redirect
+    auth: UserDict = auth_or_redirect
 
     try:
         import uuid as _uuid
@@ -198,7 +199,7 @@ def mark_single_read(req: Request, id: str):
 
     try:
         with _connect() as conn:
-            mark_read(conn, notif_id)
+            mark_read(conn, notif_id, user_id=auth["id"])
             conn.commit()
     except Exception:
         logger.exception("Failed to mark notification %s as read", id)
@@ -228,10 +229,10 @@ def mark_all_read_handler(req: Request):
 
 
 def api_unread_count(req: Request):
-    """GET /api/notifications/unread-count -- JSON for bell badge polling."""
+    """GET /api/notifications/unread-count -- OOB HTML badge for bell polling."""
     auth_or_redirect = _require_auth(req)
     if isinstance(auth_or_redirect, Response):
-        return JSONResponse({"count": 0})
+        return Span(id="bell-badge", cls="bell-badge bell-badge--hidden", hx_swap_oob="true")  # noqa: F405
     auth: UserDict = auth_or_redirect
 
     try:
@@ -241,7 +242,14 @@ def api_unread_count(req: Request):
         logger.exception("Failed to count unread notifications")
         count = 0
 
-    return JSONResponse({"count": count})
+    if count > 0:
+        return Span(  # noqa: F405
+            str(count if count < 100 else "99+"),
+            cls="bell-badge",
+            id="bell-badge",
+            hx_swap_oob="true",
+        )
+    return Span(id="bell-badge", cls="bell-badge bell-badge--hidden", hx_swap_oob="true")  # noqa: F405
 
 
 def api_notifications_partial(req: Request):

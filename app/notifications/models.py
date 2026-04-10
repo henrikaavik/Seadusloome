@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from app.db_utils import coerce_uuid, parse_jsonb
+
 logger = logging.getLogger(__name__)
 
 
@@ -48,25 +50,6 @@ class Notification:
 _NOTIFICATION_COLUMNS = "id, user_id, type, title, body, link, metadata, read, created_at"
 
 
-def _coerce_uuid(value: Any) -> uuid.UUID:
-    """Return a ``UUID`` from either a string or a ``UUID`` instance."""
-    if isinstance(value, uuid.UUID):
-        return value
-    return uuid.UUID(str(value))
-
-
-def _parse_jsonb(value: Any) -> Any:
-    """Parse a JSONB value that psycopg may return as a string or dict/list."""
-    if value is None:
-        return None
-    if isinstance(value, (dict, list)):
-        return value
-    try:
-        return json.loads(value)
-    except (TypeError, json.JSONDecodeError):
-        return value
-
-
 def _row_to_notification(row: tuple[Any, ...]) -> Notification:
     """Build a ``Notification`` from a raw cursor row."""
     (
@@ -81,13 +64,13 @@ def _row_to_notification(row: tuple[Any, ...]) -> Notification:
         created_at,
     ) = row
 
-    metadata = _parse_jsonb(metadata_raw)
+    metadata = parse_jsonb(metadata_raw)
     if metadata is not None and not isinstance(metadata, dict):
         metadata = None
 
     return Notification(
-        id=_coerce_uuid(notif_id),
-        user_id=_coerce_uuid(user_id),
+        id=coerce_uuid(notif_id),
+        user_id=coerce_uuid(user_id),
         type=notif_type,
         title=title,
         body=body,
@@ -203,17 +186,30 @@ def count_unread(conn: Any, user_id: uuid.UUID | str) -> int:
     return row[0] if row else 0
 
 
-def mark_read(conn: Any, notification_id: uuid.UUID | str) -> bool:
+def mark_read(
+    conn: Any,
+    notification_id: uuid.UUID | str,
+    user_id: uuid.UUID | str | None = None,
+) -> bool:
     """Mark a single notification as read.
 
     The caller is responsible for committing the transaction.
+    When *user_id* is provided, the UPDATE also filters on ownership
+    so that one user cannot mark another user's notification as read.
     Returns ``True`` if a row was updated, ``False`` otherwise.
     """
     try:
-        result = conn.execute(
-            "UPDATE notifications SET read = TRUE WHERE id = %s AND read = FALSE",
-            (str(notification_id),),
-        )
+        if user_id is not None:
+            result = conn.execute(
+                "UPDATE notifications SET read = TRUE "
+                "WHERE id = %s AND user_id = %s AND read = FALSE",
+                (str(notification_id), str(user_id)),
+            )
+        else:
+            result = conn.execute(
+                "UPDATE notifications SET read = TRUE WHERE id = %s AND read = FALSE",
+                (str(notification_id),),
+            )
         return result.rowcount > 0
     except Exception:
         logger.exception(

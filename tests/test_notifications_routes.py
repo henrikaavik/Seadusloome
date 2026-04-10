@@ -3,19 +3,19 @@
 
 Tests the route handlers using mocked DB connections. Same patterns as
 ``tests/test_drafter_routes.py`` — mock ``_connect``, ``_require_auth``,
-and verify the returned FT components / JSON.
+and verify the returned FT components.
 """
 
 from __future__ import annotations
 
-import json
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+from fasthtml.common import to_xml
 from starlette.requests import Request
-from starlette.responses import JSONResponse, RedirectResponse, Response
+from starlette.responses import RedirectResponse, Response
 
 from app.notifications.models import Notification
 from app.notifications.routes import (
@@ -207,7 +207,7 @@ class TestMarkAllRead:
 class TestApiUnreadCount:
     @patch("app.notifications.routes._require_auth")
     @patch("app.notifications.routes._connect")
-    def test_returns_json_count(self, mock_connect, mock_auth):
+    def test_returns_oob_badge_with_count(self, mock_connect, mock_auth):
         mock_auth.return_value = _AUTH
         conn = MagicMock()
         mock_connect.return_value = _ConnectCM(conn)
@@ -216,20 +216,23 @@ class TestApiUnreadCount:
             req = _make_request(path="/api/notifications/unread-count")
             result = api_unread_count(req)
 
-        assert isinstance(result, JSONResponse)
-        body = json.loads(result.body)
-        assert body["count"] == 7
+        html = to_xml(result)
+        assert 'id="bell-badge"' in html
+        assert 'hx-swap-oob="true"' in html
+        assert ">7<" in html
+        assert "bell-badge--hidden" not in html
 
     @patch("app.notifications.routes._require_auth")
-    def test_returns_zero_when_unauthenticated(self, mock_auth):
+    def test_returns_hidden_badge_when_unauthenticated(self, mock_auth):
         mock_auth.return_value = RedirectResponse("/auth/login", status_code=303)
 
         req = _make_request(path="/api/notifications/unread-count")
         result = api_unread_count(req)
 
-        assert isinstance(result, JSONResponse)
-        body = json.loads(result.body)
-        assert body["count"] == 0
+        html = to_xml(result)
+        assert 'id="bell-badge"' in html
+        assert 'hx-swap-oob="true"' in html
+        assert "bell-badge--hidden" in html
 
 
 # ---------------------------------------------------------------------------

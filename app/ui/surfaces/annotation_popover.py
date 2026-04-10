@@ -75,7 +75,7 @@ def AnnotationPopover(
         ),
         hx_post="/api/annotations",
         hx_target=f"#annotation-popover-{target_type}-{target_id}",
-        hx_swap="innerHTML",
+        hx_swap="outerHTML",
         cls="annotation-form",
     )
 

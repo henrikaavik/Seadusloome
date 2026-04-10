@@ -9,43 +9,77 @@ from starlette.testclient import TestClient
 
 class TestRecordMetric:
     @patch("app.metrics._connect")
-    def test_inserts_row(self, mock_connect: MagicMock):
-        from app.metrics import record_metric
+    def test_buffers_then_flushes(self, mock_connect: MagicMock):
+        import app.metrics as m
+
+        # Clear any entries buffered by prior tests
+        m._BUFFER.clear()
 
         mock_conn = MagicMock()
         mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
         mock_connect.return_value.__exit__ = MagicMock(return_value=False)
 
-        record_metric("test_metric", 42.5, {"route": "/api/test"})
+        m.record_metric("test_metric", 42.5, {"route": "/api/test"})
 
-        mock_conn.execute.assert_called_once()
-        args = mock_conn.execute.call_args[0]
+        # Not yet flushed — still in buffer
+        mock_conn.executemany.assert_not_called()
+
+        # Force flush
+        m._flush_buffer()
+
+        mock_conn.executemany.assert_called_once()
+        args = mock_conn.executemany.call_args[0]
         assert "INSERT INTO metrics" in args[0]
-        assert args[1][0] == "test_metric"
-        assert args[1][1] == 42.5
-        assert '"route"' in args[1][2]
+        rows = args[1]
+        assert len(rows) == 1
+        assert rows[0][0] == "test_metric"
+        assert rows[0][1] == 42.5
+        assert '"route"' in rows[0][2]
         mock_conn.commit.assert_called_once()
 
     @patch("app.metrics._connect")
-    def test_inserts_null_labels(self, mock_connect: MagicMock):
-        from app.metrics import record_metric
+    def test_buffers_null_labels(self, mock_connect: MagicMock):
+        import app.metrics as m
 
         mock_conn = MagicMock()
         mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
         mock_connect.return_value.__exit__ = MagicMock(return_value=False)
 
-        record_metric("simple_metric", 1.0)
+        m.record_metric("simple_metric", 1.0)
+        m._flush_buffer()
 
-        args = mock_conn.execute.call_args[0]
-        assert args[1][2] is None
+        rows = mock_conn.executemany.call_args[0][1]
+        assert rows[0][2] is None
 
     @patch("app.metrics._connect")
     def test_swallows_db_errors(self, mock_connect: MagicMock):
-        from app.metrics import record_metric
+        import app.metrics as m
 
         mock_connect.side_effect = Exception("DB down")
-        # Should not raise
-        record_metric("broken", 0)
+        m.record_metric("broken", 0)
+        # Flush should not raise even though the DB is down
+        m._flush_buffer()
+
+    @patch("app.metrics._connect")
+    def test_bulk_flushes_multiple_rows(self, mock_connect: MagicMock):
+        import app.metrics as m
+
+        mock_conn = MagicMock()
+        mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        m.record_metric("m1", 1.0)
+        m.record_metric("m2", 2.0, {"k": "v"})
+        m.record_metric("m3", 3.0)
+        m._flush_buffer()
+
+        rows = mock_conn.executemany.call_args[0][1]
+        assert len(rows) == 3
+        assert rows[0][0] == "m1"
+        assert rows[1][0] == "m2"
+        assert rows[2][0] == "m3"
+        # Single commit for the whole batch
+        mock_conn.commit.assert_called_once()
 
 
 class TestMetricsMiddleware:

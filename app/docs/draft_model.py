@@ -26,6 +26,7 @@ from datetime import datetime
 from typing import Any
 
 from app.db import get_connection as _connect
+from app.db_utils import coerce_uuid
 
 logger = logging.getLogger(__name__)
 
@@ -76,13 +77,6 @@ _DRAFT_COLUMNS = (
 )
 
 
-def _coerce_uuid(value: Any) -> uuid.UUID:
-    """Return a ``UUID`` from either a string or a ``UUID`` instance."""
-    if isinstance(value, uuid.UUID):
-        return value
-    return uuid.UUID(str(value))
-
-
 def _row_to_draft(row: tuple[Any, ...]) -> Draft:
     """Build a ``Draft`` dataclass from a raw cursor row."""
     (
@@ -103,9 +97,9 @@ def _row_to_draft(row: tuple[Any, ...]) -> Draft:
         updated_at,
     ) = row
     return Draft(
-        id=_coerce_uuid(draft_id),
-        user_id=_coerce_uuid(user_id),
-        org_id=_coerce_uuid(org_id),
+        id=coerce_uuid(draft_id),
+        user_id=coerce_uuid(user_id),
+        org_id=coerce_uuid(org_id),
         title=title,
         filename=filename,
         content_type=content_type,

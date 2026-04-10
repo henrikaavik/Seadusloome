@@ -38,7 +38,7 @@ def notify(
     """
     try:
         with get_connection() as conn:
-            create_notification(
+            result = create_notification(
                 conn,
                 user_id=user_id,
                 type=type,
@@ -47,7 +47,8 @@ def notify(
                 link=link,
                 metadata=metadata,
             )
-            conn.commit()
+            if result is not None:
+                conn.commit()
     except Exception:
         logger.warning(
             "Failed to send notification type=%s to user_id=%s (non-critical)",

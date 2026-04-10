@@ -103,29 +103,13 @@ def NotificationBell(unread_count: int = 0):  # noqa: ANN201
             hx_get="/api/notifications/unread-count",
             hx_trigger="load, every 30s",
             hx_swap="none",
-            # Use an OOB swap to update the badge in-place:
-            # The JSON response is handled by a tiny client-side script below.
+            # The endpoint returns an OOB-swapped badge span that
+            # replaces #bell-badge in-place regardless of hx_swap.
             id="bell-poll",
             cls="hidden",
         ),
         Script(  # noqa: F405
             """
-            document.body.addEventListener('htmx:afterRequest', function(e) {
-                if (e.detail.pathInfo && e.detail.pathInfo.requestPath ===
-                    '/api/notifications/unread-count') {
-                    try {
-                        var data = JSON.parse(e.detail.xhr.responseText);
-                        var badge = document.getElementById('bell-badge');
-                        if (badge) {
-                            var count = data.count || 0;
-                            badge.textContent = count > 99 ? '99+' : (count > 0 ? count : '');
-                            badge.className = count > 0
-                                ? 'bell-badge'
-                                : 'bell-badge bell-badge--hidden';
-                        }
-                    } catch(ex) {}
-                }
-            });
             document.addEventListener('click', function(e) {
                 var bell = document.querySelector('.notification-bell');
                 var dropdown = document.getElementById('notification-dropdown');

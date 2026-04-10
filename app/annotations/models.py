@@ -23,6 +23,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from app.db_utils import coerce_uuid, parse_jsonb
+
 logger = logging.getLogger(__name__)
 
 
@@ -72,25 +74,6 @@ _ANNOTATION_COLUMNS = (
 _REPLY_COLUMNS = "id, annotation_id, user_id, content, created_at"
 
 
-def _coerce_uuid(value: Any) -> uuid.UUID:
-    """Return a ``UUID`` from either a string or a ``UUID`` instance."""
-    if isinstance(value, uuid.UUID):
-        return value
-    return uuid.UUID(str(value))
-
-
-def _parse_jsonb(value: Any) -> Any:
-    """Parse a JSONB value that psycopg may return as a string or dict/list."""
-    if value is None:
-        return None
-    if isinstance(value, (dict, list)):
-        return value
-    try:
-        return json.loads(value)
-    except (TypeError, json.JSONDecodeError):
-        return value
-
-
 def _row_to_annotation(row: tuple[Any, ...]) -> Annotation:
     """Build an ``Annotation`` from a raw cursor row."""
     (
@@ -108,20 +91,20 @@ def _row_to_annotation(row: tuple[Any, ...]) -> Annotation:
         updated_at,
     ) = row
 
-    target_metadata = _parse_jsonb(target_metadata_raw)
+    target_metadata = parse_jsonb(target_metadata_raw)
     if target_metadata is not None and not isinstance(target_metadata, dict):
         target_metadata = None
 
     return Annotation(
-        id=_coerce_uuid(ann_id),
-        user_id=_coerce_uuid(user_id),
-        org_id=_coerce_uuid(org_id),
+        id=coerce_uuid(ann_id),
+        user_id=coerce_uuid(user_id),
+        org_id=coerce_uuid(org_id),
         target_type=target_type,
         target_id=str(target_id),
         target_metadata=target_metadata,
         content=content,
         resolved=bool(resolved),
-        resolved_by=_coerce_uuid(resolved_by) if resolved_by else None,
+        resolved_by=coerce_uuid(resolved_by) if resolved_by else None,
         resolved_at=resolved_at,
         created_at=created_at,
         updated_at=updated_at,
@@ -139,9 +122,9 @@ def _row_to_reply(row: tuple[Any, ...]) -> AnnotationReply:
     ) = row
 
     return AnnotationReply(
-        id=_coerce_uuid(reply_id),
-        annotation_id=_coerce_uuid(annotation_id),
-        user_id=_coerce_uuid(user_id),
+        id=coerce_uuid(reply_id),
+        annotation_id=coerce_uuid(annotation_id),
+        user_id=coerce_uuid(user_id),
         content=content,
         created_at=created_at,
     )

@@ -1,8 +1,10 @@
 """Application-level performance metrics: recording, middleware, and helpers.
 
 Provides:
-- ``record_metric(name, value, labels)`` — fire-and-forget INSERT into the
-  ``metrics`` Postgres table (created by migration 011).
+- ``record_metric(name, value, labels)`` — buffer a metric for periodic
+  bulk INSERT into the ``metrics`` Postgres table (created by migration 011).
+  Never blocks the caller; flushes every ``_FLUSH_INTERVAL`` seconds or when
+  the buffer reaches ``_FLUSH_SIZE`` entries.
 - ``MetricsMiddleware`` — Starlette ASGI middleware that records per-request
   latency with route path and method as labels.
 - ``track_duration(name, **labels)`` — context manager that measures a code
@@ -11,8 +13,12 @@ Provides:
 
 from __future__ import annotations
 
+import atexit
+import json
 import logging
+import threading
 import time
+from collections import deque
 from contextlib import contextmanager
 from typing import Any
 
@@ -24,30 +30,69 @@ from app.db import get_connection as _connect
 
 logger = logging.getLogger(__name__)
 
-
 # ---------------------------------------------------------------------------
-# Core recording helper
+# Buffered metric recording
 # ---------------------------------------------------------------------------
 
+_BUFFER: deque[tuple[str, float, str | None]] = deque()
+_FLUSH_INTERVAL = 10.0  # seconds
+_FLUSH_SIZE = 100  # flush if buffer hits this many entries
+_lock = threading.Lock()
+_flush_timer: threading.Timer | None = None
 
-def record_metric(name: str, value: float, labels: dict[str, Any] | None = None) -> None:
-    """INSERT a metric row into the ``metrics`` table.
 
-    This is fire-and-forget: failures are logged but never propagated so
-    callers (middleware, helpers) do not crash the request on a DB hiccup.
-    """
+def _flush_buffer() -> None:
+    """Bulk-INSERT all buffered metrics into Postgres."""
+    global _flush_timer
+    items: list[tuple[str, float, str | None]] = []
+    with _lock:
+        while _BUFFER:
+            items.append(_BUFFER.popleft())
+        _flush_timer = None
+
+    if not items:
+        return
+
     try:
-        import json
-
-        labels_json = json.dumps(labels) if labels else None
         with _connect() as conn:
-            conn.execute(
+            # Use executemany for bulk insert
+            conn.executemany(
                 "INSERT INTO metrics (name, value, labels) VALUES (%s, %s, %s::jsonb)",
-                (name, value, labels_json),
+                items,
             )
             conn.commit()
     except Exception:
-        logger.debug("Failed to record metric %s", name, exc_info=True)
+        logger.debug("Failed to flush %d metrics", len(items), exc_info=True)
+
+
+def _schedule_flush() -> None:
+    """Schedule a deferred flush if one isn't already pending."""
+    global _flush_timer
+    if _flush_timer is None:
+        _flush_timer = threading.Timer(_FLUSH_INTERVAL, _flush_buffer)
+        _flush_timer.daemon = True
+        _flush_timer.start()
+
+
+def record_metric(name: str, value: float, labels: dict[str, Any] | None = None) -> None:
+    """Buffer a metric for bulk INSERT. Never blocks the caller."""
+    try:
+        labels_json = json.dumps(labels) if labels else None
+        with _lock:
+            _BUFFER.append((name, value, labels_json))
+            buf_len = len(_BUFFER)
+
+        if buf_len >= _FLUSH_SIZE:
+            # Flush immediately in a background thread
+            threading.Thread(target=_flush_buffer, daemon=True).start()
+        else:
+            _schedule_flush()
+    except Exception:
+        logger.debug("Failed to buffer metric %s", name, exc_info=True)
+
+
+# Flush remaining metrics on interpreter shutdown
+atexit.register(_flush_buffer)
 
 
 # ---------------------------------------------------------------------------

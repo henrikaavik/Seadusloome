@@ -196,6 +196,31 @@ admin_job_retry = _rebind(_admin_job_retry_impl)
 admin_jobs_purge = _rebind(_admin_jobs_purge_impl)
 admin_performance_page = _rebind(_admin_performance_page_impl)
 
+# ---------------------------------------------------------------------------
+# Completeness check — warn if a new admin page handler is added without
+# a corresponding _rebind() call.  Run once at import time.
+# ---------------------------------------------------------------------------
+_EXPECTED_PAGE_HANDLERS = {
+    "admin_dashboard_page", "admin_audit_page", "admin_audit_export",
+    "admin_analytics_page", "admin_cost_page", "admin_jobs_page",
+    "admin_job_retry", "admin_jobs_purge", "admin_performance_page",
+    "health_check", "trigger_sync",
+}
+_rebound_names = {
+    name for name in _EXPECTED_PAGE_HANDLERS
+    if name in globals() and callable(globals()[name])
+    and getattr(globals()[name], "__module__", None) == __name__
+}
+_missing = _EXPECTED_PAGE_HANDLERS - _rebound_names
+if _missing:
+    import warnings as _warnings
+
+    _warnings.warn(
+        f"admin_dashboard shim: missing rebinds for {_missing}. "
+        "Add _rebind() calls for new admin page handlers.",
+        stacklevel=1,
+    )
+
 
 # ---------------------------------------------------------------------------
 # Apply admin role decorator & route registration

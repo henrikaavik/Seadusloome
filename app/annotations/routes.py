@@ -42,6 +42,7 @@ from app.auth.helpers import require_auth as _require_auth
 from app.auth.provider import UserDict
 from app.auth.users import get_user
 from app.db import get_connection as _connect
+from app.notifications.wire import notify_annotation_reply
 from app.ui.surfaces.annotation_popover import AnnotationPopover
 
 logger = logging.getLogger(__name__)
@@ -426,12 +427,20 @@ async def reply_annotation_handler(req: Request, id: str):
         return Response(status_code=500)
 
     log_annotation_reply(auth["id"], annotation.id, reply.id)
+    notify_annotation_reply(annotation, reply)
 
-    # Return the updated annotation thread
-    return _annotation_list_fragment(
-        annotation.target_type,
-        annotation.target_id,
-        auth,
+    # Return just the updated thread item so the outerHTML swap on
+    # #annotation-thread-{id} replaces only that thread, not the whole popover.
+    with _connect() as conn:
+        updated_ann = get_annotation(conn, parsed)
+        if updated_ann is None:
+            return Response(status_code=404)
+        replies_raw = list_replies(conn, updated_ann.id)
+    enriched_replies = [
+        {"reply": r, "user_name": _user_display_name(r.user_id)} for r in replies_raw
+    ]
+    return _annotation_item(
+        updated_ann, _user_display_name(updated_ann.user_id), enriched_replies, auth
     )
 
 
@@ -464,6 +473,10 @@ def resolve_annotation_handler(req: Request, id: str):
     if str(annotation.org_id) != str(auth.get("org_id")):
         return Response(status_code=404)
 
+    # Only the author or an admin can resolve
+    if str(annotation.user_id) != str(auth.get("id")) and auth.get("role") != "admin":
+        return Response(status_code=403)
+
     try:
         with _connect() as conn:
             updated = resolve_annotation(conn, parsed, auth["id"])
@@ -477,10 +490,18 @@ def resolve_annotation_handler(req: Request, id: str):
 
     log_annotation_resolve(auth["id"], annotation.id)
 
-    return _annotation_list_fragment(
-        annotation.target_type,
-        annotation.target_id,
-        auth,
+    # Return just the updated thread item so the outerHTML swap on
+    # #annotation-thread-{id} replaces only that thread, not the whole popover.
+    with _connect() as conn:
+        updated_ann = get_annotation(conn, parsed)
+        if updated_ann is None:
+            return Response(status_code=404)
+        replies_raw = list_replies(conn, updated_ann.id)
+    enriched_replies = [
+        {"reply": r, "user_name": _user_display_name(r.user_id)} for r in replies_raw
+    ]
+    return _annotation_item(
+        updated_ann, _user_display_name(updated_ann.user_id), enriched_replies, auth
     )
 
 

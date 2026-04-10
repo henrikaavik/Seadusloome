@@ -28,6 +28,7 @@ from datetime import datetime
 from typing import Any
 
 from app.db import get_connection as _connect
+from app.db_utils import coerce_uuid, parse_jsonb
 
 logger = logging.getLogger(__name__)
 
@@ -70,25 +71,6 @@ _SESSION_COLUMNS = (
 )
 
 
-def _coerce_uuid(value: Any) -> uuid.UUID:
-    """Return a ``UUID`` from either a string or a ``UUID`` instance."""
-    if isinstance(value, uuid.UUID):
-        return value
-    return uuid.UUID(str(value))
-
-
-def _parse_jsonb(value: Any) -> Any:
-    """Parse a JSONB value that psycopg may return as a string or dict."""
-    if value is None:
-        return None
-    if isinstance(value, (dict, list)):
-        return value
-    try:
-        return json.loads(value)
-    except (TypeError, json.JSONDecodeError):
-        return value
-
-
 def _row_to_session(row: tuple[Any, ...]) -> DraftingSession:
     """Build a ``DraftingSession`` dataclass from a raw cursor row."""
     (
@@ -108,18 +90,18 @@ def _row_to_session(row: tuple[Any, ...]) -> DraftingSession:
         updated_at,
     ) = row
 
-    clarifications = _parse_jsonb(clarifications_raw)
+    clarifications = parse_jsonb(clarifications_raw)
     if not isinstance(clarifications, list):
         clarifications = []
 
-    proposed_structure = _parse_jsonb(proposed_structure_raw)
+    proposed_structure = parse_jsonb(proposed_structure_raw)
     if proposed_structure is not None and not isinstance(proposed_structure, dict):
         proposed_structure = None
 
     return DraftingSession(
-        id=_coerce_uuid(session_id),
-        user_id=_coerce_uuid(user_id),
-        org_id=_coerce_uuid(org_id),
+        id=coerce_uuid(session_id),
+        user_id=coerce_uuid(user_id),
+        org_id=coerce_uuid(org_id),
         workflow_type=workflow_type,
         current_step=int(current_step),
         intent=intent,
@@ -127,7 +109,7 @@ def _row_to_session(row: tuple[Any, ...]) -> DraftingSession:
         research_data_encrypted=research_data_encrypted,
         proposed_structure=proposed_structure,
         draft_content_encrypted=draft_content_encrypted,
-        integrated_draft_id=_coerce_uuid(integrated_draft_id) if integrated_draft_id else None,
+        integrated_draft_id=coerce_uuid(integrated_draft_id) if integrated_draft_id else None,
         status=status,
         created_at=created_at,
         updated_at=updated_at,
