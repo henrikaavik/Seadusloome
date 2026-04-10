@@ -56,17 +56,24 @@ class TestClaudeStubMode:
 
 
 class TestClaudeProdMode:
-    def test_claude_raises_in_prod_without_key(self, monkeypatch: pytest.MonkeyPatch):
-        """APP_ENV=production + no key must fail ClaudeProvider __init__.
+    def test_claude_stubs_in_prod_without_key(self, monkeypatch: pytest.MonkeyPatch):
+        """APP_ENV=production + no key → stub mode (NOT RuntimeError).
 
-        #449: only an explicit APP_ENV=production forces real
-        credentials. Dev/test/staging all fall through to stub mode.
+        Unlike STORAGE_ENCRYPTION_KEY (data-loss risk) and TIKA_URL
+        (hard dep for parsing), the Anthropic key is explicitly optional
+        per README Phase 2 Step 5. The LLM stub path produces synthetic
+        entity refs that are good enough for the full pipeline to run
+        end-to-end in demo mode. The first real Phase 2 upload proved
+        that gating on is_stub_allowed() here blocks the entire
+        extract_entities handler in prod — so we removed the gate and
+        let ClaudeProvider always stub when no key is set.
         """
         monkeypatch.setenv("APP_ENV", "production")
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
-        with pytest.raises(RuntimeError, match="APP_ENV=production"):
-            ClaudeProvider()
+        provider = ClaudeProvider()
+        assert provider._stubbed is True
+        assert provider.complete("test").startswith("[STUB Claude]")
 
     def test_claude_stubbed_in_staging(self, monkeypatch: pytest.MonkeyPatch):
         """#449: APP_ENV=staging is now explicitly stub-mode-eligible.

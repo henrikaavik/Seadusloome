@@ -22,7 +22,6 @@ import logging
 import os
 from typing import Any
 
-from app.config import is_stub_allowed
 from app.llm.provider import LLMProvider
 
 logger = logging.getLogger(__name__)
@@ -44,15 +43,22 @@ class ClaudeProvider(LLMProvider):
         api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
 
         if not api_key:
-            if is_stub_allowed():
-                logger.warning(
-                    "ANTHROPIC_API_KEY not set — ClaudeProvider running in STUB mode. "
-                    "All completions return canned responses."
-                )
-                self._stubbed = True
-                self._api_key = ""
-            else:
-                raise RuntimeError("ANTHROPIC_API_KEY must be set when APP_ENV=production")
+            # Unlike STORAGE_ENCRYPTION_KEY and TIKA_URL, the Anthropic key
+            # is explicitly OPTIONAL in Phase 2 (README Step 5). The LLM
+            # stub path produces synthetic entity refs that are good enough
+            # for the full pipeline to run end-to-end in demo mode.
+            # Requiring the key in production was the root cause of the
+            # "ANTHROPIC_API_KEY must be set" pipeline failure on the first
+            # real upload — the is_stub_allowed() gate blocked stub mode
+            # when APP_ENV=production, making the entire extract_entities
+            # handler unreachable without a paid API key.
+            logger.warning(
+                "ANTHROPIC_API_KEY not set — ClaudeProvider running in STUB mode. "
+                "All completions return canned responses. Set ANTHROPIC_API_KEY "
+                "in Coolify to enable real LLM extraction."
+            )
+            self._stubbed = True
+            self._api_key = ""
         else:
             self._stubbed = False
             self._api_key = api_key
