@@ -67,20 +67,79 @@ def UserMenu(user: UserDict | None):  # noqa: ANN201
     )
 
 
+def _bell_badge(unread_count: int):  # noqa: ANN201
+    """Inner badge element — returned by the polling endpoint too."""
+    if unread_count > 0:
+        return Span(  # noqa: F405
+            str(unread_count if unread_count < 100 else "99+"),
+            cls="bell-badge",
+            id="bell-badge",
+        )
+    return Span(id="bell-badge", cls="bell-badge bell-badge--hidden")  # noqa: F405
+
+
 def NotificationBell(unread_count: int = 0):  # noqa: ANN201
-    """Bell icon with unread count badge. Actual logic added in Phase 2."""
-    badge = (
-        Span(str(unread_count if unread_count < 100 else "99+"), cls="bell-badge")  # noqa: F405
-        if unread_count > 0
-        else None
-    )
-    return A(  # noqa: F405
-        Span("🔔", cls="bell-icon", aria_hidden="true"),  # noqa: F405
-        badge,
-        Span("Teavitused", cls="sr-only"),  # noqa: F405
-        href="/notifications",
+    """Bell icon with unread count badge and HTMX-powered dropdown.
+
+    - Polls ``/api/notifications/unread-count`` every 30s to update the badge.
+    - Click toggles a dropdown loaded via ``hx_get="/api/notifications?limit=5"``.
+    """
+    return Div(  # noqa: F405
+        Button(  # noqa: F405
+            Span("\U0001f514", cls="bell-icon", aria_hidden="true"),  # noqa: F405
+            _bell_badge(unread_count),
+            Span("Teavitused", cls="sr-only"),  # noqa: F405
+            type="button",
+            cls="notification-bell-trigger",
+            aria_label=(f"Teavitused ({unread_count} lugemata)" if unread_count else "Teavitused"),
+            hx_get="/api/notifications?limit=5",
+            hx_target="#notification-dropdown",
+            hx_swap="innerHTML",
+            hx_trigger="click",
+        ),
+        Div(id="notification-dropdown", cls="notification-dropdown"),  # noqa: F405
+        # Badge poll: swap just the badge span every 30 seconds.
+        Span(  # noqa: F405
+            hx_get="/api/notifications/unread-count",
+            hx_trigger="load, every 30s",
+            hx_swap="none",
+            # Use an OOB swap to update the badge in-place:
+            # The JSON response is handled by a tiny client-side script below.
+            id="bell-poll",
+            cls="hidden",
+        ),
+        Script(  # noqa: F405
+            """
+            document.body.addEventListener('htmx:afterRequest', function(e) {
+                if (e.detail.pathInfo && e.detail.pathInfo.requestPath ===
+                    '/api/notifications/unread-count') {
+                    try {
+                        var data = JSON.parse(e.detail.xhr.responseText);
+                        var badge = document.getElementById('bell-badge');
+                        if (badge) {
+                            var count = data.count || 0;
+                            badge.textContent = count > 99 ? '99+' : (count > 0 ? count : '');
+                            badge.className = count > 0
+                                ? 'bell-badge'
+                                : 'bell-badge bell-badge--hidden';
+                        }
+                    } catch(ex) {}
+                }
+            });
+            document.addEventListener('click', function(e) {
+                var bell = document.querySelector('.notification-bell');
+                var dropdown = document.getElementById('notification-dropdown');
+                if (dropdown && bell && !bell.contains(e.target)) {
+                    dropdown.innerHTML = '';
+                    dropdown.classList.remove('notification-dropdown--open');
+                }
+                if (dropdown && bell && bell.contains(e.target)) {
+                    dropdown.classList.toggle('notification-dropdown--open');
+                }
+            });
+            """
+        ),
         cls="notification-bell",
-        aria_label=f"Teavitused ({unread_count} lugemata)" if unread_count else "Teavitused",
     )
 
 

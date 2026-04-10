@@ -64,6 +64,7 @@ from app.ui.data.data_table import Column, DataTable
 from app.ui.data.pagination import Pagination
 from app.ui.forms.app_form import AppForm
 from app.ui.layout import PageShell
+from app.ui.primitives.annotation_button import AnnotationButton
 from app.ui.primitives.badge import Badge, BadgeVariant
 from app.ui.primitives.button import Button
 from app.ui.surfaces.alert import Alert
@@ -1115,6 +1116,7 @@ def _step_5_page(session: DraftingSession, auth: UserDict, theme: str):
                         variant="ghost",
                         size="sm",
                     ),
+                    AnnotationButton("provision", f"{session.id}-clause-{i}"),
                     cls="clause-actions",
                 ),
                 id=f"clause-{i}",
@@ -2122,6 +2124,14 @@ def export_docx(req: Request, session_id: str):
             conn.commit()
     except Exception:
         logger.exception("Failed to mark session %s as completed", session.id)
+
+    # Notify the session owner that the drafter is complete.
+    try:
+        from app.notifications.wire import notify_drafter_complete
+
+        notify_drafter_complete(session)
+    except Exception:
+        logger.debug("notify_drafter_complete failed (non-critical)", exc_info=True)
 
     filename = f"eelnou-{session.id}.docx"
     return FileResponse(

@@ -39,6 +39,7 @@ from app.db import get_connection as _connect
 from app.ui.data.data_table import Column, DataTable
 from app.ui.data.pagination import Pagination
 from app.ui.layout import PageShell
+from app.ui.primitives.annotation_button import AnnotationButton
 from app.ui.primitives.badge import Badge
 from app.ui.primitives.button import Button
 from app.ui.surfaces.alert import Alert
@@ -394,11 +395,13 @@ def _render_message(msg: Any):
             cls="chat-message chat-message-user",
         )
     elif role == "assistant":
+        msg_id = str(msg.id) if hasattr(msg, "id") and msg.id else ""
         return Div(  # noqa: F405
             Div(  # noqa: F405
                 Div(Safe(_format_assistant_content(content)), cls="chat-message-text"),  # noqa: F405
                 cls="chat-bubble chat-bubble-assistant",
             ),
+            AnnotationButton("conversation", msg_id) if msg_id else "",
             cls="chat-message chat-message-assistant",
         )
     elif role == "tool":

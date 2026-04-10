@@ -113,6 +113,16 @@ def check_org_cost_budget(org_id: UUID | str) -> None:
         return
 
     total_cost = float(row[0]) if row else 0.0
+
+    # Notify org admins when cost hits 80% of the budget.
+    if total_cost >= max_cost * 0.8 and total_cost < max_cost:
+        try:
+            from app.notifications.wire import notify_cost_alert
+
+            notify_cost_alert(org_id, total_cost, max_cost)
+        except Exception:
+            logger.debug("notify_cost_alert failed (non-critical)", exc_info=True)
+
     if total_cost >= max_cost:
         raise CostBudgetExceededError(
             f"Organisatsiooni igakuine LLM-i kulueelarve ({max_cost:.2f} USD) "

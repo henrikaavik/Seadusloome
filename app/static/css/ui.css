@@ -2065,3 +2065,192 @@
   box-shadow: var(--shadow-sm);
   z-index: 10;
 }
+
+/* ===========================================================================
+   Annotations: Button, Popover, Thread, Reply, Form
+   =========================================================================== */
+
+/* ---- Annotation trigger button ---- */
+.annotation-button-wrapper {
+  display: inline-block;
+  position: relative;
+}
+
+.annotation-button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  font-size: var(--text-sm);
+  line-height: 1;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.annotation-button:hover {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+.annotation-count-badge {
+  font-size: var(--text-xs);
+  min-width: 1.25em;
+  text-align: center;
+}
+
+.annotation-popover-container {
+  /* Rendered empty; filled by HTMX on button click */
+}
+
+/* ---- Annotation popover ---- */
+.annotation-popover {
+  margin-top: var(--space-2);
+  padding: var(--space-4);
+  background: var(--color-surface-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  max-height: 28rem;
+  overflow-y: auto;
+}
+
+.annotation-popover-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.annotation-popover-title {
+  font-weight: 600;
+  font-size: var(--text-sm);
+  color: var(--color-text);
+}
+
+.annotation-divider {
+  margin: var(--space-3) 0;
+  border: none;
+  border-top: 1px solid var(--color-border);
+}
+
+/* ---- Annotation list ---- */
+.annotation-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.annotation-list-empty {
+  padding: var(--space-3) 0;
+}
+
+/* ---- Annotation thread (single annotation + replies) ---- */
+.annotation-thread {
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+}
+
+.annotation-thread.annotation-resolved {
+  opacity: 0.7;
+  border-left: 3px solid var(--color-success);
+}
+
+.annotation-header {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin-bottom: var(--space-1);
+}
+
+.annotation-author {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.annotation-timestamp {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+}
+
+.annotation-content {
+  font-size: var(--text-sm);
+  color: var(--color-text);
+  margin: var(--space-1) 0;
+  line-height: 1.5;
+}
+
+.annotation-status {
+  margin-top: var(--space-1);
+}
+
+.annotation-resolved-info {
+  font-size: var(--text-xs);
+  color: var(--color-success);
+  font-style: italic;
+}
+
+.annotation-actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.annotation-resolve-btn,
+.annotation-delete-btn {
+  font-size: var(--text-xs);
+  padding: var(--space-1) var(--space-2);
+}
+
+/* ---- Annotation replies ---- */
+.annotation-replies {
+  margin-top: var(--space-2);
+  padding-left: var(--space-3);
+  border-left: 2px solid var(--color-border);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.annotation-reply {
+  padding: var(--space-2);
+  background: var(--color-surface-elevated);
+  border-radius: var(--radius-sm);
+}
+
+/* ---- Annotation forms ---- */
+.annotation-form,
+.annotation-reply-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.annotation-form-input,
+.annotation-reply-input {
+  width: 100%;
+  padding: var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  font-family: inherit;
+  resize: vertical;
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+
+.annotation-form-input:focus,
+.annotation-reply-input:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 2px var(--color-primary-alpha);
+}

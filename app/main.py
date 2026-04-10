@@ -10,6 +10,7 @@ from starlette.staticfiles import StaticFiles
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app.admin import register_admin_routes
+from app.annotations.routes import register_annotation_routes
 from app.auth.middleware import SKIP_PATHS, auth_before
 from app.auth.organizations import register_org_routes
 from app.auth.routes import register_auth_routes
@@ -22,6 +23,7 @@ from app.drafter.routes import register_drafter_routes
 from app.explorer.pages import register_explorer_pages
 from app.explorer.routes import register_explorer_routes
 from app.explorer.websocket import register_ws_routes
+from app.notifications.routes import register_notification_routes
 from app.sync.webhook import register_webhook_routes
 from app.templates.dashboard import index_redirect, register_dashboard_routes
 from app.ui.design_system_pages import register_design_system_routes
@@ -161,6 +163,8 @@ register_drafter_routes(rt)
 register_report_routes(rt)
 register_chat_routes(rt)
 register_chat_ws_routes(app)
+register_annotation_routes(rt)
+register_notification_routes(rt)
 
 
 @rt("/")

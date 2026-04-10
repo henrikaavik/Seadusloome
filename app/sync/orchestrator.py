@@ -235,6 +235,15 @@ def run_sync(repo_dir: Path | None = None) -> bool:
     except Exception as e:
         logger.exception("Sync pipeline failed")
         log_sync("failed", started_at, error_message=str(e)[:1000])
+
+        # Notify all system admins about the sync failure.
+        try:
+            from app.notifications.wire import notify_sync_failed
+
+            notify_sync_failed(str(e)[:1000])
+        except Exception:
+            logger.debug("notify_sync_failed failed (non-critical)", exc_info=True)
+
         return False
 
     finally:

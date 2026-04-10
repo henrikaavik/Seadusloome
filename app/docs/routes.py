@@ -48,6 +48,7 @@ from app.sync.jena_loader import delete_named_graph
 from app.ui.data.data_table import Column, DataTable
 from app.ui.data.pagination import Pagination
 from app.ui.layout import PageShell
+from app.ui.primitives.annotation_button import AnnotationButton
 from app.ui.primitives.badge import Badge, BadgeVariant
 from app.ui.primitives.button import Button
 from app.ui.surfaces.alert import Alert
@@ -701,7 +702,10 @@ def draft_detail_page(req: Request, draft_id: str):
         ),
         Card(
             CardHeader(H3("Staatus", cls="card-title")),  # noqa: F405
-            CardBody(tracker),
+            CardBody(
+                tracker,
+                AnnotationButton("draft", str(draft.id)),
+            ),
         ),
         Card(
             CardHeader(H3("\u00dcksikasjad", cls="card-title")),  # noqa: F405

@@ -475,6 +475,12 @@ def explorer_page(req: Request):
                     Ul(id="panel-neighbors", cls="neighbor-list"),
                     cls="meta-section",
                 ),
+                # ----- Annotation button (entity-level) -----
+                Div(
+                    id="panel-annotation-btn",
+                    cls="annotation-section",
+                    style="display:none;",
+                ),
                 # ----- Bookmark button -----
                 Div(
                     Button(
@@ -499,6 +505,36 @@ def explorer_page(req: Request):
             NotStr('<svg id="canvas"></svg>'),
             # ----- Explorer JS (after DOM) -----
             Script(src="/static/js/explorer.js"),
+            # ----- Annotation button wiring for detail panel -----
+            # When explorerShowDetail() sets #panel-title, this
+            # observer injects an AnnotationButton via HTMX into
+            # #panel-annotation-btn. The MutationObserver pattern
+            # avoids patching explorer.js directly.
+            Script(
+                "(function(){"
+                "var panelBtn=document.getElementById('panel-annotation-btn');"
+                "var panelTitle=document.getElementById('panel-title');"
+                "if(!panelBtn||!panelTitle){return;}"
+                "var obs=new MutationObserver(function(){"
+                "var uri=panelTitle.dataset.entityUri||panelTitle.textContent.trim();"
+                "if(!uri){panelBtn.style.display='none';return;}"
+                "var safeId=encodeURIComponent(uri);"
+                "panelBtn.innerHTML="
+                '\'<div class="annotation-button-wrapper">'
+                '<button type="button" class="annotation-button"'
+                " hx-get=\"/api/annotations?target_type=entity&target_id='+safeId+'\"'"
+                " hx-target=\"#annotation-popover-entity-'+safeId+'\"'"
+                ' hx-swap="innerHTML"\''
+                ' aria-label="Markused"\''
+                ' title="Markused">&#128172;</button>'
+                "<div id=\"annotation-popover-entity-'+safeId+'\"'"
+                ' class="annotation-popover-container"></div></div>\';'
+                "panelBtn.style.display='block';"
+                "if(typeof htmx!=='undefined'){htmx.process(panelBtn);}"
+                "});"
+                "obs.observe(panelTitle,{childList:true,characterData:true,subtree:true});"
+                "})();"
+            ),
             # ----- Optional draft overlay (Phase 2 Batch 4) -----
             *overlay_tags,
             cls="explorer-page",

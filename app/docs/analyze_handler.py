@@ -149,6 +149,14 @@ def analyze_impact(
             )
             conn.commit()
 
+        # Notify the draft owner that analysis is complete.
+        try:
+            from app.notifications.wire import notify_analysis_done
+
+            notify_analysis_done(draft)
+        except Exception:
+            logger.debug("notify_analysis_done failed (non-critical)", exc_info=True)
+
         logger.info(
             "analyze_impact: draft %s ready report=%s score=%d",
             draft_id,

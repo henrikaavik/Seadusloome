@@ -35,6 +35,7 @@ from app.jobs.queue import JobQueue
 from app.ui.data.data_table import Column, DataTable
 from app.ui.forms.app_form import AppForm
 from app.ui.layout import PageShell
+from app.ui.primitives.annotation_button import AnnotationButton
 from app.ui.primitives.badge import Badge, BadgeVariant
 from app.ui.primitives.button import Button
 from app.ui.surfaces.alert import Alert
@@ -297,7 +298,7 @@ def _affected_entities_section(findings: dict[str, Any]) -> Any:
     )
 
 
-def _conflicts_section(findings: dict[str, Any]) -> Any:
+def _conflicts_section(findings: dict[str, Any], draft_id: str = "") -> Any:
     """Build the "Konfliktid" section."""
     rows = list(findings.get("conflicts") or [])
 
@@ -342,12 +343,15 @@ def _conflicts_section(findings: dict[str, Any]) -> Any:
         )
 
     return Card(
-        CardHeader(H3("Konfliktid", cls="card-title")),  # noqa: F405
+        CardHeader(
+            H3("Konfliktid", cls="card-title"),  # noqa: F405
+            AnnotationButton("draft", f"{draft_id}-conflicts") if draft_id else "",
+        ),
         CardBody(body),
     )
 
 
-def _eu_compliance_section(findings: dict[str, Any]) -> Any:
+def _eu_compliance_section(findings: dict[str, Any], draft_id: str = "") -> Any:
     """Build the "EL-i õigusaktide vastavus" section."""
     rows = list(findings.get("eu_compliance") or [])
 
@@ -375,7 +379,10 @@ def _eu_compliance_section(findings: dict[str, Any]) -> Any:
     ]
 
     return Card(
-        CardHeader(H3("EL-i õigusaktide vastavus", cls="card-title")),  # noqa: F405
+        CardHeader(
+            H3("EL-i õigusaktide vastavus", cls="card-title"),  # noqa: F405
+            AnnotationButton("draft", f"{draft_id}-eu-compliance") if draft_id else "",
+        ),
         CardBody(
             DataTable(
                 columns=columns,
@@ -386,7 +393,7 @@ def _eu_compliance_section(findings: dict[str, Any]) -> Any:
     )
 
 
-def _gaps_section(findings: dict[str, Any]) -> Any:
+def _gaps_section(findings: dict[str, Any], draft_id: str = "") -> Any:
     """Build the "Lüngad" section."""
     rows = list(findings.get("gaps") or [])
 
@@ -406,7 +413,10 @@ def _gaps_section(findings: dict[str, Any]) -> Any:
     ]
 
     return Card(
-        CardHeader(H3("Lüngad", cls="card-title")),  # noqa: F405
+        CardHeader(
+            H3("Lüngad", cls="card-title"),  # noqa: F405
+            AnnotationButton("draft", f"{draft_id}-gaps") if draft_id else "",
+        ),
         CardBody(
             DataTable(
                 columns=columns,
@@ -508,9 +518,9 @@ def draft_report_page(req: Request, draft_id: str):
         ),
         _summary_card(report_row),
         _affected_entities_section(findings),
-        _conflicts_section(findings),
-        _eu_compliance_section(findings),
-        _gaps_section(findings),
+        _conflicts_section(findings, draft_id=str(draft.id)),
+        _eu_compliance_section(findings, draft_id=str(draft.id)),
+        _gaps_section(findings, draft_id=str(draft.id)),
         _export_section(draft),
         title=f"Mõjuaruanne — {draft.title}",
         user=auth,
