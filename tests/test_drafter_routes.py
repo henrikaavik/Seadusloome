@@ -310,23 +310,76 @@ class TestStepPage:
         assert 'name="intent"' in resp.text
         assert "Kavatsus" in resp.text
 
+    @patch("app.drafter.routes._find_latest_job")
     @patch("app.drafter.routes.fetch_session")
     @patch("app.auth.middleware._get_provider")
-    def test_step_2_renders_placeholder(
+    def test_step_2_shows_waiting_when_job_running(
         self,
         mock_get_provider: MagicMock,
         mock_fetch: MagicMock,
+        mock_find_job: MagicMock,
     ):
         mock_get_provider.return_value = _stub_provider()
         session = _make_session(current_step=2)
         mock_fetch.return_value = session
+        mock_find_job.return_value = {"status": "running", "result": None, "error_message": None}
 
         client = _authed_client()
         resp = client.get(f"/drafter/{_SESSION_ID}/step/2")
 
         assert resp.status_code == 200
-        assert "Tapsustamine" in resp.text
-        assert "jargmises arendusetapis" in resp.text
+        assert "Kusimuste genereerimine" in resp.text
+
+    @patch("app.drafter.routes._find_latest_job")
+    @patch("app.drafter.routes.fetch_session")
+    @patch("app.auth.middleware._get_provider")
+    def test_step_2_renders_qa_form_with_clarifications(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_find_job: MagicMock,
+    ):
+        mock_get_provider.return_value = _stub_provider()
+        session = _make_session(current_step=2)
+        session.clarifications = [
+            {"question": "Milliseid asutusi see mojutab?", "answer": None, "rationale": "scope"},
+            {"question": "Kas see on EL-iga seotud?", "answer": None, "rationale": "EU"},
+            {"question": "Mis on ulemine periood?", "answer": None, "rationale": "timing"},
+        ]
+        mock_fetch.return_value = session
+        mock_find_job.return_value = {"status": "success", "result": {}, "error_message": None}
+
+        client = _authed_client()
+        resp = client.get(f"/drafter/{_SESSION_ID}/step/2")
+
+        assert resp.status_code == 200
+        assert "Milliseid asutusi" in resp.text
+        assert 'name="answer"' in resp.text
+
+    @patch("app.drafter.routes._find_latest_job")
+    @patch("app.drafter.routes.fetch_session")
+    @patch("app.auth.middleware._get_provider")
+    def test_step_2_shows_advance_when_all_answered(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_find_job: MagicMock,
+    ):
+        mock_get_provider.return_value = _stub_provider()
+        session = _make_session(current_step=2)
+        session.clarifications = [
+            {"question": "Q1?", "answer": "A1"},
+            {"question": "Q2?", "answer": "A2"},
+            {"question": "Q3?", "answer": "A3"},
+        ]
+        mock_fetch.return_value = session
+        mock_find_job.return_value = {"status": "success", "result": {}, "error_message": None}
+
+        client = _authed_client()
+        resp = client.get(f"/drafter/{_SESSION_ID}/step/2")
+
+        assert resp.status_code == 200
+        assert "Jatka uurimisega" in resp.text
 
     @patch("app.drafter.routes.fetch_session")
     @patch("app.auth.middleware._get_provider")
@@ -368,7 +421,8 @@ class TestStepPage:
 
 
 class TestSubmitIntent:
-    @patch("app.drafter.routes.log_action")
+    @patch("app.drafter.routes.JobQueue")
+    @patch("app.drafter.routes.log_drafter_step_advance")
     @patch("app.drafter.routes._connect")
     @patch("app.drafter.routes.fetch_session")
     @patch("app.auth.middleware._get_provider")
@@ -378,6 +432,7 @@ class TestSubmitIntent:
         mock_fetch: MagicMock,
         mock_connect: MagicMock,
         mock_log: MagicMock,
+        mock_queue_cls: MagicMock,
     ):
         mock_get_provider.return_value = _stub_provider()
         session = _make_session(current_step=1)
@@ -403,7 +458,8 @@ class TestSubmitIntent:
         assert resp.status_code == 303
         assert f"/drafter/{_SESSION_ID}/step/2" in resp.headers["location"]
         mock_log.assert_called_once()
-        assert mock_log.call_args.args[1] == "drafter.step.advance"
+        # Verify drafter_clarify job was enqueued
+        mock_queue_cls.return_value.enqueue.assert_called_once()
 
     @patch("app.drafter.routes.fetch_session")
     @patch("app.auth.middleware._get_provider")
@@ -452,16 +508,19 @@ class TestSubmitIntent:
 
 
 class TestStepStatusFragment:
+    @patch("app.drafter.routes._find_latest_job")
     @patch("app.drafter.routes.fetch_session")
     @patch("app.auth.middleware._get_provider")
-    def test_status_fragment_returns_polling_div(
+    def test_status_fragment_returns_polling_div_when_running(
         self,
         mock_get_provider: MagicMock,
         mock_fetch: MagicMock,
+        mock_find_job: MagicMock,
     ):
         mock_get_provider.return_value = _stub_provider()
         session = _make_session(current_step=2)
         mock_fetch.return_value = session
+        mock_find_job.return_value = {"status": "running", "result": None, "error_message": None}
 
         client = _authed_client()
         resp = client.get(
@@ -470,5 +529,228 @@ class TestStepStatusFragment:
         )
 
         assert resp.status_code == 200
-        assert "Ootamine" in resp.text
         assert "every 3s" in resp.text
+
+    @patch("app.drafter.routes._find_latest_job")
+    @patch("app.drafter.routes.fetch_session")
+    @patch("app.auth.middleware._get_provider")
+    def test_status_fragment_redirects_on_success(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_find_job: MagicMock,
+    ):
+        mock_get_provider.return_value = _stub_provider()
+        session = _make_session(current_step=2)
+        mock_fetch.return_value = session
+        mock_find_job.return_value = {"status": "success", "result": {}, "error_message": None}
+
+        client = _authed_client()
+        resp = client.get(
+            f"/drafter/{_SESSION_ID}/step/2/status",
+            headers={"HX-Request": "true"},
+        )
+
+        assert resp.status_code == 200
+        assert "HX-Redirect" in resp.headers
+
+
+# ---------------------------------------------------------------------------
+# Step 3: Research results
+# ---------------------------------------------------------------------------
+
+
+class TestStep3Page:
+    @patch("app.drafter.routes._find_latest_job")
+    @patch("app.drafter.routes.decrypt_text")
+    @patch("app.drafter.routes.fetch_session")
+    @patch("app.auth.middleware._get_provider")
+    def test_step_3_renders_research_results(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_decrypt: MagicMock,
+        mock_find_job: MagicMock,
+    ):
+        import json
+
+        mock_get_provider.return_value = _stub_provider()
+        session = _make_session(current_step=3)
+        session.research_data_encrypted = b"encrypted"
+        mock_fetch.return_value = session
+        mock_decrypt.return_value = json.dumps(
+            {
+                "provisions": [
+                    {"uri": "uri:1", "label": "TsiviilS par 1", "act_label": "TsiviilS"},
+                ],
+                "eu_directives": [],
+                "court_decisions": [],
+                "topic_clusters": [],
+            }
+        )
+
+        client = _authed_client()
+        resp = client.get(f"/drafter/{_SESSION_ID}/step/3")
+
+        assert resp.status_code == 200
+        assert "TsiviilS" in resp.text
+        assert "Jatka struktuuriga" in resp.text
+
+
+# ---------------------------------------------------------------------------
+# Step 4: Structure editing
+# ---------------------------------------------------------------------------
+
+
+class TestStep4Page:
+    @patch("app.drafter.routes._find_latest_job")
+    @patch("app.drafter.routes.fetch_session")
+    @patch("app.auth.middleware._get_provider")
+    def test_step_4_renders_editable_tree(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_find_job: MagicMock,
+    ):
+        mock_get_provider.return_value = _stub_provider()
+        session = _make_session(current_step=4)
+        session.proposed_structure = {
+            "title": "Test seadus",
+            "chapters": [
+                {
+                    "number": "1. peatukk",
+                    "title": "Uldsatted",
+                    "sections": [
+                        {"paragraph": "par 1", "title": "Reguleerimisala"},
+                    ],
+                }
+            ],
+        }
+        mock_fetch.return_value = session
+
+        client = _authed_client()
+        resp = client.get(f"/drafter/{_SESSION_ID}/step/4")
+
+        assert resp.status_code == 200
+        assert 'name="law_title"' in resp.text
+        assert "Uldsatted" in resp.text
+        assert "Salvesta" in resp.text
+
+
+# ---------------------------------------------------------------------------
+# Step 5: Clauses
+# ---------------------------------------------------------------------------
+
+
+class TestStep5Page:
+    @patch("app.drafter.routes._find_latest_job")
+    @patch("app.drafter.routes.decrypt_text")
+    @patch("app.drafter.routes.fetch_session")
+    @patch("app.auth.middleware._get_provider")
+    def test_step_5_renders_clauses_with_citations(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_decrypt: MagicMock,
+        mock_find_job: MagicMock,
+    ):
+        import json
+
+        mock_get_provider.return_value = _stub_provider()
+        session = _make_session(current_step=5)
+        session.draft_content_encrypted = b"encrypted"
+        mock_fetch.return_value = session
+        mock_decrypt.return_value = json.dumps(
+            {
+                "clauses": [
+                    {
+                        "chapter": "1",
+                        "chapter_title": "Uldsatted",
+                        "paragraph": "par 1",
+                        "title": "Reguleerimisala",
+                        "text": "Kaesolev seadus satestab...",
+                        "citations": ["estleg:TsiviilS/par/1"],
+                        "notes": "Test note",
+                    }
+                ]
+            }
+        )
+
+        client = _authed_client()
+        resp = client.get(f"/drafter/{_SESSION_ID}/step/5")
+
+        assert resp.status_code == 200
+        assert "Kaesolev seadus" in resp.text
+        assert "estleg:TsiviilS" in resp.text
+        assert "Muuda" in resp.text
+        assert "Genereeri uuesti" in resp.text
+
+
+# ---------------------------------------------------------------------------
+# Step 6: Review
+# ---------------------------------------------------------------------------
+
+
+class TestStep6Page:
+    @patch("app.drafter.routes.fetch_session")
+    @patch("app.auth.middleware._get_provider")
+    def test_step_6_shows_trigger_button_when_no_draft(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+    ):
+        mock_get_provider.return_value = _stub_provider()
+        session = _make_session(current_step=6)
+        session.integrated_draft_id = None
+        mock_fetch.return_value = session
+
+        client = _authed_client()
+        resp = client.get(f"/drafter/{_SESSION_ID}/step/6")
+
+        assert resp.status_code == 200
+        assert "Kaivita mojuanaluus" in resp.text
+
+    @patch("app.drafter.routes.fetch_session")
+    @patch("app.auth.middleware._get_provider")
+    def test_step_6_shows_report_link_when_draft_linked(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+    ):
+        mock_get_provider.return_value = _stub_provider()
+        draft_id = uuid.UUID("55555555-5555-5555-5555-555555555555")
+        session = _make_session(current_step=6)
+        session.integrated_draft_id = draft_id
+        mock_fetch.return_value = session
+
+        client = _authed_client()
+        resp = client.get(f"/drafter/{_SESSION_ID}/step/6")
+
+        assert resp.status_code == 200
+        assert "Vaata mojuanaluusi" in resp.text
+        assert str(draft_id) in resp.text
+
+
+# ---------------------------------------------------------------------------
+# Step 7: Export
+# ---------------------------------------------------------------------------
+
+
+class TestStep7Page:
+    @patch("app.drafter.routes.fetch_session")
+    @patch("app.auth.middleware._get_provider")
+    def test_step_7_shows_download_link(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+    ):
+        mock_get_provider.return_value = _stub_provider()
+        session = _make_session(current_step=7)
+        mock_fetch.return_value = session
+
+        client = _authed_client()
+        resp = client.get(f"/drafter/{_SESSION_ID}/step/7")
+
+        assert resp.status_code == 200
+        assert "Laadi alla .docx" in resp.text
+        assert "/export" in resp.text
