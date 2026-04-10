@@ -991,6 +991,13 @@ function updateBreadcrumb() {
   if (!breadcrumb) return;
   breadcrumb.innerHTML = '';
 
+  // Hide breadcrumb in overview — it's redundant when no drill-down
+  if (state.view === 'overview') {
+    breadcrumb.style.display = 'none';
+    return;
+  }
+  breadcrumb.style.display = '';
+
   const overview = document.createElement('span');
   overview.textContent = '\u00dclevaade';
   overview.addEventListener('click', () => {
