@@ -46,62 +46,70 @@ def _get_export_dir() -> Path:
     return p
 
 
+_WATERMARK_TEXT = (
+    "See dokument on genereeritud tehisintellekti abil "
+    "Seadusloome AI koostaja kaudu. Palun kontrollige sisu enne kasutamist."
+)
+
+
 def _add_page_number_footer(doc: Any) -> None:
-    """Add centered page number footer to all sections."""
+    """Add centered footer with watermark + page number to all sections.
+
+    Combines the AI-generated watermark text (line 1) with the page
+    number (line 2) in a single footer so both appear on every page.
+    """
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
 
     for section in doc.sections:
         footer = section.footer
-        paragraph = footer.paragraphs[0]
-        paragraph.alignment = 1  # CENTER
 
-        paragraph.add_run("Lk ")
+        # Line 1: watermark text
+        watermark_para = footer.paragraphs[0]
+        watermark_para.alignment = 1  # CENTER
+        wm_run = watermark_para.add_run(_WATERMARK_TEXT)
+        wm_run.italic = True
+        wm_run.font.size = Pt(8)
 
-        run1 = paragraph.add_run()
+        # Line 2: page number
+        page_para = footer.add_paragraph()
+        page_para.alignment = 1  # CENTER
+
+        page_para.add_run("Lk ")
+
+        run1 = page_para.add_run()
         fld_begin = OxmlElement("w:fldChar")
         fld_begin.set(qn("w:fldCharType"), "begin")
         run1._r.append(fld_begin)
 
-        run2 = paragraph.add_run()
+        run2 = page_para.add_run()
         instr = OxmlElement("w:instrText")
         instr.set(qn("xml:space"), "preserve")
         instr.text = " PAGE "
         run2._r.append(instr)
 
-        run3 = paragraph.add_run()
+        run3 = page_para.add_run()
         fld_end = OxmlElement("w:fldChar")
         fld_end.set(qn("w:fldCharType"), "end")
         run3._r.append(fld_end)
 
-        paragraph.add_run(" / ")
+        page_para.add_run(" / ")
 
-        run4 = paragraph.add_run()
+        run4 = page_para.add_run()
         fld_begin2 = OxmlElement("w:fldChar")
         fld_begin2.set(qn("w:fldCharType"), "begin")
         run4._r.append(fld_begin2)
 
-        run5 = paragraph.add_run()
+        run5 = page_para.add_run()
         instr2 = OxmlElement("w:instrText")
         instr2.set(qn("xml:space"), "preserve")
         instr2.text = " NUMPAGES "
         run5._r.append(instr2)
 
-        run6 = paragraph.add_run()
+        run6 = page_para.add_run()
         fld_end2 = OxmlElement("w:fldChar")
         fld_end2.set(qn("w:fldCharType"), "end")
         run6._r.append(fld_end2)
-
-
-def _add_watermark(doc: Any) -> None:
-    """Add an AI-generated content watermark paragraph."""
-    p = doc.add_paragraph()
-    run = p.add_run(
-        "See dokument on genereeritud tehisintellekti abil "
-        "Seadusloome AI koostaja kaudu. Palun kontrollige sisu enne kasutamist."
-    )
-    run.italic = True
-    run.font.size = Pt(8)
 
 
 def build_drafter_docx(
@@ -165,7 +173,6 @@ def build_drafter_docx(
         doc.add_paragraph(f"Tuvastatud konfliktide arv: {impact_summary.get('conflict_count', 0)}")
         doc.add_paragraph(f"Tuvastatud lunkade arv: {impact_summary.get('gap_count', 0)}")
 
-    _add_watermark(doc)
     _add_page_number_footer(doc)
 
     doc.save(str(out_path))

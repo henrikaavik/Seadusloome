@@ -130,7 +130,9 @@ class TestClaudeRealMode:
         assert kw["messages"] == [{"role": "user", "content": "Mis on tsiviilseadustik?"}]
 
         # Cost tracking was called
-        mock_log_cost.assert_called_once_with(feature="complete", tokens_input=10, tokens_output=5)
+        mock_log_cost.assert_called_once_with(
+            feature="complete", tokens_input=10, tokens_output=5, user_id=None, org_id=None
+        )
 
     @patch("app.llm.claude.ClaudeProvider._log_cost")
     def test_complete_with_system_prompt(
@@ -187,6 +189,8 @@ class TestClaudeRealMode:
             feature="drafter_clarify",
             tokens_input=10,
             tokens_output=5,
+            user_id=None,
+            org_id=None,
         )
 
     @patch("app.llm.claude.ClaudeProvider._log_cost")

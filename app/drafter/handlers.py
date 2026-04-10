@@ -15,6 +15,7 @@ so they are registered before the worker claims any drafter job.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 from typing import Any
@@ -35,7 +36,7 @@ from app.drafter.session_model import (
 )
 from app.jobs.worker import register_handler
 from app.llm import get_default_provider
-from app.ontology.sparql_client import SparqlClient
+from app.ontology.sparql_client import SparqlClient, _sanitize_sparql_value
 from app.storage import decrypt_text, encrypt_text
 
 logger = logging.getLogger(__name__)
@@ -129,13 +130,18 @@ def _extract_keywords(text: str) -> list[str]:
     return result[:10]
 
 
+def _safe_keyword(kw: str) -> str:
+    """Escape a keyword for safe interpolation in a SPARQL string literal."""
+    return _sanitize_sparql_value(kw)
+
+
 def _find_related_laws(intent: str, client: SparqlClient) -> list[dict[str, str]]:
     """Find laws related to the intent via keyword search."""
     keywords = _extract_keywords(intent)
     all_laws: list[dict[str, str]] = []
     seen_uris: set[str] = set()
     for kw in keywords[:5]:
-        query = _RELATED_LAWS_QUERY.format(keyword=kw)
+        query = _RELATED_LAWS_QUERY.format(keyword=_safe_keyword(kw))
         try:
             rows = client.query(query)
         except Exception:
@@ -169,9 +175,10 @@ def _run_research_queries(
     seen_uris: set[str] = set()
 
     for kw in keywords[:5]:
+        escaped_kw = _safe_keyword(kw)
         # Provisions
         try:
-            rows = client.query(_PROVISIONS_BY_KEYWORD_QUERY.format(keyword=kw))
+            rows = client.query(_PROVISIONS_BY_KEYWORD_QUERY.format(keyword=escaped_kw))
             for row in rows:
                 uri = row.get("provision", "")
                 if uri and uri not in seen_uris:
@@ -188,7 +195,7 @@ def _run_research_queries(
 
         # EU directives
         try:
-            rows = client.query(_EU_DIRECTIVES_QUERY.format(keyword=kw))
+            rows = client.query(_EU_DIRECTIVES_QUERY.format(keyword=escaped_kw))
             for row in rows:
                 uri = row.get("directive", "")
                 if uri and uri not in seen_uris:
@@ -204,7 +211,7 @@ def _run_research_queries(
 
         # Court decisions
         try:
-            rows = client.query(_COURT_DECISIONS_QUERY.format(keyword=kw))
+            rows = client.query(_COURT_DECISIONS_QUERY.format(keyword=escaped_kw))
             for row in rows:
                 uri = row.get("decision", "")
                 if uri and uri not in seen_uris:
@@ -220,7 +227,7 @@ def _run_research_queries(
 
         # Topic clusters
         try:
-            rows = client.query(_TOPIC_CLUSTERS_QUERY.format(keyword=kw))
+            rows = client.query(_TOPIC_CLUSTERS_QUERY.format(keyword=escaped_kw))
             for row in rows:
                 uri = row.get("cluster", "")
                 if uri and uri not in seen_uris:
@@ -317,7 +324,12 @@ def drafter_clarify(
     prompt = CLARIFY_PROMPT.format(intent=session.intent or "", laws=laws_text)
 
     try:
-        result = provider.extract_json(prompt, feature="drafter_clarify")
+        result = provider.extract_json(
+            prompt,
+            feature="drafter_clarify",
+            user_id=session.user_id,
+            org_id=session.org_id,
+        )
     except Exception as exc:
         if attempt >= max_attempts:
             logger.exception("drafter_clarify permanently failed for session %s", session_id)
@@ -440,7 +452,7 @@ def drafter_structure(
 
     # VTK workflow: use fixed structure, skip LLM call
     if session.workflow_type == "vtk":
-        structure = dict(VTK_STRUCTURE)
+        structure = copy.deepcopy(VTK_STRUCTURE)
         # Set the title based on intent
         structure["title"] = f"VTK eelanaluus: {(session.intent or '')[:100]}"
 
@@ -479,7 +491,12 @@ def drafter_structure(
     )
 
     try:
-        result = provider.extract_json(prompt, feature="drafter_structure")
+        result = provider.extract_json(
+            prompt,
+            feature="drafter_structure",
+            user_id=session.user_id,
+            org_id=session.org_id,
+        )
     except Exception as exc:
         if attempt >= max_attempts:
             logger.exception("drafter_structure permanently failed for session %s", session_id)
@@ -589,7 +606,12 @@ def drafter_draft(
                         relevant_research=relevant_research,
                     )
 
-                result = provider.extract_json(prompt, feature="drafter_draft")
+                result = provider.extract_json(
+                    prompt,
+                    feature="drafter_draft",
+                    user_id=session.user_id,
+                    org_id=session.org_id,
+                )
 
                 clauses.append(
                     {
@@ -629,4 +651,111 @@ def drafter_draft(
     return {
         "session_id": str(session_id),
         "clause_count": len(clauses),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Step 5b: Regenerate single clause (background job)
+# ---------------------------------------------------------------------------
+
+
+@register_handler("drafter_regenerate_clause")
+def drafter_regenerate_clause(
+    payload: dict[str, Any],
+    *,
+    attempt: int = 1,
+    max_attempts: int = 3,
+) -> dict[str, Any]:
+    """Regenerate a single clause via LLM and update the session."""
+    session_id = UUID(str(payload["session_id"]))
+    clause_index = int(payload["clause_index"])
+
+    session = fetch_session(session_id)
+    if session is None:
+        raise ValueError(f"Drafting session {session_id} not found")
+
+    logger.info(
+        "drafter_regenerate_clause: starting for session %s clause %d",
+        session_id,
+        clause_index,
+    )
+
+    # Decrypt existing clauses
+    clauses: list[dict[str, Any]] = []
+    if session.draft_content_encrypted:
+        try:
+            data = json.loads(decrypt_text(session.draft_content_encrypted))
+            clauses = data.get("clauses", [])
+        except Exception:
+            raise ValueError(f"Cannot decrypt draft content for session {session_id}")
+
+    if clause_index < 0 or clause_index >= len(clauses):
+        raise ValueError(f"Clause index {clause_index} out of range for session {session_id}")
+
+    clause = clauses[clause_index]
+
+    # Decrypt research data
+    research: dict[str, Any] = {}
+    if session.research_data_encrypted:
+        try:
+            research = json.loads(decrypt_text(session.research_data_encrypted))
+        except Exception:
+            pass
+
+    relevant_research = _filter_research_for_section(research, clause)
+    section_title = clause.get("title", "")
+
+    provider = get_default_provider()
+
+    if session.workflow_type == "vtk" and section_title in VTK_SECTION_PROMPTS:
+        clarifications_text = _format_clarifications_for_prompt(session.clarifications or [])
+        prompt = VTK_SECTION_PROMPTS[section_title].format(
+            intent=session.intent or "",
+            clarifications=clarifications_text,
+            relevant_research=relevant_research,
+        )
+    else:
+        prompt = DRAFT_PROMPT.format(
+            chapter_title=clause.get("chapter_title", ""),
+            chapter_number=clause.get("chapter", ""),
+            section_title=section_title,
+            paragraph=clause.get("paragraph", ""),
+            intent=session.intent or "",
+            relevant_research=relevant_research,
+        )
+
+    try:
+        result = provider.extract_json(
+            prompt,
+            feature="drafter_regenerate",
+            user_id=session.user_id,
+            org_id=session.org_id,
+        )
+        clause["text"] = result.get("text", clause.get("text", ""))
+        clause["citations"] = result.get("citations", clause.get("citations", []))
+        clause["notes"] = result.get("notes", clause.get("notes", ""))
+    except Exception as exc:
+        if attempt >= max_attempts:
+            logger.exception(
+                "drafter_regenerate_clause permanently failed for session %s clause %d",
+                session_id,
+                clause_index,
+            )
+        raise RuntimeError(f"Clause regeneration failed: {exc}") from exc
+
+    clauses[clause_index] = clause
+    encrypted = encrypt_text(json.dumps({"clauses": clauses}, ensure_ascii=False))
+
+    with get_connection() as conn:
+        update_session(conn, session_id, draft_content_encrypted=encrypted)
+        conn.commit()
+
+    logger.info(
+        "drafter_regenerate_clause: completed for session %s clause %d",
+        session_id,
+        clause_index,
+    )
+    return {
+        "session_id": str(session_id),
+        "clause_index": clause_index,
     }

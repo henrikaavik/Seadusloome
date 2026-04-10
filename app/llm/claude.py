@@ -76,13 +76,21 @@ class ClaudeProvider(LLMProvider):
         self._client = anthropic.Anthropic(api_key=self._api_key)
         return self._client
 
-    def _log_cost(self, feature: str, tokens_input: int, tokens_output: int) -> None:
+    def _log_cost(
+        self,
+        feature: str,
+        tokens_input: int,
+        tokens_output: int,
+        *,
+        user_id: Any = None,
+        org_id: Any = None,
+    ) -> None:
         """Log usage via cost_tracker. Import deferred to avoid circular deps."""
         from app.llm.cost_tracker import log_usage
 
         log_usage(
-            user_id=None,
-            org_id=None,
+            user_id=user_id,
+            org_id=org_id,
             provider="claude",
             model=self._model,
             feature=feature,
@@ -100,6 +108,8 @@ class ClaudeProvider(LLMProvider):
         temperature: float = 0.0,
         system: str | None = None,
         feature: str = "complete",
+        user_id: Any = None,
+        org_id: Any = None,
     ) -> str:
         """Return a completion for *prompt*.
 
@@ -165,12 +175,20 @@ class ClaudeProvider(LLMProvider):
             feature=feature,
             tokens_input=response.usage.input_tokens,
             tokens_output=response.usage.output_tokens,
+            user_id=user_id,
+            org_id=org_id,
         )
 
         return content
 
     def extract_json(
-        self, prompt: str, *, schema: dict | None = None, feature: str = "extract_json"
+        self,
+        prompt: str,
+        *,
+        schema: dict | None = None,
+        feature: str = "extract_json",
+        user_id: Any = None,
+        org_id: Any = None,
     ) -> dict:
         """Run *prompt* through the model and parse the reply as JSON.
 
@@ -191,6 +209,8 @@ class ClaudeProvider(LLMProvider):
             temperature=0.0,
             system=instruction,
             feature=feature,
+            user_id=user_id,
+            org_id=org_id,
         )
         try:
             return json.loads(raw)

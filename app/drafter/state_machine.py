@@ -171,16 +171,19 @@ def advance_step(session: Any, conn: Any) -> Step:
         create_version_snapshot,
         update_session,
     )
+    from app.storage import encrypt_text
 
-    snapshot_data = json.dumps(
-        {
-            "step": int(current),
-            "intent": session.intent,
-            "clarifications": session.clarifications,
-            "status": session.status,
-        },
-        default=str,
-    ).encode()
+    snapshot_data = encrypt_text(
+        json.dumps(
+            {
+                "step": int(current),
+                "intent": session.intent,
+                "clarifications": session.clarifications,
+                "status": session.status,
+            },
+            default=str,
+        )
+    )
     create_version_snapshot(conn, session.id, int(current), snapshot_data)
 
     # Advance the step.

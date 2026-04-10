@@ -754,3 +754,507 @@ class TestStep7Page:
         assert resp.status_code == 200
         assert "Laadi alla .docx" in resp.text
         assert "/export" in resp.text
+
+
+# ---------------------------------------------------------------------------
+# #505 — Step boundary guard
+# ---------------------------------------------------------------------------
+
+
+class TestStepBoundaryGuard:
+    @patch("app.drafter.routes.fetch_session")
+    @patch("app.auth.middleware._get_provider")
+    def test_future_step_redirects_to_current(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+    ):
+        """Requesting step 5 when session is at step 2 should redirect to step 2."""
+        mock_get_provider.return_value = _stub_provider()
+        session = _make_session(current_step=2)
+        mock_fetch.return_value = session
+
+        client = _authed_client()
+        resp = client.get(f"/drafter/{_SESSION_ID}/step/5")
+
+        assert resp.status_code == 303
+        assert f"/drafter/{_SESSION_ID}/step/2" in resp.headers["location"]
+
+    @patch("app.drafter.routes._find_latest_job")
+    @patch("app.drafter.routes.fetch_session")
+    @patch("app.auth.middleware._get_provider")
+    def test_previous_step_allowed(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_find_job: MagicMock,
+    ):
+        """Viewing a previous step (e.g., step 1 when at step 3) is allowed."""
+        mock_get_provider.return_value = _stub_provider()
+        session = _make_session(current_step=3, intent="Test intent")
+        mock_fetch.return_value = session
+
+        client = _authed_client()
+        resp = client.get(f"/drafter/{_SESSION_ID}/step/1")
+
+        assert resp.status_code == 200
+        assert "Kavatsus" in resp.text
+
+    @patch("app.drafter.routes.fetch_session")
+    @patch("app.auth.middleware._get_provider")
+    def test_current_step_allowed(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+    ):
+        """Viewing the current step is allowed."""
+        mock_get_provider.return_value = _stub_provider()
+        session = _make_session(current_step=1)
+        mock_fetch.return_value = session
+
+        client = _authed_client()
+        resp = client.get(f"/drafter/{_SESSION_ID}/step/1")
+
+        assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# #508 — POST handler tests
+# ---------------------------------------------------------------------------
+
+
+class TestPostStep2Answer:
+    """POST step 2 answer submission -- saves answer, re-renders."""
+
+    @patch("app.drafter.routes._find_latest_job")
+    @patch("app.drafter.routes._connect")
+    @patch("app.drafter.routes.fetch_session")
+    @patch("app.auth.middleware._get_provider")
+    def test_submit_answer_saves_and_rerenders(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_connect: MagicMock,
+        mock_find_job: MagicMock,
+    ):
+        mock_get_provider.return_value = _stub_provider()
+        session = _make_session(current_step=2)
+        session.clarifications = [
+            {"question": "Q1?", "answer": None, "rationale": "scope"},
+            {"question": "Q2?", "answer": None, "rationale": "EU"},
+            {"question": "Q3?", "answer": None, "rationale": "timing"},
+        ]
+        # First fetch for auth, second after save
+        mock_fetch.side_effect = [session, session]
+        mock_find_job.return_value = {"status": "success", "result": {}, "error_message": None}
+
+        mock_conn = MagicMock()
+        mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        with patch("app.drafter.routes.update_session"):
+            client = _authed_client()
+            resp = client.post(
+                f"/drafter/{_SESSION_ID}/step/2",
+                data={"answer": "Vastus", "question_index": "0"},
+            )
+
+        assert resp.status_code == 200
+
+
+class TestPostStep2Advance:
+    """POST step 2 advance -- enqueues drafter_research job."""
+
+    @patch("app.drafter.routes.JobQueue")
+    @patch("app.drafter.routes.log_drafter_step_advance")
+    @patch("app.drafter.routes._connect")
+    @patch("app.drafter.routes.fetch_session")
+    @patch("app.auth.middleware._get_provider")
+    def test_advance_enqueues_research_job(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_connect: MagicMock,
+        mock_log: MagicMock,
+        mock_queue_cls: MagicMock,
+    ):
+        mock_get_provider.return_value = _stub_provider()
+        session = _make_session(current_step=2)
+        session.clarifications = [
+            {"question": "Q1?", "answer": "A1"},
+            {"question": "Q2?", "answer": "A2"},
+            {"question": "Q3?", "answer": "A3"},
+        ]
+        mock_fetch.return_value = session
+
+        mock_conn = MagicMock()
+        mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        with (
+            patch("app.drafter.routes.get_session", return_value=session),
+            patch("app.drafter.routes.advance_step", return_value=3),
+        ):
+            client = _authed_client()
+            resp = client.post(
+                f"/drafter/{_SESSION_ID}/step/2",
+                data={"action": "advance"},
+            )
+
+        assert resp.status_code == 303
+        assert f"/drafter/{_SESSION_ID}/step/3" in resp.headers["location"]
+        mock_queue_cls.return_value.enqueue.assert_called_once()
+        enqueue_args = mock_queue_cls.return_value.enqueue.call_args
+        assert enqueue_args.args[0] == "drafter_research"
+        assert enqueue_args.args[1]["session_id"] == str(_SESSION_ID)
+
+
+class TestPostStep3Advance:
+    """POST step 3 advance -- enqueues drafter_structure job."""
+
+    @patch("app.drafter.routes.JobQueue")
+    @patch("app.drafter.routes.log_drafter_step_advance")
+    @patch("app.drafter.routes._connect")
+    @patch("app.drafter.routes.fetch_session")
+    @patch("app.auth.middleware._get_provider")
+    def test_advance_enqueues_structure_job(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_connect: MagicMock,
+        mock_log: MagicMock,
+        mock_queue_cls: MagicMock,
+    ):
+        mock_get_provider.return_value = _stub_provider()
+        session = _make_session(current_step=3)
+        session.research_data_encrypted = b"encrypted"
+        mock_fetch.return_value = session
+
+        mock_conn = MagicMock()
+        mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        with (
+            patch("app.drafter.routes.get_session", return_value=session),
+            patch("app.drafter.routes.advance_step", return_value=4),
+        ):
+            client = _authed_client()
+            resp = client.post(
+                f"/drafter/{_SESSION_ID}/step/3",
+                data={"action": "advance"},
+            )
+
+        assert resp.status_code == 303
+        assert f"/drafter/{_SESSION_ID}/step/4" in resp.headers["location"]
+        mock_queue_cls.return_value.enqueue.assert_called_once()
+        enqueue_args = mock_queue_cls.return_value.enqueue.call_args
+        assert enqueue_args.args[0] == "drafter_structure"
+        assert enqueue_args.args[1]["session_id"] == str(_SESSION_ID)
+
+
+class TestPostStep4Submit:
+    """POST step 4 submit structure -- saves, enqueues drafter_draft job."""
+
+    @patch("app.drafter.routes.JobQueue")
+    @patch("app.drafter.routes.log_drafter_step_advance")
+    @patch("app.drafter.routes._connect")
+    @patch("app.drafter.routes.fetch_session")
+    @patch("app.auth.middleware._get_provider")
+    def test_submit_structure_saves_and_enqueues_draft_job(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_connect: MagicMock,
+        mock_log: MagicMock,
+        mock_queue_cls: MagicMock,
+    ):
+        mock_get_provider.return_value = _stub_provider()
+        session = _make_session(current_step=4)
+        session.proposed_structure = {
+            "title": "Test",
+            "chapters": [
+                {
+                    "number": "1",
+                    "title": "Uldsatted",
+                    "sections": [{"paragraph": "par 1", "title": "Test"}],
+                }
+            ],
+        }
+        mock_fetch.return_value = session
+
+        mock_conn = MagicMock()
+        mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        updated_session = _make_session(current_step=4)
+        updated_session.proposed_structure = session.proposed_structure
+
+        with (
+            patch("app.drafter.routes.update_session"),
+            patch("app.drafter.routes.get_session", return_value=updated_session),
+            patch("app.drafter.routes.advance_step", return_value=5),
+        ):
+            client = _authed_client()
+            resp = client.post(
+                f"/drafter/{_SESSION_ID}/step/4",
+                data={
+                    "law_title": "Test seadus",
+                    "chapter_count": "1",
+                    "chapter_0_number": "1",
+                    "chapter_0_title": "Uldsatted",
+                    "chapter_0_section_count": "1",
+                    "chapter_0_section_0_paragraph": "par 1",
+                    "chapter_0_section_0_title": "Test",
+                },
+            )
+
+        assert resp.status_code == 303
+        assert f"/drafter/{_SESSION_ID}/step/5" in resp.headers["location"]
+        mock_queue_cls.return_value.enqueue.assert_called_once()
+        enqueue_args = mock_queue_cls.return_value.enqueue.call_args
+        assert enqueue_args.args[0] == "drafter_draft"
+
+
+class TestPostStep5Advance:
+    """POST step 5 advance -- triggers step advance to review."""
+
+    @patch("app.drafter.routes.log_drafter_step_advance")
+    @patch("app.drafter.routes._connect")
+    @patch("app.drafter.routes.fetch_session")
+    @patch("app.auth.middleware._get_provider")
+    def test_advance_from_step_5_to_step_6(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_connect: MagicMock,
+        mock_log: MagicMock,
+    ):
+        mock_get_provider.return_value = _stub_provider()
+        session = _make_session(current_step=5)
+        session.draft_content_encrypted = b"encrypted"
+        mock_fetch.return_value = session
+
+        mock_conn = MagicMock()
+        mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        with (
+            patch("app.drafter.routes.get_session", return_value=session),
+            patch("app.drafter.routes.advance_step", return_value=6),
+        ):
+            client = _authed_client()
+            resp = client.post(
+                f"/drafter/{_SESSION_ID}/step/5",
+                data={"action": "advance"},
+            )
+
+        assert resp.status_code == 303
+        assert f"/drafter/{_SESSION_ID}/step/6" in resp.headers["location"]
+        mock_log.assert_called_once()
+
+
+class TestPostStep5SaveClause:
+    """POST step 5 save-clause -- updates clause text."""
+
+    @patch("app.drafter.routes.log_drafter_clause_edit")
+    @patch("app.drafter.routes.encrypt_text")
+    @patch("app.drafter.routes._connect")
+    @patch("app.drafter.routes.decrypt_text")
+    @patch("app.drafter.routes.fetch_session")
+    @patch("app.auth.middleware._get_provider")
+    def test_save_clause_updates_text(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_decrypt: MagicMock,
+        mock_connect: MagicMock,
+        mock_encrypt: MagicMock,
+        mock_log: MagicMock,
+    ):
+        import json
+
+        mock_get_provider.return_value = _stub_provider()
+        session = _make_session(current_step=5)
+        session.draft_content_encrypted = b"encrypted"
+        mock_fetch.return_value = session
+        mock_decrypt.return_value = json.dumps(
+            {
+                "clauses": [
+                    {
+                        "chapter": "1",
+                        "chapter_title": "Test",
+                        "paragraph": "par 1",
+                        "title": "Test",
+                        "text": "Old text",
+                        "citations": [],
+                        "notes": "",
+                    }
+                ]
+            }
+        )
+        mock_encrypt.return_value = b"new-encrypted"
+
+        mock_conn = MagicMock()
+        mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        with patch("app.drafter.routes.update_session"):
+            client = _authed_client()
+            resp = client.post(
+                f"/drafter/{_SESSION_ID}/step/5/save-clause",
+                data={"text": "Updated text", "clause_index": "0"},
+            )
+
+        assert resp.status_code == 303
+        mock_log.assert_called_once()
+
+
+class TestPostStep5Regenerate:
+    """POST step 5 regenerate -- enqueues regenerate job (after #506 fix)."""
+
+    @patch("app.drafter.routes.log_drafter_regenerate")
+    @patch("app.drafter.routes.JobQueue")
+    @patch("app.drafter.routes.decrypt_text")
+    @patch("app.drafter.routes.fetch_session")
+    @patch("app.auth.middleware._get_provider")
+    def test_regenerate_enqueues_background_job(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_decrypt: MagicMock,
+        mock_queue_cls: MagicMock,
+        mock_log: MagicMock,
+    ):
+        import json
+
+        mock_get_provider.return_value = _stub_provider()
+        session = _make_session(current_step=5)
+        session.draft_content_encrypted = b"encrypted"
+        mock_fetch.return_value = session
+        mock_decrypt.return_value = json.dumps(
+            {
+                "clauses": [
+                    {
+                        "chapter": "1",
+                        "paragraph": "par 1",
+                        "title": "Test",
+                        "text": "Old",
+                        "citations": [],
+                        "notes": "",
+                    }
+                ]
+            }
+        )
+
+        client = _authed_client()
+        resp = client.post(
+            f"/drafter/{_SESSION_ID}/step/5/regenerate/0",
+        )
+
+        assert resp.status_code == 200
+        # Should return a polling div
+        assert "every 3s" in resp.text
+        # Job should be enqueued
+        mock_queue_cls.return_value.enqueue.assert_called_once()
+        enqueue_args = mock_queue_cls.return_value.enqueue.call_args
+        assert enqueue_args.args[0] == "drafter_regenerate_clause"
+        assert enqueue_args.args[1]["session_id"] == str(_SESSION_ID)
+        assert enqueue_args.args[1]["clause_index"] == 0
+
+
+class TestPostStep6Review:
+    """POST step 6 trigger review -- creates drafts row."""
+
+    @patch("app.drafter.routes._trigger_integrated_review")
+    @patch("app.drafter.routes._connect")
+    @patch("app.drafter.routes.fetch_session")
+    @patch("app.auth.middleware._get_provider")
+    def test_trigger_review_links_draft(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_connect: MagicMock,
+        mock_trigger: MagicMock,
+    ):
+        mock_get_provider.return_value = _stub_provider()
+        session = _make_session(current_step=6)
+        session.integrated_draft_id = None
+        mock_fetch.side_effect = [session, session]
+
+        draft_id = uuid.UUID("55555555-5555-5555-5555-555555555555")
+        mock_trigger.return_value = draft_id
+
+        mock_conn = MagicMock()
+        mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        with patch("app.drafter.routes.update_session"):
+            client = _authed_client()
+            resp = client.post(
+                f"/drafter/{_SESSION_ID}/step/6",
+                data={},
+            )
+
+        assert resp.status_code == 200
+        mock_trigger.assert_called_once()
+
+
+class TestGetExport:
+    """GET step 7 export download -- FileResponse."""
+
+    @patch("app.drafter.routes.log_drafter_export")
+    @patch("app.drafter.routes._connect")
+    @patch("app.drafter.routes.decrypt_text")
+    @patch("app.drafter.routes.fetch_session")
+    @patch("app.auth.middleware._get_provider")
+    def test_export_returns_docx_file(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_decrypt: MagicMock,
+        mock_connect: MagicMock,
+        mock_log: MagicMock,
+    ):
+        import json
+
+        mock_get_provider.return_value = _stub_provider()
+        session = _make_session(current_step=7)
+        session.draft_content_encrypted = b"encrypted"
+        session.proposed_structure = {
+            "title": "Test seadus",
+            "chapters": [
+                {
+                    "number": "1",
+                    "title": "Test",
+                    "sections": [{"paragraph": "par 1", "title": "Test"}],
+                }
+            ],
+        }
+        mock_fetch.return_value = session
+        mock_decrypt.return_value = json.dumps(
+            {
+                "clauses": [
+                    {
+                        "chapter": "1",
+                        "chapter_title": "Test",
+                        "paragraph": "par 1",
+                        "title": "Test",
+                        "text": "Seaduse tekst",
+                        "citations": [],
+                        "notes": "",
+                    }
+                ]
+            }
+        )
+
+        mock_conn = MagicMock()
+        mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        with patch("app.drafter.routes.update_session"):
+            client = _authed_client()
+            resp = client.get(f"/drafter/{_SESSION_ID}/export")
+
+        assert resp.status_code == 200
+        assert "application/vnd.openxmlformats" in resp.headers.get("content-type", "")
+        mock_log.assert_called_once()

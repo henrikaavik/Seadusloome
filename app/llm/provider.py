@@ -9,6 +9,7 @@ providers via configuration alone.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from uuid import UUID
 
 
 class LLMProvider(ABC):
@@ -23,6 +24,8 @@ class LLMProvider(ABC):
         temperature: float = 0.0,
         system: str | None = None,
         feature: str = "complete",
+        user_id: UUID | str | None = None,
+        org_id: UUID | str | None = None,
     ) -> str:
         """Return a free-form completion for *prompt*.
 
@@ -32,11 +35,19 @@ class LLMProvider(ABC):
             temperature: Sampling temperature (0.0 = deterministic).
             system: Optional system prompt for the model.
             feature: Cost-tracking feature label (e.g. ``"drafter_clarify"``).
+            user_id: Optional user id for cost tracking attribution.
+            org_id: Optional org id for cost tracking attribution.
         """
 
     @abstractmethod
     def extract_json(
-        self, prompt: str, *, schema: dict | None = None, feature: str = "extract_json"
+        self,
+        prompt: str,
+        *,
+        schema: dict | None = None,
+        feature: str = "extract_json",
+        user_id: UUID | str | None = None,
+        org_id: UUID | str | None = None,
     ) -> dict:
         """Run *prompt* through the model and parse the reply as JSON.
 
@@ -45,6 +56,8 @@ class LLMProvider(ABC):
             schema: Optional JSON schema the reply should conform to.
                 Implementations may use this for constrained decoding
                 or just validation; callers must not assume enforcement.
+            user_id: Optional user id for cost tracking attribution.
+            org_id: Optional org id for cost tracking attribution.
         """
 
     @abstractmethod

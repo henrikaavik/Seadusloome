@@ -333,6 +333,24 @@ unset. Set it in Coolify to enable real LLM-powered extraction. Phase 3
 adds the `anthropic` Python package to pyproject.toml; until then the
 real-extraction path raises a helpful error if the package is missing.
 
+### Phase 3A setup — AI Advisory Chat + AI Law Drafter
+
+Phase 3A ships two database migrations that run automatically on container
+boot (via `docker/entrypoint.sh`), so no manual migration step is needed:
+
+- **006_encrypt_parsed_text_and_drafting_tables.sql** — adds the
+  `drafting_sessions` table and converts the `documents.parsed_text` column
+  to encrypted JSONB storage.
+- **007_llm_usage.sql** — adds the `llm_usage` table used by the cost
+  tracker to record token consumption per feature and per user.
+
+Both migrations are idempotent (`CREATE TABLE IF NOT EXISTS` / `CREATE INDEX
+CONCURRENTLY IF NOT EXISTS`), so a re-deploy after a failed first run is safe.
+
+Optionally set `ANTHROPIC_API_KEY` in Coolify (if not already set from Phase 2)
+and `CHAT_MAX_TOKENS` (defaults to 4096) on `seadusloome-app`. No new
+persistent volumes are required.
+
 ### Troubleshooting deploys
 
 If a deploy is marked **Failed** in Coolify, open the deployment log and

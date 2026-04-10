@@ -1311,6 +1311,10 @@ def step_page(req: Request, session_id: str, n: str):
     if str(session.org_id) != str(auth.get("org_id")):
         return _not_found_page(req)
 
+    # Prevent viewing future steps — allow current and previous only.
+    if step_num > session.current_step:
+        return RedirectResponse(f"/drafter/{session_id}/step/{session.current_step}", 303)
+
     if step_num == 1:
         return _step_1_content(session, auth, theme)
     elif step_num == 2:
@@ -2168,7 +2172,11 @@ async def save_clause(req: Request, session_id: str):
 
 
 def regenerate_clause(req: Request, session_id: str, clause_idx: str):
-    """POST /drafter/{session_id}/step/5/regenerate/{clause_idx}."""
+    """POST /drafter/{session_id}/step/5/regenerate/{clause_idx}.
+
+    Enqueues a ``drafter_regenerate_clause`` background job and returns
+    an HTMX polling fragment so the UI can check for completion.
+    """
     auth_or_redirect = _require_auth(req)
     if isinstance(auth_or_redirect, Response):
         return auth_or_redirect
@@ -2187,6 +2195,7 @@ def regenerate_clause(req: Request, session_id: str, clause_idx: str):
     except (ValueError, TypeError):
         return Div("Vigane indeks.")  # noqa: F405
 
+    # Validate clause index
     clauses: list[dict[str, Any]] = []
     if session.draft_content_encrypted:
         try:
@@ -2198,94 +2207,124 @@ def regenerate_clause(req: Request, session_id: str, clause_idx: str):
     if idx < 0 or idx >= len(clauses):
         return Div("Klausel ei leitud.")  # noqa: F405
 
-    clause = clauses[idx]
+    section_ref = f"{clauses[idx].get('chapter', '')}/{clauses[idx].get('paragraph', '')}"
+    log_drafter_regenerate(auth.get("id"), session.id, section_ref)
 
-    # Regenerate this single clause via LLM
-    from app.drafter.prompts import DRAFT_PROMPT, VTK_SECTION_PROMPTS
-    from app.llm import get_default_provider
-
-    provider = get_default_provider()
-
-    # Decrypt research data
-    research: dict[str, Any] = {}
-    if session.research_data_encrypted:
-        try:
-            research = json.loads(decrypt_text(session.research_data_encrypted))
-        except Exception:
-            pass
-
-    from app.drafter.handlers import (
-        _filter_research_for_section,
-        _format_clarifications_for_prompt,
-    )
-
-    relevant_research = _filter_research_for_section(research, clause)
-    section_title = clause.get("title", "")
-
-    if session.workflow_type == "vtk" and section_title in VTK_SECTION_PROMPTS:
-        clarifications_text = _format_clarifications_for_prompt(session.clarifications or [])
-        prompt = VTK_SECTION_PROMPTS[section_title].format(
-            intent=session.intent or "",
-            clarifications=clarifications_text,
-            relevant_research=relevant_research,
-        )
-    else:
-        prompt = DRAFT_PROMPT.format(
-            chapter_title=clause.get("chapter_title", ""),
-            chapter_number=clause.get("chapter", ""),
-            section_title=section_title,
-            paragraph=clause.get("paragraph", ""),
-            intent=session.intent or "",
-            relevant_research=relevant_research,
-        )
-
+    # Enqueue the regeneration as a background job
     try:
-        result = provider.extract_json(prompt, feature="drafter_regenerate")
-        clause["text"] = result.get("text", clause.get("text", ""))
-        clause["citations"] = result.get("citations", clause.get("citations", []))
-        clause["notes"] = result.get("notes", clause.get("notes", ""))
+        queue = JobQueue()
+        queue.enqueue(
+            "drafter_regenerate_clause",
+            {
+                "session_id": str(session.id),
+                "clause_index": idx,
+            },
+            priority=0,
+        )
     except Exception:
-        logger.exception("Clause regeneration failed for session %s clause %d", session_id, idx)
+        logger.exception(
+            "Failed to enqueue drafter_regenerate_clause for session %s clause %d",
+            session_id,
+            idx,
+        )
         return Div(  # noqa: F405
             Alert("Uuesti genereerimine ebaonnestus.", variant="danger"),
             id=f"clause-{clause_idx}",
         )
 
-    clauses[idx] = clause
-    encrypted = encrypt_text(json.dumps({"clauses": clauses}, ensure_ascii=False))
+    # Return polling fragment
+    return Div(  # noqa: F405
+        P("Klausli uuesti genereerimine...", cls="muted-text"),  # noqa: F405
+        Div(cls="spinner"),  # noqa: F405
+        id=f"clause-{clause_idx}",
+        cls="clause-item regenerating",
+        hx_get=f"/drafter/{session_id}/step/5/regenerate/{clause_idx}/status",
+        hx_trigger="every 3s",
+        hx_swap="outerHTML",
+    )
+
+
+def regenerate_clause_status(req: Request, session_id: str, clause_idx: str):
+    """GET /drafter/{session_id}/step/5/regenerate/{clause_idx}/status.
+
+    HTMX polling endpoint that checks whether the regeneration background
+    job has completed. Returns the updated clause div on success, keeps
+    polling on pending, and shows an error on failure.
+    """
+    auth_or_redirect = _require_auth(req)
+    if isinstance(auth_or_redirect, Response):
+        return auth_or_redirect
+    auth = auth_or_redirect
+
+    parsed = _parse_uuid(session_id)
+    if parsed is None:
+        return Div("Sessiooni ei leitud.", id=f"clause-{clause_idx}")  # noqa: F405
+
+    session = fetch_session(parsed)
+    if session is None or str(session.org_id) != str(auth.get("org_id")):
+        return Div("Sessiooni ei leitud.", id=f"clause-{clause_idx}")  # noqa: F405
 
     try:
-        with _connect() as conn:
-            update_session(conn, session.id, draft_content_encrypted=encrypted)
-            conn.commit()
-    except Exception:
-        logger.exception("Failed to save regenerated clause for session %s", session_id)
+        idx = int(clause_idx)
+    except (ValueError, TypeError):
+        return Div("Vigane indeks.", id=f"clause-{clause_idx}")  # noqa: F405
 
-    section_ref = f"{clause.get('chapter', '')}/{clause.get('paragraph', '')}"
-    log_drafter_regenerate(auth.get("id"), session.id, section_ref)
+    # Check background job status
+    job = _find_latest_job(parsed, "drafter_regenerate_clause")
+    if job and job["status"] == "success":
+        # Re-read session to get updated clauses
+        session = fetch_session(parsed) or session
+        clauses: list[dict[str, Any]] = []
+        if session.draft_content_encrypted:
+            try:
+                data = json.loads(decrypt_text(session.draft_content_encrypted))
+                clauses = data.get("clauses", [])
+            except Exception:
+                pass
 
-    # Return the updated clause div
-    citations = clause.get("citations", [])
-    citation_links: list[Any] = []
-    for cit in citations:
-        citation_links.append(
-            A(cit, href=f"/explorer?search={cit}", cls="citation-link", target="_blank")  # noqa: F405
+        if 0 <= idx < len(clauses):
+            clause = clauses[idx]
+            citations = clause.get("citations", [])
+            citation_links: list[Any] = []
+            for cit in citations:
+                citation_links.append(
+                    A(cit, href=f"/explorer?search={cit}", cls="citation-link", target="_blank")  # noqa: F405
+                )
+
+            return Div(  # noqa: F405
+                H4(
+                    f"{clause.get('paragraph', '')} {clause.get('title', '')}",
+                    cls="clause-heading",
+                ),  # noqa: F405
+                Small(  # noqa: F405
+                    f"Peatukk: {clause.get('chapter', '')} {clause.get('chapter_title', '')}",
+                    cls="clause-chapter-ref muted-text",
+                ),
+                Div(  # noqa: F405
+                    P(clause.get("text", ""), cls="clause-text"),  # noqa: F405
+                    cls="clause-body",
+                ),
+                Div(*citation_links, cls="clause-citations") if citation_links else None,  # noqa: F405
+                Alert("Uuesti genereeritud.", variant="success"),
+                id=f"clause-{clause_idx}",
+                cls="clause-item",
+            )
+
+    if job and job["status"] == "failed":
+        return Div(  # noqa: F405
+            Alert("Uuesti genereerimine ebaonnestus.", variant="danger"),
+            id=f"clause-{clause_idx}",
         )
 
+    # Still running — keep polling
     return Div(  # noqa: F405
-        H4(f"{clause.get('paragraph', '')} {clause.get('title', '')}", cls="clause-heading"),  # noqa: F405
-        Small(  # noqa: F405
-            f"Peatukk: {clause.get('chapter', '')} {clause.get('chapter_title', '')}",
-            cls="clause-chapter-ref muted-text",
-        ),
-        Div(  # noqa: F405
-            P(clause.get("text", ""), cls="clause-text"),  # noqa: F405
-            cls="clause-body",
-        ),
-        Div(*citation_links, cls="clause-citations") if citation_links else None,  # noqa: F405
-        Alert("Uuesti genereeritud.", variant="success"),
+        P("Klausli uuesti genereerimine...", cls="muted-text"),  # noqa: F405
+        Div(cls="spinner"),  # noqa: F405
         id=f"clause-{clause_idx}",
-        cls="clause-item",
+        cls="clause-item regenerating",
+        hx_get=f"/drafter/{session_id}/step/5/regenerate/{clause_idx}/status",
+        hx_trigger="every 3s",
+        hx_swap="outerHTML",
     )
 
 
@@ -2313,6 +2352,9 @@ def register_drafter_routes(rt) -> None:  # type: ignore[no-untyped-def]
     rt("/drafter/{session_id}/step/5/edit/{clause_idx}", methods=["GET"])(clause_edit_form)
     rt("/drafter/{session_id}/step/5/save-clause", methods=["POST"])(save_clause)
     rt("/drafter/{session_id}/step/5/regenerate/{clause_idx}", methods=["POST"])(regenerate_clause)
+    rt("/drafter/{session_id}/step/5/regenerate/{clause_idx}/status", methods=["GET"])(
+        regenerate_clause_status
+    )
     rt("/drafter/{session_id}/step/6", methods=["POST"])(submit_review)
     rt("/drafter/{session_id}/step/{n}/status", methods=["GET"])(step_status_fragment)
     rt("/drafter/{session_id}/export", methods=["GET"])(export_docx)
