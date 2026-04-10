@@ -63,14 +63,14 @@ svg#canvas { width: 100%; height: 100vh; display: block; }
   background: rgba(100,116,139,0.25);
 }
 
-/* ------- Navigation buttons ------- */
-.nav-btn {
+/* ------- Navigation buttons (override design-system .btn) ------- */
+#controls button.nav-btn {
   background: rgba(52,211,153,0.08); border: 1px solid rgba(52,211,153,0.25); color: #6ee7b7;
   padding: 6px 14px; border-radius: 8px; font-size: 12px; cursor: pointer;
   backdrop-filter: blur(8px); transition: all 0.15s; text-align: left;
   font-weight: 500;
 }
-.nav-btn:hover { background: rgba(52,211,153,0.18); color: #a7f3d0; border-color: rgba(52,211,153,0.4); }
+#controls button.nav-btn:hover { background: rgba(52,211,153,0.18); color: #a7f3d0; border-color: rgba(52,211,153,0.4); }
 
 /* ------- Tooltip ------- */
 #tooltip {
