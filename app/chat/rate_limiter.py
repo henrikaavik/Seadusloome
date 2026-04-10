@@ -75,6 +75,14 @@ def check_org_cost_budget(org_id: UUID | str) -> None:
     Sums ``cost_usd`` from the ``llm_usage`` table for the current
     calendar month. If the total meets or exceeds
     ``ORG_MAX_MONTHLY_COST_USD``, raises immediately.
+
+    .. note:: **Known TOCTOU race condition** — Two concurrent requests
+       can both read the current total, both find it under the cap,
+       and both proceed to call the LLM. This means the budget is a
+       *soft* cap (fail-open), not a hard wall. The overshoot is
+       bounded by the cost of a single LLM call, which is acceptable
+       for our use case. A proper fix (``SELECT ... FOR UPDATE`` on a
+       running total row) is Phase 4 work.
     """
     try:
         with get_connection() as conn:

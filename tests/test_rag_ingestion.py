@@ -150,6 +150,7 @@ class TestEmbedChunks:
 
 
 class TestIngestPipeline:
+    @patch("scripts.ingest_rag._delete_stale_chunks")
     @patch("scripts.ingest_rag._upsert_chunks")
     @patch("scripts.ingest_rag._embed_chunks")
     @patch("scripts.ingest_rag._fetch_entities")
@@ -158,8 +159,9 @@ class TestIngestPipeline:
         mock_fetch: MagicMock,
         mock_embed: MagicMock,
         mock_upsert: MagicMock,
+        mock_delete_stale: MagicMock,
     ):
-        """Full ingestion pipeline: fetch -> chunk -> embed -> upsert."""
+        """Full ingestion pipeline: fetch -> chunk -> embed -> upsert -> stale cleanup."""
         mock_fetch.return_value = [
             {
                 "source_type": "ontology",
@@ -173,14 +175,17 @@ class TestIngestPipeline:
 
         mock_embed.side_effect = fake_embed
         mock_upsert.return_value = 1
+        mock_delete_stale.return_value = 0
 
         result = asyncio.run(ingest())
 
         assert result["entity_count"] == 1
         assert result["chunk_count"] == 1
+        assert result["stale_deleted"] == 0
         mock_fetch.assert_called_once()
         mock_embed.assert_called_once()
         mock_upsert.assert_called_once()
+        mock_delete_stale.assert_called_once()
 
     @patch("scripts.ingest_rag._fetch_entities")
     def test_ingest_no_entities(self, mock_fetch: MagicMock):
@@ -192,6 +197,7 @@ class TestIngestPipeline:
         assert result["entity_count"] == 0
         assert result["chunk_count"] == 0
 
+    @patch("scripts.ingest_rag._delete_stale_chunks")
     @patch("scripts.ingest_rag._upsert_chunks")
     @patch("scripts.ingest_rag._embed_chunks")
     @patch("scripts.ingest_rag._fetch_entities")
@@ -200,6 +206,7 @@ class TestIngestPipeline:
         mock_fetch: MagicMock,
         mock_embed: MagicMock,
         mock_upsert: MagicMock,
+        mock_delete_stale: MagicMock,
     ):
         """Custom sparql and embedder are passed through."""
         mock_sparql = MagicMock()
@@ -218,6 +225,7 @@ class TestIngestPipeline:
 
         mock_embed.side_effect = fake_embed
         mock_upsert.return_value = 1
+        mock_delete_stale.return_value = 0
 
         result = asyncio.run(ingest(sparql=mock_sparql, embedder=mock_embedder))
 

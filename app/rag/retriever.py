@@ -117,6 +117,15 @@ class Retriever:
         # 4. Parse results
         import json
 
+        if not rows:
+            logger.info(
+                "RAG retrieval returned 0 results for query (first 80 chars): %.80s "
+                "— the rag_chunks table may be empty. Run "
+                "'uv run python scripts/ingest_rag.py' to populate it.",
+                query,
+            )
+            return []
+
         results: list[RetrievedChunk] = []
         for row in rows:
             content = row[0]

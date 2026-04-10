@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 import time
 
 from app.db import get_connection
@@ -27,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 # SPARQL queries for each entity type
 _PROVISION_QUERY = """
-PREFIX estleg: <http://data.seadus.ee/ontology#>
+PREFIX estleg: <https://data.riik.ee/ontology/estleg#>
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 
 SELECT ?uri ?label ?summary WHERE {
@@ -38,7 +39,7 @@ SELECT ?uri ?label ?summary WHERE {
 """
 
 _COURT_DECISION_QUERY = """
-PREFIX estleg: <http://data.seadus.ee/ontology#>
+PREFIX estleg: <https://data.riik.ee/ontology/estleg#>
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 
 SELECT ?uri ?label ?caseNumber WHERE {
@@ -49,13 +50,13 @@ SELECT ?uri ?label ?caseNumber WHERE {
 """
 
 _EU_LEGISLATION_QUERY = """
-PREFIX euleg: <http://data.seadus.ee/eu-ontology#>
+PREFIX estleg: <https://data.riik.ee/ontology/estleg#>
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 
 SELECT ?uri ?label ?celexNumber WHERE {
-    ?uri a euleg:EULegislation .
+    ?uri a estleg:EULegislation .
     OPTIONAL { ?uri rdfs:label ?label }
-    OPTIONAL { ?uri euleg:celexNumber ?celexNumber }
+    OPTIONAL { ?uri estleg:celexNumber ?celexNumber }
 }
 """
 
@@ -152,40 +153,95 @@ async def _embed_chunks(
     return all_embeddings
 
 
+_UPSERT_BATCH_SIZE = 500
+
+
 def _upsert_chunks(
     chunks: list[RagChunk],
     embeddings: list[list[float]],
 ) -> int:
     """Upsert chunks and embeddings into rag_chunks table.
 
+    Processes in batches of :data:`_UPSERT_BATCH_SIZE` rows per commit
+    to keep memory usage bounded for large (90k+) entity sets.
+
     Returns the number of rows upserted.
     """
+    import json as _json
+
     upserted = 0
+    upsert_sql = """INSERT INTO rag_chunks
+       (source_type, source_uri, chunk_index, content, metadata, embedding)
+       VALUES (%s, %s, %s, %s, %s::jsonb, %s::vector)
+       ON CONFLICT (source_type, source_uri, chunk_index)
+       DO UPDATE SET
+           content = EXCLUDED.content,
+           metadata = EXCLUDED.metadata,
+           embedding = EXCLUDED.embedding,
+           created_at = now()"""
+
     with get_connection() as conn:
+        cur = conn.cursor()
+        batch_params: list[tuple[str, str, int, str, str, str]] = []
         for chunk, embedding in zip(chunks, embeddings):
             embedding_str = "[" + ",".join(str(v) for v in embedding) + "]"
-            conn.execute(
-                """INSERT INTO rag_chunks
-                   (source_type, source_uri, chunk_index, content, metadata, embedding)
-                   VALUES (%s, %s, %s, %s, %s::jsonb, %s::vector)
-                   ON CONFLICT (source_type, source_uri, chunk_index)
-                   DO UPDATE SET
-                       content = EXCLUDED.content,
-                       metadata = EXCLUDED.metadata,
-                       embedding = EXCLUDED.embedding,
-                       created_at = now()""",
+            batch_params.append(
                 (
                     chunk.metadata["source_type"],
                     chunk.metadata["source_uri"],
                     chunk.chunk_index,
                     chunk.content,
-                    __import__("json").dumps(chunk.metadata),
+                    _json.dumps(chunk.metadata),
                     embedding_str,
-                ),
+                )
             )
-            upserted += 1
-        conn.commit()
+            if len(batch_params) >= _UPSERT_BATCH_SIZE:
+                cur.executemany(upsert_sql, batch_params)
+                upserted += len(batch_params)
+                conn.commit()
+                batch_params = []
+
+        # Flush remaining rows
+        if batch_params:
+            cur.executemany(upsert_sql, batch_params)
+            upserted += len(batch_params)
+            conn.commit()
     return upserted
+
+
+def _delete_stale_chunks(entities: list[dict[str, str]]) -> int:
+    """Delete chunks whose source_uri is no longer in the current ingestion set.
+
+    Groups entities by source_type and removes any rows in ``rag_chunks``
+    whose ``source_uri`` wasn't seen during this ingestion run.
+
+    Returns the total number of stale rows deleted.
+    """
+    # Build per-source-type URI sets
+    uris_by_type: dict[str, set[str]] = {}
+    for entity in entities:
+        st = entity["source_type"]
+        uris_by_type.setdefault(st, set()).add(entity["source_uri"])
+
+    deleted = 0
+    with get_connection() as conn:
+        for source_type, current_uris in uris_by_type.items():
+            if not current_uris:
+                continue
+            cursor = conn.execute(
+                "DELETE FROM rag_chunks WHERE source_type = %s AND source_uri NOT IN %s",
+                (source_type, tuple(current_uris)),
+            )
+            row_count = cursor.rowcount if cursor.rowcount else 0
+            if row_count > 0:
+                logger.info(
+                    "Deleted %d stale chunks for source_type=%s",
+                    row_count,
+                    source_type,
+                )
+            deleted += row_count
+        conn.commit()
+    return deleted
 
 
 async def ingest(
@@ -225,17 +281,24 @@ async def ingest(
     logger.info("Upserting %d chunks into rag_chunks...", len(chunks))
     upserted = _upsert_chunks(chunks, embeddings)
 
+    # Remove stale chunks for source_types that were ingested.
+    # A chunk is stale when its source_uri no longer appears in the
+    # current ingestion run (e.g. a repealed provision).
+    stale_deleted = _delete_stale_chunks(entities)
+
     elapsed = time.monotonic() - start
     logger.info(
-        "RAG ingestion complete: %d entities, %d chunks, %.1fs",
+        "RAG ingestion complete: %d entities, %d chunks, %d stale deleted, %.1fs",
         len(entities),
         upserted,
+        stale_deleted,
         elapsed,
     )
 
     return {
         "entity_count": len(entities),
         "chunk_count": upserted,
+        "stale_deleted": stale_deleted,
         "elapsed_seconds": int(elapsed),
     }
 
@@ -259,6 +322,15 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     )
+
+    provider = get_default_embedding_provider()
+    if getattr(provider, "_stubbed", False):
+        print("WARNING: Embedding provider is in stub mode (VOYAGE_API_KEY not set).")
+        print("Stub embeddings are random vectors and will produce meaningless RAG results.")
+        if "--allow-stub" not in sys.argv:
+            print("Pass --allow-stub to proceed anyway (dev/test only).")
+            sys.exit(1)
+
     result = asyncio.run(ingest())
     print(f"Entities: {result['entity_count']}")
     print(f"Chunks:   {result['chunk_count']}")

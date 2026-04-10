@@ -351,6 +351,27 @@ Optionally set `ANTHROPIC_API_KEY` in Coolify (if not already set from Phase 2)
 and `CHAT_MAX_TOKENS` (defaults to 4096) on `seadusloome-app`. No new
 persistent volumes are required.
 
+### Phase 3C setup — RAG Pipeline + Rate Limiting
+
+Phase 3C adds two more migrations that run automatically on container boot:
+
+- **008_chat_tables.sql** — chat conversation and message tables.
+- **009_rag_chunks.sql** — the `rag_chunks` table with an HNSW vector index for
+  pgvector similarity search.
+
+Set `VOYAGE_API_KEY` in Coolify to enable real Voyage AI embeddings. Without it,
+the embedding provider falls back to random stub vectors (acceptable for dev, but
+useless for production RAG retrieval).
+
+After the first ontology sync completes, run the RAG ingestion script once to
+populate the vector index:
+
+    uv run python scripts/ingest_rag.py
+
+Subsequent syncs trigger incremental re-ingestion automatically. Rate limit env
+vars are optional — defaults are 100 messages per hour per user and $50 per month
+per organisation.
+
 ### Troubleshooting deploys
 
 If a deploy is marked **Failed** in Coolify, open the deployment log and

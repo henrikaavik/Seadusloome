@@ -14,5 +14,5 @@ CREATE TABLE IF NOT EXISTS rag_chunks (
 );
 
 CREATE INDEX IF NOT EXISTS idx_rag_chunks_embedding ON rag_chunks
-    USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+    USING hnsw (embedding vector_cosine_ops);
 CREATE INDEX IF NOT EXISTS idx_rag_chunks_source ON rag_chunks(source_type, source_uri);

@@ -66,10 +66,12 @@ EXPOSE 5001
 
 # Liveness probe hits /api/ping (see app/main.py). start_period raised to
 # 120s (#516) because Phase 3A adds migrations 006 (encrypt_parsed_text +
-# drafting_sessions tables) and 007 (llm_usage table), plus lazy-load of the
-# anthropic SDK and cost_tracker on first real LLM call, on top of the
-# existing cold-start overhead from Phase 2 (migration 005, lxml, background
-# worker thread, rdflib, SPARQLWrapper, FastHTML, psycopg).
+# drafting_sessions tables) and 007 (llm_usage table), Phase 3C adds
+# migrations 008 (chat tables) and 009 (rag_chunks with HNSW vector index),
+# plus lazy-load of the anthropic SDK, Voyage embedding provider, and
+# cost_tracker on first real LLM call, on top of the existing cold-start
+# overhead from Phase 2 (migration 005, lxml, background worker thread,
+# rdflib, SPARQLWrapper, FastHTML, psycopg).
 HEALTHCHECK --interval=15s --timeout=5s --start-period=120s --retries=3 \
     CMD curl -fsS http://localhost:5001/api/ping || exit 1
 
