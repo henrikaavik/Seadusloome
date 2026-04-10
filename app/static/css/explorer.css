@@ -307,8 +307,66 @@ svg#canvas { width: 100%; height: 100vh; display: block; }
 #legend { bottom: 80px; }
 #instructions { bottom: 80px; }
 
+/* ------- Help banners (info-box overrides for dark explorer) ------- */
+#explorer-help-banner {
+  position: relative; z-index: 11;
+}
+
+body.explorer-page .info-box {
+  background: rgba(30, 41, 59, 0.9);
+  border-radius: 10px;
+  padding: 12px 16px;
+  font-size: 13px;
+  color: #cbd5e1;
+  backdrop-filter: blur(12px);
+}
+body.explorer-page .info-box-info {
+  border: 1px solid rgba(56, 189, 248, 0.25);
+}
+body.explorer-page .info-box-tip {
+  border: 1px solid rgba(52, 211, 153, 0.25);
+}
+body.explorer-page .info-box-dismiss {
+  color: #64748b;
+  font-size: 18px;
+  padding: 0 4px;
+  cursor: pointer;
+  transition: color 0.15s;
+}
+body.explorer-page .info-box-dismiss:hover {
+  color: #e2e8f0;
+}
+
+/* ------- Annotation section in detail panel ------- */
+.annotation-section { margin-top: 12px; }
+.annotation-button-wrapper { display: inline-flex; align-items: center; gap: 8px; }
+.annotation-button {
+  background: rgba(100, 116, 139, 0.15);
+  border: 1px solid rgba(100, 116, 139, 0.3);
+  color: #94a3b8;
+  padding: 6px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: all 0.15s;
+}
+.annotation-button:hover {
+  background: rgba(100, 116, 139, 0.3);
+  color: #e2e8f0;
+}
+
 /* ------- Responsive ------- */
 @media (max-width: 1280px) {
   #detail-panel { width: 320px; }
   #search-input { width: 180px; }
+}
+@media (max-width: 768px) {
+  #topbar { padding: 12px 16px 24px; gap: 8px; }
+  #topbar h1 { font-size: 14px; }
+  #search-box { display: none; }
+  #controls { top: 48px; left: 12px; }
+  .ctrl-btn { padding: 5px 10px; font-size: 11px; }
+  #legend { left: 12px; padding: 10px; }
+  #instructions { display: none; }
+  #detail-panel { width: 100vw; max-width: 100vw; }
 }

@@ -288,6 +288,7 @@ def explorer_page(req: Request):
         )
 
     return Html(
+        data_theme="dark",
         Head(
             Meta(charset="UTF-8"),
             Meta(name="viewport", content="width=device-width, initial-scale=1.0"),
@@ -298,6 +299,8 @@ def explorer_page(req: Request):
                 integrity="sha512-vc58qvvBdrDR4etbxMdlTt4GBQk1qjvyORR2nrsPsFPyrs+/u5c3+1Ct6upOgdZoIl7eq6k3a1UPDSNAQi/32A==",
                 crossorigin="anonymous",
             ),
+            # Design tokens (CSS custom properties) — required by ui.css
+            Link(rel="stylesheet", href="/static/css/tokens.css"),
             # Explorer styles
             Link(rel="stylesheet", href="/static/css/explorer.css"),
             # Phase 2 additions (#446): the .d3-node-highlighted rule
