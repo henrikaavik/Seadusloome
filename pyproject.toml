@@ -17,6 +17,7 @@ dependencies = [
     "python-docx",
     "anthropic>=0.93.0",
     "voyageai>=0.3.7",
+    "sentry-sdk[starlette]>=2.57.0",
 ]
 
 [dependency-groups]

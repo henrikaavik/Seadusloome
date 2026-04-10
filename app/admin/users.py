@@ -91,6 +91,9 @@ def _quick_links_card():
                 Li(A("Organisatsioonid", href="/admin/organizations")),  # noqa: F405
                 Li(A("Kasutajad", href="/admin/users")),  # noqa: F405
                 Li(A("Auditilogi", href="/admin/audit")),  # noqa: F405
+                Li(A("T\u00f6\u00f6de monitor", href="/admin/jobs")),  # noqa: F405
+                Li(A("Kasutusanal\u00fc\u00fctika", href="/admin/analytics")),  # noqa: F405
+                Li(A("LLM kulud", href="/admin/costs")),  # noqa: F405
                 cls="quick-links",
             )
         ),

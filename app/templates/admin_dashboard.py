@@ -24,11 +24,31 @@ from fasthtml.common import *  # noqa: F403, F401
 from starlette.responses import JSONResponse  # noqa: F401  -- used by rebound health_check
 
 from app.admin._shared import _tooltip  # noqa: F401
+from app.admin.analytics import (
+    _get_usage_data,  # noqa: F401
+    _refresh_usage_daily,  # noqa: F401
+    _usage_summary,  # noqa: F401
+)
+from app.admin.analytics import (
+    admin_analytics_page as _admin_analytics_page_impl,
+)
 from app.admin.audit import (
     _get_audit_log_page as _get_audit_log_page_impl,
 )
 from app.admin.audit import (
+    admin_audit_export as _admin_audit_export_impl,
+)
+from app.admin.audit import (
     admin_audit_page as _admin_audit_page_impl,
+)
+from app.admin.cost_dashboard import (
+    _get_cost_by_feature,  # noqa: F401
+    _get_cost_by_model,  # noqa: F401
+    _get_cost_by_org,  # noqa: F401
+    _get_monthly_trend,  # noqa: F401
+)
+from app.admin.cost_dashboard import (
+    admin_cost_page as _admin_cost_page_impl,
 )
 from app.admin.dashboard import (
     admin_dashboard_page as _admin_dashboard_page_impl,
@@ -42,6 +62,22 @@ from app.admin.health import (
 from app.admin.health import (
     health_check as _health_check_impl,
 )
+from app.admin.job_monitor import (
+    _get_recent_failed,  # noqa: F401
+    _get_status_counts,  # noqa: F401
+    _get_type_breakdown,  # noqa: F401
+    _purge_completed,  # noqa: F401
+    _retry_job,  # noqa: F401
+)
+from app.admin.job_monitor import (
+    admin_job_retry as _admin_job_retry_impl,
+)
+from app.admin.job_monitor import (
+    admin_jobs_page as _admin_jobs_page_impl,
+)
+from app.admin.job_monitor import (
+    admin_jobs_purge as _admin_jobs_purge_impl,
+)
 from app.admin.jobs import (
     _get_job_queue_snapshot,  # noqa: F401
     _job_queue_card,  # noqa: F401
@@ -49,6 +85,15 @@ from app.admin.jobs import (
 from app.admin.llm_usage import (
     _get_llm_usage_stats,  # noqa: F401
     _llm_usage_card,  # noqa: F401
+)
+from app.admin.performance import (
+    _get_job_durations,  # noqa: F401
+    _get_latency_percentiles,  # noqa: F401
+    _get_llm_latencies,  # noqa: F401
+    _get_slowest_routes,  # noqa: F401
+)
+from app.admin.performance import (
+    admin_performance_page as _admin_performance_page_impl,
 )
 from app.admin.rate_limits import (
     _get_rate_limit_stats,  # noqa: F401
@@ -143,6 +188,13 @@ trigger_sync = _rebind(_trigger_sync_impl)
 # patches on this module take effect when the page is rendered.
 admin_dashboard_page = _rebind(_admin_dashboard_page_impl)
 admin_audit_page = _rebind(_admin_audit_page_impl)
+admin_audit_export = _rebind(_admin_audit_export_impl)
+admin_analytics_page = _rebind(_admin_analytics_page_impl)
+admin_cost_page = _rebind(_admin_cost_page_impl)
+admin_jobs_page = _rebind(_admin_jobs_page_impl)
+admin_job_retry = _rebind(_admin_job_retry_impl)
+admin_jobs_purge = _rebind(_admin_jobs_purge_impl)
+admin_performance_page = _rebind(_admin_performance_page_impl)
 
 
 # ---------------------------------------------------------------------------
@@ -151,12 +203,26 @@ admin_audit_page = _rebind(_admin_audit_page_impl)
 
 _admin_dashboard = require_role("admin")(admin_dashboard_page)
 _admin_audit = require_role("admin")(admin_audit_page)
+_admin_audit_export = require_role("admin")(admin_audit_export)
 _admin_sync = require_role("admin")(trigger_sync)
+_admin_analytics = require_role("admin")(admin_analytics_page)
+_admin_costs = require_role("admin")(admin_cost_page)
+_admin_jobs = require_role("admin")(admin_jobs_page)
+_admin_job_retry = require_role("admin")(admin_job_retry)
+_admin_jobs_purge = require_role("admin")(admin_jobs_purge)
+_admin_performance = require_role("admin")(admin_performance_page)
 
 
 def register_admin_routes(rt) -> None:  # type: ignore[no-untyped-def]
     """Register admin dashboard routes on the FastHTML route decorator *rt*."""
     rt("/admin", methods=["GET"])(_admin_dashboard)
     rt("/admin/audit", methods=["GET"])(_admin_audit)
+    rt("/admin/audit/export", methods=["GET"])(_admin_audit_export)
+    rt("/admin/performance", methods=["GET"])(_admin_performance)
     rt("/admin/sync", methods=["POST"])(_admin_sync)
+    rt("/admin/analytics", methods=["GET"])(_admin_analytics)
+    rt("/admin/costs", methods=["GET"])(_admin_costs)
+    rt("/admin/jobs", methods=["GET"])(_admin_jobs)
+    rt("/admin/jobs/{id}/retry", methods=["POST"])(_admin_job_retry)
+    rt("/admin/jobs/purge", methods=["POST"])(_admin_jobs_purge)
     rt("/api/health", methods=["GET"])(health_check)

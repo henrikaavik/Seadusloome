@@ -98,6 +98,13 @@ _HDRS = (
     Link(rel="stylesheet", href="/static/css/ui.css"),
 )
 
+# Initialize Sentry before the ASGI app is created so that the Starlette
+# integration can wrap the app and capture unhandled exceptions. No-op when
+# SENTRY_DSN is unset.
+from app.observability import init_sentry  # noqa: E402
+
+init_sentry()
+
 bware = Beforeware(auth_before, skip=SKIP_PATHS)
 # pico=False: using custom design system (app/ui) instead of Pico CSS.
 # lifespan=lifespan: FastHTML forwards this to Starlette so the
@@ -138,6 +145,13 @@ if os.environ.get("APP_ENV", "development") != "development":
 # that request.url.scheme, request.client.host, etc. reflect the original
 # client request rather than the proxy hop.
 app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
+
+# Record per-request latency into the metrics table for the admin
+# performance dashboard.  Added after ProxyHeadersMiddleware so that
+# the request path is already resolved when the middleware fires.
+from app.metrics import MetricsMiddleware  # noqa: E402
+
+app.add_middleware(MetricsMiddleware)
 
 # FastHTML adds a default static-file route at `/{fname:path}.{ext:static}`
 # that serves from the current working directory. Our assets live under
