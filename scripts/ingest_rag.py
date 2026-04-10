@@ -26,16 +26,21 @@ from app.rag.embedding import EmbeddingProvider, VoyageProvider, get_default_emb
 
 logger = logging.getLogger(__name__)
 
-# SPARQL queries for each entity type
+# SPARQL queries for each entity type.
+# These batch queries intentionally fetch ALL entities for full RAG re-ingestion.
+# LIMIT 200000 is a safety cap to prevent runaway results if the ontology grows
+# unexpectedly; the real entity counts (~90k total across all types) are well
+# below this threshold. If we ever exceed 200k per type, revisit pagination.
 _PROVISION_QUERY = """
 PREFIX estleg: <https://data.riik.ee/ontology/estleg#>
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 
-SELECT ?uri ?label ?summary WHERE {
-    ?uri a estleg:paragrahv .
-    OPTIONAL { ?uri rdfs:label ?label }
+SELECT ?uri ?paragrahv ?summary ?sourceAct WHERE {
+    ?uri estleg:paragrahv ?paragrahv .
     OPTIONAL { ?uri estleg:summary ?summary }
+    OPTIONAL { ?uri estleg:sourceAct ?sourceAct }
 }
+LIMIT 200000
 """
 
 _COURT_DECISION_QUERY = """
@@ -47,6 +52,7 @@ SELECT ?uri ?label ?caseNumber WHERE {
     OPTIONAL { ?uri rdfs:label ?label }
     OPTIONAL { ?uri estleg:caseNumber ?caseNumber }
 }
+LIMIT 200000
 """
 
 _EU_LEGISLATION_QUERY = """
@@ -58,6 +64,7 @@ SELECT ?uri ?label ?celexNumber WHERE {
     OPTIONAL { ?uri rdfs:label ?label }
     OPTIONAL { ?uri estleg:celexNumber ?celexNumber }
 }
+LIMIT 200000
 """
 
 # Batch size for embedding API calls
@@ -71,8 +78,8 @@ def _fetch_entities(sparql: SparqlClient) -> list[dict[str, str]]:
     logger.info("Fetching provisions...")
     for row in sparql.query(_PROVISION_QUERY):
         content_parts = []
-        if row.get("label"):
-            content_parts.append(row["label"])
+        if row.get("paragrahv"):
+            content_parts.append(row["paragrahv"])
         if row.get("summary"):
             content_parts.append(row["summary"])
         if content_parts:
@@ -196,14 +203,18 @@ def _upsert_chunks(
                 )
             )
             if len(batch_params) >= _UPSERT_BATCH_SIZE:
-                cur.executemany(upsert_sql, batch_params)
+                # psycopg 3's executemany is row-by-row; pipeline mode
+                # batches the network round-trips for better throughput.
+                with conn.pipeline():
+                    cur.executemany(upsert_sql, batch_params)
                 upserted += len(batch_params)
                 conn.commit()
                 batch_params = []
 
         # Flush remaining rows
         if batch_params:
-            cur.executemany(upsert_sql, batch_params)
+            with conn.pipeline():
+                cur.executemany(upsert_sql, batch_params)
             upserted += len(batch_params)
             conn.commit()
     return upserted
@@ -228,9 +239,11 @@ def _delete_stale_chunks(entities: list[dict[str, str]]) -> int:
         for source_type, current_uris in uris_by_type.items():
             if not current_uris:
                 continue
+            # psycopg 3 doesn't expand tuples into SQL IN clauses;
+            # use != ALL(%s) with a Python list (adapted to PG array).
             cursor = conn.execute(
-                "DELETE FROM rag_chunks WHERE source_type = %s AND source_uri NOT IN %s",
-                (source_type, tuple(current_uris)),
+                "DELETE FROM rag_chunks WHERE source_type = %s AND source_uri != ALL(%s)",
+                (source_type, list(current_uris)),
             )
             row_count = cursor.rowcount if cursor.rowcount else 0
             if row_count > 0:

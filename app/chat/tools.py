@@ -198,14 +198,13 @@ async def _exec_search_provisions(
     safe_keywords = _sanitize_sparql_value(keywords)
 
     query = f"""
-        PREFIX estleg: <http://ontology.seadusloome.ee/>
+        PREFIX estleg: <https://data.riik.ee/ontology/estleg#>
         PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 
         SELECT ?uri ?paragrahv ?summary ?source_act
         WHERE {{
-            ?uri a estleg:Provision .
-            OPTIONAL {{ ?uri estleg:paragrahv ?paragrahv . }}
-            OPTIONAL {{ ?uri rdfs:comment ?summary . }}
+            ?uri estleg:paragrahv ?paragrahv .
+            OPTIONAL {{ ?uri estleg:summary ?summary . }}
             OPTIONAL {{ ?uri estleg:sourceAct ?source_act . }}
             FILTER(
                 CONTAINS(LCASE(STR(?paragrahv)), LCASE("{safe_keywords}"))
@@ -305,7 +304,7 @@ async def _exec_get_provision_details(
         filter_clause = f"BIND(<{safe_uri}> AS ?uri)"
 
     query = f"""
-        PREFIX estleg: <http://ontology.seadusloome.ee/>
+        PREFIX estleg: <https://data.riik.ee/ontology/estleg#>
         PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 
         SELECT ?uri ?text ?sourceAct ?paragrahv ?related ?relLabel

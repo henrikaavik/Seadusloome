@@ -1,8 +1,8 @@
 -- Phase 3A: LLM usage tracking for cost monitoring
 CREATE TABLE IF NOT EXISTS llm_usage (
     id BIGSERIAL PRIMARY KEY,
-    user_id UUID REFERENCES users(id),
-    org_id UUID REFERENCES organizations(id),
+    user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    org_id UUID REFERENCES organizations(id) ON DELETE SET NULL,
     provider TEXT NOT NULL,
     model TEXT NOT NULL,
     feature TEXT NOT NULL,
@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS llm_usage (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE INDEX IF NOT EXISTS idx_llm_usage_user ON llm_usage(user_id);
 CREATE INDEX IF NOT EXISTS idx_llm_usage_org ON llm_usage(org_id);
 CREATE INDEX IF NOT EXISTS idx_llm_usage_feature ON llm_usage(feature);
 CREATE INDEX IF NOT EXISTS idx_llm_usage_created ON llm_usage(created_at);

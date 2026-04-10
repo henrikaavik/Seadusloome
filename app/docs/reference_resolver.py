@@ -184,8 +184,8 @@ class ReferenceResolver:
         sparql = (
             PREFIXES
             + """
-            SELECT ?uri ?shortName ?fullName WHERE {
-              ?uri a estleg:Law .
+            SELECT DISTINCT ?uri ?shortName ?fullName WHERE {
+              ?provision estleg:sourceAct ?uri .
               OPTIONAL { ?uri estleg:shortName ?shortName }
               OPTIONAL { ?uri rdfs:label ?fullName }
             }

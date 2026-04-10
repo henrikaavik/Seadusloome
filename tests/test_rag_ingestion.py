@@ -22,13 +22,17 @@ from scripts.ingest_rag import (
 
 class TestFetchEntities:
     def test_fetches_provisions(self):
-        """Provisions with label and summary are fetched correctly."""
+        """Provisions with paragrahv and summary are fetched correctly."""
         mock_sparql = MagicMock()
         mock_sparql.query.side_effect = [
-            # Provisions
+            # Provisions (query selects ?paragrahv and ?summary, not ?label)
             [
-                {"uri": "http://example.org/p1", "label": "TsMS \u00a7 1", "summary": "Summary 1"},
-                {"uri": "http://example.org/p2", "label": "TsMS \u00a7 2", "summary": ""},
+                {
+                    "uri": "http://example.org/p1",
+                    "paragrahv": "TsMS \u00a7 1",
+                    "summary": "Summary 1",
+                },
+                {"uri": "http://example.org/p2", "paragrahv": "TsMS \u00a7 2", "summary": ""},
             ],
             # Court decisions
             [],
@@ -75,10 +79,10 @@ class TestFetchEntities:
         assert "CELEX: 32016R0679" in entities[0]["content"]
 
     def test_skips_entities_without_content(self):
-        """Entities with no label or summary are skipped."""
+        """Entities with no paragrahv or summary are skipped."""
         mock_sparql = MagicMock()
         mock_sparql.query.side_effect = [
-            [{"uri": "http://example.org/p1", "label": "", "summary": ""}],
+            [{"uri": "http://example.org/p1", "paragrahv": "", "summary": ""}],
             [],
             [],
         ]
@@ -90,7 +94,7 @@ class TestFetchEntities:
         """All entity types are combined in a single list."""
         mock_sparql = MagicMock()
         mock_sparql.query.side_effect = [
-            [{"uri": "http://example.org/p1", "label": "Provision", "summary": "S"}],
+            [{"uri": "http://example.org/p1", "paragrahv": "Provision", "summary": "S"}],
             [{"uri": "http://example.org/cd1", "label": "Decision", "caseNumber": "123"}],
             [{"uri": "http://example.org/eu1", "label": "Regulation", "celexNumber": "C1"}],
         ]

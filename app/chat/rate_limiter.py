@@ -27,8 +27,21 @@ from app.db import get_connection
 
 logger = logging.getLogger(__name__)
 
+# Backward-compatible aliases for tests that import these names.
+# The actual check functions re-read from the environment each call so
+# that config changes take effect without a process restart.
 _MAX_MESSAGES_PER_HOUR = int(os.environ.get("CHAT_MAX_MESSAGES_PER_HOUR", "100"))
 _MAX_MONTHLY_COST_USD = float(os.environ.get("ORG_MAX_MONTHLY_COST_USD", "50.0"))
+
+
+def _get_max_messages_per_hour() -> int:
+    """Read the rate limit from the environment on each call."""
+    return int(os.environ.get("CHAT_MAX_MESSAGES_PER_HOUR", "100"))
+
+
+def _get_max_monthly_cost_usd() -> float:
+    """Read the cost cap from the environment on each call."""
+    return float(os.environ.get("ORG_MAX_MONTHLY_COST_USD", "50.0"))
 
 
 class RateLimitExceededError(Exception):
@@ -46,6 +59,7 @@ def check_message_rate(user_id: UUID | str) -> None:
     created in the last hour. If the count exceeds
     ``CHAT_MAX_MESSAGES_PER_HOUR``, raises immediately.
     """
+    max_messages = _get_max_messages_per_hour()
     try:
         with get_connection() as conn:
             row = conn.execute(
@@ -62,10 +76,10 @@ def check_message_rate(user_id: UUID | str) -> None:
         return
 
     count = row[0] if row else 0
-    if count >= _MAX_MESSAGES_PER_HOUR:
+    if count >= max_messages:
         raise RateLimitExceededError(
             f"Olete saatnud {count} sonumit viimase tunni jooksul. "
-            f"Limiit on {_MAX_MESSAGES_PER_HOUR} sonumit tunnis."
+            f"Limiit on {max_messages} sonumit tunnis."
         )
 
 
@@ -84,6 +98,7 @@ def check_org_cost_budget(org_id: UUID | str) -> None:
        for our use case. A proper fix (``SELECT ... FOR UPDATE`` on a
        running total row) is Phase 4 work.
     """
+    max_cost = _get_max_monthly_cost_usd()
     try:
         with get_connection() as conn:
             row = conn.execute(
@@ -98,8 +113,8 @@ def check_org_cost_budget(org_id: UUID | str) -> None:
         return
 
     total_cost = float(row[0]) if row else 0.0
-    if total_cost >= _MAX_MONTHLY_COST_USD:
+    if total_cost >= max_cost:
         raise CostBudgetExceededError(
-            f"Organisatsiooni igakuine LLM-i kulueelarve ({_MAX_MONTHLY_COST_USD:.2f} USD) "
+            f"Organisatsiooni igakuine LLM-i kulueelarve ({max_cost:.2f} USD) "
             f"on taidetud (praegune kulu: {total_cost:.2f} USD)."
         )

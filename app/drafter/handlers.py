@@ -48,12 +48,11 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _RELATED_LAWS_QUERY = """\
-PREFIX estleg: <https://data.riik.ee/ontology/estleg/>
+PREFIX estleg: <https://data.riik.ee/ontology/estleg#>
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
-PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
 
 SELECT DISTINCT ?law ?label WHERE {{
-  ?law a estleg:EnactedLaw .
+  ?provision estleg:sourceAct ?law .
   ?law rdfs:label ?label .
   FILTER(CONTAINS(LCASE(?label), LCASE("{keyword}")))
 }}
@@ -61,13 +60,13 @@ LIMIT 5
 """
 
 _PROVISIONS_BY_KEYWORD_QUERY = """\
-PREFIX estleg: <https://data.riik.ee/ontology/estleg/>
+PREFIX estleg: <https://data.riik.ee/ontology/estleg#>
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 
 SELECT DISTINCT ?provision ?label ?actLabel WHERE {{
-  ?provision a estleg:Provision .
+  ?provision estleg:paragrahv ?paragrahv .
   ?provision rdfs:label ?label .
-  ?provision estleg:partOfAct ?act .
+  ?provision estleg:sourceAct ?act .
   ?act rdfs:label ?actLabel .
   FILTER(CONTAINS(LCASE(?label), LCASE("{keyword}")))
 }}
@@ -75,7 +74,7 @@ LIMIT 20
 """
 
 _EU_DIRECTIVES_QUERY = """\
-PREFIX estleg: <https://data.riik.ee/ontology/estleg/>
+PREFIX estleg: <https://data.riik.ee/ontology/estleg#>
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 
 SELECT DISTINCT ?directive ?label WHERE {{
@@ -87,7 +86,7 @@ LIMIT 10
 """
 
 _COURT_DECISIONS_QUERY = """\
-PREFIX estleg: <https://data.riik.ee/ontology/estleg/>
+PREFIX estleg: <https://data.riik.ee/ontology/estleg#>
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 
 SELECT DISTINCT ?decision ?label WHERE {{
@@ -99,7 +98,7 @@ LIMIT 10
 """
 
 _TOPIC_CLUSTERS_QUERY = """\
-PREFIX estleg: <https://data.riik.ee/ontology/estleg/>
+PREFIX estleg: <https://data.riik.ee/ontology/estleg#>
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 
 SELECT DISTINCT ?cluster ?label WHERE {{

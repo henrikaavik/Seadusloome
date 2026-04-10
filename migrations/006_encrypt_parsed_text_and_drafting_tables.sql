@@ -77,7 +77,7 @@ create table if not exists drafting_sessions (
     draft_content_encrypted bytea,
     -- integrated_draft_id: set in step 7 when the session produces a finalized
     -- Draft row in the `drafts` table (linked to the Jena named graph).
-    integrated_draft_id     uuid        references drafts(id),
+    integrated_draft_id     uuid        references drafts(id) on delete set null,
     status                  text        not null default 'active'
                                 check (status in ('active', 'completed', 'abandoned')),
     created_at              timestamptz not null default now(),
