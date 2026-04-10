@@ -196,20 +196,6 @@ def ping():
     return "ok"
 
 
-@rt("/api/debug-admin", methods=["GET"])
-def debug_admin(req: Request):
-    """Temporary debug endpoint to catch admin page errors."""
-    import traceback
-
-    from starlette.responses import PlainTextResponse
-
-    try:
-        from app.templates.admin_dashboard import admin_dashboard_page
-
-        return admin_dashboard_page(req)
-    except Exception:
-        return PlainTextResponse(traceback.format_exc(), status_code=500)
-
 
 # In production, uvicorn is invoked directly via the Dockerfile CMD, and
 # this module is imported by it. Guard serve() so it only runs when the

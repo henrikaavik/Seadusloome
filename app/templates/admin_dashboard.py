@@ -16,12 +16,17 @@ no effect.
 
 from __future__ import annotations
 
+import csv  # noqa: F401  -- used by rebound audit_export
+import io  # noqa: F401  -- used by rebound audit_export
 import logging
+import os  # noqa: F401  -- used by rebound sync
 import threading
 import types as _types
+from datetime import UTC, date, datetime, timedelta  # noqa: F401  -- used by rebound funcs
 
 from fasthtml.common import *  # noqa: F403, F401
-from starlette.responses import JSONResponse  # noqa: F401  -- used by rebound health_check
+from starlette.requests import Request  # noqa: F401  -- used by rebound page handlers
+from starlette.responses import JSONResponse, Response  # noqa: F401
 
 from app.admin._shared import _tooltip  # noqa: F401
 from app.admin.analytics import (
@@ -123,7 +128,15 @@ from app.admin.users import (
 from app.auth.roles import require_role
 from app.db import get_connection as _connect  # noqa: F401
 from app.sync.jena_loader import check_health as jena_check_health  # noqa: F401
+from app.ui.data.data_table import Column, DataTable  # noqa: F401  -- used by rebound pages
+from app.ui.data.pagination import Pagination  # noqa: F401
+from app.ui.forms.app_form import AppForm  # noqa: F401
+from app.ui.layout import PageShell  # noqa: F401  -- used by rebound page handlers
+from app.ui.primitives.badge import Badge, BadgeVariant, StatusBadge  # noqa: F401
 from app.ui.primitives.button import Button  # noqa: F401, F811  -- shadow guard #419
+from app.ui.surfaces.card import Card, CardBody, CardHeader  # noqa: F401
+from app.ui.surfaces.info_box import InfoBox  # noqa: F401
+from app.ui.theme import get_theme_from_request  # noqa: F401  -- used by rebound page handlers
 
 # Module-level state expected by tests (e.g. ``admin_dashboard._sync_in_progress``).
 _sync_lock = threading.Lock()
