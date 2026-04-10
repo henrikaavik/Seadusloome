@@ -20,6 +20,7 @@ from app.ui.layout import PageShell
 from app.ui.primitives.badge import Badge, StatusBadge
 from app.ui.primitives.button import Button
 from app.ui.surfaces.card import Card, CardBody, CardHeader
+from app.ui.surfaces.info_box import InfoBox
 from app.ui.theme import get_theme_from_request
 
 # Module-level lock so two admins clicking "Sync now" at the same time
@@ -28,6 +29,11 @@ _sync_lock = threading.Lock()
 _sync_in_progress = False
 
 logger = logging.getLogger(__name__)
+
+
+def _tooltip(text: str):
+    """Return a small (?) icon with a CSS-only hover tooltip."""
+    return Span("?", cls="admin-tooltip", data_tooltip=text)
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +167,13 @@ def _health_card(jena_ok: bool, pg_ok: bool):
         cls="info-list",
     )
     return Card(
-        CardHeader(H3("Süsteemi tervis", cls="card-title")),
+        CardHeader(
+            H3(
+                "S\u00fcsteemi tervis",
+                _tooltip("Jena ja Postgres \u00fchenduse staatus"),
+                cls="card-title",
+            )
+        ),
         CardBody(body),
     )
 
@@ -237,7 +249,13 @@ def _sync_card(sync_logs: list[dict], *, status_banner: tuple[str, str] | None =
     body_nodes.append(_sync_trigger_form())
 
     return Card(
-        CardHeader(H3("Sünkroniseerimise staatus", cls="card-title")),
+        CardHeader(
+            H3(
+                "S\u00fcnkroniseerimise staatus",
+                _tooltip("GitHub \u2192 RDF \u2192 Jena s\u00fcnkroniseerimise ajalugu"),
+                cls="card-title",
+            )
+        ),
         CardBody(*body_nodes),
         id="sync-card",
     )
@@ -289,7 +307,13 @@ def _job_queue_card():
     if not has_any:
         body: object = P("Taustajobisid pole.", cls="muted-text")
         return Card(
-            CardHeader(H3("Taustajobide järjekord", cls="card-title")),
+            CardHeader(
+                H3(
+                    "Taustajobide j\u00e4rjekord",
+                    _tooltip("Parse, anal\u00fc\u00fcs ja ekspordi t\u00f6\u00f6d"),
+                    cls="card-title",
+                )
+            ),
             CardBody(body),
             id="job-queue-card",
         )
@@ -340,7 +364,13 @@ def _job_queue_card():
         body_children.append(DataTable(columns=columns, rows=rows))
 
     return Card(
-        CardHeader(H3("Taustajobide järjekord", cls="card-title")),
+        CardHeader(
+            H3(
+                "Taustajobide j\u00e4rjekord",
+                _tooltip("Parse, anal\u00fc\u00fcs ja ekspordi t\u00f6\u00f6d"),
+                cls="card-title",
+            )
+        ),
         CardBody(*body_children),
         id="job-queue-card",
     )
@@ -425,7 +455,13 @@ def _llm_usage_card():
         body_children.append(DataTable(columns=columns, rows=rows))
 
     return Card(
-        CardHeader(H3("LLM kasutus", cls="card-title")),
+        CardHeader(
+            H3(
+                "LLM kasutus",
+                _tooltip("Tokenite ja kulu statistika jooksvast kuust"),
+                cls="card-title",
+            )
+        ),
         CardBody(*body_children),
         id="llm-usage-card",
     )
@@ -529,7 +565,13 @@ def _rate_limit_card():
         body_children.append(DataTable(columns=columns, rows=rows))
 
     return Card(
-        CardHeader(H3("Kasutuslimiidid", cls="card-title")),
+        CardHeader(
+            H3(
+                "Kasutuslimiidid",
+                _tooltip("Org kulu vs eelarve, kasutajate s\u00f5numite limiidid"),
+                cls="card-title",
+            )
+        ),
         CardBody(*body_children),
         id="rate-limit-card",
     )
@@ -560,7 +602,13 @@ def _user_stats_card(stats: dict):  # type: ignore[type-arg]
         body_children.append(DataTable(columns=columns, rows=rows))
 
     return Card(
-        CardHeader(H3("Kasutajate statistika", cls="card-title")),
+        CardHeader(
+            H3(
+                "Kasutajate statistika",
+                _tooltip("Kasutajate arv, seansid, jaotus organisatsioonide kaupa"),
+                cls="card-title",
+            )
+        ),
         CardBody(*body_children),
     )
 
@@ -596,7 +644,16 @@ def admin_dashboard_page(req: Request):
     user_stats = _get_user_stats()
 
     content = (
-        H1("Administreerimise töölaud", cls="page-title"),
+        H1("Administreerimise t\u00f6\u00f6laud", cls="page-title"),
+        InfoBox(
+            P(
+                "Administreerimise t\u00f6\u00f6laud n\u00e4itab s\u00fcsteemi "
+                "tervist, s\u00fcnkroniseerimise staatust, taustajobisid, "
+                "LLM kasutust ja kasutajate statistikat."
+            ),
+            variant="info",
+            dismissible=True,
+        ),
         _health_card(jena_ok, pg_ok),
         _sync_card(sync_logs),
         _job_queue_card(),

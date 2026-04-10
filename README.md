@@ -8,7 +8,7 @@ Advisory software that helps Estonian government officials in the law creation p
 
 A government official uploads a draft law (or describes what a new law should achieve). The system maps it against:
 
-- **615** enacted Estonian laws
+- **50,000+** enacted provisions (across 615 laws)
 - **22,832** draft legislation items
 - **12,137** Supreme Court decisions
 - **33,242** EU legal acts
@@ -24,11 +24,12 @@ graph TB
         D3["D3.js Graph Explorer"]
         HTMX["HTMX Dynamic UI"]
         Chat["AI Chat Interface"]
+        Drafter["Law Drafter Wizard"]
     end
 
     subgraph API["API Layer (FastHTML / Starlette)"]
         REST["REST Endpoints"]
-        WS["WebSocket"]
+        WS["WebSocket\n(Explorer + Chat)"]
         Auth["JWT Auth + RBAC"]
     end
 
@@ -37,18 +38,23 @@ graph TB
         DA["Document Analyzer"]
         IM["Impact Mapper"]
         CD["Conflict Detector"]
-        LD["AI Law Drafter"]
+        LD["AI Law Drafter\n(7-step pipeline)"]
+        RAG["RAG Pipeline\n(Retriever + Chunker)"]
+        CO["Chat Orchestrator\n(Streaming + Tools)"]
     end
 
     subgraph Storage["Storage Layer"]
         Jena["Apache Jena Fuseki\n(SPARQL Triplestore)"]
         PG["PostgreSQL 18\n+ pgvector"]
-        LLM["Pluggable LLM\n(Claude API)"]
+        LLM["Claude API\n(Anthropic)"]
+        Voyage["Voyage AI\n(Embeddings)"]
+        Tika["Apache Tika\n(Doc Parsing)"]
     end
 
     subgraph Pipeline["Data Pipeline"]
         GH["GitHub\n(JSON-LD Source)"]
         Sync["Sync Worker"]
+        BGW["Background Job\nWorker"]
     end
 
     Frontend --> API
@@ -56,8 +62,12 @@ graph TB
     Core --> Jena
     Core --> PG
     Core --> LLM
+    RAG --> Voyage
+    RAG --> PG
+    DA --> Tika
     GH -->|webhook| Sync
     Sync -->|"JSON-LD → RDF"| Jena
+    BGW -->|"parse, extract,\nanalyze, export"| Core
 
     subgraph Deployment["Coolify (Self-hosted PaaS)"]
         Traefik["Traefik Reverse Proxy\nTLS + Let's Encrypt"]
@@ -221,8 +231,12 @@ flowchart LR
 | Frontend | D3.js + HTMX + Vanilla JS |
 | Triplestore | Apache Jena Fuseki (SPARQL) |
 | Database | PostgreSQL 18 + pgvector |
-| AI | Pluggable LLM (Claude API primary) |
-| Embeddings | multilingual-e5-large / EstBERT |
+| LLM | Claude API (Anthropic) via pluggable `LLMProvider` |
+| Embeddings | Voyage AI (`voyage-multilingual-2`, 1024d) |
+| RAG | pgvector HNSW index + chunker + retriever pipeline |
+| Document parsing | Apache Tika (server) + python-docx (export) |
+| Background jobs | `FOR UPDATE SKIP LOCKED` job queue with worker thread |
+| Cost tracking | Per-user / per-org LLM usage metering and budgets |
 | Auth | JWT (TARA SSO-ready via OIDC) |
 | Deployment | Coolify on Hetzner VPS |
 | CI/CD | GitHub Actions + Coolify webhooks |
@@ -398,6 +412,17 @@ look for the `Healthcheck` section. Common failure modes we have hit:
 - **Draft stuck at parsing forever** — `TIKA_URL` is unset or
   unreachable. Verify `seadusloome-tika` is running (Coolify →
   seadusloome-tika → Logs). Check `TIKA_URL` on `seadusloome-app`.
+- **Drafter says "AI vajab seadistamist"** — `ANTHROPIC_API_KEY` is
+  unset or empty. The drafter's `require_real_llm` guard blocks all
+  steps that call the LLM when running in stub mode.
+- **Chat messages return "Limiit taitud" error** — the user hit the
+  per-hour rate limit (`CHAT_MAX_MESSAGES_PER_HOUR`, default 100) or
+  the org hit the monthly cost budget (`ORG_MAX_MONTHLY_COST_USD`,
+  default $50). Increase the limits in Coolify env vars if needed.
+- **RAG context missing from chat replies** — `VOYAGE_API_KEY` is
+  unset, so the embedding provider is in stub mode (random vectors).
+  Set the key and run `uv run python scripts/ingest_rag.py` to
+  populate the vector index.
 
 ## Development Phases
 
@@ -408,40 +433,46 @@ gantt
     axisFormat %b %Y
 
     section Phase 1
-    Core Infrastructure + Ontology Explorer :p1, 2026-04-09, 8w
+    Core Infrastructure + Ontology Explorer :done, p1, 2026-04-09, 8w
+
+    section Phase 1.5
+    Design System Foundation               :done, p15, after p1, 2w
 
     section Phase 2
-    Document Upload + Impact Analysis      :p2, after p1, 10w
+    Document Upload + Impact Analysis      :done, p2, after p15, 10w
 
     section Phase 3
-    AI Advisory Chat + AI Law Drafter      :p3, after p2, 12w
+    AI Advisory Chat + AI Law Drafter      :done, p3, after p2, 12w
 
     section Phase 4
-    Collaboration + Admin                  :p4, after p1, 6w
+    Collaboration + Admin                  :p4, after p3, 6w
 
     section Phase 5
-    Public API + MCP Server                :p5, after p3, 6w
+    Public API + MCP Server                :p5, after p4, 6w
 ```
 
-| Phase | Scope | Dependencies |
-|-------|-------|-------------|
-| 1 | Core Infrastructure + Ontology Explorer | None |
-| 2 | Document Upload + Impact Analysis | Phase 1 |
-| 3 | AI Advisory Chat + AI Law Drafter | Phase 2 |
-| 4 | Collaboration + Admin | Phase 1 |
-| 5 | Public API + MCP Server | Phase 3 |
+| Phase | Scope | Status |
+|-------|-------|--------|
+| 1 | **Core Infrastructure + Ontology Explorer** -- FastHTML scaffolding, PostgreSQL schema, Jena Fuseki, GitHub-to-Jena sync pipeline, JWT auth + RBAC, Coolify deployment, D3.js graph explorer with SPARQL-backed lazy loading | COMPLETE |
+| 1.5 | **Design System Foundation** -- Estonia Brand design tokens, reusable UI component library (buttons, cards, forms, modals, alerts, data tables, pagination), dark/light theme, sidebar + top bar layout | COMPLETE |
+| 2 | **Document Upload + Impact Analysis** -- Encrypted file storage (Fernet), Apache Tika parsing, Claude-powered entity extraction, SPARQL impact traversal, conflict detection, gap analysis, .docx report export, background job queue | COMPLETE |
+| 3 | **AI Advisory Chat + AI Law Drafter** -- Streaming WebSocket chat with tool use (SPARQL queries), RAG pipeline (Voyage AI embeddings + pgvector HNSW), 7-step law drafter wizard (intent -> clarify -> research -> structure -> draft -> review -> .docx export), per-user/per-org rate limiting, LLM cost tracking | COMPLETE |
+| 4 | Collaboration + Admin -- Organizations, shared workspaces, annotation system, admin dashboard | Planned |
+| 5 | Public API + MCP Server -- REST API + MCP protocol for third-party integrations | Planned |
 
 ## Modules
 
-1. **Core Infrastructure** — FastHTML scaffolding, PostgreSQL, Jena Fuseki, sync pipeline, JWT auth, Coolify deployment
-2. **Ontology Explorer** — D3.js interactive graph with SPARQL-backed lazy loading, timeline view, version history
-3. **Document Upload** — .docx/.pdf parsing, Estonian legal NLP, temporary named graph integration
-4. **Impact Analysis** — SPARQL traversal, conflict detection, EU compliance, gap analysis
-5. **AI Advisory Chat** — RAG pipeline, ontology-aware prompting, streaming Estonian responses
-6. **AI Law Drafter** — Intent-to-draft pipeline: VTK or full law from natural language description
-7. **User Management** — Organizations, roles, shared workspaces, audit logging
-8. **Public API + MCP Server** — REST API + MCP protocol for third-party integrations (post-MVP)
-9. **Monitoring & Admin** — Health dashboard, usage analytics, cost tracking
+| # | Module | Status |
+|---|--------|--------|
+| 1 | **Core Infrastructure** -- FastHTML scaffolding, PostgreSQL schema + migrations, Jena Fuseki, GitHub-to-Jena sync pipeline, JWT auth + RBAC, Coolify deployment | Implemented |
+| 2 | **Ontology Explorer** -- D3.js interactive graph with SPARQL-backed lazy loading, category drill-down, entity detail pages | Implemented |
+| 3 | **Document Upload** -- Encrypted .docx/.pdf storage, Apache Tika parsing, Claude entity extraction, background job queue | Implemented |
+| 4 | **Impact Analysis** -- SPARQL traversal, conflict detection, EU compliance checking, gap analysis, impact scoring, .docx report export | Implemented |
+| 5 | **AI Advisory Chat** -- Streaming WebSocket chat, RAG-grounded responses (Voyage AI + pgvector), SPARQL tool use, rate limiting | Implemented |
+| 6 | **AI Law Drafter** -- 7-step wizard (intent capture, clarification, ontology research, structure generation, clause drafting, integrated review, .docx export) | Implemented |
+| 7 | **User Management** -- Organizations, roles, shared workspaces, audit logging | Planned |
+| 8 | **Public API + MCP Server** -- REST API + MCP protocol for third-party integrations | Planned |
+| 9 | **Monitoring & Admin** -- Health dashboard, usage analytics, cost tracking | Planned (admin dashboard scaffolding exists) |
 
 ## Local Development
 

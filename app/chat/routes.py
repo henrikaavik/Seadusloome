@@ -43,6 +43,7 @@ from app.ui.primitives.badge import Badge
 from app.ui.primitives.button import Button
 from app.ui.surfaces.alert import Alert
 from app.ui.surfaces.card import Card, CardBody, CardHeader
+from app.ui.surfaces.info_box import InfoBox
 from app.ui.theme import get_theme_from_request
 
 logger = logging.getLogger(__name__)
@@ -256,6 +257,16 @@ def chat_list_page(req: Request):
             )
 
     header_children: list = [H1("Vestlused", cls="page-title")]  # noqa: F405
+    header_children.append(
+        InfoBox(
+            P(
+                "AI n\u00f5ustaja vastab k\u00fcsimustele Eesti \u00f5iguse kohta. "
+                "Vestlused on privaatsed ja seotud teie organisatsiooniga."
+            ),
+            variant="info",
+            dismissible=True,
+        )
+    )
     header_children.append(
         Div(  # noqa: F405
             A(  # noqa: F405
@@ -592,6 +603,13 @@ def conversation_view_page(req: Request, conv_id: str):
             *message_bubbles,
             id="chat-messages",
             cls="chat-messages",
+        ),
+        # Input area help text
+        Small(  # noqa: F405
+            "K\u00fcsige k\u00fcsimusi Eesti seaduste, kohtuotsuste v\u00f5i "
+            "EL-i \u00f5igusaktide kohta. AI kasutab ontoloogiat ja RAG-i "
+            "vastuste p\u00f5hjendamiseks.",
+            cls="form-field-help",
         ),
         # Input area
         Div(  # noqa: F405

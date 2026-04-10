@@ -68,6 +68,7 @@ from app.ui.primitives.badge import Badge, BadgeVariant
 from app.ui.primitives.button import Button
 from app.ui.surfaces.alert import Alert
 from app.ui.surfaces.card import Card, CardBody, CardHeader
+from app.ui.surfaces.info_box import InfoBox
 from app.ui.theme import get_theme_from_request
 
 logger = logging.getLogger(__name__)
@@ -289,6 +290,18 @@ def drafter_list_page(req: Request):
             )
 
     header_children: list = [H1("AI koostaja", cls="page-title")]  # noqa: F405
+    header_children.append(
+        InfoBox(
+            P(
+                "AI koostaja aitab teil kirjutada uue seaduse eeln\u00f5u "
+                "samm-sammult. Kirjeldage oma kavatsust ja s\u00fcsteem "
+                "genereerib k\u00fcsimused, uurib ontoloogiat, pakub "
+                "v\u00e4lja struktuuri ja koostab s\u00e4tted."
+            ),
+            variant="info",
+            dismissible=True,
+        )
+    )
     if org_id:
         header_children.append(
             Div(  # noqa: F405
@@ -403,13 +416,17 @@ def new_session_page(req: Request):
 
     return PageShell(
         H1("Uus koostamine", cls="page-title"),  # noqa: F405
-        P(  # noqa: F405
-            "Valige toovoo tyyp. AI koostaja juhib Teid labi 7-sammulise "
-            "protsessi, mille lopuks saate valmis eelnou.",
-            cls="page-lead",
+        InfoBox(
+            P(
+                "Valige t\u00f6\u00f6voog: 'T\u00e4isseadus' loob terve seaduse "
+                "eeln\u00f5u, 'VTK' loob v\u00e4ljat\u00f6\u00f6tamiskavatsuse "
+                "standardvormis."
+            ),
+            variant="info",
+            dismissible=True,
         ),
         Card(CardBody(*card_children)),
-        P(A("< Tagasi koostaja nimekirja", href="/drafter"), cls="back-link"),  # noqa: F405
+        P(A("\u2190 Tagasi koostaja nimekirja", href="/drafter"), cls="back-link"),  # noqa: F405
         title="Uus koostamine",
         user=auth,
         theme=theme,
@@ -591,11 +608,19 @@ def _step_1_content(
     return PageShell(
         H1("Kavatsuse kirjeldamine", cls="page-title"),  # noqa: F405
         _step_tracker(session.current_step),
+        InfoBox(
+            P(
+                "Kirjeldage oma seadusandlikku kavatsust vabas vormis. "
+                "Mida t\u00e4psem kirjeldus, seda paremad tulemused."
+            ),
+            variant="tip",
+            dismissible=True,
+        ),
         Card(
             CardHeader(H3("1. samm: Kavatsus", cls="card-title")),  # noqa: F405
             CardBody(*children),
         ),
-        P(A("< Tagasi koostaja nimekirja", href="/drafter"), cls="back-link"),  # noqa: F405
+        P(A("\u2190 Tagasi koostaja nimekirja", href="/drafter"), cls="back-link"),  # noqa: F405
         title="Kavatsus",
         user=auth,
         theme=theme,
@@ -767,6 +792,14 @@ def _step_2_page(session: DraftingSession, auth: UserDict, theme: str):
     return PageShell(
         H1("Tapsustamine", cls="page-title"),  # noqa: F405
         _step_tracker(session.current_step),
+        InfoBox(
+            P(
+                "AI esitab t\u00e4psustavaid k\u00fcsimusi teie kavatsuse kohta. "
+                "Vastake v\u00e4hemalt 3 k\u00fcsimusele enne j\u00e4tkamist."
+            ),
+            variant="tip",
+            dismissible=True,
+        ),
         Card(
             CardHeader(H3("2. samm: Tapsustamine", cls="card-title")),  # noqa: F405
             CardBody(*children)
@@ -775,7 +808,7 @@ def _step_2_page(session: DraftingSession, auth: UserDict, theme: str):
                 P("Kusimusi ei leitud.", cls="muted-text")  # noqa: F405
             ),
         ),
-        P(A("< Tagasi koostaja nimekirja", href="/drafter"), cls="back-link"),  # noqa: F405
+        P(A("\u2190 Tagasi koostaja nimekirja", href="/drafter"), cls="back-link"),  # noqa: F405
         title="Tapsustamine",
         user=auth,
         theme=theme,
@@ -836,6 +869,14 @@ def _step_3_page(session: DraftingSession, auth: UserDict, theme: str):
     return PageShell(
         H1("Ontoloogia uurimine", cls="page-title"),  # noqa: F405
         _step_tracker(session.current_step),
+        InfoBox(
+            P(
+                "S\u00fcsteem uurib ontoloogiat ja leiab seotud s\u00e4tted, "
+                "EL-i direktiivid ja kohtuotsused."
+            ),
+            variant="info",
+            dismissible=True,
+        ),
         Card(
             CardHeader(H3("3. samm: Uurimine", cls="card-title")),  # noqa: F405
             CardBody(
@@ -843,7 +884,7 @@ def _step_3_page(session: DraftingSession, auth: UserDict, theme: str):
                 Div(advance_form, cls="step-advance"),  # noqa: F405
             ),
         ),
-        P(A("< Tagasi koostaja nimekirja", href="/drafter"), cls="back-link"),  # noqa: F405
+        P(A("\u2190 Tagasi koostaja nimekirja", href="/drafter"), cls="back-link"),  # noqa: F405
         title="Uurimine",
         user=auth,
         theme=theme,
@@ -977,18 +1018,19 @@ def _step_4_page(session: DraftingSession, auth: UserDict, theme: str):
     return PageShell(
         H1("Struktuuri muutmine", cls="page-title"),  # noqa: F405
         _step_tracker(session.current_step),
+        InfoBox(
+            P(
+                "AI pakub v\u00e4lja seaduse struktuuri. Saate peat\u00fckke "
+                "ja paragrahve muuta, lisada v\u00f5i eemaldada."
+            ),
+            variant="tip",
+            dismissible=True,
+        ),
         Card(
             CardHeader(H3(f"4. samm: Struktuur ({wf_label})", cls="card-title")),  # noqa: F405
-            CardBody(
-                P(  # noqa: F405
-                    "Vaadake ule ja muutke pakutud struktuuri. "
-                    "Voite muuta peatukkide ja paragrahvide nimesid.",
-                    cls="page-lead",
-                ),
-                form,
-            ),
+            CardBody(form),
         ),
-        P(A("< Tagasi koostaja nimekirja", href="/drafter"), cls="back-link"),  # noqa: F405
+        P(A("\u2190 Tagasi koostaja nimekirja", href="/drafter"), cls="back-link"),  # noqa: F405
         title="Struktuur",
         user=auth,
         theme=theme,
@@ -1091,6 +1133,14 @@ def _step_5_page(session: DraftingSession, auth: UserDict, theme: str):
     return PageShell(
         H1("Seaduseteksti koostamine", cls="page-title"),  # noqa: F405
         _step_tracker(session.current_step),
+        InfoBox(
+            P(
+                "AI koostab iga paragrahvi sisu viidete ja m\u00e4rkustega. "
+                "Saate igat s\u00e4tet muuta v\u00f5i uuesti genereerida."
+            ),
+            variant="tip",
+            dismissible=True,
+        ),
         Card(
             CardHeader(  # noqa: F405
                 H3(  # noqa: F405
@@ -1103,7 +1153,7 @@ def _step_5_page(session: DraftingSession, auth: UserDict, theme: str):
                 Div(advance_form, cls="step-advance"),  # noqa: F405
             ),
         ),
-        P(A("< Tagasi koostaja nimekirja", href="/drafter"), cls="back-link"),  # noqa: F405
+        P(A("\u2190 Tagasi koostaja nimekirja", href="/drafter"), cls="back-link"),  # noqa: F405
         title="Koostamine",
         user=auth,
         theme=theme,
@@ -1123,6 +1173,15 @@ def _step_6_page(session: DraftingSession, auth: UserDict, theme: str):
         return PageShell(
             H1("Integreeritud ulevaade", cls="page-title"),  # noqa: F405
             _step_tracker(session.current_step),
+            InfoBox(
+                P(
+                    "Koostatud eeln\u00f5u anal\u00fc\u00fcsitakse "
+                    "m\u00f5juanal\u00fc\u00fcsi s\u00fcsteemis. "
+                    "Vaadake konflikte ja m\u00f5jutatud s\u00e4tteid."
+                ),
+                variant="info",
+                dismissible=True,
+            ),
             Card(
                 CardHeader(H3("6. samm: Ulevaade", cls="card-title")),  # noqa: F405
                 CardBody(
@@ -1139,7 +1198,7 @@ def _step_6_page(session: DraftingSession, auth: UserDict, theme: str):
                     ),
                 ),
             ),
-            P(A("< Tagasi koostaja nimekirja", href="/drafter"), cls="back-link"),  # noqa: F405
+            P(A("\u2190 Tagasi koostaja nimekirja", href="/drafter"), cls="back-link"),  # noqa: F405
             title="Ulevaade",
             user=auth,
             theme=theme,
@@ -1152,6 +1211,15 @@ def _step_6_page(session: DraftingSession, auth: UserDict, theme: str):
     return PageShell(
         H1("Integreeritud ulevaade", cls="page-title"),  # noqa: F405
         _step_tracker(session.current_step),
+        InfoBox(
+            P(
+                "Koostatud eeln\u00f5u anal\u00fc\u00fcsitakse "
+                "m\u00f5juanal\u00fc\u00fcsi s\u00fcsteemis. "
+                "Vaadake konflikte ja m\u00f5jutatud s\u00e4tteid."
+            ),
+            variant="info",
+            dismissible=True,
+        ),
         Card(
             CardHeader(H3("6. samm: Ulevaade", cls="card-title")),  # noqa: F405
             CardBody(
@@ -1198,6 +1266,15 @@ def _step_7_page(session: DraftingSession, auth: UserDict, theme: str):
     return PageShell(
         H1("Eksport", cls="page-title"),  # noqa: F405
         _step_tracker(session.current_step),
+        InfoBox(
+            P(
+                "Laadige alla valmis .docx fail eeln\u00f5uga. "
+                "Fail sisaldab AI-genereeritud m\u00e4rget ja "
+                "viidete registrit."
+            ),
+            variant="tip",
+            dismissible=True,
+        ),
         Card(
             CardHeader(H3("7. samm: Eksport", cls="card-title")),  # noqa: F405
             CardBody(

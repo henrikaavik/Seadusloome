@@ -17,6 +17,7 @@ from app.ui.layout import PageShell
 from app.ui.primitives.badge import Badge
 from app.ui.primitives.button import Button
 from app.ui.surfaces.card import Card, CardBody, CardHeader
+from app.ui.surfaces.info_box import InfoBox
 from app.ui.theme import get_theme_from_request
 
 logger = logging.getLogger(__name__)
@@ -137,6 +138,36 @@ def _remove_bookmark(bookmark_id: str, user_id: str) -> bool:
     except Exception:
         logger.exception("Failed to remove bookmark %s for user %s", bookmark_id, user_id)
         return False
+
+
+def _get_dashboard_counts(user_id: str, org_id: str | None) -> dict[str, int]:
+    """Return counts for drafts, drafter sessions, and conversations."""
+    counts: dict[str, int] = {"drafts": 0, "drafter_sessions": 0, "conversations": 0}
+    if not user_id:
+        return counts
+    try:
+        with _connect() as conn:
+            if org_id:
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM drafts WHERE org_id = %s",
+                    (org_id,),
+                ).fetchone()
+                counts["drafts"] = row[0] if row else 0
+
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM drafting_sessions WHERE user_id = %s AND org_id = %s",
+                    (user_id, org_id),
+                ).fetchone()
+                counts["drafter_sessions"] = row[0] if row else 0
+
+            row = conn.execute(
+                "SELECT COUNT(*) FROM conversations WHERE user_id = %s",
+                (user_id,),
+            ).fetchone()
+            counts["conversations"] = row[0] if row else 0
+    except Exception:
+        logger.exception("Failed to fetch dashboard counts for user %s", user_id)
+    return counts
 
 
 # ---------------------------------------------------------------------------
@@ -277,9 +308,32 @@ def dashboard_page(req: Request):
     activity = _get_recent_activity(user_id) if user_id else []
     bookmarks = _get_bookmarks(user_id) if user_id else []
     org_info = _get_user_org_info(user_id) if user_id else None
+    counts = _get_dashboard_counts(user_id, auth.get("org_id")) if user_id else {}
+
+    # Build the counts summary line
+    draft_count = counts.get("drafts", 0)
+    session_count = counts.get("drafter_sessions", 0)
+    conv_count = counts.get("conversations", 0)
 
     content = (
         H1(f"Tere tulemast, {full_name}!", cls="page-title"),
+        InfoBox(
+            P(
+                "Tere tulemast Seadusloome s\u00fcsteemi! "
+                "Siit leiate kiirlingid teie eeln\u00f5udele, koostajale ja vestlustele. "
+                "Kasutage vasakul olevat men\u00fc\u00fcd navigeerimiseks."
+            ),
+            P(
+                f"Teil on {draft_count} eeln\u00f5u"
+                f"{'d' if draft_count != 1 else ''}"
+                f", {session_count} koostaja sessiooni"
+                f" ja {conv_count} vestlus"
+                f"{'t' if conv_count != 1 else ''}"
+                "."
+            ),
+            variant="info",
+            dismissible=True,
+        ),
         _org_card(org_info),
         _bookmarks_card(bookmarks),
         _activity_card(activity),

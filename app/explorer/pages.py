@@ -230,6 +230,63 @@ def explorer_page(req: Request):
             )
         )
 
+    # Build the help banner elements that sit above the top bar.
+    help_banner = Div(
+        Div(
+            Span(
+                "\u2139\ufe0f",
+                cls="info-box-icon",
+                aria_hidden="true",
+            ),
+            Div(
+                "See on Eesti \u00f5iguse ontoloogia uurija. "
+                "Kl\u00f5psake kategooriatele, et uurida seadusi, kohtuotsuseid "
+                "ja EL-i \u00f5igusakte. Kasutage otsingut konkreetsete "
+                "s\u00e4tete leidmiseks.",
+                cls="info-box-content",
+            ),
+            Button(
+                "\u00d7",
+                type="button",
+                cls="info-box-dismiss",
+                aria_label="Sulge",
+                onclick="this.parentElement.parentElement.remove()",
+            ),
+            cls="info-box info-box-info",
+            role="note",
+        ),
+        id="explorer-help-banner",
+        style="padding:0.75rem 1rem 0;",
+    )
+
+    # Optional draft tip
+    draft_tip = None
+    if not overlay_uris and not draft_param:
+        draft_tip = Div(
+            Div(
+                Span(
+                    "\U0001f4a1",
+                    cls="info-box-icon",
+                    aria_hidden="true",
+                ),
+                Div(
+                    "N\u00e4pun\u00e4ide: lisage ?draft=ID URL-ile, "
+                    "et n\u00e4ha eeln\u00f5u m\u00f5jutatud \u00fcksusi graafikul.",
+                    cls="info-box-content",
+                ),
+                Button(
+                    "\u00d7",
+                    type="button",
+                    cls="info-box-dismiss",
+                    aria_label="Sulge",
+                    onclick="this.parentElement.parentElement.remove()",
+                ),
+                cls="info-box info-box-tip",
+                role="note",
+            ),
+            style="padding:0 1rem;",
+        )
+
     return Html(
         Head(
             Meta(charset="UTF-8"),
@@ -250,6 +307,9 @@ def explorer_page(req: Request):
             Link(rel="stylesheet", href="/static/css/ui.css"),
         ),
         Body(
+            # ----- Help banner -----
+            help_banner,
+            draft_tip if draft_tip else "",
             # ----- Top bar -----
             Div(
                 H1("Estonian Legal Ontology"),

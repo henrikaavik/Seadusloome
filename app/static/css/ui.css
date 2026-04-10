@@ -1960,3 +1960,108 @@
   gap: var(--space-2);
   margin-bottom: var(--space-4);
 }
+
+/* ===========================================================================
+   InfoBox — contextual help / onboarding guidance
+   =========================================================================== */
+
+.info-box {
+  display: flex;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border-radius: var(--radius);
+  margin-bottom: var(--space-5);
+  line-height: var(--leading-normal);
+  font-size: var(--text-sm);
+  align-items: flex-start;
+}
+
+.info-box-icon {
+  flex-shrink: 0;
+  font-size: var(--text-lg);
+}
+
+.info-box-content {
+  flex: 1;
+}
+
+.info-box-content p {
+  margin: 0 0 var(--space-2) 0;
+}
+
+.info-box-content p:last-child {
+  margin-bottom: 0;
+}
+
+.info-box-dismiss {
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font-size: var(--text-xl);
+  line-height: 1;
+  padding: 0 var(--space-1);
+  opacity: 0.6;
+  color: inherit;
+}
+
+.info-box-dismiss:hover {
+  opacity: 1;
+}
+
+.info-box-info {
+  background-color: var(--color-info-bg);
+  border: 1px solid var(--color-info);
+  color: var(--color-info);
+}
+
+.info-box-tip {
+  background-color: var(--color-success-bg);
+  border: 1px solid var(--color-success);
+  color: var(--color-success);
+}
+
+.info-box-warning {
+  background-color: var(--color-warning-bg);
+  border: 1px solid var(--color-warning);
+  color: var(--color-warning);
+}
+
+/* Ensure body text inside info boxes stays readable in dark mode */
+.info-box-content strong {
+  font-weight: var(--font-semibold);
+}
+
+/* Admin tooltip icon (?) next to card headers */
+.admin-tooltip {
+  display: inline-block;
+  cursor: help;
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-full);
+  width: 1.25em;
+  height: 1.25em;
+  line-height: 1.25em;
+  text-align: center;
+  margin-left: var(--space-2);
+  vertical-align: middle;
+  position: relative;
+}
+
+.admin-tooltip:hover::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  left: 100%;
+  top: 50%;
+  transform: translateY(-50%);
+  margin-left: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+  font-size: var(--text-xs);
+  box-shadow: var(--shadow-sm);
+  z-index: 10;
+}

@@ -39,6 +39,7 @@ from app.ui.primitives.badge import Badge, BadgeVariant
 from app.ui.primitives.button import Button
 from app.ui.surfaces.alert import Alert
 from app.ui.surfaces.card import Card, CardBody, CardHeader
+from app.ui.surfaces.info_box import InfoBox
 from app.ui.theme import get_theme_from_request
 
 logger = logging.getLogger(__name__)
@@ -496,6 +497,15 @@ def draft_report_page(req: Request, draft_id: str):
 
     return PageShell(
         header,
+        InfoBox(
+            P(
+                "See aruanne n\u00e4itab, kuidas teie eeln\u00f5u m\u00f5jutab "
+                "olemasolevat \u00f5igusraamistikku. Mida k\u00f5rgem on "
+                "m\u00f5juskoor, seda rohkem muudatusi eeln\u00f5u p\u00f5hjustab."
+            ),
+            variant="info",
+            dismissible=True,
+        ),
         _summary_card(report_row),
         _affected_entities_section(findings),
         _conflicts_section(findings),

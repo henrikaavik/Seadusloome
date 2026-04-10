@@ -52,6 +52,7 @@ from app.ui.primitives.badge import Badge, BadgeVariant
 from app.ui.primitives.button import Button
 from app.ui.surfaces.alert import Alert
 from app.ui.surfaces.card import Card, CardBody, CardFooter, CardHeader
+from app.ui.surfaces.info_box import InfoBox
 from app.ui.theme import get_theme_from_request
 
 logger = logging.getLogger(__name__)
@@ -360,12 +361,22 @@ def drafts_list_page(req: Request):
 
         if total == 0:
             body = Div(
+                InfoBox(
+                    P(
+                        "Laadige \u00fcles .docx v\u00f5i .pdf eeln\u00f5u, "
+                        "et n\u00e4ha selle m\u00f5ju olemasolevatele seadustele. "
+                        "S\u00fcsteem anal\u00fc\u00fcsib automaatselt viiteid, "
+                        "konflikte ja EL-i vastavust."
+                    ),
+                    variant="info",
+                    dismissible=True,
+                ),
                 P(
-                    "Teie organisatsioon ei ole veel ühtegi eelnõu üles laadinud.",
+                    "Teie organisatsioon ei ole veel \u00fchtegi eeln\u00f5u \u00fcles laadinud.",
                     cls="muted-text",
                 ),
                 A(
-                    "Laadi üles uus eelnõu",
+                    "Laadi \u00fcles uus eeln\u00f5u",
                     href="/drafts/new",
                     cls="btn btn-primary btn-md",
                 ),
@@ -518,16 +529,19 @@ def new_draft_page(req: Request):
     card_children.append(form)
 
     return PageShell(
-        H1("Uus eelnõu", cls="page-title"),  # noqa: F405
-        P(
-            "Laadige üles draft legislative dokument (.docx või .pdf). "
-            "Pärast üleslaadimist käivitub automaatselt parse-, olemite "
-            "eraldamise ja mõjude analüüsi pipeline.",
-            cls="page-lead",
+        H1("Uus eeln\u00f5u", cls="page-title"),  # noqa: F405
+        InfoBox(
+            P(
+                "Valige fail (.docx v\u00f5i .pdf, kuni 50 MB) ja andke sellele "
+                "pealkiri. P\u00e4rast \u00fcleslaadimist anal\u00fc\u00fcsib "
+                "s\u00fcsteem eeln\u00f5u automaatselt."
+            ),
+            variant="info",
+            dismissible=True,
         ),
         Card(CardBody(*card_children)),
-        P(A("← Tagasi eelnõude nimekirja", href="/drafts"), cls="back-link"),  # noqa: F405
-        title="Uus eelnõu",
+        P(A("\u2190 Tagasi eeln\u00f5ude nimekirja", href="/drafts"), cls="back-link"),  # noqa: F405
+        title="Uus eeln\u00f5u",
         user=auth,
         theme=theme,
         active_nav="/drafts",
@@ -674,13 +688,23 @@ def draft_detail_page(req: Request, draft_id: str):
 
     return PageShell(
         H1(draft.title, cls="page-title"),  # noqa: F405
-        P(A("← Tagasi eelnõude nimekirja", href="/drafts"), cls="back-link"),  # noqa: F405
+        P(A("\u2190 Tagasi eeln\u00f5ude nimekirja", href="/drafts"), cls="back-link"),  # noqa: F405
+        InfoBox(
+            P(
+                "Eeln\u00f5u l\u00e4bib automaatselt mitu etappi: "
+                "teksti eraldamine \u2192 viidete tuvastamine \u2192 "
+                "m\u00f5juanal\u00fc\u00fcs. "
+                "Tulemused ilmuvad allpool."
+            ),
+            variant="info",
+            dismissible=True,
+        ),
         Card(
             CardHeader(H3("Staatus", cls="card-title")),  # noqa: F405
             CardBody(tracker),
         ),
         Card(
-            CardHeader(H3("Üksikasjad", cls="card-title")),  # noqa: F405
+            CardHeader(H3("\u00dcksikasjad", cls="card-title")),  # noqa: F405
             CardBody(*detail_body),
             CardFooter(
                 P(

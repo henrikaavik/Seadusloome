@@ -1,7 +1,8 @@
-"""Surface components: Card, Alert, Modal (and children)."""
+"""Surface components: Card, Alert, InfoBox, Modal (and children)."""
 
 from app.ui.surfaces.alert import Alert
 from app.ui.surfaces.card import Card, CardBody, CardFooter, CardHeader
+from app.ui.surfaces.info_box import InfoBox
 from app.ui.surfaces.modal import (
     ConfirmModal,
     Modal,
@@ -18,6 +19,7 @@ __all__ = [
     "CardFooter",
     "CardHeader",
     "ConfirmModal",
+    "InfoBox",
     "Modal",
     "ModalBody",
     "ModalFooter",
