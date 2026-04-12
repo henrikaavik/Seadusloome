@@ -74,11 +74,12 @@ class TestRetriever:
         results = asyncio.run(retriever.retrieve("test", source_type="court_decision"))
 
         assert len(results) == 1
-        # Verify the SQL included the source_type parameter
+        # Verify the SQL included the source_type parameter and tenant guard
         call_args = mock_conn.execute.call_args
         sql = call_args[0][0]
         params = call_args[0][1]
-        assert "WHERE source_type" in sql
+        assert "source_type = %s" in sql
+        assert "org_id IS NULL OR org_id = %s" in sql
         assert "court_decision" in params
 
     @patch("app.rag.retriever.get_connection")
