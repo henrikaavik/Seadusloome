@@ -287,6 +287,72 @@ class TestClaudeRealMode:
         assert mock_client.messages.create.call_count == 2
 
     @patch("app.llm.claude.ClaudeProvider._log_cost")
+    def test_complete_scrubs_pii_before_send(
+        self,
+        mock_log_cost: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """NFR §7.1: emails in the prompt must not reach Anthropic.
+
+        The captured ``messages`` payload must contain the placeholder,
+        never the raw address.
+        """
+        provider = self._make_provider(monkeypatch)
+        mock_client = MagicMock()
+        provider._client = mock_client
+
+        mock_client.messages.create.return_value = self._make_response("ok")
+
+        provider.complete(
+            "please email foo@example.com about UUID 550e8400-e29b-41d4-a716-446655440000"
+        )
+
+        kw = mock_client.messages.create.call_args[1]
+        sent = kw["messages"][0]["content"]
+        assert "foo@example.com" not in sent
+        assert "550e8400-e29b-41d4-a716-446655440000" not in sent
+        assert "[REDACTED_EMAIL]" in sent
+        assert "[REDACTED_UUID]" in sent
+
+    @patch("app.llm.claude.ClaudeProvider._log_cost")
+    def test_complete_allow_raw_preserves_prompt(
+        self,
+        mock_log_cost: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """allow_raw=True bypasses the scrubber (draft-analysis path)."""
+        provider = self._make_provider(monkeypatch)
+        mock_client = MagicMock()
+        provider._client = mock_client
+
+        mock_client.messages.create.return_value = self._make_response("ok")
+
+        prompt = "verbatim draft references foo@example.com"
+        provider.complete(prompt, allow_raw=True)
+
+        kw = mock_client.messages.create.call_args[1]
+        assert kw["messages"][0]["content"] == prompt
+
+    @patch("app.llm.claude.ClaudeProvider._log_cost")
+    def test_complete_scrubs_system_prompt(
+        self,
+        mock_log_cost: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """PII in the system prompt is scrubbed too."""
+        provider = self._make_provider(monkeypatch)
+        mock_client = MagicMock()
+        provider._client = mock_client
+
+        mock_client.messages.create.return_value = self._make_response("ok")
+
+        provider.complete("hi", system="operator: ops@example.ee")
+
+        kw = mock_client.messages.create.call_args[1]
+        assert "ops@example.ee" not in kw["system"]
+        assert "[REDACTED_EMAIL]" in kw["system"]
+
+    @patch("app.llm.claude.ClaudeProvider._log_cost")
     def test_complete_api_error_raises(
         self,
         mock_log_cost: MagicMock,

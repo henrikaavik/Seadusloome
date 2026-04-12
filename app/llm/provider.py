@@ -47,6 +47,7 @@ class LLMProvider(ABC):
         feature: str = "complete",
         user_id: UUID | str | None = None,
         org_id: UUID | str | None = None,
+        allow_raw: bool = False,
     ) -> str:
         """Return a free-form completion for *prompt*.
 
@@ -58,6 +59,10 @@ class LLMProvider(ABC):
             feature: Cost-tracking feature label (e.g. ``"drafter_clarify"``).
             user_id: Optional user id for cost tracking attribution.
             org_id: Optional org id for cost tracking attribution.
+            allow_raw: When ``True``, skip PII scrubbing on the prompt.
+                Reserved for draft-analysis callers; user-supplied free
+                form fields must NOT set this. See
+                :mod:`app.llm.scrubber` for details.
         """
 
     @abstractmethod
@@ -69,6 +74,7 @@ class LLMProvider(ABC):
         feature: str = "extract_json",
         user_id: UUID | str | None = None,
         org_id: UUID | str | None = None,
+        allow_raw: bool = False,
     ) -> dict:
         """Run *prompt* through the model and parse the reply as JSON.
 
@@ -102,6 +108,7 @@ class LLMProvider(ABC):
         feature: str = "acomplete",
         user_id: UUID | str | None = None,
         org_id: UUID | str | None = None,
+        allow_raw: bool = False,
     ) -> str:
         """Async variant of :meth:`complete`.
 
@@ -126,6 +133,7 @@ class LLMProvider(ABC):
         feature: str = "astream",
         user_id: UUID | str | None = None,
         org_id: UUID | str | None = None,
+        allow_raw: bool = False,
     ) -> AsyncIterator[StreamEvent]:
         """Async streaming completion that yields :class:`StreamEvent` objects.
 

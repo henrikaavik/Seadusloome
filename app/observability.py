@@ -42,12 +42,17 @@ def _get_git_sha() -> str:
 
 
 def _scrub_pii(event: dict[str, Any], hint: dict[str, Any]) -> dict[str, Any] | None:
-    """Remove PII (emails, names) from Sentry events before transmission.
+    """Remove PII (emails, names, tokens) from Sentry events before send.
 
-    Strips ``user`` context entirely and redacts any ``email`` or
-    ``full_name`` values found in breadcrumb data and exception frame
-    local variables.
+    Strips ``user`` context entirely, redacts any ``email`` /
+    ``full_name`` / ``password`` / ``token`` keys in breadcrumb data
+    and stack-frame locals, and additionally runs :func:`scrub_prompt`
+    over all free-form string values so emails, phone numbers, UUIDs
+    and secret-like tokens that leaked into logs are redacted using
+    the same regex set the LLM egress path uses (NFR §7.1).
     """
+    from app.llm.scrubber import scrub_prompt
+
     # Remove top-level user context so emails/names never reach Sentry.
     event.pop("user", None)
 
@@ -58,6 +63,11 @@ def _scrub_pii(event: dict[str, Any], hint: dict[str, Any]) -> dict[str, Any] | 
             for key in list(data.keys()):
                 if key in ("email", "full_name", "password", "token"):
                     data[key] = "[Redacted]"
+                elif isinstance(data[key], str):
+                    data[key] = scrub_prompt(data[key])
+        message = breadcrumb.get("message")
+        if isinstance(message, str):
+            breadcrumb["message"] = scrub_prompt(message)
 
     # Scrub exception frame local variables.
     exception_info = event.get("exception")
@@ -72,6 +82,8 @@ def _scrub_pii(event: dict[str, Any], hint: dict[str, Any]) -> dict[str, Any] | 
                     for key in list(local_vars.keys()):
                         if key in ("email", "full_name", "password", "token"):
                             local_vars[key] = "[Redacted]"
+                        elif isinstance(local_vars[key], str):
+                            local_vars[key] = scrub_prompt(local_vars[key])
 
     return event
 

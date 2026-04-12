@@ -22,6 +22,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from app.llm.provider import LLMProvider, StreamEvent
+from app.llm.scrubber import scrub_messages, scrub_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -113,11 +114,16 @@ class ClaudeProvider(LLMProvider):
         feature: str = "complete",
         user_id: Any = None,
         org_id: Any = None,
+        allow_raw: bool = False,
     ) -> str:
         """Return a completion for *prompt*.
 
         Stub mode returns a deterministic marker string so tests can
         assert on it without network I/O.
+
+        PII / secret-like tokens in *prompt* and *system* are scrubbed
+        via :func:`app.llm.scrubber.scrub_prompt` unless ``allow_raw``
+        is ``True`` (reserved for draft-analysis callers).
         """
         if self._stubbed:
             return f"[STUB Claude] {prompt[:40]}..."
@@ -126,14 +132,20 @@ class ClaudeProvider(LLMProvider):
 
         client = self._get_client()
 
+        scrubbed_prompt = scrub_prompt(prompt, allow_raw=allow_raw)
+        scrubbed_system = scrub_prompt(system, allow_raw=allow_raw) if system else system
+
         create_kwargs: dict[str, Any] = {
             "model": self._model,
             "max_tokens": max_tokens,
             "temperature": temperature,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": scrub_messages(
+                [{"role": "user", "content": scrubbed_prompt}],
+                allow_raw=allow_raw,
+            ),
         }
-        if system:
-            create_kwargs["system"] = system
+        if scrubbed_system:
+            create_kwargs["system"] = scrubbed_system
 
         try:
             response = client.messages.create(**create_kwargs)
@@ -192,12 +204,13 @@ class ClaudeProvider(LLMProvider):
         feature: str = "extract_json",
         user_id: Any = None,
         org_id: Any = None,
+        allow_raw: bool = False,
     ) -> dict:
         """Run *prompt* through the model and parse the reply as JSON.
 
         Stub mode returns a deterministic dict; real mode wraps the
         prompt in a "respond with valid JSON" instruction and json-loads
-        the reply.
+        the reply. See :meth:`complete` for the ``allow_raw`` contract.
         """
         if self._stubbed:
             return {"stub": True, "prompt": prompt[:40]}
@@ -214,6 +227,7 @@ class ClaudeProvider(LLMProvider):
             feature=feature,
             user_id=user_id,
             org_id=org_id,
+            allow_raw=allow_raw,
         )
         try:
             return json.loads(raw)
@@ -282,11 +296,13 @@ class ClaudeProvider(LLMProvider):
         feature: str = "acomplete",
         user_id: Any = None,
         org_id: Any = None,
+        allow_raw: bool = False,
     ) -> str:
         """Async variant of :meth:`complete`.
 
         Stub mode returns a deterministic marker string so tests can
-        assert on it without network I/O.
+        assert on it without network I/O. See :meth:`complete` for the
+        ``allow_raw`` contract.
         """
         if self._stubbed:
             return f"[STUB Claude async] {prompt[:40]}..."
@@ -295,14 +311,20 @@ class ClaudeProvider(LLMProvider):
 
         client = self._get_async_client()
 
+        scrubbed_prompt = scrub_prompt(prompt, allow_raw=allow_raw)
+        scrubbed_system = scrub_prompt(system, allow_raw=allow_raw) if system else system
+
         create_kwargs: dict[str, Any] = {
             "model": self._model,
             "max_tokens": max_tokens,
             "temperature": temperature,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": scrub_messages(
+                [{"role": "user", "content": scrubbed_prompt}],
+                allow_raw=allow_raw,
+            ),
         }
-        if system:
-            create_kwargs["system"] = system
+        if scrubbed_system:
+            create_kwargs["system"] = scrubbed_system
 
         try:
             response = await client.messages.create(**create_kwargs)
@@ -361,11 +383,13 @@ class ClaudeProvider(LLMProvider):
         feature: str = "astream",
         user_id: Any = None,
         org_id: Any = None,
+        allow_raw: bool = False,
     ) -> AsyncIterator[StreamEvent]:
         """Async streaming completion yielding :class:`StreamEvent` objects.
 
         Stub mode yields a few canned events then ``StreamEvent(type="stop")``.
-        Real mode wraps ``AsyncAnthropic.messages.stream()``.
+        Real mode wraps ``AsyncAnthropic.messages.stream()``. See
+        :meth:`complete` for the ``allow_raw`` contract.
         """
         if self._stubbed:
             yield StreamEvent(type="content", delta="[STUB] ")
@@ -376,14 +400,20 @@ class ClaudeProvider(LLMProvider):
 
         client = self._get_async_client()
 
+        scrubbed_prompt = scrub_prompt(prompt, allow_raw=allow_raw)
+        scrubbed_system = scrub_prompt(system, allow_raw=allow_raw) if system else system
+
         create_kwargs: dict[str, Any] = {
             "model": self._model,
             "max_tokens": max_tokens,
             "temperature": temperature,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": scrub_messages(
+                [{"role": "user", "content": scrubbed_prompt}],
+                allow_raw=allow_raw,
+            ),
         }
-        if system:
-            create_kwargs["system"] = system
+        if scrubbed_system:
+            create_kwargs["system"] = scrubbed_system
 
         tokens_input = 0
         tokens_output = 0
