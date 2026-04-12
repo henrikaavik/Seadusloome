@@ -42,15 +42,6 @@ _STATIC_DIR = Path(__file__).parent / "static"
 _stop_worker = threading.Event()
 _worker_thread: threading.Thread | None = None
 
-# Draft archive-warning scheduler (issue #572). Lifecycle mirrors the
-# job worker: the lifespan hook starts the thread on ASGI startup and
-# sets the stop event on shutdown. Coolify has no native cron, so a
-# lifespan thread is the simplest way to run a daily scan. Tests opt
-# out via the same ``DISABLE_BACKGROUND_WORKER=1`` flag so they never
-# spawn real threads against a mocked DB.
-_stop_archive_scheduler = threading.Event()
-_archive_thread: threading.Thread | None = None
-
 
 async def lifespan(_app):  # type: ignore[no-untyped-def]
     """ASGI lifespan hook: start the background worker, stop it on shutdown.
@@ -69,7 +60,7 @@ async def lifespan(_app):  # type: ignore[no-untyped-def]
     the pytest suite uses this flag so mocked DB calls are not racing
     a real worker thread.
     """
-    global _worker_thread, _archive_thread
+    global _worker_thread
 
     # Reconcile any sync_log rows orphaned by a previous process crash
     # (issue #567). A lingering 'running' row would otherwise make the
@@ -91,17 +82,11 @@ async def lifespan(_app):  # type: ignore[no-untyped-def]
 
     # Local import so tests that patch app.jobs.worker see the module
     # freshly re-imported if they reload after setting env vars.
-    from app.jobs.archive_warning import start_archive_warning_scheduler
     from app.jobs.worker import start_worker_thread
 
     _stop_worker.clear()
     _worker_thread = start_worker_thread(_stop_worker)
     logger.info("Background worker started")
-
-    _stop_archive_scheduler.clear()
-    _archive_thread = start_archive_warning_scheduler(_stop_archive_scheduler)
-    logger.info("Draft archive-warning scheduler started")
-
     try:
         yield
     finally:
@@ -110,12 +95,6 @@ async def lifespan(_app):  # type: ignore[no-untyped-def]
         if _worker_thread is not None:
             _worker_thread.join(timeout=5.0)
             _worker_thread = None
-
-        logger.info("Stopping draft archive-warning scheduler...")
-        _stop_archive_scheduler.set()
-        if _archive_thread is not None:
-            _archive_thread.join(timeout=5.0)
-            _archive_thread = None
 
 
 # Head tags hoisted into <head> by FastHTML. The theme init script must run

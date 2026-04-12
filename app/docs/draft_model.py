@@ -66,7 +66,6 @@ class Draft:
     error_message: str | None
     created_at: datetime
     updated_at: datetime
-    last_accessed_at: datetime | None = None
 
 
 # Column order used by every SELECT in this module. Kept in sync with
@@ -74,7 +73,7 @@ class Draft:
 _DRAFT_COLUMNS = (
     "id, user_id, org_id, title, filename, content_type, file_size, "
     "storage_path, graph_uri, status, parsed_text_encrypted, entity_count, "
-    "error_message, created_at, updated_at, last_accessed_at"
+    "error_message, created_at, updated_at"
 )
 
 
@@ -96,7 +95,6 @@ def _row_to_draft(row: tuple[Any, ...]) -> Draft:
         error_message,
         created_at,
         updated_at,
-        last_accessed_at,
     ) = row
     return Draft(
         id=coerce_uuid(draft_id),
@@ -114,7 +112,6 @@ def _row_to_draft(row: tuple[Any, ...]) -> Draft:
         error_message=error_message,
         created_at=created_at,
         updated_at=updated_at,
-        last_accessed_at=last_accessed_at,
     )
 
 
@@ -222,46 +219,6 @@ def delete_draft(conn: Any, draft_id: uuid.UUID | str) -> str | None:
     storage_path = row[0]
     conn.execute("delete from drafts where id = %s", (str(draft_id),))
     return storage_path
-
-
-def touch_draft_access(conn: Any, draft_id: uuid.UUID | str) -> bool:
-    """Reset the ``last_accessed_at`` clock on a draft (issue #572).
-
-    Called from every route that surfaces a draft to an end user so the
-    90-day auto-archive warning stays correctly timed. The caller is
-    responsible for committing the transaction; errors are logged but
-    never raised — an audit-style touch failure must never break the
-    primary read path.
-
-    Returns ``True`` when a row was actually updated.
-    """
-    try:
-        result = conn.execute(
-            "update drafts set last_accessed_at = now() where id = %s",
-            (str(draft_id),),
-        )
-    except Exception:
-        logger.exception("Failed to touch last_accessed_at for draft=%s", draft_id)
-        return False
-    return (result.rowcount or 0) > 0
-
-
-def touch_draft_access_conn(draft_id: uuid.UUID | str) -> bool:
-    """Open a fresh connection and touch ``last_accessed_at``.
-
-    Route handlers use this instead of wiring up their own
-    ``_connect()`` block when they only need to bump the access time.
-    Commits on success; swallows all errors.
-    """
-    try:
-        with _connect() as conn:
-            updated = touch_draft_access(conn, draft_id)
-            if updated:
-                conn.commit()
-            return updated
-    except Exception:
-        logger.exception("touch_draft_access_conn failed for draft=%s", draft_id)
-        return False
 
 
 # ---------------------------------------------------------------------------

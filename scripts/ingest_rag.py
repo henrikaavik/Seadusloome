@@ -173,38 +173,18 @@ def _upsert_chunks(
     to keep memory usage bounded for large (90k+) entity sets.
 
     Returns the number of rows upserted.
-
-    .. note::
-
-        SECURITY: this function is the **public corpus** ingestion path. It
-        always writes ``org_id = NULL`` and ``source_id = NULL`` — those two
-        NULLs are the wire signal that a row is visible to every tenant
-        (see ``app.rag.retriever`` and migration 016, #576).
-
-        **Private draft ingestion is not implemented yet.** When it lands, it
-        must go through a different code path that sets ``org_id`` to the
-        owning org and ``source_id`` to the draft's UUID, and the retriever
-        already gates on that.
     """
     import json as _json
 
-    # #576: tenant scoping columns (org_id, source_id) exist on rag_chunks
-    # as of migration 016. Public corpus ingestion here writes them as NULL
-    # explicitly — that's what makes these rows visible to every org.
-    # Private draft ingestion is deliberately NOT implemented in this path.
-
     upserted = 0
     upsert_sql = """INSERT INTO rag_chunks
-       (source_type, source_uri, chunk_index, content, metadata, embedding,
-        org_id, source_id)
-       VALUES (%s, %s, %s, %s, %s::jsonb, %s::vector, NULL, NULL)
+       (source_type, source_uri, chunk_index, content, metadata, embedding)
+       VALUES (%s, %s, %s, %s, %s::jsonb, %s::vector)
        ON CONFLICT (source_type, source_uri, chunk_index)
        DO UPDATE SET
            content = EXCLUDED.content,
            metadata = EXCLUDED.metadata,
            embedding = EXCLUDED.embedding,
-           org_id = EXCLUDED.org_id,
-           source_id = EXCLUDED.source_id,
            created_at = now()"""
 
     with get_connection() as conn:
