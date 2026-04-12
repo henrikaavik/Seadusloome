@@ -1,11 +1,25 @@
 # Build stage: install dependencies with uv
 FROM python:3.13-slim AS builder
 
+# Build metadata — populated by CI via --build-arg (see .github/workflows/ci.yml).
+# Defaults let local `docker build` work without explicit args; in that case we
+# try to derive GIT_SHA from the copied .git directory below, and BUILD_TIME
+# stays "unknown" unless the caller passes one in.
+ARG GIT_SHA=dev
+ARG BUILD_TIME=unknown
+
 COPY --from=ghcr.io/astral-sh/uv:0.11.5 /uv /usr/local/bin/uv
 
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
 
 WORKDIR /app
+
+# git lets us derive the sha from .git when GIT_SHA build-arg is the
+# default "dev". Installed in the builder stage only — the runtime
+# stage already installs git for the sync pipeline.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends git && \
+    rm -rf /var/lib/apt/lists/*
 
 # Install dependencies first (cache layer)
 COPY pyproject.toml uv.lock .python-version ./
@@ -17,6 +31,24 @@ COPY app/ app/
 # Only copy runtime scripts (build_icons.py is excluded via .dockerignore)
 COPY scripts/ scripts/
 COPY migrations/ migrations/
+
+# Copy .git so we can resolve HEAD at build time when GIT_SHA is unset.
+# Coolify builds from a fresh git clone so .git is present in the build
+# context. The directory is NOT copied into the runtime stage — only the
+# generated VERSION.json is — so image size is unaffected.
+COPY .git/ .git/
+
+# Write /app/VERSION.json. If the build-arg GIT_SHA is still the default
+# "dev" we fall back to `git rev-parse HEAD`; if that also fails we keep
+# "dev". We do this after the app copy so the runtime stage can just
+# COPY --from=builder /app/VERSION.json without caring how it was built.
+RUN resolved_sha="$GIT_SHA"; \
+    if [ "$resolved_sha" = "dev" ] && [ -d .git ]; then \
+      resolved_sha="$(git rev-parse HEAD 2>/dev/null || echo dev)"; \
+    fi; \
+    printf '{"app": "0.1.0", "sha": "%s", "built_at": "%s"}\n' \
+      "$resolved_sha" "$BUILD_TIME" > /app/VERSION.json && \
+    cat /app/VERSION.json
 
 # Runtime stage
 FROM python:3.13-slim
@@ -37,6 +69,7 @@ COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /app/app /app/app
 COPY --from=builder /app/scripts /app/scripts
 COPY --from=builder /app/migrations /app/migrations
+COPY --from=builder /app/VERSION.json /app/VERSION.json
 COPY docker/entrypoint.sh /app/entrypoint.sh
 
 ENV PATH="/app/.venv/bin:$PATH"

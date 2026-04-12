@@ -14,6 +14,7 @@ from app.sync.jena_loader import check_health as jena_check_health
 from app.ui.primitives.badge import StatusBadge
 from app.ui.primitives.button import Button  # noqa: F401, F811  -- shadow guard
 from app.ui.surfaces.card import Card, CardBody, CardHeader
+from app.version import read_version  # noqa: F401  -- rebound onto shim module
 
 logger = logging.getLogger(__name__)
 
@@ -60,4 +61,11 @@ def health_check(req: Request):
     pg_ok = _check_postgres()
     overall = "ok" if (jena_ok and pg_ok) else "degraded"
 
-    return JSONResponse({"status": overall, "jena": jena_ok, "postgres": pg_ok})
+    return JSONResponse(
+        {
+            "status": overall,
+            "jena": jena_ok,
+            "postgres": pg_ok,
+            "version": read_version(),
+        }
+    )

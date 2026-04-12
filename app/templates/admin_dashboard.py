@@ -145,6 +145,7 @@ from app.ui.primitives.button import Button  # noqa: F401, F811  -- shadow guard
 from app.ui.surfaces.card import Card, CardBody, CardHeader  # noqa: F401
 from app.ui.surfaces.info_box import InfoBox  # noqa: F401
 from app.ui.theme import get_theme_from_request  # noqa: F401  -- used by rebound page handlers
+from app.version import read_version  # noqa: F401  -- referenced by rebound health_check
 
 # Module-level state expected by tests (e.g. ``admin_dashboard._sync_in_progress``).
 _sync_lock = threading.Lock()

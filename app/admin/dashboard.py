@@ -15,6 +15,37 @@ from app.ui.layout import PageShell
 from app.ui.primitives.button import Button  # noqa: F401, F811  -- shadow guard
 from app.ui.surfaces.info_box import InfoBox
 from app.ui.theme import get_theme_from_request
+from app.version import read_version
+
+
+def _version_footer():  # noqa: ANN202
+    """Render the admin page footer showing app version, sha, and build time."""
+    version = read_version()
+    app_ver = version.get("app", "0.0.0")
+    sha = version.get("sha", "unknown")
+    built_at = version.get("built_at", "unknown")
+    short_sha = sha[:7] if sha and not sha.startswith("dev") else sha
+    # Link the sha to the GitHub commit when it looks like a real sha.
+    is_real_sha = len(sha) >= 7 and not sha.startswith("dev") and sha != "unknown"
+    sha_node = (
+        A(  # noqa: F405
+            short_sha,
+            href=f"https://github.com/henrikaavik/Seadusloome/commit/{sha}",
+            target="_blank",
+            rel="noopener noreferrer",
+            cls="admin-footer-sha",
+        )
+        if is_real_sha
+        else Span(short_sha, cls="admin-footer-sha")  # noqa: F405
+    )
+    return Footer(  # noqa: F405
+        Small(  # noqa: F405
+            f"v{app_ver} · ",
+            sha_node,
+            f" · built {built_at}",
+        ),
+        cls="admin-footer",
+    )
 
 
 def admin_dashboard_page(req: Request):
@@ -45,6 +76,7 @@ def admin_dashboard_page(req: Request):
         _rate_limit_card(),
         _user_stats_card(user_stats),
         _quick_links_card(),
+        _version_footer(),
     )
 
     return PageShell(
