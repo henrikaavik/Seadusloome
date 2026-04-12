@@ -43,13 +43,14 @@ def _make_conversation(
     *,
     conv_id: uuid.UUID = _CONV_ID,
     org_id: str = _ORG_ID,
+    user_id: str = _USER_ID,
     context_draft_id: uuid.UUID | None = None,
     title: str = "Test vestlus",
 ) -> Conversation:
     now = datetime.now(UTC)
     return Conversation(
         id=conv_id,
-        user_id=uuid.UUID(_USER_ID),
+        user_id=uuid.UUID(user_id),
         org_id=uuid.UUID(org_id),
         title=title,
         context_draft_id=context_draft_id,
@@ -278,14 +279,35 @@ class TestChatView:
 
     @patch("app.chat.routes._connect")
     @patch("app.auth.middleware._get_provider")
-    def test_cross_org_returns_not_found(self, mock_provider, mock_connect):
+    def test_non_owner_returns_not_found(self, mock_provider, mock_connect):
+        """Issue #569: chat conversations are owner-only. Even a same-org
+        colleague must not be able to read another user's chat."""
         mock_provider.return_value = _stub_provider()
         conn = MagicMock()
         mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
         mock_connect.return_value.__exit__ = MagicMock(return_value=False)
 
-        # Conversation belongs to a different org
-        conv = _make_conversation(org_id=_OTHER_ORG_ID)
+        # Conversation belongs to a different user in the same org.
+        other_user = "99999999-9999-9999-9999-999999999999"
+        conv = _make_conversation(user_id=other_user)
+        with patch("app.chat.routes.get_conversation", return_value=conv):
+            client = _authed_client()
+            resp = client.get(f"/chat/{_CONV_ID}")
+            assert resp.status_code == 200
+            assert "ei leitud" in resp.text.lower() or "puudub" in resp.text.lower()
+
+    @patch("app.chat.routes._connect")
+    @patch("app.auth.middleware._get_provider")
+    def test_cross_org_returns_not_found(self, mock_provider, mock_connect):
+        """A user from a different org should also be denied (the
+        common case and what the org-scoped check used to catch)."""
+        mock_provider.return_value = _stub_provider()
+        conn = MagicMock()
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        other_user = "99999999-9999-9999-9999-999999999999"
+        conv = _make_conversation(org_id=_OTHER_ORG_ID, user_id=other_user)
         with patch("app.chat.routes.get_conversation", return_value=conv):
             client = _authed_client()
             resp = client.get(f"/chat/{_CONV_ID}")
@@ -385,15 +407,123 @@ class TestChatDelete:
 
     @patch("app.chat.routes._connect")
     @patch("app.auth.middleware._get_provider")
+    def test_delete_non_owner_returns_not_found(self, mock_provider, mock_connect):
+        """Issue #569: only the owner can delete their conversation."""
+        mock_provider.return_value = _stub_provider()
+        conn = MagicMock()
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        other_user = "99999999-9999-9999-9999-999999999999"
+        conv = _make_conversation(user_id=other_user)
+        with patch("app.chat.routes.get_conversation", return_value=conv):
+            client = _authed_client()
+            resp = client.post(f"/chat/{_CONV_ID}/delete")
+            assert resp.status_code == 200
+            assert "ei leitud" in resp.text.lower()
+
+    @patch("app.chat.routes._connect")
+    @patch("app.auth.middleware._get_provider")
     def test_delete_cross_org_returns_not_found(self, mock_provider, mock_connect):
         mock_provider.return_value = _stub_provider()
         conn = MagicMock()
         mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
         mock_connect.return_value.__exit__ = MagicMock(return_value=False)
 
-        conv = _make_conversation(org_id=_OTHER_ORG_ID)
+        other_user = "99999999-9999-9999-9999-999999999999"
+        conv = _make_conversation(org_id=_OTHER_ORG_ID, user_id=other_user)
         with patch("app.chat.routes.get_conversation", return_value=conv):
             client = _authed_client()
             resp = client.post(f"/chat/{_CONV_ID}/delete")
             assert resp.status_code == 200
             assert "ei leitud" in resp.text.lower()
+
+
+# ---------------------------------------------------------------------------
+# Regression: cross-org draft context leak (#562)
+# ---------------------------------------------------------------------------
+
+
+class TestCrossOrgDraftContextLeak:
+    """Issue #562: new_conversation must reject drafts from other orgs."""
+
+    @patch("app.chat.routes.log_chat_conversation_create")
+    @patch("app.chat.routes._connect")
+    @patch("app.auth.middleware._get_provider")
+    def test_new_conversation_rejects_foreign_draft(self, mock_provider, mock_connect, mock_audit):
+        """A user in org A cannot start a conversation with org B's draft UUID."""
+        mock_provider.return_value = _stub_provider()
+        conn = MagicMock()
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        # _get_draft_title queries the DB with org_id filter; return None
+        # to simulate a draft belonging to a different org.
+        conn.execute.return_value.fetchone.return_value = None
+
+        conv = _make_conversation()  # conversation that will be created (without draft)
+        with patch("app.chat.routes.create_conversation", return_value=conv) as mock_create:
+            client = _authed_client()
+            resp = client.get(f"/chat/new?draft={_DRAFT_ID}")
+            assert resp.status_code == 303
+
+            # The conversation should have been created without draft context
+            call_kwargs = mock_create.call_args.kwargs
+            assert call_kwargs.get("context_draft_id") is None
+
+    @patch("app.chat.routes.log_chat_conversation_create")
+    @patch("app.chat.routes._connect")
+    @patch("app.auth.middleware._get_provider")
+    def test_new_conversation_accepts_own_org_draft(self, mock_provider, mock_connect, mock_audit):
+        """A user in org A can start a conversation with their own org's draft."""
+        mock_provider.return_value = _stub_provider()
+        conn = MagicMock()
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        # Simulate _get_draft_title finding the draft (org_id matches)
+        conn.execute.return_value.fetchone.return_value = ("Meie eelnou",)
+
+        conv = _make_conversation(context_draft_id=_DRAFT_ID)
+        with patch("app.chat.routes.create_conversation", return_value=conv) as mock_create:
+            client = _authed_client()
+            resp = client.get(f"/chat/new?draft={_DRAFT_ID}")
+            assert resp.status_code == 303
+
+            # Draft context should have been passed through
+            call_kwargs = mock_create.call_args.kwargs
+            assert call_kwargs.get("context_draft_id") == _DRAFT_ID
+
+    def test_get_draft_title_returns_none_for_foreign_org(self):
+        """_get_draft_title with a different org_id returns None."""
+        from app.chat.routes import _get_draft_title
+
+        with patch("app.chat.routes._connect") as mock_connect:
+            conn = MagicMock()
+            mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+            mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+            # The query with org_id filter returns no rows
+            conn.execute.return_value.fetchone.return_value = None
+
+            result = _get_draft_title(str(_DRAFT_ID), _OTHER_ORG_ID)
+            assert result is None
+
+            # Verify the query included org_id
+            call_args = conn.execute.call_args[0]
+            assert "org_id" in call_args[0]
+            assert call_args[1] == (str(_DRAFT_ID), _OTHER_ORG_ID)
+
+    def test_get_draft_title_returns_title_for_own_org(self):
+        """_get_draft_title with the correct org_id returns the filename."""
+        from app.chat.routes import _get_draft_title
+
+        with patch("app.chat.routes._connect") as mock_connect:
+            conn = MagicMock()
+            mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+            mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+            conn.execute.return_value.fetchone.return_value = ("Eelnou XYZ",)
+
+            result = _get_draft_title(str(_DRAFT_ID), _ORG_ID)
+            assert result == "Eelnou XYZ"

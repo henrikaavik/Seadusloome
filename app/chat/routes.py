@@ -23,6 +23,7 @@ from starlette.requests import Request
 from starlette.responses import RedirectResponse, Response
 
 from app.auth.helpers import require_auth as _require_auth
+from app.auth.policy import can_access_conversation
 from app.chat.audit import (
     log_chat_conversation_create,
     log_chat_conversation_delete,
@@ -326,13 +327,18 @@ def new_conversation(req: Request):
     if draft_param:
         parsed_draft = _parse_uuid(draft_param)
         if parsed_draft:
-            context_draft_id = parsed_draft
-            # Try to load draft title
-            draft_title = _get_draft_title(str(parsed_draft))
-            if draft_title:
+            # Validate the draft belongs to the user's org
+            draft_title = _get_draft_title(str(parsed_draft), org_id)
+            if draft_title is not None:
+                context_draft_id = parsed_draft
                 title = f"Vestlus \u2014 {draft_title}"
             else:
-                title = "Vestlus \u2014 eelnou"
+                # Draft not found or belongs to another org — ignore it
+                logger.warning(
+                    "Draft %s not found or not owned by org %s",
+                    parsed_draft,
+                    org_id,
+                )
 
     if not context_draft_id:
         from datetime import datetime as dt
@@ -362,13 +368,17 @@ def new_conversation(req: Request):
     return RedirectResponse(url=f"/chat/{conversation.id}", status_code=303)
 
 
-def _get_draft_title(draft_id: str) -> str | None:
-    """Attempt to read the draft title from the DB."""
+def _get_draft_title(draft_id: str, org_id: str) -> str | None:
+    """Attempt to read the draft title from the DB.
+
+    Returns ``None`` when the draft does not exist **or** belongs to a
+    different organisation — preventing cross-org context leakage.
+    """
     try:
         with _connect() as conn:
             row = conn.execute(
-                "SELECT filename FROM drafts WHERE id = %s",
-                (draft_id,),
+                "SELECT filename FROM drafts WHERE id = %s AND org_id = %s",
+                (draft_id, org_id),
             ).fetchone()
         return row[0] if row else None
     except Exception:
@@ -570,7 +580,7 @@ def conversation_view_page(req: Request, conv_id: str):
         return _not_found_page(req)
 
     # Cross-org access check
-    if str(conversation.org_id) != str(auth.get("org_id")):
+    if not can_access_conversation(auth, conversation):
         return _not_found_page(req)
 
     # Load messages
@@ -587,7 +597,7 @@ def conversation_view_page(req: Request, conv_id: str):
     # Draft context header
     draft_header = None
     if conversation.context_draft_id:
-        draft_title = _get_draft_title(str(conversation.context_draft_id))
+        draft_title = _get_draft_title(str(conversation.context_draft_id), str(auth.get("org_id")))
         draft_label = draft_title or str(conversation.context_draft_id)
         draft_header = Div(  # noqa: F405
             Badge("Eelnou", variant="primary"),
@@ -694,7 +704,7 @@ def delete_conversation_handler(req: Request, conv_id: str):
         return _not_found_page(req)
 
     # Cross-org access check
-    if str(conversation.org_id) != str(auth.get("org_id")):
+    if not can_access_conversation(auth, conversation):
         return _not_found_page(req)
 
     # Delete

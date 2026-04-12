@@ -29,6 +29,7 @@ from starlette.responses import FileResponse, Response
 
 from app.auth.audit import log_action
 from app.auth.helpers import require_auth as _require_auth
+from app.auth.policy import can_view_draft
 from app.db import get_connection as _connect
 from app.docs.draft_model import Draft, fetch_draft
 from app.jobs.queue import JobQueue
@@ -282,12 +283,7 @@ def _affected_entities_section(findings: dict[str, Any]) -> Any:
     if total > _MAX_INLINE_ROWS:
         body_children.append(
             P(  # noqa: F405
-                f"Kuvatud {len(visible)} esimest reast {total}-st. ",
-                A(  # noqa: F405
-                    "Vaata kõiki",
-                    href="#",
-                    cls="data-table-link",
-                ),
+                f"Kuvatud {len(visible)} esimest reast {total}-st.",
                 cls="muted-text",
             )
         )
@@ -472,7 +468,7 @@ def draft_report_page(req: Request, draft_id: str):
         return _not_found_page(req)
 
     draft = fetch_draft(parsed)
-    if draft is None or str(draft.org_id) != str(auth.get("org_id")):
+    if draft is None or not can_view_draft(auth, draft):
         return _not_found_page(req)
 
     report_row = _fetch_latest_report(parsed)
@@ -559,7 +555,7 @@ def export_draft_report_handler(req: Request, draft_id: str):
         return _not_found_page(req)
 
     draft = fetch_draft(parsed)
-    if draft is None or str(draft.org_id) != str(auth.get("org_id")):
+    if draft is None or not can_view_draft(auth, draft):
         return _not_found_page(req)
 
     report_row = _fetch_latest_report(parsed)
@@ -614,7 +610,7 @@ def export_status_fragment(req: Request, draft_id: str, job_id: str):
         return _not_found_page(req)
 
     draft = fetch_draft(parsed_draft)
-    if draft is None or str(draft.org_id) != str(auth.get("org_id")):
+    if draft is None or not can_view_draft(auth, draft):
         return _not_found_page(req)
 
     try:
@@ -741,7 +737,7 @@ def download_export_handler(req: Request, draft_id: str, job_id: str):
         return _not_found_page(req)
 
     draft = fetch_draft(parsed_draft)
-    if draft is None or str(draft.org_id) != str(auth.get("org_id")):
+    if draft is None or not can_view_draft(auth, draft):
         return _not_found_page(req)
 
     try:

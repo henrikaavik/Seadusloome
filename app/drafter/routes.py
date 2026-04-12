@@ -33,6 +33,7 @@ from starlette.responses import FileResponse, RedirectResponse, Response
 
 from app.auth.audit import log_action
 from app.auth.helpers import require_auth as _require_auth
+from app.auth.policy import can_access_drafter_session
 from app.auth.provider import UserDict
 from app.db import get_connection as _connect
 from app.drafter.audit import (
@@ -532,7 +533,7 @@ def session_redirect(req: Request, session_id: str):
     session = fetch_session(parsed)
     if session is None:
         return _not_found_page(req)
-    if str(session.org_id) != str(auth.get("org_id")):
+    if not can_access_drafter_session(auth, session):
         return _not_found_page(req)
 
     return RedirectResponse(
@@ -1397,7 +1398,7 @@ def step_page(req: Request, session_id: str, n: str):
     session = fetch_session(parsed)
     if session is None:
         return _not_found_page(req)
-    if str(session.org_id) != str(auth.get("org_id")):
+    if not can_access_drafter_session(auth, session):
         return _not_found_page(req)
 
     # Prevent viewing future steps — allow current and previous only.
@@ -1442,7 +1443,7 @@ async def submit_intent(req: Request, session_id: str):
     session = fetch_session(parsed)
     if session is None:
         return _not_found_page(req)
-    if str(session.org_id) != str(auth.get("org_id")):
+    if not can_access_drafter_session(auth, session):
         return _not_found_page(req)
 
     form_data = await req.form()
@@ -1539,7 +1540,7 @@ def step_status_fragment(req: Request, session_id: str, n: str):
         return Div("Sessiooni ei leitud.", id="step-status")  # noqa: F405
 
     session = fetch_session(parsed)
-    if session is None or str(session.org_id) != str(auth.get("org_id")):
+    if session is None or not can_access_drafter_session(auth, session):
         return Div("Sessiooni ei leitud.", id="step-status")  # noqa: F405
 
     try:
@@ -1611,7 +1612,7 @@ async def submit_clarification(req: Request, session_id: str):
     session = fetch_session(parsed)
     if session is None:
         return _not_found_page(req)
-    if str(session.org_id) != str(auth.get("org_id")):
+    if not can_access_drafter_session(auth, session):
         return _not_found_page(req)
 
     form_data = await req.form()
@@ -1700,7 +1701,7 @@ async def advance_from_research(req: Request, session_id: str):
     session = fetch_session(parsed)
     if session is None:
         return _not_found_page(req)
-    if str(session.org_id) != str(auth.get("org_id")):
+    if not can_access_drafter_session(auth, session):
         return _not_found_page(req)
 
     try:
@@ -1755,7 +1756,7 @@ async def submit_structure(req: Request, session_id: str):
     session = fetch_session(parsed)
     if session is None:
         return _not_found_page(req)
-    if str(session.org_id) != str(auth.get("org_id")):
+    if not can_access_drafter_session(auth, session):
         return _not_found_page(req)
 
     form_data = await req.form()
@@ -1857,7 +1858,7 @@ async def submit_draft_advance(req: Request, session_id: str):
     session = fetch_session(parsed)
     if session is None:
         return _not_found_page(req)
-    if str(session.org_id) != str(auth.get("org_id")):
+    if not can_access_drafter_session(auth, session):
         return _not_found_page(req)
 
     form_data = await req.form()
@@ -1908,7 +1909,7 @@ async def submit_review(req: Request, session_id: str):
     session = fetch_session(parsed)
     if session is None:
         return _not_found_page(req)
-    if str(session.org_id) != str(auth.get("org_id")):
+    if not can_access_drafter_session(auth, session):
         return _not_found_page(req)
 
     form_data = await req.form()
@@ -2064,7 +2065,7 @@ def export_docx(req: Request, session_id: str):
     session = fetch_session(parsed)
     if session is None:
         return _not_found_page(req)
-    if str(session.org_id) != str(auth.get("org_id")):
+    if not can_access_drafter_session(auth, session):
         return _not_found_page(req)
 
     from app.drafter.docx_builder import build_drafter_docx
@@ -2158,7 +2159,7 @@ def clause_edit_form(req: Request, session_id: str, clause_idx: str):
         return Div("Sessiooni ei leitud.", id=f"clause-{clause_idx}")  # noqa: F405
 
     session = fetch_session(parsed)
-    if session is None or str(session.org_id) != str(auth.get("org_id")):
+    if session is None or not can_access_drafter_session(auth, session):
         return Div("Sessiooni ei leitud.", id=f"clause-{clause_idx}")  # noqa: F405
 
     try:
@@ -2226,7 +2227,7 @@ async def save_clause(req: Request, session_id: str):
         return RedirectResponse(url="/drafter", status_code=303)
 
     session = fetch_session(parsed)
-    if session is None or str(session.org_id) != str(auth.get("org_id")):
+    if session is None or not can_access_drafter_session(auth, session):
         return RedirectResponse(url="/drafter", status_code=303)
 
     form_data = await req.form()
@@ -2284,7 +2285,7 @@ def regenerate_clause(req: Request, session_id: str, clause_idx: str):
         return Div("Sessiooni ei leitud.")  # noqa: F405
 
     session = fetch_session(parsed)
-    if session is None or str(session.org_id) != str(auth.get("org_id")):
+    if session is None or not can_access_drafter_session(auth, session):
         return Div("Sessiooni ei leitud.")  # noqa: F405
 
     try:
@@ -2358,7 +2359,7 @@ def regenerate_clause_status(req: Request, session_id: str, clause_idx: str):
         return Div("Sessiooni ei leitud.", id=f"clause-{clause_idx}")  # noqa: F405
 
     session = fetch_session(parsed)
-    if session is None or str(session.org_id) != str(auth.get("org_id")):
+    if session is None or not can_access_drafter_session(auth, session):
         return Div("Sessiooni ei leitud.", id=f"clause-{clause_idx}")  # noqa: F405
 
     try:

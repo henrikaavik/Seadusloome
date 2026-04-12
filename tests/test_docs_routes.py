@@ -49,6 +49,7 @@ def _make_draft(
     *,
     draft_id: uuid.UUID | None = None,
     org_id: str = _ORG_ID,
+    user_id: str = _USER_ID,
     status: str = "uploaded",
     title: str = "Test eelnõu",
     error_message: str | None = None,
@@ -59,7 +60,7 @@ def _make_draft(
     resolved_id = draft_id or uuid.UUID("44444444-4444-4444-4444-444444444444")
     return Draft(
         id=resolved_id,
-        user_id=uuid.UUID(_USER_ID),
+        user_id=uuid.UUID(user_id),
         org_id=uuid.UUID(org_id),
         title=title,
         filename="eelnou.docx",
@@ -632,6 +633,70 @@ class TestDeleteDraftHandler:
 
         assert resp.status_code == 200
         assert "Eelnõu ei leitud" in resp.text
+
+    @patch("app.docs.routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_delete_same_org_non_owner_returns_not_found(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+    ):
+        """Issue #568: a same-org drafter, reviewer, or org-admin must
+        NOT be able to delete someone else's draft. Before the fix any
+        same-org viewer could click the delete button and succeed."""
+        mock_get_provider.return_value = _stub_provider()
+        other_user = "99999999-9999-9999-9999-999999999999"
+        mock_fetch.return_value = _make_draft(user_id=other_user)
+
+        client = _authed_client()
+        resp = client.post("/drafts/44444444-4444-4444-4444-444444444444/delete")
+
+        assert resp.status_code == 200
+        assert "Eelnõu ei leitud" in resp.text
+
+    @patch("app.docs.routes.delete_named_graph")
+    @patch("app.docs.routes.log_draft_delete")
+    @patch("app.docs.routes.delete_encrypted_file")
+    @patch("app.docs.routes.delete_draft")
+    @patch("app.docs.routes._connect")
+    @patch("app.docs.routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_delete_system_admin_cross_org_succeeds(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_connect: MagicMock,
+        mock_delete: MagicMock,
+        mock_delete_file: MagicMock,
+        mock_log: MagicMock,
+        mock_delete_graph: MagicMock,
+    ):
+        """Matrix grants system admin a cross-org delete override."""
+        admin = {
+            "id": "88888888-8888-8888-8888-888888888888",
+            "email": "admin@seadusloome.ee",
+            "full_name": "System Admin",
+            "role": "admin",
+            "org_id": _OTHER_ORG_ID,
+        }
+        provider = MagicMock()
+        provider.get_current_user.return_value = admin
+        mock_get_provider.return_value = provider
+
+        draft = _make_draft()  # belongs to _ORG_ID, different from admin's org
+        mock_fetch.return_value = draft
+
+        mock_conn = MagicMock()
+        mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+        mock_delete.return_value = "/tmp/ciphertext.enc"
+
+        client = _authed_client()
+        resp = client.post(f"/drafts/{draft.id}/delete")
+
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/drafts"
+        mock_delete.assert_called_once()
 
     @patch("app.docs.routes.delete_named_graph")
     @patch("app.docs.routes.log_draft_delete")

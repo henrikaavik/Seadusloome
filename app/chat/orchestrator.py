@@ -30,6 +30,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from app.auth.policy import can_access_conversation
 from app.chat.models import (
     create_message,
     get_conversation,
@@ -65,22 +66,27 @@ _MAX_HISTORY_MESSAGES = 50
 # ---------------------------------------------------------------------------
 
 
-def _load_impact_summary(draft_id: str) -> str | None:
+def _load_impact_summary(draft_id: str, org_id: str) -> str | None:
     """Load the latest impact report summary for *draft_id* from the DB.
 
-    Returns ``None`` if no report exists or the query fails.
+    The query joins through the ``drafts`` table and filters by
+    *org_id* to prevent cross-organisation data access.
+
+    Returns ``None`` if no report exists, the draft belongs to a
+    different organisation, or the query fails.
     """
     try:
         with get_connection() as conn:
             row = conn.execute(
                 """
-                SELECT report_data
-                FROM impact_reports
-                WHERE draft_id = %s
-                ORDER BY generated_at DESC
+                SELECT ir.report_data
+                FROM impact_reports ir
+                JOIN drafts d ON d.id = ir.draft_id
+                WHERE ir.draft_id = %s AND d.org_id = %s
+                ORDER BY ir.generated_at DESC
                 LIMIT 1
                 """,
-                (draft_id,),
+                (draft_id, org_id),
             ).fetchone()
     except Exception:
         logger.exception("Failed to load impact summary for draft_id=%s", draft_id)
@@ -216,8 +222,10 @@ class ChatOrchestrator:
             await send({"type": "error", "message": "Vestlust ei leitud."})
             return
 
-        # Access control: verify org
-        if str(conversation.org_id) != str(org_id):
+        # Access control: owner-only per NFR §5 matrix (fix #569).
+        # The previous org-level check allowed any same-org colleague
+        # to send turns into another user's private conversation.
+        if not can_access_conversation(auth, conversation):
             await send({"type": "error", "message": "Puudub oigus sellele vestlusele."})
             return
 
@@ -234,7 +242,7 @@ class ChatOrchestrator:
         draft_context_id: str | None = None
         if conversation.context_draft_id:
             draft_context_id = str(conversation.context_draft_id)
-            impact_summary = _load_impact_summary(draft_context_id)
+            impact_summary = _load_impact_summary(draft_context_id, str(org_id))
 
         system_prompt = build_system_prompt(
             draft_context_id=draft_context_id,
@@ -242,6 +250,7 @@ class ChatOrchestrator:
         )
 
         # 2b. RAG retrieval
+        # NOTE: RAG chunks are from public corpus only. See #566 for org-scoping requirement.
         rag_chunks: list[Any] = []
         rag_context_json: list[dict[str, Any]] | None = None
 

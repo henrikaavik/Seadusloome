@@ -43,6 +43,7 @@ def _make_session(
     *,
     session_id: uuid.UUID = _SESSION_ID,
     org_id: str = _ORG_ID,
+    user_id: str = _USER_ID,
     workflow_type: str = "full_law",
     current_step: int = 1,
     intent: str | None = None,
@@ -51,7 +52,7 @@ def _make_session(
     now = datetime.now(UTC)
     return DraftingSession(
         id=session_id,
-        user_id=uuid.UUID(_USER_ID),
+        user_id=uuid.UUID(user_id),
         org_id=uuid.UUID(org_id),
         workflow_type=workflow_type,
         current_step=current_step,
@@ -399,13 +400,34 @@ class TestStepPage:
 
     @patch("app.drafter.routes.fetch_session")
     @patch("app.auth.middleware._get_provider")
+    def test_non_owner_session_returns_404(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+    ):
+        """Issue #569: drafter sessions are owner-only — same-org users
+        must not advance or view another user's drafting workflow."""
+        mock_get_provider.return_value = _stub_provider()
+        other_user = "99999999-9999-9999-9999-999999999999"
+        foreign = _make_session(user_id=other_user)
+        mock_fetch.return_value = foreign
+
+        client = _authed_client()
+        resp = client.get(f"/drafter/{_SESSION_ID}/step/1")
+
+        assert resp.status_code == 200
+        assert "ei leitud" in resp.text
+
+    @patch("app.drafter.routes.fetch_session")
+    @patch("app.auth.middleware._get_provider")
     def test_cross_org_session_returns_404(
         self,
         mock_get_provider: MagicMock,
         mock_fetch: MagicMock,
     ):
         mock_get_provider.return_value = _stub_provider()
-        foreign = _make_session(org_id=_OTHER_ORG_ID)
+        other_user = "99999999-9999-9999-9999-999999999999"
+        foreign = _make_session(org_id=_OTHER_ORG_ID, user_id=other_user)
         mock_fetch.return_value = foreign
 
         client = _authed_client()

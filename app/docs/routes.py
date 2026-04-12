@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
@@ -29,6 +30,7 @@ from starlette.requests import Request
 from starlette.responses import RedirectResponse, Response
 
 from app.auth.helpers import require_auth as _require_auth
+from app.auth.policy import can_delete_draft, can_view_draft
 from app.db import get_connection as _connect
 from app.docs.audit import (
     log_draft_delete,
@@ -602,8 +604,15 @@ async def create_draft_handler(req: Request):
 # ---------------------------------------------------------------------------
 
 
-def _draft_detail_body(draft: Draft) -> list[Any]:
-    """Build the metadata + actions body of the draft detail page."""
+def _draft_detail_body(draft: Draft, auth: Mapping[str, Any] | None = None) -> list[Any]:
+    """Build the metadata + actions body of the draft detail page.
+
+    The delete form is only rendered when ``auth`` is allowed to delete
+    per ``app.auth.policy.can_delete_draft`` (issue #568). Before this
+    check the button was shown to every same-org viewer, which made the
+    route handler's stricter owner-only check surprising for reviewers
+    and org admins who could click and get a 404.
+    """
     metadata = Dl(  # noqa: F405
         Dt("Pealkiri"),  # noqa: F405
         Dd(draft.title),  # noqa: F405
@@ -638,26 +647,27 @@ def _draft_detail_body(draft: Draft) -> list[Any]:
     # confirm message is JSON-encoded so the Estonian special chars
     # ('õ', 'õ') and the apostrophes round-trip safely into the
     # generated HTML.
-    onclick_js = f"return confirm({json.dumps(_DELETE_CONFIRM)});"
-    actions.append(
-        Form(  # noqa: F405
-            Button(
-                "Kustuta eelnõu",
-                type="submit",
-                variant="danger",
-                size="md",
-                onclick=onclick_js,
-            ),
-            method="post",
-            action=f"/drafts/{draft.id}/delete",
-            enctype="application/x-www-form-urlencoded",
-            hx_post=f"/drafts/{draft.id}/delete",
-            hx_target="body",
-            hx_swap="outerHTML",
-            hx_confirm=_DELETE_CONFIRM,
-            cls="inline-form",
+    if can_delete_draft(auth, draft):
+        onclick_js = f"return confirm({json.dumps(_DELETE_CONFIRM)});"
+        actions.append(
+            Form(  # noqa: F405
+                Button(
+                    "Kustuta eelnõu",
+                    type="submit",
+                    variant="danger",
+                    size="md",
+                    onclick=onclick_js,
+                ),
+                method="post",
+                action=f"/drafts/{draft.id}/delete",
+                enctype="application/x-www-form-urlencoded",
+                hx_post=f"/drafts/{draft.id}/delete",
+                hx_target="body",
+                hx_swap="outerHTML",
+                hx_confirm=_DELETE_CONFIRM,
+                cls="inline-form",
+            )
         )
-    )
 
     return [metadata, Div(*actions, cls="draft-actions")]
 
@@ -677,14 +687,14 @@ def draft_detail_page(req: Request, draft_id: str):
     draft = fetch_draft(parsed)
     if draft is None:
         return _not_found_page(req)
-    if str(draft.org_id) != str(auth.get("org_id")):
+    if not can_view_draft(auth, draft):
         # Defensive: return 404 (not 403) so we never leak the existence
         # of drafts belonging to other organisations.
         return _not_found_page(req)
 
     log_draft_view(auth.get("id"), draft.id)
 
-    detail_body = _draft_detail_body(draft)
+    detail_body = _draft_detail_body(draft, auth=auth)
     tracker = _status_tracker(draft)
 
     return PageShell(
@@ -749,7 +759,7 @@ def draft_status_fragment(req: Request, draft_id: str):
         )
 
     draft = fetch_draft(parsed)
-    if draft is None or str(draft.org_id) != str(auth.get("org_id")):
+    if draft is None or not can_view_draft(auth, draft):
         return Div(  # noqa: F405
             Alert("Eelnõu ei leitud.", variant="warning"),
             id=f"draft-status-{draft_id}",
@@ -764,7 +774,13 @@ def draft_status_fragment(req: Request, draft_id: str):
 
 
 def delete_draft_handler(req: Request, draft_id: str):
-    """POST /drafts/{draft_id}/delete — remove the draft + encrypted file."""
+    """POST /drafts/{draft_id}/delete — remove the draft + encrypted file.
+
+    Owner-only per NFR §5 matrix (fixed by #568). Any same-org colleague
+    used to be able to delete another user's draft because the handler
+    authorized on ``org_id`` alone. The helper in ``app.auth.policy``
+    enforces the full rule: owner OR system admin.
+    """
     auth_or_redirect = _require_auth(req)
     if isinstance(auth_or_redirect, Response):
         return auth_or_redirect
@@ -775,7 +791,11 @@ def delete_draft_handler(req: Request, draft_id: str):
         return _not_found_page(req)
 
     draft = fetch_draft(parsed)
-    if draft is None or str(draft.org_id) != str(auth.get("org_id")):
+    if draft is None:
+        return _not_found_page(req)
+    if not can_delete_draft(auth, draft):
+        # Return 404 rather than 403 so we don't leak existence of the
+        # draft to cross-org or non-owner callers.
         return _not_found_page(req)
 
     storage_path: str | None = None
