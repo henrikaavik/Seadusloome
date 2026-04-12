@@ -116,6 +116,9 @@ from app.admin.sync import (
     _sync_trigger_form,  # noqa: F401
 )
 from app.admin.sync import (
+    sync_status_card as _sync_status_card_impl,
+)
+from app.admin.sync import (
     trigger_sync as _trigger_sync_impl,
 )
 from app.admin.users import (
@@ -128,6 +131,9 @@ from app.admin.users import (
 from app.auth.roles import require_role
 from app.db import get_connection as _connect  # noqa: F401
 from app.sync.jena_loader import check_health as jena_check_health  # noqa: F401
+from app.sync.orchestrator import (
+    has_recent_running_row,  # noqa: F401  -- referenced by rebound trigger_sync
+)
 from app.ui.data.data_table import Column, DataTable  # noqa: F401  -- used by rebound pages
 from app.ui.data.pagination import Pagination  # noqa: F401
 from app.ui.forms.app_form import AppForm  # noqa: F401
@@ -195,6 +201,7 @@ health_check = _rebind(_health_check_impl)
 # tests assert against.
 _run_sync_and_clear_flag = _rebind(_run_sync_and_clear_flag_impl)
 trigger_sync = _rebind(_trigger_sync_impl)
+sync_status_card = _rebind(_sync_status_card_impl)
 
 # admin_dashboard_page calls _check_postgres, jena_check_health,
 # _get_sync_logs, _get_user_stats — all patchable names.  Rebind it so
@@ -225,6 +232,7 @@ _EXPECTED_PAGE_HANDLERS = {
     "admin_performance_page",
     "health_check",
     "trigger_sync",
+    "sync_status_card",
 }
 _rebound_names = {
     name
@@ -252,6 +260,7 @@ _admin_dashboard = require_role("admin")(admin_dashboard_page)
 _admin_audit = require_role("admin")(admin_audit_page)
 _admin_audit_export = require_role("admin")(admin_audit_export)
 _admin_sync = require_role("admin")(trigger_sync)
+_admin_sync_status = require_role("admin")(sync_status_card)
 _admin_analytics = require_role("admin")(admin_analytics_page)
 _admin_costs = require_role("admin")(admin_cost_page)
 _admin_jobs = require_role("admin")(admin_jobs_page)
@@ -267,6 +276,7 @@ def register_admin_routes(rt) -> None:  # type: ignore[no-untyped-def]
     rt("/admin/audit/export", methods=["GET"])(_admin_audit_export)
     rt("/admin/performance", methods=["GET"])(_admin_performance)
     rt("/admin/sync", methods=["POST"])(_admin_sync)
+    rt("/admin/sync/status", methods=["GET"])(_admin_sync_status)
     rt("/admin/analytics", methods=["GET"])(_admin_analytics)
     rt("/admin/costs", methods=["GET"])(_admin_costs)
     rt("/admin/jobs", methods=["GET"])(_admin_jobs)

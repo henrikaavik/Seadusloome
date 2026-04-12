@@ -1952,6 +1952,113 @@
   color: var(--color-danger);
 }
 
+/* ---- Sync live progress panel (issue #567) ---- */
+.sync-running-panel {
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius);
+  border: 1px solid var(--color-info);
+  background: var(--color-info-bg);
+  margin-bottom: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.sync-running-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.sync-elapsed {
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+}
+
+.sync-progress-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.sync-progress-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  border-radius: 999px;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  font-size: var(--text-xs);
+  line-height: 1.2;
+  color: var(--color-text-muted);
+  transition: background 150ms ease, border-color 150ms ease, color 150ms ease;
+}
+
+.sync-progress-pill-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  border-radius: 50%;
+  background: var(--color-border);
+  color: var(--color-text);
+  font-weight: 600;
+  font-size: 0.7rem;
+}
+
+.sync-progress-pill-label {
+  font-weight: 500;
+}
+
+.sync-progress-pill-done {
+  border-color: var(--color-success);
+  color: var(--color-success);
+  background: var(--color-success-bg, transparent);
+}
+
+.sync-progress-pill-done .sync-progress-pill-index {
+  background: var(--color-success);
+  color: var(--color-surface);
+}
+
+.sync-progress-pill-active {
+  border-color: var(--color-info);
+  color: var(--color-info);
+  background: var(--color-surface);
+  animation: sync-progress-pulse 1.5s ease-in-out infinite;
+}
+
+.sync-progress-pill-active .sync-progress-pill-index {
+  background: var(--color-info);
+  color: var(--color-surface);
+}
+
+.sync-progress-pill-pending {
+  opacity: 0.55;
+}
+
+@keyframes sync-progress-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgb(from var(--color-info) r g b / 0.35);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgb(from var(--color-info) r g b / 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sync-progress-pill-active {
+    animation: none;
+  }
+}
+
 /* ---- Job queue summary row ---- */
 .job-queue-summary {
   display: flex;

@@ -15,6 +15,15 @@ from app.sync.validator import load_shapes, validate_graph
 
 _RESULTS_COUNT_RE = re.compile(r"Results \((\d+)\)")
 
+# Phase labels written to sync_log.current_step so the admin UI can
+# render a live progress-pill indicator. Keep this list in sync with the
+# frontend's `_PROGRESS_PHASES` in app/admin/sync.py.
+PHASE_CLONING = "cloning"
+PHASE_CONVERTING = "converting"
+PHASE_VALIDATING = "validating"
+PHASE_UPLOADING = "uploading"
+PHASE_REINGESTING = "reingesting"
+
 
 def _parse_violation_count(results_line: str) -> int:
     """Extract the integer violation count from a pyshacl `Results (N)` line.
@@ -78,24 +87,126 @@ def _trigger_rag_ingestion() -> None:
         logger.info("RAG re-ingestion completed in new event loop")
 
 
-def log_sync(
+def _insert_running_row(started_at: datetime, step: str) -> int | None:
+    """Insert a 'running' sync_log row and return its id.
+
+    Returns None on DB failure — the orchestrator continues without a
+    log id and falls back to a single INSERT at the end.
+    """
+    try:
+        with get_connection() as conn:
+            row = conn.execute(
+                "INSERT INTO sync_log (started_at, status, current_step) "
+                "VALUES (%s, 'running', %s) RETURNING id",
+                (started_at, step),
+            ).fetchone()
+            conn.commit()
+            return int(row[0]) if row else None
+    except Exception:
+        logger.exception("Failed to insert running sync_log row")
+        return None
+
+
+def _update_step(log_id: int | None, step: str) -> None:
+    """Update the current_step for an in-flight sync_log row."""
+    if log_id is None:
+        return
+    try:
+        with get_connection() as conn:
+            conn.execute(
+                "UPDATE sync_log SET current_step = %s WHERE id = %s",
+                (step, log_id),
+            )
+            conn.commit()
+    except Exception:
+        logger.exception("Failed to update sync_log step")
+
+
+def _finalize_row(
+    log_id: int | None,
     status: str,
     started_at: datetime,
     entity_count: int | None = None,
     error_message: str | None = None,
 ) -> None:
-    """Write a sync_log entry to PostgreSQL."""
+    """Finalize a sync_log row.
+
+    If ``log_id`` is not None, updates the existing 'running' row in place
+    (clearing current_step and setting finished_at). If the initial INSERT
+    failed and ``log_id`` is None, falls back to a terminal-only INSERT so
+    operators still see a record.
+    """
+    finished_at = datetime.now(UTC)
     try:
         with get_connection() as conn:
-            conn.execute(
-                """INSERT INTO sync_log
-                   (started_at, finished_at, status, entity_count, error_message)
-                   VALUES (%s, %s, %s, %s, %s)""",  # type: ignore[arg-type]
-                (started_at, datetime.now(UTC), status, entity_count, error_message),
-            )
+            if log_id is not None:
+                conn.execute(
+                    """UPDATE sync_log
+                       SET status = %s,
+                           finished_at = %s,
+                           entity_count = %s,
+                           error_message = %s,
+                           current_step = NULL
+                       WHERE id = %s""",  # type: ignore[arg-type]
+                    (status, finished_at, entity_count, error_message, log_id),
+                )
+            else:
+                conn.execute(
+                    """INSERT INTO sync_log
+                       (started_at, finished_at, status, entity_count, error_message)
+                       VALUES (%s, %s, %s, %s, %s)""",  # type: ignore[arg-type]
+                    (started_at, finished_at, status, entity_count, error_message),
+                )
             conn.commit()
     except Exception:
-        logger.exception("Failed to write sync log")
+        logger.exception("Failed to finalize sync_log row")
+
+
+def mark_stale_running_as_failed() -> int:
+    """Mark any lingering 'running' rows as failed.
+
+    Called at app startup (app/main.py) to clean up rows orphaned by a
+    process crash or restart. Returns the number of rows updated.
+    """
+    try:
+        with get_connection() as conn:
+            cur = conn.execute(
+                """UPDATE sync_log
+                   SET status = 'failed',
+                       finished_at = now(),
+                       error_message = 'Process restarted during sync',
+                       current_step = NULL
+                   WHERE status = 'running'"""
+            )
+            conn.commit()
+            return cur.rowcount or 0
+    except Exception:
+        logger.exception("Failed to clean stale running rows")
+        return 0
+
+
+def has_recent_running_row(max_age_minutes: int = 30) -> bool:
+    """Return True if a sync_log row with status='running' exists and is
+    recent enough to still be plausibly alive.
+
+    Used by the webhook to avoid spawning a parallel sync while an
+    admin-triggered one is in flight. The age bound protects against a
+    phantom 'running' row wedging future syncs if startup cleanup also
+    failed.
+    """
+    try:
+        with get_connection() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM sync_log "
+                "WHERE status = 'running' "
+                "  AND started_at > now() - (%s::text || ' minutes')::interval "
+                "LIMIT 1",
+                (str(max_age_minutes),),
+            ).fetchone()
+            return row is not None
+    except Exception:
+        logger.exception("Failed to check for running sync row")
+        return False
 
 
 def clone_or_pull(target_dir: Path) -> None:
@@ -137,6 +248,10 @@ def run_sync(repo_dir: Path | None = None) -> bool:
     started_at = datetime.now(UTC)
     logger.info("Starting sync pipeline at %s", started_at.isoformat())
 
+    # Insert 'running' row up front so the admin UI can show live progress.
+    # All subsequent step transitions reference this row via log_id.
+    log_id = _insert_running_row(started_at, PHASE_CLONING)
+
     use_temp = repo_dir is None
     if use_temp:
         temp_dir = tempfile.mkdtemp(prefix="ontology-sync-")
@@ -144,9 +259,11 @@ def run_sync(repo_dir: Path | None = None) -> bool:
 
     try:
         # Step 1: Clone or pull
+        _update_step(log_id, PHASE_CLONING)
         clone_or_pull(repo_dir)
 
         # Step 2: Convert JSON-LD → RDF
+        _update_step(log_id, PHASE_CONVERTING)
         logger.info("Converting JSON-LD to RDF...")
         graph = convert_ontology(repo_dir)
         entity_count = len(graph)
@@ -163,6 +280,7 @@ def run_sync(repo_dir: Path | None = None) -> bool:
         # provisions). The right long-term policy is "validate, log,
         # keep going" — the admin dashboard surfaces the warning count
         # so cleanup can happen over time without blocking deploys.
+        _update_step(log_id, PHASE_VALIDATING)
         shacl_warning: str | None = None
         shapes_dir = repo_dir / "shacl"
         if shapes_dir.exists() and any(shapes_dir.iterdir()):
@@ -193,23 +311,57 @@ def run_sync(repo_dir: Path | None = None) -> bool:
         turtle = serialize_to_turtle(graph)
 
         # Step 5: Clear and upload
+        _update_step(log_id, PHASE_UPLOADING)
         logger.info("Clearing default graph...")
-        clear_default_graph()
+        cleared = clear_default_graph()
+        if not cleared:
+            _finalize_row(
+                log_id,
+                "failed",
+                started_at,
+                error_message="Clear default graph failed — aborting (data intact)",
+            )
+            return False
 
         logger.info("Uploading to Jena Fuseki...")
         success = upload_turtle(turtle)
         if not success:
-            log_sync("failed", started_at, error_message="Upload to Jena failed")
+            logger.critical(
+                "Upload failed AFTER default graph was cleared — "
+                "ontology is in a DEGRADED state with zero triples. "
+                "A successful re-sync is required to restore data."
+            )
+            _finalize_row(
+                log_id,
+                "failed",
+                started_at,
+                error_message=(
+                    "Upload to Jena failed after graph was cleared — "
+                    "ontology is degraded (empty). Re-sync required."
+                ),
+            )
             return False
 
-        # Step 6: Verify
+        # Step 6: Verify — post-upload health check
         final_count = get_triple_count()
+        if final_count == 0:
+            logger.warning(
+                "Post-upload health check: triple count is ZERO despite "
+                "upload reporting success — ontology may be degraded"
+            )
         logger.info("Sync complete. %d triples in Jena.", final_count)
+
+        # Step 7: RAG re-ingestion runs under its own phase label so the
+        # admin UI shows "Taasindekseerimine" while Voyage embeds chunks.
+        # Marked before the notify call so clients polling see the shift
+        # immediately; finalization to 'success' happens after.
+        _update_step(log_id, PHASE_REINGESTING)
 
         # If SHACL produced warnings, record them in the same log row so
         # the admin dashboard shows both success + warning count in one
         # place. Row remains status=success — this is informational.
-        log_sync(
+        _finalize_row(
+            log_id,
             "success",
             started_at,
             entity_count=final_count,
@@ -234,7 +386,7 @@ def run_sync(repo_dir: Path | None = None) -> bool:
 
     except Exception as e:
         logger.exception("Sync pipeline failed")
-        log_sync("failed", started_at, error_message=str(e)[:1000])
+        _finalize_row(log_id, "failed", started_at, error_message=str(e)[:1000])
 
         # Notify all system admins about the sync failure.
         try:

@@ -281,13 +281,15 @@ class TestSyncLogs:
         mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
         mock_connect.return_value.__exit__ = MagicMock(return_value=False)
         mock_conn.execute.return_value.fetchall.return_value = [
-            (1, "2024-06-01 10:00", "2024-06-01 10:05", "success", 5000, None),
+            (1, "2024-06-01 10:00", "2024-06-01 10:05", "success", 5000, None, None),
         ]
 
         result = _get_sync_logs()
         assert len(result) == 1
         assert result[0]["status"] == "success"
         assert result[0]["entity_count"] == 5000
+        # Migration 013 adds current_step — helper must surface it.
+        assert "current_step" in result[0]
 
     @patch("app.templates.admin_dashboard._connect")
     def test_get_sync_logs_returns_empty_on_error(self, mock_connect: MagicMock):
@@ -296,6 +298,149 @@ class TestSyncLogs:
         mock_connect.side_effect = Exception("DB unavailable")
         result = _get_sync_logs()
         assert result == []
+
+
+# ---------------------------------------------------------------------------
+# Live-progress sync card (issue #567)
+# ---------------------------------------------------------------------------
+
+
+class TestSyncCardLiveProgress:
+    """The admin sync card must auto-poll while a sync is running and stop
+    polling when it reaches a terminal state."""
+
+    def _running_log(self, step: str = "converting") -> dict:
+        """Build a fake sync_log row representing a sync in flight."""
+        from datetime import UTC, datetime
+
+        return {
+            "id": 1,
+            "started_at": datetime.now(UTC),
+            "finished_at": None,
+            "status": "running",
+            "entity_count": None,
+            "error_message": None,
+            "current_step": step,
+        }
+
+    def _success_log(self) -> dict:
+        from datetime import UTC, datetime
+
+        return {
+            "id": 2,
+            "started_at": datetime.now(UTC),
+            "finished_at": datetime.now(UTC),
+            "status": "success",
+            "entity_count": 5_000_000,
+            "error_message": None,
+            "current_step": None,
+        }
+
+    def test_card_polls_while_running(self):
+        """A running row triggers HTMX polling on the card element."""
+        from fasthtml.common import to_xml
+
+        from app.admin.sync import _sync_card
+
+        html = to_xml(_sync_card([self._running_log()]))
+        assert "/admin/sync/status" in html
+        assert "every 3s" in html
+        # Progress pills render with Estonian phase labels
+        assert "Konverteerimine" in html
+
+    def test_card_stops_polling_on_terminal_state(self):
+        """A success/failed row must NOT emit polling attributes."""
+        from fasthtml.common import to_xml
+
+        from app.admin.sync import _sync_card
+
+        html = to_xml(_sync_card([self._success_log()]))
+        assert "/admin/sync/status" not in html
+        assert "every 3s" not in html
+
+    def test_progress_pills_mark_completed_phases_done(self):
+        """Pills before the current step render with the 'done' state."""
+        from fasthtml.common import to_xml
+
+        from app.admin.sync import _sync_card
+
+        html = to_xml(_sync_card([self._running_log(step="uploading")]))
+        # Cloning + converting + validating completed before uploading,
+        # so their pills should carry the -done modifier class.
+        assert "sync-progress-pill-done" in html
+        # Uploading is active
+        assert "sync-progress-pill-active" in html
+        # Reingesting is still pending
+        assert "sync-progress-pill-pending" in html
+
+    @patch("app.templates.admin_dashboard._get_sync_logs")
+    def test_sync_status_endpoint_renders_card(self, mock_logs: MagicMock):
+        """GET /admin/sync/status returns the same card fragment the
+        polling loop expects to swap in-place."""
+        from starlette.requests import Request
+
+        from app.templates.admin_dashboard import sync_status_card
+
+        mock_logs.return_value = [self._running_log()]
+
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/admin/sync/status",
+            "headers": [],
+            "query_string": b"",
+            "scheme": "http",
+            "server": ("testserver", 80),
+            "client": ("127.0.0.1", 12345),
+            "auth": {"role": "admin", "id": "admin-test", "email": "a@b.ee"},
+        }
+        req = Request(scope)
+
+        result = sync_status_card(req)
+
+        from fasthtml.common import to_xml
+
+        html = to_xml(result)
+        assert 'id="sync-card"' in html
+        assert "every 3s" in html
+
+    @patch("app.templates.admin_dashboard._get_sync_logs")
+    @patch("app.templates.admin_dashboard.has_recent_running_row", return_value=True)
+    def test_post_sync_detects_running_via_db(
+        self,
+        mock_has_running: MagicMock,
+        mock_logs: MagicMock,
+    ):
+        """If the DB already shows a running sync, trigger_sync must NOT
+        spawn a second thread and must show the 'already running' banner."""
+        from starlette.requests import Request
+
+        from app.templates import admin_dashboard
+        from app.templates.admin_dashboard import trigger_sync
+
+        mock_logs.return_value = [self._running_log()]
+        admin_dashboard._sync_in_progress = False
+
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/admin/sync",
+            "headers": [],
+            "query_string": b"",
+            "scheme": "http",
+            "server": ("testserver", 80),
+            "client": ("127.0.0.1", 12345),
+            "auth": {"role": "admin", "id": "admin-test", "email": "a@b.ee"},
+        }
+        req = Request(scope)
+
+        with patch("threading.Thread") as mock_thread_cls:
+            trigger_sync(req)
+            mock_thread_cls.assert_not_called()
+
+        # In-memory flag must be released again so a real subsequent sync
+        # (after the other one finishes) can proceed.
+        assert admin_dashboard._sync_in_progress is False
 
 
 class TestUserStats:

@@ -61,6 +61,20 @@ async def lifespan(_app):  # type: ignore[no-untyped-def]
     a real worker thread.
     """
     global _worker_thread
+
+    # Reconcile any sync_log rows orphaned by a previous process crash
+    # (issue #567). A lingering 'running' row would otherwise make the
+    # admin card display a stuck progress indicator and the DB-level
+    # lock would block new syncs. Best-effort: swallow failures.
+    try:
+        from app.sync.orchestrator import mark_stale_running_as_failed
+
+        stale = mark_stale_running_as_failed()
+        if stale:
+            logger.warning("Marked %d stale 'running' sync_log row(s) as failed", stale)
+    except Exception:
+        logger.exception("Startup: stale sync_log cleanup failed (non-critical)")
+
     if os.environ.get("DISABLE_BACKGROUND_WORKER") == "1":
         logger.info("Background worker disabled via DISABLE_BACKGROUND_WORKER=1")
         yield

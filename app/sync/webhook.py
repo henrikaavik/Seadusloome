@@ -9,7 +9,7 @@ import threading
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from app.sync.orchestrator import run_sync
+from app.sync.orchestrator import has_recent_running_row, run_sync
 
 logger = logging.getLogger(__name__)
 
@@ -25,11 +25,20 @@ def verify_signature(payload: bytes, signature: str, secret: str) -> bool:
     return hmac.compare_digest(expected, signature)
 
 
-def trigger_sync_background() -> None:
-    """Run sync in a background thread so we can respond to GitHub immediately."""
+def trigger_sync_background() -> bool:
+    """Run sync in a background thread so we can respond to GitHub immediately.
+
+    Returns ``False`` if another sync is already in flight (detected via
+    sync_log.status='running') and the request should be treated as a
+    no-op. Returns ``True`` when a new sync thread has been spawned.
+    """
+    if has_recent_running_row():
+        logger.info("Webhook sync skipped — another sync is already running")
+        return False
     thread = threading.Thread(target=run_sync, daemon=True)
     thread.start()
     logger.info("Sync triggered in background thread")
+    return True
 
 
 async def webhook_handler(request: Request) -> JSONResponse:
@@ -75,8 +84,10 @@ async def webhook_handler(request: Request) -> JSONResponse:
         return JSONResponse({"status": "ignored", "ref": ref})
 
     logger.info("Ontology repo push to main detected, triggering sync")
-    trigger_sync_background()
+    started = trigger_sync_background()
 
+    if not started:
+        return JSONResponse({"status": "sync_in_progress"})
     return JSONResponse({"status": "sync_triggered"})
 
 

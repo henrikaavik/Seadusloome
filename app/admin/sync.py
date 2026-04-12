@@ -4,33 +4,60 @@ from __future__ import annotations
 
 import logging
 import threading
+from datetime import UTC, datetime
 
 from fasthtml.common import *  # noqa: F403
 from starlette.requests import Request
 
 from app.admin._shared import _tooltip
 from app.db import get_connection as _connect
+from app.sync.orchestrator import (
+    PHASE_CLONING,
+    PHASE_CONVERTING,
+    PHASE_REINGESTING,
+    PHASE_UPLOADING,
+    PHASE_VALIDATING,
+    has_recent_running_row,
+)
 from app.ui.data.data_table import Column, DataTable
 from app.ui.forms.app_form import AppForm
 from app.ui.primitives.badge import StatusBadge
 from app.ui.primitives.button import Button  # noqa: F401, F811  -- shadow guard
 from app.ui.surfaces.card import Card, CardBody, CardHeader
 
-# Module-level lock so two admins clicking "Sync now" at the same time
-# don't trigger two parallel clones.
+# Module-level lock — keeps rapid double-clicks on the "Sync now" button
+# from both spawning a thread before the DB's running row becomes visible.
+# The authoritative lock is now at the DB layer (sync_log.status='running'),
+# but this in-memory guard closes the race window for admins on the same
+# worker process.
 _sync_lock = threading.Lock()
 _sync_in_progress = False
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Phase metadata
+# ---------------------------------------------------------------------------
+
+# Ordered list of pipeline phases with their Estonian display labels. Order
+# matters: the UI uses the index to decide which pills are done / active /
+# pending. Keep in sync with app/sync/orchestrator.py phase constants.
+_PROGRESS_PHASES: list[tuple[str, str]] = [
+    (PHASE_CLONING, "Kloonimine"),
+    (PHASE_CONVERTING, "Konverteerimine"),
+    (PHASE_VALIDATING, "Valideerimine"),
+    (PHASE_UPLOADING, "\u00dcleslaadimine"),
+    (PHASE_REINGESTING, "Taasindekseerimine"),
+]
+
+# ---------------------------------------------------------------------------
 # DB helpers
 # ---------------------------------------------------------------------------
 
 _SYNC_STATUS_MAP = {
-    "running": ("running", "Käimas"),
-    "success": ("ok", "Õnnestus"),
-    "failed": ("failed", "Ebaõnnestus"),
+    "running": ("running", "K\u00e4imas"),
+    "success": ("ok", "\u00d5nnestus"),
+    "failed": ("failed", "Eba\u00f5nnestus"),
 }
 
 
@@ -39,7 +66,8 @@ def _get_sync_logs(limit: int = 5) -> list[dict]:  # type: ignore[type-arg]
     try:
         with _connect() as conn:
             rows = conn.execute(
-                "SELECT id, started_at, finished_at, status, entity_count, error_message "
+                "SELECT id, started_at, finished_at, status, entity_count, "
+                "error_message, current_step "
                 "FROM sync_log ORDER BY started_at DESC LIMIT %s",
                 (limit,),
             ).fetchall()
@@ -51,6 +79,7 @@ def _get_sync_logs(limit: int = 5) -> list[dict]:  # type: ignore[type-arg]
                 "status": r[3],
                 "entity_count": r[4],
                 "error_message": r[5],
+                "current_step": r[6] if len(r) > 6 else None,
             }
             for r in rows
         ]
@@ -79,7 +108,7 @@ def _sync_trigger_form():
     """
     return AppForm(
         Button(
-            "Sünkroniseeri kohe",
+            "S\u00fcnkroniseeri kohe",
             type="submit",
             variant="primary",
             size="sm",
@@ -94,17 +123,117 @@ def _sync_trigger_form():
     )
 
 
-def _sync_card(sync_logs: list[dict], *, status_banner: tuple[str, str] | None = None):  # type: ignore[type-arg]
+def _elapsed_seconds(started_at: datetime | None) -> int:
+    """Return whole seconds since ``started_at``. 0 if unknown."""
+    if started_at is None:
+        return 0
+    # Postgres may hand back a naive datetime depending on driver config;
+    # treat naive as UTC since that's what _insert_running_row writes.
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=UTC)
+    delta = datetime.now(UTC) - started_at
+    return max(0, int(delta.total_seconds()))
+
+
+def _format_elapsed(seconds: int) -> str:
+    """Format as ``M:SS`` for display next to the running badge."""
+    minutes, secs = divmod(seconds, 60)
+    return f"{minutes}:{secs:02d}"
+
+
+def _progress_pills(current_step: str | None):
+    """Render the 5-phase progress indicator.
+
+    Pills before the current step are marked ``done``; the current step is
+    ``active``; later steps are ``pending``. If ``current_step`` is not in
+    the known list (legacy rows), every pill renders as pending so the
+    admin still sees the skeleton.
+    """
+    current_index = -1
+    for i, (key, _) in enumerate(_PROGRESS_PHASES):
+        if key == current_step:
+            current_index = i
+            break
+
+    pills = []
+    for i, (_key, label) in enumerate(_PROGRESS_PHASES):
+        if current_index == -1:
+            state = "pending"
+        elif i < current_index:
+            state = "done"
+        elif i == current_index:
+            state = "active"
+        else:
+            state = "pending"
+        pills.append(
+            Span(  # noqa: F405
+                Span(str(i + 1), cls="sync-progress-pill-index"),  # noqa: F405
+                Span(label, cls="sync-progress-pill-label"),  # noqa: F405
+                cls=f"sync-progress-pill sync-progress-pill-{state}",
+                data_phase=_PROGRESS_PHASES[i][0],
+            )
+        )
+    return Div(*pills, cls="sync-progress-pills", role="status", aria_live="polite")  # noqa: F405
+
+
+def _running_panel(entry: dict):  # type: ignore[type-arg]
+    """Render the live progress panel shown while a sync is running."""
+    started_at = entry.get("started_at")
+    elapsed = _elapsed_seconds(started_at)
+    return Div(  # noqa: F405
+        Div(  # noqa: F405
+            _sync_status_badge("running"),
+            Span(
+                f"Kestab {_format_elapsed(elapsed)}",
+                cls="sync-elapsed",
+                data_testid="sync-elapsed",
+            ),
+            cls="sync-running-header",
+        ),
+        _progress_pills(entry.get("current_step")),
+        cls="sync-running-panel",
+    )
+
+
+def _sync_card(
+    sync_logs: list[dict],  # type: ignore[type-arg]
+    *,
+    status_banner: tuple[str, str] | None = None,
+):
     """Render the sync status card.
 
     Args:
-        sync_logs: recent sync_log rows from the DB
+        sync_logs: recent sync_log rows from the DB (newest first).
         status_banner: optional (variant, message) tuple shown above the
             log table — used by POST /admin/sync to surface 'queued' /
             'already running' feedback.
+
+    Auto-polling: when the newest entry has status='running', the
+    returned card carries ``hx-get="/admin/sync/status"`` with an every-3s
+    trigger so it re-renders itself until the sync reaches a terminal
+    state. When status is terminal the polling attributes are absent, so
+    HTMX stops polling automatically.
     """
-    if not sync_logs:
-        body = P("Sünkroniseerimisi ei leitud.", cls="muted-text")  # noqa: F405
+    is_running = bool(sync_logs) and sync_logs[0].get("status") == "running"
+
+    body_nodes: list = []
+
+    if status_banner is not None:
+        variant, message = status_banner
+        body_nodes.append(
+            Div(message, cls=f"sync-banner sync-banner-{variant}", role="status")  # noqa: F405
+        )
+
+    if is_running:
+        body_nodes.append(_running_panel(sync_logs[0]))
+
+    # Historical log table — always shown (gives context even while
+    # the live panel is up).
+    log_rows = sync_logs[1:] if is_running else sync_logs
+    if not log_rows:
+        body_nodes.append(
+            P("S\u00fcnkroniseerimisi ei leitud.", cls="muted-text")  # noqa: F405
+        )
     else:
         columns = [
             Column(key="started", label="Algusaeg", sortable=False),
@@ -118,27 +247,38 @@ def _sync_card(sync_logs: list[dict], *, status_banner: tuple[str, str] | None =
             Column(key="error_message", label="Veateade", sortable=False),
         ]
         rows = []
-        for entry in sync_logs:
+        for entry in log_rows:
             started = entry["started_at"]
             rows.append(
                 {
-                    "started": started.strftime("%d.%m.%Y %H:%M") if started else "—",
+                    "started": started.strftime("%d.%m.%Y %H:%M") if started else "\u2014",
                     "status_raw": entry["status"],
                     "status": entry["status"],
                     "entity_count": (
-                        str(entry["entity_count"]) if entry["entity_count"] is not None else "—"
+                        str(entry["entity_count"])
+                        if entry["entity_count"] is not None
+                        else "\u2014"
                     ),
-                    "error_message": entry["error_message"] or "—",
+                    "error_message": entry["error_message"] or "\u2014",
                 }
             )
-        body = DataTable(columns=columns, rows=rows)
+        body_nodes.append(DataTable(columns=columns, rows=rows))
 
-    body_nodes: list = []
-    if status_banner is not None:
-        variant, message = status_banner
-        body_nodes.append(Div(message, cls=f"sync-banner sync-banner-{variant}", role="status"))  # noqa: F405
-    body_nodes.append(body)
     body_nodes.append(_sync_trigger_form())
+
+    card_kwargs: dict = {"id": "sync-card"}
+    if is_running:
+        # Poll ourselves every 3s while the sync is running. HTMX swaps
+        # this same element outerHTML with the next render — when the
+        # sync finishes the new response omits these attrs and polling
+        # stops.
+        card_kwargs.update(
+            {
+                "hx_get": "/admin/sync/status",
+                "hx_trigger": "every 3s",
+                "hx_swap": "outerHTML",
+            }
+        )
 
     return Card(
         CardHeader(
@@ -149,7 +289,7 @@ def _sync_card(sync_logs: list[dict], *, status_banner: tuple[str, str] | None =
             )
         ),
         CardBody(*body_nodes),
-        id="sync-card",
+        **card_kwargs,
     )
 
 
@@ -184,19 +324,43 @@ def trigger_sync(req: Request):
     """
     global _sync_in_progress
 
-    already_running = False
+    already_running_memory = False
     with _sync_lock:
         if _sync_in_progress:
-            already_running = True
+            already_running_memory = True
         else:
             _sync_in_progress = True
 
-    if already_running:
-        banner = ("warning", "Sünkroniseerimine on juba käimas.")
+    # DB-level check catches syncs kicked off by the webhook or another
+    # worker process where the in-memory flag wouldn't see them.
+    already_running_db = False
+    if not already_running_memory:
+        already_running_db = has_recent_running_row()
+        if already_running_db:
+            # Release the flag we just set — another sync owns the slot.
+            with _sync_lock:
+                _sync_in_progress = False
+
+    if already_running_memory or already_running_db:
+        banner = ("warning", "S\u00fcnkroniseerimine on juba k\u00e4imas.")
     else:
         thread = threading.Thread(target=_run_sync_and_clear_flag, daemon=True)
         thread.start()
-        banner = ("info", "Sünkroniseerimine käivitati — vaata tulemust allpool olevast logist.")
+        banner = (
+            "info",
+            "S\u00fcnkroniseerimine k\u00e4ivitati \u2014 edenemist n\u00e4eb allpool reaalajas.",
+        )
 
     sync_logs = _get_sync_logs()
     return _sync_card(sync_logs, status_banner=banner)
+
+
+def sync_status_card(req: Request):
+    """GET /admin/sync/status — re-render the sync card for HTMX polling.
+
+    Used by the running-state card's ``hx-get`` trigger. Returns the
+    same fragment as the POST handler but without a status banner (no
+    fresh admin action to announce).
+    """
+    sync_logs = _get_sync_logs()
+    return _sync_card(sync_logs)
