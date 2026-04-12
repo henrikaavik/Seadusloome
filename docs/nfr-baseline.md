@@ -20,7 +20,7 @@ This document is the single source of truth for security, privacy, access contro
 
 **Mandatory compensating controls:**
 
-1. **File encryption** — AES-256-GCM via Fernet with key versioning; `DRAFT_ENCRYPTION_KEY` in Coolify secrets
+1. **File encryption** — Fernet (AES-128-CBC + HMAC-SHA256, authenticated encryption) with key versioning; `DRAFT_ENCRYPTION_KEY` in Coolify secrets. Fernet provides authenticated encryption via the `cryptography` library's vetted implementation; the 128-bit key length is adequate for the documented threat model (protecting encrypted files from a DB or storage snapshot — not side-channel attackers with live access). A future upgrade to AES-256-GCM would require a coordinated re-encryption migration tracked separately.
 2. **Encrypted parsed text** — `drafts.parsed_text` column encrypted at rest via Fernet (not just "assumed" DB-level encryption)
 3. **Encrypted drafting sessions** — `drafting_sessions.draft_content` JSONB encrypted via the same Fernet key
 4. **Strict org-scoped access** — every query includes `WHERE org_id = %s`; cross-org access returns 404 (not 403) to prevent enumeration
@@ -197,7 +197,7 @@ audit_log (
 
 | Data | Mechanism | Key source |
 |------|-----------|------------|
-| Draft file content | AES-256-GCM (Fernet) | `DRAFT_ENCRYPTION_KEY` (Coolify secret) |
+| Draft file content | Fernet (AES-128-CBC + HMAC-SHA256) | `DRAFT_ENCRYPTION_KEY` (Coolify secret) |
 | `drafts.parsed_text` | Application-level Fernet encryption | same key |
 | `drafting_sessions.draft_content` | Application-level Fernet | same key |
 | `messages.content` (chat) | Application-level Fernet | same key |

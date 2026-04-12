@@ -49,7 +49,7 @@ create table if not exists drafts (
     filename        text        not null,
     content_type    text        not null,
     file_size       bigint      not null check (file_size >= 0),
-    storage_path    text        not null,    -- path to AES-256-GCM encrypted file on disk
+    storage_path    text        not null,    -- path to Fernet-encrypted (AES-128-CBC + HMAC-SHA256) file on disk
     graph_uri       text        not null unique, -- Jena named graph URI, e.g. urn:draft:{id}
     status          text        not null check (status in (
                                     'uploaded',

@@ -553,7 +553,7 @@ Coolify handles: TLS certificates (Let's Encrypt auto-renewal), reverse proxy ro
 
 ### 8.2 Security Considerations
 
-Given that draft legislation may be sensitive prior to publication, the system must enforce: TLS everywhere (handled by Coolify/Traefik), **mandatory** encryption-at-rest for draft files (AES-256-GCM via Fernet) and encrypted storage of parsed text in PostgreSQL, strict org-scoped role-based API authorization, persistent draft named graphs with cascade delete on explicit removal, audit logging of all document uploads, draft accesses, and AI interactions, LLM API calls made server-side only (no client-side API keys), PII scrubbing before every LLM prompt, and API keys stored as Coolify encrypted secrets. Draft retention is "persistent until owner deletes" with a mandatory 90-day auto-archive warning requiring user action (keep or delete).
+Given that draft legislation may be sensitive prior to publication, the system must enforce: TLS everywhere (handled by Coolify/Traefik), **mandatory** encryption-at-rest for draft files (Fernet (AES-128-CBC + HMAC-SHA256)) and encrypted storage of parsed text in PostgreSQL, strict org-scoped role-based API authorization, persistent draft named graphs with cascade delete on explicit removal, audit logging of all document uploads, draft accesses, and AI interactions, LLM API calls made server-side only (no client-side API keys), PII scrubbing before every LLM prompt, and API keys stored as Coolify encrypted secrets. Draft retention is "persistent until owner deletes" with a mandatory 90-day auto-archive warning requiring user action (keep or delete).
 
 ---
 
