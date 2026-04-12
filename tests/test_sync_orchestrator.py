@@ -132,7 +132,7 @@ def test_run_sync_continues_on_shacl_violations(
 ):
     """SHACL violations should log a WARNING but the sync must still
     upload and return True. _finalize_row must be called with
-    status=success and an error_message that begins with 'WARN: SHACL'.
+    status=success and an error_message that summarises the violations.
 
     Also asserts the staged-publish contract (#573): upload goes to a
     staging graph and is promoted via COPY to the default graph.
@@ -165,7 +165,11 @@ def test_run_sync_continues_on_shacl_violations(
     assert args[1] == "success"
     error_message = kwargs.get("error_message")
     assert error_message is not None
-    assert "WARN: SHACL" in error_message
+    # The summariser emits Estonian prose + the violation total. The
+    # mock report lacks proper "Constraint Violation in X" blocks so
+    # the summariser falls back to "unable to group" but still prefixes
+    # the count with SHACL.
+    assert "SHACL" in error_message
     assert "213" in error_message
 
 

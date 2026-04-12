@@ -17,6 +17,7 @@ from app.sync.jena_loader import (
     graph_triple_count,
     upload_turtle_to_named_graph,
 )
+from app.sync.shacl_summary import summarise_report
 from app.sync.validator import load_shapes, validate_graph
 
 _RESULTS_COUNT_RE = re.compile(r"Results \((\d+)\)")
@@ -362,7 +363,7 @@ def run_sync(
             if len(shapes) > 0:
                 conforms, report = validate_graph(graph, shapes)
                 if not conforms:
-                    # Extract "Results (N):" line for a clean summary
+                    # Extract "Results (N):" line for a clean log summary
                     results_line = next(
                         (line for line in report.splitlines() if "Results (" in line),
                         "Results (unknown)",
@@ -373,7 +374,13 @@ def run_sync(
                         violation_count,
                         results_line,
                     )
-                    shacl_warning = f"WARN: SHACL {results_line} — {report[:900]}"
+                    # Store a condensed human-readable summary in the
+                    # sync_log row instead of the raw pyshacl wall of
+                    # text (which was 900+ chars of noise per sync).
+                    # The summary groups violations by constraint type
+                    # + property and shows up to 3 sample focus nodes
+                    # per group, making the admin dashboard readable.
+                    shacl_warning = summarise_report(report)
                 else:
                     logger.info("SHACL validation passed with no violations")
         else:
