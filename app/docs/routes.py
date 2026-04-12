@@ -29,7 +29,6 @@ from fasthtml.common import *  # noqa: F403
 from starlette.requests import Request
 from starlette.responses import RedirectResponse, Response
 
-from app.auth.audit import log_action
 from app.auth.helpers import require_auth as _require_auth
 from app.auth.policy import can_delete_draft, can_view_draft
 from app.db import get_connection as _connect
@@ -44,8 +43,6 @@ from app.docs.draft_model import (
     delete_draft,
     fetch_draft,
     fetch_drafts_for_org,
-    touch_draft_access,
-    touch_draft_access_conn,
 )
 from app.docs.upload import DraftUploadError, handle_upload
 from app.rag.retriever import delete_chunks_for_draft
@@ -89,24 +86,6 @@ _PAGE_SIZE = 25
 _DELETE_CONFIRM = (
     "Kas olete kindel, et soovite selle eelnõu kustutada? Seda tegevust ei saa tagasi võtta."
 )
-
-# #572: drafts whose ``last_accessed_at`` is older than this are stale
-# and the UI surfaces a "Hoia alles" (Keep) button alongside the delete
-# button. The same threshold is used by the archive-warning scan job.
-_STALE_THRESHOLD_DAYS = 90
-
-
-def _is_draft_stale(draft: Draft) -> bool:
-    """Return True when the draft has not been accessed for 90+ days (#572)."""
-    last = getattr(draft, "last_accessed_at", None)
-    if last is None:
-        return False
-    try:
-        elapsed = (datetime.now(UTC) - last).total_seconds()
-    except (TypeError, ValueError):
-        return False
-    return elapsed > _STALE_THRESHOLD_DAYS * 24 * 60 * 60
-
 
 _STATUS_KEY_MAP: dict[str, str] = {
     "uploaded": "pending",
@@ -658,30 +637,6 @@ def _draft_detail_body(draft: Draft, auth: Mapping[str, Any] | None = None) -> l
             )
         )
 
-    # #572: stale drafts (not accessed for 90+ days) get a "Hoia alles"
-    # button next to the delete form so the owner can reset the
-    # archive clock without scrolling through the delete confirmation.
-    # The owner-only rule matches the delete policy — resetting the
-    # clock is a governance action, not a passive read.
-    if _is_draft_stale(draft) and can_delete_draft(auth, draft):
-        actions.append(
-            Form(  # noqa: F405
-                Button(
-                    "Hoia alles",
-                    type="submit",
-                    variant="primary",
-                    size="md",
-                ),
-                method="post",
-                action=f"/drafts/{draft.id}/keep",
-                enctype="application/x-www-form-urlencoded",
-                hx_post=f"/drafts/{draft.id}/keep",
-                hx_target="body",
-                hx_swap="outerHTML",
-                cls="inline-form",
-            )
-        )
-
     # #443: the form needs an explicit ``hx_post`` so HTMX intercepts
     # the submit and ``hx_confirm`` actually fires. Without it, the
     # browser does a native form POST, the confirmation prompt is
@@ -738,8 +693,6 @@ def draft_detail_page(req: Request, draft_id: str):
         return _not_found_page(req)
 
     log_draft_view(auth.get("id"), draft.id)
-    # #572: surface-to-user counts as access; reset the archive clock.
-    touch_draft_access_conn(draft.id)
 
     detail_body = _draft_detail_body(draft, auth=auth)
     tracker = _status_tracker(draft)
@@ -945,57 +898,6 @@ def delete_draft_handler(req: Request, draft_id: str):
 # ---------------------------------------------------------------------------
 
 
-def keep_draft_handler(req: Request, draft_id: str):
-    """POST /drafts/{draft_id}/keep — reset the 90-day archive clock.
-
-    Owner-only per the same policy as delete — resetting the archive
-    clock is a governance action that re-commits the org to retaining
-    the draft for another 90 days. Same-org reviewers and admins MUST
-    NOT be able to bypass the owner's intent to let a stale draft
-    auto-warn.
-    """
-    auth_or_redirect = _require_auth(req)
-    if isinstance(auth_or_redirect, Response):
-        return auth_or_redirect
-    auth = auth_or_redirect
-
-    parsed = _parse_uuid(draft_id)
-    if parsed is None:
-        return _not_found_page(req)
-
-    draft = fetch_draft(parsed)
-    if draft is None:
-        return _not_found_page(req)
-    if not can_delete_draft(auth, draft):
-        # 404 (not 403) — see delete_draft_handler for the reasoning.
-        return _not_found_page(req)
-
-    try:
-        with _connect() as conn:
-            touch_draft_access(conn, parsed)
-            conn.commit()
-    except Exception:
-        logger.exception("Failed to reset last_accessed_at for draft=%s", parsed)
-        return _not_found_page(req)
-
-    log_action(
-        auth.get("id"),
-        "draft.keep",
-        {"draft_id": str(parsed)},
-    )
-
-    # Redirect back to the detail page so the user sees the refreshed
-    # state without the Keep button (the draft is no longer stale).
-    # HTMX-driven submits get an HX-Redirect so the browser performs
-    # a real navigation rather than swapping a partial into <body>.
-    if req.headers.get("HX-Request") == "true":
-        return Response(
-            status_code=204,
-            headers={"HX-Redirect": f"/drafts/{parsed}"},
-        )
-    return RedirectResponse(url=f"/drafts/{parsed}", status_code=303)
-
-
 # ---------------------------------------------------------------------------
 # Route registration
 # ---------------------------------------------------------------------------
@@ -1012,5 +914,4 @@ def register_draft_routes(rt) -> None:  # type: ignore[no-untyped-def]
     rt("/drafts", methods=["POST"])(create_draft_handler)
     rt("/drafts/{draft_id}", methods=["GET"])(draft_detail_page)
     rt("/drafts/{draft_id}/status", methods=["GET"])(draft_status_fragment)
-    rt("/drafts/{draft_id}/keep", methods=["POST"])(keep_draft_handler)
     rt("/drafts/{draft_id}/delete", methods=["POST"])(delete_draft_handler)
