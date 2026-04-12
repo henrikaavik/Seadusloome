@@ -16,7 +16,7 @@ The architecture plan is in `estonian-legal-ontology-plan.md`. The ontology sour
 - **Application Core:** Ontology query engine, document analyzer, impact mapper, conflict detector, AI law drafter
 - **Storage:** Apache Jena Fuseki (SPARQL triplestore for RDF ontology queries) + PostgreSQL 16 with pgvector (app state, vectors, chat history)
 - **AI Layer:** Pluggable LLM via abstract `LLMProvider` interface (both Claude and Codex supported; Claude is the default), RAG pipeline with multilingual embeddings
-- **Deployment:** Coolify (self-hosted PaaS) on Hetzner VPS with Traefik reverse proxy
+- **Deployment:** Coolify (self-hosted PaaS) on Hostinger VPS with Traefik reverse proxy
 
 **Key data flow:** GitHub (JSON-LD source of truth) → sync pipeline → RDF conversion → Jena Fuseki (runtime query engine). Uploaded drafts become named graphs in Jena that persist until explicitly deleted by the owner; compensating controls include encryption at rest, strict org-scoped access control, full audit logging, and a 90-day auto-archive warning.
 
@@ -44,7 +44,7 @@ The architecture plan is in `estonian-legal-ontology-plan.md`. The ontology sour
 | Embeddings | multilingual-e5-large / EstBERT |
 | Document parsing | Apache Tika / python-docx |
 | Auth | Authlib + OIDC (TARA-ready) |
-| Deployment | Coolify on Hetzner VPS |
+| Deployment | Coolify on Hostinger VPS |
 | CI/CD | GitHub Actions + Coolify webhooks |
 
 ## Development Context

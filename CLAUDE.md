@@ -19,7 +19,7 @@ The architecture plan is in `estonian-legal-ontology-plan.md`. The ontology sour
 - **Document Processing:** Apache Tika (server-side .docx/.pdf parsing) + python-docx (report/draft export)
 - **Background Jobs:** `FOR UPDATE SKIP LOCKED` job queue with worker thread for parse, extract, analyze, export pipelines
 - **Cost Tracking:** Per-user and per-org LLM usage metering with configurable rate limits and monthly budgets
-- **Deployment:** Coolify (self-hosted PaaS) on Hetzner VPS with Traefik reverse proxy
+- **Deployment:** Coolify (self-hosted PaaS) on Hostinger VPS with Traefik reverse proxy
 
 **Key data flow:** GitHub (JSON-LD source of truth) → sync pipeline → RDF conversion → Jena Fuseki (runtime query engine). Uploaded drafts become named graphs in Jena that persist until explicitly deleted by the owner; compensating controls include encryption at rest, strict org-scoped access control, full audit logging, and a 90-day auto-archive warning.
 
@@ -51,7 +51,7 @@ The architecture plan is in `estonian-legal-ontology-plan.md`. The ontology sour
 | Background jobs | `FOR UPDATE SKIP LOCKED` job queue with worker thread |
 | Cost tracking | Per-user / per-org LLM usage metering (llm_usage table) |
 | Auth | JWT + Authlib + OIDC (TARA-ready) |
-| Deployment | Coolify on Hetzner VPS |
+| Deployment | Coolify on Hostinger VPS |
 | CI/CD | GitHub Actions + Coolify webhooks |
 | Linting | ruff + pyright |
 | Package manager | uv |

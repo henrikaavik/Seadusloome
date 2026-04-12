@@ -238,7 +238,7 @@ flowchart LR
 | Background jobs | `FOR UPDATE SKIP LOCKED` job queue with worker thread |
 | Cost tracking | Per-user / per-org LLM usage metering and budgets |
 | Auth | JWT (TARA SSO-ready via OIDC) |
-| Deployment | Coolify on Hetzner VPS |
+| Deployment | Coolify on Hostinger VPS |
 | CI/CD | GitHub Actions + Coolify webhooks |
 | Linting | ruff + pyright |
 | Package Manager | uv |

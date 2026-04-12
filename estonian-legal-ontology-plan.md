@@ -93,7 +93,7 @@ Coolify replaces the traditional Docker Compose → Kubernetes migration path wi
 - **Secrets management:** Environment variables and secrets stored encrypted, injected at deploy time — critical for LLM API keys and database credentials.
 - **Monitoring dashboard:** Built-in container metrics, logs, and resource usage. Reduces the need for a custom admin dashboard in early phases.
 - **Scaling:** Horizontal scaling when needed, without migrating to Kubernetes. Coolify supports multiple servers and load balancing.
-- **Cost-effective:** Runs on a single VPS (Hetzner, DigitalOcean) — significantly cheaper than managed Kubernetes for your 5–50 user scale.
+- **Cost-effective:** Runs on a single VPS (this deployment uses Hostinger; Hetzner / DigitalOcean / any KVM provider works) — significantly cheaper than managed Kubernetes for your 5–50 user scale.
 
 This means the deployment section of the tech stack simplifies considerably: instead of Docker Compose → nginx → manual SSL → eventual K8s migration, you get a production-ready deployment platform from day one.
 
@@ -181,7 +181,7 @@ The ontology is designed to be extended with new domains without code changes. T
 | Document Parser | Apache Tika / python-docx | Extract text from uploaded .docx/.pdf drafts for analysis |
 | Auth | Authlib + OIDC | Government SSO integration ready (TARA); simple JWT sessions for initial version |
 | Deployment | **Coolify** (self-hosted PaaS) | Replaces Docker Compose + nginx + manual SSL; built-in Traefik proxy, git-push deploys, secrets management, monitoring |
-| Infrastructure | Single VPS (Hetzner/DO) | Coolify manages all containers on the server; scale to multiple servers later if needed |
+| Infrastructure | Single VPS (Hostinger, this deployment) | Coolify manages all containers on the server; scale to multiple servers later if needed |
 | CI/CD | GitHub Actions + Coolify webhooks | GitHub Actions for tests/linting; Coolify handles deployment on push to main |
 | Ontology Sync | Python worker + GitHub webhooks | Converts JSON-LD → RDF, loads into Jena; triggered on push or on schedule |
 | Estonian NLP | EstBERT / multilingual-e5 | Estonian-capable embedding model for vector search; EstBERT for entity extraction from legal text |
@@ -378,7 +378,7 @@ The project is divided into five phases, designed so each phase produces a usabl
 **Milestone:** User can log in, see the full ontology graph, search for specific laws, and explore relationships. The data pipeline automatically keeps the graph current with the GitHub repository. The entire system runs on a Coolify-managed VPS with automatic SSL.
 
 **Coolify setup in this phase:**
-- Provision VPS (Hetzner CPX31 or similar: 4 vCPU, 8GB RAM, sufficient for all services)
+- Provision VPS (Hostinger KVM or equivalent: 4 vCPU, 8GB RAM, sufficient for all services) — this project runs on Hostinger
 - Install Coolify, configure domain and wildcard SSL
 - Define services: FastHTML app (git-push deploy), Jena Fuseki (Docker service with persistent volume), PostgreSQL (Coolify-managed database), sync worker (scheduled container)
 - Configure GitHub webhook for automated deployments
@@ -549,7 +549,7 @@ For a read-only visualization (like the D3 demo), loading JSON-LD directly could
 
 Coolify handles: TLS certificates (Let's Encrypt auto-renewal), reverse proxy routing (Traefik), container health checks and restart policies, log aggregation, deployment rollbacks, and secrets injection.
 
-**Recommended VPS:** Hetzner CPX31 (4 vCPU, 8GB RAM, 160GB NVMe) — approximately €15/month. Sufficient for all services with 50 concurrent users. Scale to CPX41 or add a second server via Coolify if needed.
+**Deployed on:** Hostinger VPS (KVM, 4 vCPU, 8GB RAM). Sufficient for all services at the target 50-user scale. Scale by upgrading the plan in Hostinger's panel or add a second server via Coolify if needed.
 
 ### 8.2 Security Considerations
 
@@ -578,7 +578,7 @@ Given that draft legislation may be sensitive prior to publication, the system m
 
 To begin Phase 1 development:
 
-1. **Provision infrastructure:** Set up a Hetzner VPS, install Coolify, configure your domain DNS. Create the Coolify project with service definitions for FastHTML, Jena Fuseki, and PostgreSQL.
+1. **Provision infrastructure:** Set up a Hostinger VPS (the project's actual host), install Coolify, configure your domain DNS. Create the Coolify project with service definitions for FastHTML, Jena Fuseki, and PostgreSQL.
 
 2. **Set up the project repository** with FastHTML scaffolding and Dockerfile. Connect to Coolify for automated deployments. Extend the existing ontology repo's GitHub Actions for the sync pipeline.
 
