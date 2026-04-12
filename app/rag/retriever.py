@@ -58,6 +58,7 @@ class Retriever:
         *,
         k: int = 10,
         source_type: str | None = None,
+        org_id: str | None = None,
     ) -> list[RetrievedChunk]:
         """Retrieve the top-k most similar chunks to *query*.
 
@@ -67,12 +68,23 @@ class Retriever:
             source_type: Optional filter to restrict results to a
                 specific source type (``'ontology'``, ``'draft'``,
                 ``'law_text'``, ``'court_decision'``).
+            org_id: Tenant scope. Public-corpus chunks (``org_id IS NULL``
+                in the DB) are always visible. If a non-``None`` value is
+                supplied, private chunks owned by that org are also
+                visible. If ``None``, the caller is treated as "no org"
+                and only public chunks are returned. Callers must pass
+                the authenticated user's ``org_id`` — failing to do so is
+                a data-leak bug, not a convenience.
 
         Returns:
             List of :class:`RetrievedChunk` ordered by descending
             similarity score. Empty list if no results or if the
             table has no data.
         """
+        # Tenant scoping: `(org_id IS NULL OR org_id = $1)` keeps public
+        # corpus (NULL) visible to everyone and gates private chunks on
+        # the caller's org. See migration 016 and issue #576.
+
         if not query.strip():
             return []
 
@@ -85,25 +97,33 @@ class Retriever:
         # 2. Build the SQL query
         embedding_str = "[" + ",".join(str(v) for v in query_embedding) + "]"
 
+        # Tenant predicate: NULL org_id always matches (public); otherwise
+        # match the caller's own org. psycopg binds Python `None` as SQL
+        # NULL, and `NULL = NULL` is NULL (not true), so the `org_id IS
+        # NULL` branch correctly keeps public rows visible even when the
+        # caller has no org.
+        tenant_where = "(org_id IS NULL OR org_id = %s)"
+
         if source_type:
             sql = (
                 "SELECT content, metadata, "
                 "1 - (embedding <=> %s::vector) AS score "
                 "FROM rag_chunks "
-                "WHERE source_type = %s "
+                f"WHERE {tenant_where} AND source_type = %s "
                 "ORDER BY embedding <=> %s::vector "
                 "LIMIT %s"
             )
-            params = (embedding_str, source_type, embedding_str, k)
+            params = (embedding_str, org_id, source_type, embedding_str, k)
         else:
             sql = (
                 "SELECT content, metadata, "
                 "1 - (embedding <=> %s::vector) AS score "
                 "FROM rag_chunks "
+                f"WHERE {tenant_where} "
                 "ORDER BY embedding <=> %s::vector "
                 "LIMIT %s"
             )
-            params = (embedding_str, embedding_str, k)
+            params = (embedding_str, org_id, embedding_str, k)
 
         # 3. Execute
         try:
@@ -152,3 +172,38 @@ class Retriever:
             )
 
         return results
+
+
+def delete_chunks_for_draft(conn, draft_id) -> int:
+    """Delete every ``rag_chunks`` row owned by the given draft.
+
+    This is the application-level cascade for the polymorphic
+    ``(source_type, source_id)`` reference documented in migration 016.
+    PostgreSQL can't enforce the FK itself because ``source_id`` is
+    polymorphic across source types, so every caller that deletes a
+    draft row must also call this helper. See
+    ``app/docs/routes.py::delete_draft_handler`` for the canonical
+    wiring.
+
+    Parameters
+    ----------
+    conn:
+        An open psycopg connection. Commit is the caller's
+        responsibility — this helper is expected to run inside the same
+        transaction as the ``DELETE FROM drafts`` statement so either
+        both succeed or neither does.
+    draft_id:
+        UUID (or string/UUID-compatible) identifying the draft. Compared
+        against ``rag_chunks.source_id``.
+
+    Returns
+    -------
+    int
+        Number of rows removed. Zero is a legitimate outcome — e.g. a
+        draft that was never RAG-ingested.
+    """
+    cursor = conn.execute(
+        "DELETE FROM rag_chunks WHERE source_type = 'draft' AND source_id = %s",
+        (str(draft_id),),
+    )
+    return cursor.rowcount or 0

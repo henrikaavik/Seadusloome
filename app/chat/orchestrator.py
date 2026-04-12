@@ -250,7 +250,10 @@ class ChatOrchestrator:
         )
 
         # 2b. RAG retrieval
-        # NOTE: RAG chunks are from public corpus only. See #566 for org-scoping requirement.
+        # Tenant scoping landed in #576: retriever now filters by caller's
+        # org_id (public NULL-scoped rows + caller's own private rows).
+        # rag_chunks is still public-corpus-only in practice until private
+        # draft ingestion ships, but the filtering machinery is in place.
         rag_chunks: list[Any] = []
         rag_context_json: list[dict[str, Any]] | None = None
 
@@ -259,7 +262,14 @@ class ChatOrchestrator:
             if retriever is not None:
                 try:
                     await send({"type": "retrieval_started"})
-                    rag_chunks = await retriever.retrieve(user_message, k=10)
+                    # #576: pass the caller's org_id so private chunks from
+                    # other tenants are never retrieved. Public-corpus rows
+                    # (org_id IS NULL in DB) stay visible regardless.
+                    rag_chunks = await retriever.retrieve(
+                        user_message,
+                        k=10,
+                        org_id=str(org_id) if org_id else None,
+                    )
                     await send({"type": "retrieval_done", "chunk_count": len(rag_chunks)})
                 except Exception:
                     logger.warning(

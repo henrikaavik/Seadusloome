@@ -114,15 +114,23 @@ class FakeRetriever:
         query: str,
         k: int = 10,
         source_type: str | None = None,
+        org_id: str | None = None,
     ) -> list[FakeChunk]:
         self.call_count += 1
+        self.last_org_id = org_id
         return self.chunks
 
 
 class ErrorRetriever:
     """A retriever that always raises."""
 
-    async def retrieve(self, query: str, k: int = 10, source_type: str | None = None) -> list:
+    async def retrieve(
+        self,
+        query: str,
+        k: int = 10,
+        source_type: str | None = None,
+        org_id: str | None = None,
+    ) -> list:
         raise RuntimeError("Embedding service unavailable")
 
 
