@@ -14,13 +14,6 @@ ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
 
 WORKDIR /app
 
-# git lets us derive the sha from .git when GIT_SHA build-arg is the
-# default "dev". Installed in the builder stage only — the runtime
-# stage already installs git for the sync pipeline.
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends git && \
-    rm -rf /var/lib/apt/lists/*
-
 # Install dependencies first (cache layer)
 COPY pyproject.toml uv.lock .python-version ./
 RUN uv sync --frozen --no-dev --no-install-project
@@ -32,22 +25,19 @@ COPY app/ app/
 COPY scripts/ scripts/
 COPY migrations/ migrations/
 
-# Copy .git so we can resolve HEAD at build time when GIT_SHA is unset.
-# Coolify builds from a fresh git clone so .git is present in the build
-# context. The directory is NOT copied into the runtime stage — only the
-# generated VERSION.json is — so image size is unaffected.
-COPY .git/ .git/
-
-# Write /app/VERSION.json. If the build-arg GIT_SHA is still the default
-# "dev" we fall back to `git rev-parse HEAD`; if that also fails we keep
-# "dev". We do this after the app copy so the runtime stage can just
-# COPY --from=builder /app/VERSION.json without caring how it was built.
-RUN resolved_sha="$GIT_SHA"; \
-    if [ "$resolved_sha" = "dev" ] && [ -d .git ]; then \
-      resolved_sha="$(git rev-parse HEAD 2>/dev/null || echo dev)"; \
-    fi; \
-    printf '{"app": "0.1.0", "sha": "%s", "built_at": "%s"}\n' \
-      "$resolved_sha" "$BUILD_TIME" > /app/VERSION.json && \
+# Write /app/VERSION.json from the ``GIT_SHA`` build-arg (set to the
+# full commit sha by whatever builds the image). Coolify strips the
+# ``.git`` directory from its build context so a previous attempt to
+# resolve the sha via ``git rev-parse`` in-container failed every build
+# — do NOT add ``COPY .git`` here, it breaks Coolify deploys.
+#
+# When ``GIT_SHA`` is the default "dev" the runtime fallback in
+# ``app/version.py`` will try ``git rev-parse`` from the host (only
+# useful for local ``docker build`` where the working tree is a
+# git repo). Production deploys should set the build-arg via the
+# Coolify service's Additional Build Arguments — see README.
+RUN printf '{"app": "0.1.0", "sha": "%s", "built_at": "%s"}\n' \
+      "$GIT_SHA" "$BUILD_TIME" > /app/VERSION.json && \
     cat /app/VERSION.json
 
 # Runtime stage
