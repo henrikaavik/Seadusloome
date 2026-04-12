@@ -1,6 +1,7 @@
 """Sync pipeline orchestrator: GitHub → RDF → validate → Jena Fuseki."""
 
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -10,7 +11,12 @@ from pathlib import Path
 
 from app.db import get_connection
 from app.sync.converter import convert_ontology, serialize_to_turtle
-from app.sync.jena_loader import clear_default_graph, get_triple_count, upload_turtle
+from app.sync.jena_loader import (
+    copy_graph_to_default,
+    drop_graph,
+    graph_triple_count,
+    upload_turtle_to_named_graph,
+)
 from app.sync.validator import load_shapes, validate_graph
 
 _RESULTS_COUNT_RE = re.compile(r"Results \((\d+)\)")
@@ -57,6 +63,56 @@ def _get_notify_fn():  # type: ignore[no-untyped-def]
 logger = logging.getLogger(__name__)
 
 ONTOLOGY_REPO = "https://github.com/henrikaavik/estonian-legal-ontology.git"
+
+# #573: staged publish. The sync pipeline uploads fresh data into this
+# named graph first, verifies the triple count, and only then swaps it
+# into the default graph with SPARQL ``COPY``. A single stable URI is
+# safe because ``run_sync`` is serialised by the DB-level lock taken by
+# the admin/webhook callers — two syncs can't race for the same slot.
+STAGING_GRAPH = "urn:estleg:staging"
+
+# Lower bound for "this sync looks plausible". Default: 1,000,000 triples
+# (the enacted-law ontology has ~1.3M today). Overridable per env for
+# non-prod fixtures and tests. The effective threshold is the max of
+# this value and 80% of the current live-graph count — see
+# :func:`_compute_verification_threshold`.
+_DEFAULT_MIN_TRIPLES = 1_000_000
+
+
+def _sync_min_triples() -> int:
+    """Return the configured absolute minimum triple count for verification.
+
+    Exposed as a function so tests (and ops overriding ``SYNC_MIN_TRIPLES``
+    at runtime) don't need to patch a module-level constant.
+    """
+    raw = os.environ.get("SYNC_MIN_TRIPLES")
+    if raw is None:
+        return _DEFAULT_MIN_TRIPLES
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        logger.warning(
+            "Invalid SYNC_MIN_TRIPLES=%r; falling back to default %d",
+            raw,
+            _DEFAULT_MIN_TRIPLES,
+        )
+        return _DEFAULT_MIN_TRIPLES
+
+
+def _compute_verification_threshold(live_count: int) -> int:
+    """Compute the effective staging-verification threshold.
+
+    The rule is: staging must have at least ``max(SYNC_MIN_TRIPLES,
+    0.8 * live_count)`` triples. The 80% floor protects against
+    regressions (a sudden 50% drop in triple count is almost certainly
+    a parse/convert bug). On first-ever load the live graph is empty,
+    so the floor collapses to ``SYNC_MIN_TRIPLES`` alone.
+    """
+    absolute = _sync_min_triples()
+    if live_count <= 0:
+        return absolute
+    relative = int(live_count * 0.8)
+    return max(absolute, relative)
 
 
 def _trigger_rag_ingestion() -> None:
@@ -240,9 +296,10 @@ def run_sync(
     1. Clone/pull ontology repo
     2. Convert JSON-LD → RDF
     3. Validate with SHACL shapes
-    4. Clear default graph in Jena
-    5. Upload new RDF data
-    6. Log result
+    4. Upload new RDF data into a staging named graph
+    5. Verify staging triple count meets threshold
+    6. Atomically COPY staging → default graph
+    7. Log result
 
     Args:
         repo_dir: Path to existing ontology repo clone. If None, clones to temp dir.
@@ -326,45 +383,132 @@ def run_sync(
         logger.info("Serializing to Turtle...")
         turtle = serialize_to_turtle(graph)
 
-        # Step 5: Clear and upload
+        # Step 5: Staged upload + verify + atomic promote (#573).
+        # This replaces the old "clear default, then upload" flow which
+        # could leave production empty if upload failed after clear.
+        # The new flow keeps the live default graph untouched until we
+        # have a verified staging graph ready to swap in.
         _update_step(log_id, PHASE_UPLOADING)
-        logger.info("Clearing default graph...")
-        cleared = clear_default_graph()
-        if not cleared:
+
+        # Clean up any stale staging slot from a previous failed run.
+        # drop_graph is SILENT so an already-absent graph is fine.
+        logger.info("Dropping stale staging graph (if any)...")
+        if not drop_graph(STAGING_GRAPH):
             _finalize_row(
                 log_id,
                 "failed",
                 started_at,
-                error_message="Clear default graph failed — aborting (data intact)",
+                error_message="Failed to drop stale staging graph — aborting (data intact)",
             )
             return False
 
-        logger.info("Uploading to Jena Fuseki...")
-        success = upload_turtle(turtle)
-        if not success:
+        logger.info("Uploading to staging graph %s...", STAGING_GRAPH)
+        staged = upload_turtle_to_named_graph(STAGING_GRAPH, turtle)
+        if not staged:
+            # Live default graph is untouched — staging upload failed
+            # in isolation. Best-effort cleanup of any partial staging
+            # content so the next run starts clean.
+            drop_graph(STAGING_GRAPH)
+            _finalize_row(
+                log_id,
+                "failed",
+                started_at,
+                error_message="Upload to staging graph failed — live data intact",
+            )
+            return False
+
+        # Verify staging before promoting. Must clear both the absolute
+        # minimum (SYNC_MIN_TRIPLES) and at least 80% of the current
+        # live count (regression protection).
+        staging_count = graph_triple_count(STAGING_GRAPH)
+        live_count = graph_triple_count(None)
+        threshold = _compute_verification_threshold(live_count)
+        if staging_count < threshold:
+            logger.error(
+                "Staging verification failed: got %d triples (threshold %d, "
+                "live=%d). Leaving live default graph untouched.",
+                staging_count,
+                threshold,
+                live_count,
+            )
+            drop_graph(STAGING_GRAPH)
+            _finalize_row(
+                log_id,
+                "failed",
+                started_at,
+                error_message=(
+                    f"staging verification failed: got {staging_count} triples "
+                    f"(threshold {threshold}, live={live_count}) — live data intact"
+                ),
+            )
+            return False
+
+        logger.info(
+            "Staging verified (%d triples, threshold %d, live=%d). "
+            "Promoting to default graph via COPY...",
+            staging_count,
+            threshold,
+            live_count,
+        )
+        promoted = copy_graph_to_default(STAGING_GRAPH)
+        if not promoted:
+            # COPY failed. Fuseki may have cleared the default graph
+            # before the insert step raised, in which case live data
+            # is degraded; or it may have rejected the update before
+            # touching anything. We can't tell for sure without a
+            # follow-up count, which itself may lie. Log loudly and
+            # surface via sync_log.
             logger.critical(
-                "Upload failed AFTER default graph was cleared — "
-                "ontology is in a DEGRADED state with zero triples. "
-                "A successful re-sync is required to restore data."
+                "COPY <%s> TO DEFAULT failed. Live default graph may be "
+                "in an inconsistent state — investigate immediately.",
+                STAGING_GRAPH,
+            )
+            # Keep staging around so an operator can replay the COPY
+            # manually if needed. A subsequent successful run will
+            # drop it on entry.
+            _finalize_row(
+                log_id,
+                "failed",
+                started_at,
+                error_message=(
+                    "Promote (COPY staging TO DEFAULT) failed — "
+                    "live graph may be degraded. Staging left in place "
+                    "for manual recovery."
+                ),
+            )
+            return False
+
+        # Step 6: Post-promote verification. A successful COPY of a
+        # graph with N>0 triples MUST yield N triples in the default
+        # graph. Zero here means something went wrong server-side
+        # that we didn't catch above.
+        final_count = graph_triple_count(None)
+        if final_count == 0:
+            logger.critical(
+                "Post-promote health check: default graph is EMPTY despite "
+                "COPY reporting success. Ontology is degraded."
             )
             _finalize_row(
                 log_id,
                 "failed",
                 started_at,
                 error_message=(
-                    "Upload to Jena failed after graph was cleared — "
-                    "ontology is degraded (empty). Re-sync required."
+                    "Post-promote verification failed: default graph has "
+                    "zero triples after COPY. Ontology is degraded — re-sync required."
                 ),
             )
             return False
 
-        # Step 6: Verify — post-upload health check
-        final_count = get_triple_count()
-        if final_count == 0:
+        # Cleanup: drop the staging slot now that default holds the
+        # promoted data. Best-effort — a failure here just wastes
+        # space and will be reclaimed on the next sync's pre-drop.
+        if not drop_graph(STAGING_GRAPH):
             logger.warning(
-                "Post-upload health check: triple count is ZERO despite "
-                "upload reporting success — ontology may be degraded"
+                "Post-promote cleanup: failed to drop staging graph %s "
+                "(non-fatal, will be retried on next sync).",
+                STAGING_GRAPH,
             )
+
         logger.info("Sync complete. %d triples in Jena.", final_count)
 
         # Step 7: RAG re-ingestion runs under its own phase label so the

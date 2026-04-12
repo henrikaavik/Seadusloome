@@ -69,6 +69,17 @@ def get_graph_store_endpoint() -> str:
     return f"{JENA_URL}/{JENA_DATASET}/data"
 
 
+def get_sparql_update_endpoint() -> str:
+    """Return the SPARQL 1.1 Update endpoint for the active dataset.
+
+    Fuseki exposes Update at ``/{dataset}/update`` by default. This is a
+    separate endpoint from the read-only ``/sparql`` endpoint (#573 —
+    the sync pipeline uses ``COPY`` / ``CLEAR`` here to swap staging
+    into the default graph atomically).
+    """
+    return f"{JENA_URL}/{JENA_DATASET}/update"
+
+
 def upload_turtle(turtle_data: str, graph_uri: str | None = None) -> bool:
     """Upload Turtle data to Jena Fuseki via Graph Store Protocol.
 
@@ -311,6 +322,166 @@ def named_graph_exists(graph_uri: str) -> bool:
     except ValueError:
         logger.warning("named_graph_exists: could not parse JSON response")
         return False
+
+
+# ---------------------------------------------------------------------------
+# Sync-pipeline helpers: staged publish (#573)
+# ---------------------------------------------------------------------------
+#
+# The sync pipeline needs to upload the enacted-law ontology *without*
+# leaving the default graph empty if anything goes wrong partway
+# through. These helpers support the staging flow:
+#
+#     1. drop_graph(STAGING)           — clear any stale slot
+#     2. upload_turtle_to_named_graph  — PUT new data into STAGING
+#     3. graph_triple_count(STAGING)   — verify it actually landed
+#     4. copy_graph_to_default(STAGING) — atomic CLEAR DEFAULT; COPY …
+#     5. drop_graph(STAGING)           — cleanup
+#
+# These intentionally do NOT go through ``_validate_graph_uri``: that
+# allowlist is scoped to draft graph URIs, and the sync staging URI
+# ``urn:estleg:staging`` does not match the drafts/<uuid> pattern.
+
+
+def upload_turtle_to_named_graph(graph_uri: str, turtle: str) -> bool:
+    """PUT Turtle into the named graph identified by *graph_uri*.
+
+    This is the sync-pipeline counterpart to :func:`put_named_graph`
+    (which is restricted to the drafts/<uuid> allowlist). The sync
+    flow uses stable, code-owned URIs (e.g. ``urn:estleg:staging``)
+    so the allowlist does not apply — but we still want the same
+    Graph Store Protocol PUT-replace semantics.
+
+    Args:
+        graph_uri: Target named graph URI. Must not be empty.
+        turtle: Turtle serialisation to upload (UTF-8 enforced).
+
+    Returns:
+        ``True`` on any 2xx response, ``False`` on any other status
+        or a transport-level failure.
+    """
+    if not graph_uri:
+        raise ValueError("graph_uri must not be empty")
+    endpoint = get_graph_store_endpoint()
+    encoded = quote(graph_uri, safe="")
+    url = f"{endpoint}?graph={encoded}"
+    logger.info("PUT staged graph %s (%d bytes)", graph_uri, len(turtle))
+    try:
+        response = httpx.put(
+            url,
+            content=turtle.encode("utf-8"),
+            headers={"Content-Type": "text/turtle; charset=utf-8"},
+            auth=(JENA_ADMIN_USER, JENA_ADMIN_PASSWORD),
+            timeout=300.0,
+        )
+    except httpx.HTTPError:
+        logger.exception("upload_turtle_to_named_graph transport error for %s", graph_uri)
+        return False
+    if 200 <= response.status_code < 300:
+        logger.info(
+            "upload_turtle_to_named_graph succeeded for %s (status %d)",
+            graph_uri,
+            response.status_code,
+        )
+        return True
+    logger.warning(
+        "upload_turtle_to_named_graph non-2xx for %s: status=%d body=%s",
+        graph_uri,
+        response.status_code,
+        response.text[:200],
+    )
+    return False
+
+
+def graph_triple_count(graph_uri: str | None) -> int:
+    """Count triples in *graph_uri* or, when ``None``, the default graph.
+
+    Unlike :func:`get_named_graph_triple_count`, this accepts ``None``
+    so the sync pipeline can compare staging against the live default
+    graph with a single call signature. Returns zero both on an empty
+    graph and on SPARQL failure.
+    """
+    if graph_uri is None:
+        query_text = "SELECT (COUNT(*) AS ?count) WHERE { ?s ?p ?o }"
+    else:
+        # Inline the URI: staging URIs are code-owned constants, not
+        # user input, so injection is not a concern here.
+        query_text = f"SELECT (COUNT(*) AS ?count) WHERE {{ GRAPH <{graph_uri}> {{ ?s ?p ?o }} }}"
+    result = sparql_query(query_text)
+    bindings = result.get("results", {}).get("bindings", [])
+    if not bindings:
+        return 0
+    try:
+        return int(bindings[0]["count"]["value"])
+    except (KeyError, ValueError, TypeError):
+        return 0
+
+
+def _sparql_update(update: str, *, timeout: float = 120.0) -> bool:
+    """Send a SPARQL 1.1 Update request to Fuseki.
+
+    Returns ``True`` on any 2xx, ``False`` otherwise. Errors are logged
+    with enough context (status + first 200 chars of body) to debug
+    without needing Fuseki-side logs.
+    """
+    endpoint = get_sparql_update_endpoint()
+    try:
+        response = httpx.post(
+            endpoint,
+            data={"update": update},
+            auth=(JENA_ADMIN_USER, JENA_ADMIN_PASSWORD),
+            timeout=timeout,
+        )
+    except httpx.HTTPError:
+        logger.exception("SPARQL Update transport error: %s", update[:120])
+        return False
+    if 200 <= response.status_code < 300:
+        return True
+    logger.warning(
+        "SPARQL Update non-2xx: status=%d body=%s update=%s",
+        response.status_code,
+        response.text[:200],
+        update[:120],
+    )
+    return False
+
+
+def copy_graph_to_default(graph_uri: str) -> bool:
+    """Atomically replace the default graph with the contents of *graph_uri*.
+
+    Uses SPARQL 1.1 ``COPY <graph_uri> TO DEFAULT`` which Fuseki
+    implements as "clear the destination, then insert all triples from
+    the source" in a single update request. This is much closer to
+    atomic than the manual CLEAR-then-INSERT we used to do (#573): if
+    Fuseki rejects the update, the default graph is untouched; if it
+    accepts it, the swap is committed server-side as one transaction.
+
+    Returns ``True`` on success. On failure, the default graph *may or
+    may not* be partially modified depending on how far Fuseki got
+    before the error — callers must log clearly and alert.
+    """
+    if not graph_uri:
+        raise ValueError("graph_uri must not be empty")
+    # Use a longer timeout than plain updates: COPY on ~1M triples is
+    # IO-bound and can easily exceed the default 30s we use elsewhere.
+    update = f"COPY <{graph_uri}> TO DEFAULT"
+    logger.info("COPY <%s> TO DEFAULT", graph_uri)
+    return _sparql_update(update, timeout=300.0)
+
+
+def drop_graph(graph_uri: str) -> bool:
+    """Drop the named graph identified by *graph_uri* if it exists.
+
+    Uses ``DROP SILENT GRAPH <uri>`` so a missing graph is treated as
+    success — staging cleanup runs both *before* (in case a previous
+    run left a half-populated staging slot) and *after* a successful
+    promote, and in both cases "nothing to drop" is fine.
+    """
+    if not graph_uri:
+        raise ValueError("graph_uri must not be empty")
+    update = f"DROP SILENT GRAPH <{graph_uri}>"
+    logger.info("DROP SILENT GRAPH <%s>", graph_uri)
+    return _sparql_update(update, timeout=60.0)
 
 
 def get_named_graph_triple_count(graph_uri: str) -> int:
