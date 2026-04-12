@@ -153,7 +153,8 @@ def _make_conn_factory(state: _State):
             # create_draft inserts and returns the row. The INSERT
             # columns are: user_id, org_id, title, filename,
             # content_type, file_size, storage_path, graph_uri, status
-            # — 9 params. RETURNING reconstructs all 15 columns.
+            # — 9 params. RETURNING reconstructs all 16 columns (the
+            # 16th is last_accessed_at, added by migration 015 / #572).
             assert params is not None
             (
                 user_id,
@@ -185,6 +186,7 @@ def _make_conn_factory(state: _State):
                 None,  # error_message
                 now,
                 now,
+                now,  # last_accessed_at (#572)
             )
             state.draft_row = row
             cursor.fetchone.return_value = row
@@ -578,6 +580,7 @@ class TestDocsPipelineE2E:
             None,  # error_message
             now,
             now,
+            now,  # last_accessed_at (#572)
         )
         conn_factory = _make_conn_factory(state)
 

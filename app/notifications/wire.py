@@ -137,6 +137,49 @@ def notify_sync_failed(error_message: str) -> None:
         )
 
 
+def notify_draft_archive_warning(draft: Any) -> None:
+    """Notify a draft owner when their draft has been stale for 90 days (#572).
+
+    Pre-publication drafts must not persist indefinitely without an
+    explicit "keep or delete" checkpoint. This factory is invoked by
+    :func:`app.jobs.archive_warning.scan_stale_drafts` for every draft
+    whose ``last_accessed_at`` is older than 90 days. The notification
+    carries a deep-link back to the draft detail page, where the owner
+    can either click "Hoia alles" to reset the clock or delete the
+    draft outright.
+
+    Args:
+        draft: A ``Draft`` dataclass (from ``app.docs.draft_model``).
+    """
+    try:
+        last_accessed_iso = (
+            draft.last_accessed_at.isoformat()
+            if getattr(draft, "last_accessed_at", None) is not None
+            else None
+        )
+        notify(
+            user_id=draft.user_id,
+            type="draft_archive_warning",
+            title="Eelnou vajab tahelepanu",
+            body=(
+                f'Eeln\u00f5u "{draft.title}" ei ole 90 paeva kasutatud. '
+                "Palun kinnitage, et soovite seda alles hoida, v\u00f5i kustutage see."
+            ),
+            link=f"/drafts/{draft.id}",
+            metadata={
+                "draft_id": str(draft.id),
+                "title": draft.title,
+                "last_accessed_at": last_accessed_iso,
+            },
+        )
+    except Exception:
+        logger.warning(
+            "Failed to send draft_archive_warning notification for draft=%s",
+            getattr(draft, "id", "?"),
+            exc_info=True,
+        )
+
+
 def notify_cost_alert(
     org_id: UUID | str,
     current_cost: float,

@@ -31,7 +31,7 @@ from app.auth.audit import log_action
 from app.auth.helpers import require_auth as _require_auth
 from app.auth.policy import can_view_draft
 from app.db import get_connection as _connect
-from app.docs.draft_model import Draft, fetch_draft
+from app.docs.draft_model import Draft, fetch_draft, touch_draft_access_conn
 from app.jobs.queue import JobQueue
 from app.ui.data.data_table import Column, DataTable
 from app.ui.forms.app_form import AppForm
@@ -480,6 +480,8 @@ def draft_report_page(req: Request, draft_id: str):
         "draft.report.view",
         {"draft_id": str(parsed), "report_id": str(report_row[0])},
     )
+    # #572: surface-to-user counts as access; reset the archive clock.
+    touch_draft_access_conn(parsed)
 
     findings = _parse_report_data(report_row[6])
 
@@ -589,6 +591,8 @@ def export_draft_report_handler(req: Request, draft_id: str):
             "job_id": job_id,
         },
     )
+    # #572: export counts as access; reset the archive clock.
+    touch_draft_access_conn(parsed)
 
     return _export_status_spinner(parsed, job_id)
 
@@ -636,6 +640,9 @@ def export_status_fragment(req: Request, draft_id: str, job_id: str):
         return _not_found_page(req)
 
     if job.status == "success":
+        # #572: a successful export that the user observes counts as
+        # access; reset the archive clock.
+        touch_draft_access_conn(parsed_draft)
         result = job.result or {}
         docx_path = str(result.get("docx_path") or "")
         if not docx_path:
@@ -768,6 +775,8 @@ def download_export_handler(req: Request, draft_id: str, job_id: str):
             "filename": filename,
         },
     )
+    # #572: download counts as access; reset the archive clock.
+    touch_draft_access_conn(parsed_draft)
 
     return FileResponse(
         path=str(docx_path),
