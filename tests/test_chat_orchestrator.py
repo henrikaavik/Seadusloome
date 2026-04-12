@@ -193,7 +193,7 @@ class TestLoadImpactSummary:
         conn.execute.return_value.fetchone.return_value = (
             json.dumps({"summary": "Moju kokkuvote"}),
         )
-        result = _load_impact_summary("some-id")
+        result = _load_impact_summary("some-id", _ORG_ID)
         assert result == "Moju kokkuvote"
 
     @patch("app.chat.orchestrator.get_connection")
@@ -202,14 +202,47 @@ class TestLoadImpactSummary:
         mock_conn.return_value.__enter__ = MagicMock(return_value=conn)
         mock_conn.return_value.__exit__ = MagicMock(return_value=False)
         conn.execute.return_value.fetchone.return_value = None
-        result = _load_impact_summary("some-id")
+        result = _load_impact_summary("some-id", _ORG_ID)
         assert result is None
 
     @patch("app.chat.orchestrator.get_connection")
     def test_handles_db_error(self, mock_conn):
         mock_conn.side_effect = Exception("DB down")
-        result = _load_impact_summary("some-id")
+        result = _load_impact_summary("some-id", _ORG_ID)
         assert result is None
+
+    @patch("app.chat.orchestrator.get_connection")
+    def test_returns_none_for_foreign_org(self, mock_conn):
+        """Issue #562: _load_impact_summary returns None for another org's draft."""
+        conn = MagicMock()
+        mock_conn.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_conn.return_value.__exit__ = MagicMock(return_value=False)
+        # The JOIN + org_id filter returns no rows for a foreign org
+        conn.execute.return_value.fetchone.return_value = None
+
+        other_org = "99999999-9999-9999-9999-999999999999"
+        result = _load_impact_summary(str(_DRAFT_ID), other_org)
+        assert result is None
+
+        # Verify org_id was passed to the query
+        call_args = conn.execute.call_args[0]
+        assert "d.org_id" in call_args[0]
+        assert call_args[1] == (str(_DRAFT_ID), other_org)
+
+    @patch("app.chat.orchestrator.get_connection")
+    def test_query_joins_drafts_table(self, mock_conn):
+        """The query must JOIN drafts to enforce org-scoping."""
+        conn = MagicMock()
+        mock_conn.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_conn.return_value.__exit__ = MagicMock(return_value=False)
+        conn.execute.return_value.fetchone.return_value = (json.dumps({"summary": "Test"}),)
+
+        _load_impact_summary("some-id", _ORG_ID)
+
+        call_args = conn.execute.call_args[0]
+        query = call_args[0]
+        assert "JOIN drafts" in query
+        assert "d.org_id" in query
 
 
 # ---------------------------------------------------------------------------
@@ -256,6 +289,10 @@ class TestOrchestratorHappyPath:
                 None,
                 None,
                 now,
+                None,  # content_encrypted (#570)
+                None,  # tool_input_encrypted
+                None,  # tool_output_encrypted
+                None,  # rag_context_encrypted
             )
 
         conn.execute.return_value.fetchone = side_effect_fetchone
@@ -356,6 +393,10 @@ class TestOrchestratorToolUse:
                 None,
                 None,
                 now,
+                None,  # content_encrypted (#570)
+                None,  # tool_input_encrypted
+                None,  # tool_output_encrypted
+                None,  # rag_context_encrypted
             )
 
         conn.execute.return_value.fetchone = side_effect_fetchone
@@ -437,6 +478,10 @@ class TestOrchestratorMaxToolRounds:
                 None,
                 None,
                 now,
+                None,  # content_encrypted (#570)
+                None,  # tool_input_encrypted
+                None,  # tool_output_encrypted
+                None,  # rag_context_encrypted
             )
 
         conn.execute.return_value.fetchone = side_effect_fetchone
@@ -521,6 +566,10 @@ class TestOrchestratorDraftContext:
                 None,
                 None,
                 now,
+                None,  # content_encrypted (#570)
+                None,  # tool_input_encrypted
+                None,  # tool_output_encrypted
+                None,  # rag_context_encrypted
             )
 
         conn.execute.return_value.fetchone = side_effect_fetchone
@@ -586,6 +635,10 @@ class TestOrchestratorLLMError:
                 None,
                 None,
                 now,
+                None,  # content_encrypted (#570)
+                None,  # tool_input_encrypted
+                None,  # tool_output_encrypted
+                None,  # rag_context_encrypted
             )
 
         conn.execute.return_value.fetchone = side_effect_fetchone
@@ -644,6 +697,10 @@ class TestOrchestratorPersistence:
                 None,
                 None,
                 now,
+                None,  # content_encrypted (#570)
+                None,  # tool_input_encrypted
+                None,  # tool_output_encrypted
+                None,  # rag_context_encrypted
             )
 
         conn.execute.return_value.fetchone = side_effect_fetchone
@@ -698,6 +755,10 @@ class TestOrchestratorPartialPersistence:
                 None,
                 None,
                 now,
+                None,  # content_encrypted (#570)
+                None,  # tool_input_encrypted
+                None,  # tool_output_encrypted
+                None,  # rag_context_encrypted
             )
 
         conn.execute.return_value.fetchone = side_effect_fetchone
@@ -768,6 +829,10 @@ class TestOrchestratorPartialPersistence:
                 None,
                 None,
                 now,
+                None,  # content_encrypted (#570)
+                None,  # tool_input_encrypted
+                None,  # tool_output_encrypted
+                None,  # rag_context_encrypted
             )
 
         conn.execute.return_value.fetchone = side_effect_fetchone

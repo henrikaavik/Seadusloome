@@ -163,6 +163,10 @@ def _setup_mock_conn(mock_get_conn: MagicMock) -> MagicMock:
             None,
             None,
             now,
+            None,  # content_encrypted (#570)
+            None,  # tool_input_encrypted
+            None,  # tool_output_encrypted
+            None,  # rag_context_encrypted
         )
 
     conn.execute.return_value.fetchone = side_effect_fetchone
@@ -261,12 +265,16 @@ class TestRAGContextPersisted:
                 assistant_inserts.append(args)
 
         assert len(assistant_inserts) >= 1
-        # The rag_context parameter is at index 7 in the params tuple
-        # (based on create_message's SQL: conv_id, role, content, tool_name,
-        #  tool_input, tool_output, rag_context, tokens_input, tokens_output, model)
-        rag_param = assistant_inserts[0][1][6]
+        # #570: rag_context is now encrypted at rest. Post-migration the
+        # INSERT params are (conv_id, role, tool_name, tokens_in, tokens_out,
+        # model, content_ct, tool_input_ct, tool_output_ct, rag_context_ct).
+        # Index 9 is the Fernet ciphertext — decrypt + parse to assert.
+        rag_param = assistant_inserts[0][1][9]
         assert rag_param is not None
-        parsed = json.loads(rag_param)
+        assert isinstance(rag_param, bytes)
+        from app.storage import decrypt_text
+
+        parsed = json.loads(decrypt_text(rag_param))
         assert isinstance(parsed, list)
         assert len(parsed) == 1
         assert parsed[0]["content"] == "Seaduse tekst"

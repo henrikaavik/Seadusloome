@@ -27,6 +27,7 @@ from datetime import datetime
 from typing import Any
 
 from app.db_utils import coerce_uuid, parse_jsonb
+from app.storage import DecryptionError, decrypt_text, encrypt_text
 
 logger = logging.getLogger(__name__)
 
@@ -73,10 +74,51 @@ class Message:
 
 _CONVERSATION_COLUMNS = "id, user_id, org_id, title, context_draft_id, created_at, updated_at"
 
+# NOTE (#570): SELECT returns both the plaintext and the ``*_encrypted``
+# columns. ``_row_to_message`` prefers the encrypted column when set and
+# falls back to the plaintext column for rows that predate the backfill
+# (migration 014 adds the columns, scripts/migrate_chat_encryption.py
+# populates them, a later migration drops the plaintext columns).
 _MESSAGE_COLUMNS = (
     "id, conversation_id, role, content, tool_name, tool_input, "
-    "tool_output, rag_context, tokens_input, tokens_output, model, created_at"
+    "tool_output, rag_context, tokens_input, tokens_output, model, created_at, "
+    "content_encrypted, tool_input_encrypted, tool_output_encrypted, "
+    "rag_context_encrypted"
 )
+
+
+def _decode_encrypted_text(ciphertext: bytes | memoryview | None) -> str | None:
+    """Decrypt a BYTEA column; return ``None`` on NULL or decrypt failure.
+
+    Fallback semantics: the caller uses ``None`` to signal "fall back to
+    plaintext column". We log decrypt failures loudly because they can only
+    mean the key rotated or the ciphertext got corrupted — both operator
+    problems that a silent fall-through would hide.
+    """
+    if ciphertext is None:
+        return None
+    raw = bytes(ciphertext) if isinstance(ciphertext, memoryview) else ciphertext
+    try:
+        return decrypt_text(raw)
+    except DecryptionError:
+        logger.exception("Failed to decrypt message column — falling back to plaintext")
+        return None
+
+
+def _decode_encrypted_json(ciphertext: bytes | memoryview | None) -> Any:
+    """Decrypt a BYTEA column and JSON-parse the result.
+
+    Returns ``None`` for NULL inputs, decryption failures, and non-JSON
+    payloads. Same fallback semantics as :func:`_decode_encrypted_text`.
+    """
+    plaintext = _decode_encrypted_text(ciphertext)
+    if plaintext is None:
+        return None
+    try:
+        return json.loads(plaintext)
+    except (ValueError, TypeError):
+        logger.exception("Failed to parse decrypted JSON payload")
+        return None
 
 
 def _row_to_conversation(row: tuple[Any, ...]) -> Conversation:
@@ -103,12 +145,18 @@ def _row_to_conversation(row: tuple[Any, ...]) -> Conversation:
 
 
 def _row_to_message(row: tuple[Any, ...]) -> Message:
-    """Build a ``Message`` from a raw cursor row."""
+    """Build a ``Message`` from a raw cursor row.
+
+    Column order matches :data:`_MESSAGE_COLUMNS`. Encrypted columns take
+    precedence over their plaintext counterparts; the plaintext fallback
+    only matters for rows written before the #570 rollout (see migration
+    014 and ``scripts/migrate_chat_encryption.py``).
+    """
     (
         msg_id,
         conversation_id,
         role,
-        content,
+        content_plain,
         tool_name,
         tool_input_raw,
         tool_output_raw,
@@ -117,17 +165,32 @@ def _row_to_message(row: tuple[Any, ...]) -> Message:
         tokens_output,
         model,
         created_at,
+        content_encrypted,
+        tool_input_encrypted,
+        tool_output_encrypted,
+        rag_context_encrypted,
     ) = row
 
-    tool_input = parse_jsonb(tool_input_raw)
+    # Content: prefer encrypted blob, fall back to plaintext TEXT column.
+    decrypted_content = _decode_encrypted_text(content_encrypted)
+    content = decrypted_content if decrypted_content is not None else (content_plain or "")
+
+    # tool_input: prefer encrypted JSON blob; fall back to plaintext JSONB.
+    tool_input = _decode_encrypted_json(tool_input_encrypted)
+    if tool_input is None:
+        tool_input = parse_jsonb(tool_input_raw)
     if tool_input is not None and not isinstance(tool_input, dict):
         tool_input = None
 
-    tool_output = parse_jsonb(tool_output_raw)
+    tool_output = _decode_encrypted_json(tool_output_encrypted)
+    if tool_output is None:
+        tool_output = parse_jsonb(tool_output_raw)
     if tool_output is not None and not isinstance(tool_output, dict):
         tool_output = None
 
-    rag_context = parse_jsonb(rag_context_raw)
+    rag_context = _decode_encrypted_json(rag_context_encrypted)
+    if rag_context is None:
+        rag_context = parse_jsonb(rag_context_raw)
     if rag_context is not None and not isinstance(rag_context, list):
         rag_context = None
 
@@ -288,25 +351,50 @@ def create_message(
     if role not in VALID_ROLES:
         raise ValueError(f"Invalid message role: {role!r}")
 
+    # #570: write payload columns to their ``*_encrypted`` BYTEA siblings via
+    # Fernet. The legacy plaintext columns stay NULL on new INSERTs — Phase C
+    # migration will drop them entirely. Encrypting here (instead of at the
+    # DB layer via pgcrypto) keeps the key inside the app process and lets
+    # us reuse the same Fernet primitive as drafts.parsed_text_encrypted.
+    content_ciphertext = encrypt_text(content) if content else encrypt_text("")
+    tool_input_ciphertext = (
+        encrypt_text(json.dumps(tool_input, ensure_ascii=False))
+        if tool_input is not None
+        else None
+    )
+    tool_output_ciphertext = (
+        encrypt_text(json.dumps(tool_output, ensure_ascii=False))
+        if tool_output is not None
+        else None
+    )
+    rag_context_ciphertext = (
+        encrypt_text(json.dumps(rag_context, ensure_ascii=False))
+        if rag_context is not None
+        else None
+    )
+
     row = conn.execute(
         f"""
         INSERT INTO messages
             (conversation_id, role, content, tool_name, tool_input,
-             tool_output, rag_context, tokens_input, tokens_output, model)
-        VALUES (%s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s, %s, %s)
+             tool_output, rag_context, tokens_input, tokens_output, model,
+             content_encrypted, tool_input_encrypted, tool_output_encrypted,
+             rag_context_encrypted)
+        VALUES (%s, %s, NULL, %s, NULL::jsonb, NULL::jsonb, NULL::jsonb, %s, %s, %s,
+                %s, %s, %s, %s)
         RETURNING {_MESSAGE_COLUMNS}
         """,
         (
             str(conversation_id),
             role,
-            content,
             tool_name,
-            json.dumps(tool_input) if tool_input is not None else None,
-            json.dumps(tool_output) if tool_output is not None else None,
-            json.dumps(rag_context) if rag_context is not None else None,
             tokens_input,
             tokens_output,
             model,
+            content_ciphertext,
+            tool_input_ciphertext,
+            tool_output_ciphertext,
+            rag_context_ciphertext,
         ),
     ).fetchone()
     if row is None:

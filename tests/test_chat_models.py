@@ -12,6 +12,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from cryptography.fernet import Fernet
 
 from app.chat.models import (
     Conversation,
@@ -32,6 +33,24 @@ from app.chat.models import (
 _USER_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
 _ORG_ID = uuid.UUID("22222222-2222-2222-2222-222222222222")
 _DRAFT_ID = uuid.UUID("44444444-4444-4444-4444-444444444444")
+
+
+@pytest.fixture(autouse=True)
+def _fernet_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Provide a real Fernet key so ``create_message`` can encrypt.
+
+    #570: new inserts encrypt ``content`` via ``app.storage.encrypt_text``,
+    which refuses to run in production without a key. Tests run under
+    ``APP_ENV=development`` by default so an ephemeral key would be fine,
+    but we set an explicit key here so the encrypted bytes are stable
+    across tests that compare or inspect them.
+    """
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv("STORAGE_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    # Reset the cached Fernet singleton so the new key takes effect.
+    import app.storage.encrypted as encrypted_module
+
+    monkeypatch.setattr(encrypted_module, "_fernet", None)
 
 
 def _make_conversation_row(
@@ -68,8 +87,16 @@ def _make_message_row(
     tokens_input: int | None = None,
     tokens_output: int | None = None,
     model: str | None = None,
+    content_encrypted: bytes | None = None,
+    tool_input_encrypted: bytes | None = None,
+    tool_output_encrypted: bytes | None = None,
+    rag_context_encrypted: bytes | None = None,
 ) -> tuple[Any, ...]:
-    """Build a raw cursor row matching _MESSAGE_COLUMNS order."""
+    """Build a raw cursor row matching _MESSAGE_COLUMNS order.
+
+    #570 adds four encrypted BYTEA columns. The plaintext defaults above
+    exercise the fallback path used for pre-backfill rows.
+    """
     now = datetime.now(UTC)
     return (
         msg_id or uuid.uuid4(),
@@ -84,6 +111,10 @@ def _make_message_row(
         tokens_output,
         model,
         now,
+        content_encrypted,
+        tool_input_encrypted,
+        tool_output_encrypted,
+        rag_context_encrypted,
     )
 
 
