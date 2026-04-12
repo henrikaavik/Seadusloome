@@ -132,6 +132,8 @@ from app.auth.roles import require_role
 from app.db import get_connection as _connect  # noqa: F401
 from app.sync.jena_loader import check_health as jena_check_health  # noqa: F401
 from app.sync.orchestrator import (
+    PHASE_CLONING,  # noqa: F401  -- referenced by rebound trigger_sync
+    _insert_running_row,  # noqa: F401  -- referenced by rebound trigger_sync
     has_recent_running_row,  # noqa: F401  -- referenced by rebound trigger_sync
 )
 from app.ui.data.data_table import Column, DataTable  # noqa: F401  -- used by rebound pages

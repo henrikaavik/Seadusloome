@@ -389,6 +389,47 @@ def test_run_sync_writes_running_row_before_any_phase(
 @patch("app.sync.orchestrator.clone_or_pull")
 @patch("app.sync.orchestrator._finalize_row")
 @patch("app.sync.orchestrator._update_step")
+@patch("app.sync.orchestrator._insert_running_row")
+def test_run_sync_skips_insert_when_caller_provides_log_id(
+    mock_insert: MagicMock,
+    mock_update_step: MagicMock,
+    mock_finalize: MagicMock,
+    mock_clone: MagicMock,
+    mock_convert: MagicMock,
+    mock_load_shapes: MagicMock,
+    mock_validate: MagicMock,
+    mock_serialize: MagicMock,
+    mock_clear: MagicMock,
+    mock_upload: MagicMock,
+    mock_triple_count: MagicMock,
+    mock_notify: MagicMock,
+    fake_repo: Path,
+):
+    """The admin POST handler inserts the running row synchronously and
+    passes the id; run_sync must NOT create a duplicate row."""
+    mock_convert.return_value = Graph()
+
+    result = run_sync(repo_dir=fake_repo, log_id=55)
+    assert result is True
+
+    # No duplicate insert — caller already provided the row id.
+    mock_insert.assert_not_called()
+    # Finalize uses the caller-provided id.
+    args, _ = mock_finalize.call_args
+    assert args[0] == 55
+
+
+@patch("app.sync.orchestrator._get_notify_fn", return_value=None)
+@patch("app.sync.orchestrator.get_triple_count", return_value=42)
+@patch("app.sync.orchestrator.upload_turtle", return_value=True)
+@patch("app.sync.orchestrator.clear_default_graph", return_value=True)
+@patch("app.sync.orchestrator.serialize_to_turtle", return_value="# turtle")
+@patch("app.sync.orchestrator.validate_graph", return_value=(True, ""))
+@patch("app.sync.orchestrator.load_shapes", return_value=Graph())
+@patch("app.sync.orchestrator.convert_ontology")
+@patch("app.sync.orchestrator.clone_or_pull")
+@patch("app.sync.orchestrator._finalize_row")
+@patch("app.sync.orchestrator._update_step")
 @patch("app.sync.orchestrator._insert_running_row", return_value=7)
 def test_run_sync_emits_all_five_phase_labels_in_order(
     mock_insert: MagicMock,

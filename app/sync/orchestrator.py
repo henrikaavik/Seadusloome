@@ -228,7 +228,12 @@ def clone_or_pull(target_dir: Path) -> None:
         )
 
 
-def run_sync(repo_dir: Path | None = None) -> bool:
+def run_sync(
+    repo_dir: Path | None = None,
+    *,
+    log_id: int | None = None,
+    started_at: datetime | None = None,
+) -> bool:
     """Execute the full sync pipeline.
 
     Steps:
@@ -241,16 +246,27 @@ def run_sync(repo_dir: Path | None = None) -> bool:
 
     Args:
         repo_dir: Path to existing ontology repo clone. If None, clones to temp dir.
+        log_id: Pre-allocated sync_log row id. When ``trigger_sync`` inserts
+            the ``running`` row synchronously to avoid a UI race, it passes
+            the id here so the orchestrator doesn't create a second row.
+        started_at: Paired with ``log_id`` — the timestamp recorded on the
+            pre-allocated row. Used for finalize fallback paths.
 
     Returns:
         True if sync succeeded.
     """
-    started_at = datetime.now(UTC)
+    if started_at is None:
+        started_at = datetime.now(UTC)
     logger.info("Starting sync pipeline at %s", started_at.isoformat())
 
     # Insert 'running' row up front so the admin UI can show live progress.
-    # All subsequent step transitions reference this row via log_id.
-    log_id = _insert_running_row(started_at, PHASE_CLONING)
+    # All subsequent step transitions reference this row via log_id. The
+    # admin POST handler inserts synchronously before spawning the
+    # background thread to close the UI race; webhook-triggered syncs
+    # don't render a UI so they fall through to the orchestrator's own
+    # insert here.
+    if log_id is None:
+        log_id = _insert_running_row(started_at, PHASE_CLONING)
 
     use_temp = repo_dir is None
     if use_temp:

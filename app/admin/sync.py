@@ -17,6 +17,7 @@ from app.sync.orchestrator import (
     PHASE_REINGESTING,
     PHASE_UPLOADING,
     PHASE_VALIDATING,
+    _insert_running_row,
     has_recent_running_row,
 )
 from app.ui.data.data_table import Column, DataTable
@@ -298,15 +299,22 @@ def _sync_card(
 # ---------------------------------------------------------------------------
 
 
-def _run_sync_and_clear_flag():
-    """Background wrapper: runs the sync pipeline and clears the in-progress flag."""
+def _run_sync_and_clear_flag(log_id: int | None = None, started_at: datetime | None = None):
+    """Background wrapper: runs the sync pipeline and clears the in-progress flag.
+
+    The admin POST handler inserts the ``running`` sync_log row
+    synchronously (to close the UI race where the response would
+    otherwise be rendered before the thread's INSERT landed) and
+    forwards the row id here. The orchestrator reuses that row instead
+    of creating a duplicate.
+    """
     global _sync_in_progress
     try:
         # Imported here to avoid circular dependency on app.templates during
         # module load, and to ensure the sync uses the runtime env vars.
         from app.sync.orchestrator import run_sync
 
-        run_sync()
+        run_sync(log_id=log_id, started_at=started_at)
     except Exception:
         logger.exception("Admin-triggered sync raised an unhandled exception")
     finally:
@@ -321,6 +329,13 @@ def trigger_sync(req: Request):
     returns immediately. Re-renders the sync card with a status banner so
     an HTMX-capable client gets inline feedback; a plain form submit sees
     the same card on the next full page load via `/admin`.
+
+    The ``running`` sync_log row is inserted synchronously BEFORE the
+    background thread starts. Without this the main request thread
+    would query sync_log and render the card before the worker had a
+    chance to INSERT, leaving the response with no running panel and
+    no HTMX polling trigger — which is what produced the "banner only,
+    no progress" report in production.
     """
     global _sync_in_progress
 
@@ -344,7 +359,16 @@ def trigger_sync(req: Request):
     if already_running_memory or already_running_db:
         banner = ("warning", "S\u00fcnkroniseerimine on juba k\u00e4imas.")
     else:
-        thread = threading.Thread(target=_run_sync_and_clear_flag, daemon=True)
+        # Synchronous running-row INSERT: the card we return must already
+        # reflect the in-flight sync or HTMX won't start polling.
+        started_at = datetime.now(UTC)
+        log_id = _insert_running_row(started_at, PHASE_CLONING)
+
+        thread = threading.Thread(
+            target=_run_sync_and_clear_flag,
+            kwargs={"log_id": log_id, "started_at": started_at},
+            daemon=True,
+        )
         thread.start()
         banner = (
             "info",

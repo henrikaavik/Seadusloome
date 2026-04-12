@@ -128,12 +128,14 @@ class TestAdminDashboard:
         assert response.status_code == 303
         assert response.headers["location"] == "/auth/login"
 
+    @patch("app.templates.admin_dashboard._insert_running_row", return_value=99)
     @patch("app.templates.admin_dashboard._get_sync_logs")
     @patch("threading.Thread")
     def test_admin_sync_triggers_thread(
         self,
         mock_thread_cls: MagicMock,
         mock_logs: MagicMock,
+        mock_insert: MagicMock,
     ):
         """When called directly (simulating an admin request) the handler
         starts a background thread and returns a sync card with a status
@@ -403,6 +405,73 @@ class TestSyncCardLiveProgress:
         html = to_xml(result)
         assert 'id="sync-card"' in html
         assert "every 3s" in html
+
+    @patch("app.templates.admin_dashboard._insert_running_row", return_value=99)
+    @patch("app.templates.admin_dashboard._get_sync_logs")
+    def test_post_sync_inserts_running_row_before_thread(
+        self,
+        mock_logs: MagicMock,
+        mock_insert: MagicMock,
+    ):
+        """The running row must be inserted synchronously before the
+        background thread starts. Otherwise the rendered card misses the
+        progress panel + polling trigger because the worker's own INSERT
+        hasn't landed when the main thread queries sync_log."""
+        from starlette.requests import Request
+
+        from app.templates import admin_dashboard
+        from app.templates.admin_dashboard import trigger_sync
+
+        admin_dashboard._sync_in_progress = False
+        # Simulate the worker landing the INSERT: the log helper returns
+        # the row we pretend was just inserted.
+        mock_logs.return_value = [
+            {
+                "id": 99,
+                "started_at": __import__("datetime").datetime.now(
+                    __import__("datetime").timezone.utc
+                ),
+                "finished_at": None,
+                "status": "running",
+                "entity_count": None,
+                "error_message": None,
+                "current_step": "cloning",
+            }
+        ]
+
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/admin/sync",
+            "headers": [],
+            "query_string": b"",
+            "scheme": "http",
+            "server": ("testserver", 80),
+            "client": ("127.0.0.1", 12345),
+            "auth": {"role": "admin", "id": "admin-test", "email": "a@b.ee"},
+        }
+        req = Request(scope)
+
+        with patch("threading.Thread") as mock_thread_cls:
+            mock_thread_cls.return_value = MagicMock()
+            result = trigger_sync(req)
+            # INSERT must have run before the Thread constructor.
+            mock_insert.assert_called_once()
+            mock_thread_cls.assert_called_once()
+            # Thread kwargs must carry the pre-allocated log_id so the
+            # orchestrator reuses the row instead of inserting again.
+            _, call_kwargs = mock_thread_cls.call_args
+            assert call_kwargs["kwargs"]["log_id"] == 99
+
+        from fasthtml.common import to_xml
+
+        html = to_xml(result)
+        # With a running row already in sync_log, the rendered card must
+        # carry HTMX polling attributes so the UI actually updates.
+        assert "/admin/sync/status" in html
+        assert "every 3s" in html
+
+        admin_dashboard._sync_in_progress = False
 
     @patch("app.templates.admin_dashboard._get_sync_logs")
     @patch("app.templates.admin_dashboard.has_recent_running_row", return_value=True)
