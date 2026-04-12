@@ -21,6 +21,7 @@ from app.ui.primitives.badge import Badge, BadgeVariant
 from app.ui.primitives.button import Button  # noqa: F401, F811  -- shadow guard
 from app.ui.surfaces.card import Card, CardBody, CardHeader
 from app.ui.theme import get_theme_from_request
+from app.ui.time import format_tallinn
 
 logger = logging.getLogger(__name__)
 
@@ -220,7 +221,7 @@ def _failed_jobs_table(failed_jobs: list[dict]):  # type: ignore[type-arg]
         error = job["error_message"]
         short_error = error[:120] + "..." if len(error) > 120 else error
         finished = job["finished_at"]
-        finished_str = finished.strftime("%d.%m.%Y %H:%M") if finished else "\u2014"
+        finished_str = format_tallinn(finished)
 
         # Expandable error: Details element for long errors
         if len(error) > 120:

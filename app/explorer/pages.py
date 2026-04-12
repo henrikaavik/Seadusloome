@@ -250,7 +250,10 @@ def explorer_page(req: Request):
                 type="button",
                 cls="info-box-dismiss",
                 aria_label="Sulge",
-                onclick="this.parentElement.parentElement.remove()",
+                onclick=(
+                    "localStorage.setItem('explorer-help-dismissed','1');"
+                    "this.parentElement.parentElement.remove()"
+                ),
             ),
             cls="info-box info-box-info",
             role="note",
@@ -279,11 +282,15 @@ def explorer_page(req: Request):
                     type="button",
                     cls="info-box-dismiss",
                     aria_label="Sulge",
-                    onclick="this.parentElement.parentElement.remove()",
+                    onclick=(
+                        "localStorage.setItem('explorer-tip-dismissed','1');"
+                        "this.parentElement.parentElement.remove()"
+                    ),
                 ),
                 cls="info-box info-box-tip",
                 role="note",
             ),
+            id="explorer-tip-banner",
             style="padding:0 1rem;",
         )
 
@@ -535,6 +542,19 @@ def explorer_page(req: Request):
             NotStr('<svg id="canvas"></svg>'),
             # ----- Explorer JS (after DOM) -----
             Script(src="/static/js/explorer.js"),
+            # ----- Auto-hide banners via localStorage -----
+            Script(
+                "(function(){"
+                "if(localStorage.getItem('explorer-help-dismissed')){"
+                "var h=document.getElementById('explorer-help-banner');"
+                "if(h)h.remove();"
+                "}"
+                "if(localStorage.getItem('explorer-tip-dismissed')){"
+                "var t=document.getElementById('explorer-tip-banner');"
+                "if(t)t.remove();"
+                "}"
+                "})();"
+            ),
             # ----- Annotation button wiring for detail panel -----
             # When explorerShowDetail() sets #panel-title, this
             # observer injects an AnnotationButton via HTMX into

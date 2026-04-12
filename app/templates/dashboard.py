@@ -19,6 +19,7 @@ from app.ui.primitives.button import Button
 from app.ui.surfaces.card import Card, CardBody, CardHeader
 from app.ui.surfaces.info_box import InfoBox
 from app.ui.theme import get_theme_from_request
+from app.ui.time import format_tallinn
 
 logger = logging.getLogger(__name__)
 
@@ -197,7 +198,7 @@ def _activity_card(activity: list[dict]):  # type: ignore[type-arg]
             ts = entry["created_at"]
             rows.append(
                 {
-                    "time": ts.strftime("%d.%m.%Y %H:%M") if ts else "—",
+                    "time": format_tallinn(ts),
                     "action": entry["action"],
                     "detail": str(entry["detail"]) if entry["detail"] else "—",
                 }

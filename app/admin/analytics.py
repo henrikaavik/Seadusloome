@@ -21,6 +21,7 @@ from app.ui.primitives.button import Button  # noqa: F401, F811  -- shadow guard
 from app.ui.surfaces.card import Card, CardBody, CardHeader
 from app.ui.surfaces.info_box import InfoBox
 from app.ui.theme import get_theme_from_request
+from app.ui.time import format_tallinn
 
 logger = logging.getLogger(__name__)
 
@@ -172,7 +173,7 @@ def admin_analytics_page(req: Request):
         rows = [
             {
                 "day": (
-                    r["day"].strftime("%d.%m.%Y")
+                    format_tallinn(r["day"], fmt="%d.%m.%Y")
                     if hasattr(r["day"], "strftime")
                     else str(r["day"])
                 ),

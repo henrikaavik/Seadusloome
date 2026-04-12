@@ -20,6 +20,15 @@ def _sanitize_sparql_value(value: str) -> str:
 
     This escapes backslashes, quotes, and newlines so the value is safe
     inside a SPARQL double-quoted string literal.
+
+    .. warning::
+
+        This function must **NOT** be used for URI contexts (``<...>`` or
+        prefixed names like ``estleg:...``).  Characters such as ``<``,
+        ``>``, ``{``, ``}``, and spaces are not escaped here and can break
+        out of URI delimiters, enabling SPARQL injection.  For URI bindings
+        use :meth:`SparqlClient._inject_uri_bindings` which validates
+        against a strict character allowlist.
     """
     value = value.replace("\\", "\\\\")
     value = value.replace('"', '\\"')

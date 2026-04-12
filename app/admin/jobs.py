@@ -12,6 +12,7 @@ from app.ui.data.data_table import Column, DataTable
 from app.ui.primitives.badge import Badge
 from app.ui.primitives.button import Button  # noqa: F401, F811  -- shadow guard
 from app.ui.surfaces.card import Card, CardBody, CardHeader
+from app.ui.time import format_tallinn
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +113,7 @@ def _job_queue_card():
                     "job_type": job.job_type,
                     "error_message": error_raw,
                     "attempts": f"{job.attempts}/{job.max_attempts}",
-                    "finished_at": finished.strftime("%d.%m.%Y %H:%M") if finished else "—",
+                    "finished_at": format_tallinn(finished),
                 }
             )
         body_children.append(H4("Viimased ebaõnnestunud jobid", cls="section-subtitle"))  # noqa: F405

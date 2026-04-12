@@ -44,6 +44,7 @@ from app.auth.users import get_user
 from app.db import get_connection as _connect
 from app.notifications.wire import notify_annotation_reply
 from app.ui.surfaces.annotation_popover import AnnotationPopover
+from app.ui.time import format_tallinn
 
 logger = logging.getLogger(__name__)
 
@@ -62,13 +63,8 @@ def _parse_uuid(raw: str) -> uuid.UUID | None:
 
 
 def _format_timestamp(value: Any) -> str:
-    """Render a datetime as an Estonian-style timestamp."""
-    if value is None:
-        return "—"
-    try:
-        return value.strftime("%d.%m.%Y %H:%M")
-    except AttributeError:
-        return str(value)
+    """Render a ``datetime`` in Europe/Tallinn (see app.ui.time)."""
+    return format_tallinn(value)
 
 
 def _user_display_name(user_id: uuid.UUID) -> str:

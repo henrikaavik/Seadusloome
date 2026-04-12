@@ -43,6 +43,7 @@ from app.ui.surfaces.alert import Alert
 from app.ui.surfaces.card import Card, CardBody, CardHeader
 from app.ui.surfaces.info_box import InfoBox
 from app.ui.theme import get_theme_from_request
+from app.ui.time import format_tallinn
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +113,7 @@ def _format_timestamp(value: Any) -> str:
     if value is None:
         return "—"
     try:
-        return value.strftime("%d.%m.%Y %H:%M")
+        return format_tallinn(value)
     except AttributeError:
         return str(value)
 

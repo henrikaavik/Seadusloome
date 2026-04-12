@@ -61,6 +61,7 @@ from app.ui.surfaces.alert import Alert
 from app.ui.surfaces.card import Card, CardBody, CardFooter, CardHeader
 from app.ui.surfaces.info_box import InfoBox
 from app.ui.theme import get_theme_from_request
+from app.ui.time import format_tallinn
 
 logger = logging.getLogger(__name__)
 
@@ -141,13 +142,8 @@ def _status_badge(status: str):
 
 
 def _format_timestamp(value: Any) -> str:
-    """Render a ``datetime`` the same way the admin dashboard does."""
-    if value is None:
-        return "—"
-    try:
-        return value.strftime("%d.%m.%Y %H:%M")
-    except AttributeError:
-        return str(value)
+    """Render a ``datetime`` in Europe/Tallinn (see app.ui.time)."""
+    return format_tallinn(value)
 
 
 # #457: stop polling after this many seconds since the draft was

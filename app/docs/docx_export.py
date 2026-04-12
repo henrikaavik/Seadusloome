@@ -37,7 +37,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +45,7 @@ from docx.enum.section import WD_SECTION
 from docx.shared import Pt
 
 from app.docs.draft_model import Draft
+from app.ui.time import format_tallinn
 
 logger = logging.getLogger(__name__)
 
@@ -101,12 +101,8 @@ EXPORT_DIR = _load_export_dir()
 
 
 def _format_timestamp(value: Any) -> str:
-    """Render a ``datetime`` consistently across every docx section."""
-    if value is None:
-        return "—"
-    if isinstance(value, datetime):
-        return value.strftime("%d.%m.%Y %H:%M")
-    return str(value)
+    """Render a ``datetime`` consistently across every docx section (Europe/Tallinn)."""
+    return format_tallinn(value)
 
 
 def _parse_report_data(raw: Any) -> dict[str, Any]:

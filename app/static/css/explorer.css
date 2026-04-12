@@ -48,6 +48,8 @@ svg#canvas { width: 100%; height: 100vh; display: block; }
 #controls {
   position: fixed; top: 56px; left: 24px; z-index: 10;
   display: flex; flex-direction: column; gap: 6px;
+  max-height: calc(100vh - 130px); overflow-y: auto;
+  scrollbar-width: thin; scrollbar-color: rgba(100,116,139,0.3) transparent;
 }
 .ctrl-btn {
   background: rgba(30,41,59,0.85); border: 1px solid rgba(100,116,139,0.3); color: #94a3b8;

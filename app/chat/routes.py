@@ -47,6 +47,7 @@ from app.ui.surfaces.alert import Alert
 from app.ui.surfaces.card import Card, CardBody, CardHeader
 from app.ui.surfaces.info_box import InfoBox
 from app.ui.theme import get_theme_from_request
+from app.ui.time import format_tallinn
 
 logger = logging.getLogger(__name__)
 
@@ -67,13 +68,8 @@ def _parse_uuid(raw: str) -> uuid.UUID | None:
 
 
 def _format_timestamp(value: Any) -> str:
-    """Render a datetime as dd.mm.YYYY HH:MM."""
-    if value is None:
-        return "\u2014"
-    try:
-        return value.strftime("%d.%m.%Y %H:%M")
-    except AttributeError:
-        return str(value)
+    """Render a ``datetime`` in Europe/Tallinn (see app.ui.time)."""
+    return format_tallinn(value)
 
 
 def _not_found_page(req: Request):
@@ -341,9 +337,9 @@ def new_conversation(req: Request):
                 )
 
     if not context_draft_id:
-        from datetime import datetime as dt
+        from app.ui.time import now_tallinn
 
-        title = f"Vestlus \u2014 {dt.now().strftime('%d.%m.%Y %H:%M')}"
+        title = f"Vestlus \u2014 {now_tallinn().strftime('%d.%m.%Y %H:%M')}"
 
     try:
         with _connect() as conn:

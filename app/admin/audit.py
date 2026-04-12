@@ -19,6 +19,7 @@ from app.ui.layout import PageShell
 from app.ui.primitives.button import Button  # noqa: F401, F811  -- shadow guard
 from app.ui.surfaces.card import Card, CardBody, CardHeader
 from app.ui.theme import get_theme_from_request
+from app.ui.time import format_tallinn
 
 logger = logging.getLogger(__name__)
 
@@ -322,7 +323,7 @@ def _audit_results_content(
             ts = entry["created_at"]
             rows.append(
                 {
-                    "time": ts.strftime("%d.%m.%Y %H:%M") if ts else "\u2014",
+                    "time": format_tallinn(ts),
                     "user_name": entry["user_name"],
                     "action": entry["action"],
                     "detail": str(entry["detail"]) if entry["detail"] else "\u2014",
@@ -452,7 +453,7 @@ def admin_audit_export(req: Request):
                 entry["user_name"],
                 entry["action"],
                 entry["detail"],
-                ts.strftime("%d.%m.%Y %H:%M") if ts else "",
+                format_tallinn(ts) if ts else "",
             ]
         )
 

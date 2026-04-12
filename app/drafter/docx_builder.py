@@ -22,13 +22,15 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from docx import Document
 from docx.enum.section import WD_SECTION
 from docx.shared import Pt
+
+from app.ui.time import format_tallinn
 
 logger = logging.getLogger(__name__)
 
@@ -189,7 +191,7 @@ def _build_law_doc(
     """Build the body for a full_law document."""
     # Cover
     doc.add_heading(title or "Eelnou", level=0)
-    doc.add_paragraph(f"Koostatud: {datetime.now().strftime('%d.%m.%Y')}")
+    doc.add_paragraph(f"Koostatud: {format_tallinn(datetime.now(UTC), fmt='%d.%m.%Y')}")
     doc.add_paragraph("")  # spacer
 
     # Main body
@@ -229,7 +231,7 @@ def _build_vtk_doc(
     # Cover
     doc.add_heading("Vabariigi Valitsuse korralduse eelanaluus", level=0)
     doc.add_heading(title or "VTK eelanaluus", level=1)
-    doc.add_paragraph(f"Koostatud: {datetime.now().strftime('%d.%m.%Y')}")
+    doc.add_paragraph(f"Koostatud: {format_tallinn(datetime.now(UTC), fmt='%d.%m.%Y')}")
     doc.add_paragraph("")
 
     # Main body

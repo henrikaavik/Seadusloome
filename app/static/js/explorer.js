@@ -1066,9 +1066,8 @@ window.explorerGroupByCategory = function() {
 
 window.explorerResetView = function() {
   collapseToOverview(true);
-  // Reset zoom
-  svg.transition().duration(500)
-    .call(zoomBehavior.transform, d3.zoomIdentity.translate(width / 2, height / 2).scale(0.9));
+  // Center on current nodes
+  setTimeout(function() { zoomToFit(500); }, 300);
 };
 
 window.explorerCollapseToOverview = function() {
@@ -1454,6 +1453,43 @@ function renderVersionHistory(entityData) {
 }
 
 // ---------------------------------------------------------------------------
+// Zoom-to-fit — centers graph in viewport after render
+// ---------------------------------------------------------------------------
+
+function zoomToFit(duration) {
+  duration = duration || 500;
+  if (state.nodes.length === 0) return;
+
+  var padding = 80;
+  var xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
+  state.nodes.forEach(function(n) {
+    var nx = n.x || 0;
+    var ny = n.y || 0;
+    var nr = n.r || 20;
+    if (nx - nr < xMin) xMin = nx - nr;
+    if (nx + nr > xMax) xMax = nx + nr;
+    if (ny - nr < yMin) yMin = ny - nr;
+    if (ny + nr > yMax) yMax = ny + nr;
+  });
+
+  var bw = xMax - xMin;
+  var bh = yMax - yMin;
+  if (bw <= 0 || bh <= 0) return;
+
+  var midX = (xMin + xMax) / 2;
+  var midY = (yMin + yMax) / 2;
+  var scale = Math.min((width - padding * 2) / bw, (height - padding * 2) / bh, 1.5);
+  scale = Math.max(0.3, Math.min(scale, 1.5));
+
+  var transform = d3.zoomIdentity
+    .translate(width / 2, height / 2)
+    .scale(scale)
+    .translate(-midX, -midY);
+
+  svg.transition().duration(duration).call(zoomBehavior.transform, transform);
+}
+
+// ---------------------------------------------------------------------------
 // Window resize
 // ---------------------------------------------------------------------------
 
@@ -1518,6 +1554,9 @@ async function init() {
   state.view = 'overview';
   updateBreadcrumb();
   render();
+
+  // Center the graph once the simulation settles
+  setTimeout(function() { zoomToFit(600); }, 800);
 
   // Start WebSocket connection once
   if (!wsInitialized) {

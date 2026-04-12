@@ -31,6 +31,7 @@ from app.notifications.models import (
 )
 from app.ui.layout import PageShell
 from app.ui.theme import get_theme_from_request
+from app.ui.time import format_tallinn
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +65,7 @@ def _time_ago(dt: Any) -> str:
     days = hours // 24
     if days < 30:
         return f"{days} p tagasi"
-    return dt.strftime("%d.%m.%Y")
+    return format_tallinn(dt, fmt="%d.%m.%Y")
 
 
 def NotificationItem(notif: Any, *, compact: bool = False):  # noqa: ANN201, N802

@@ -25,6 +25,7 @@ from app.ui.forms.app_form import AppForm
 from app.ui.primitives.badge import StatusBadge
 from app.ui.primitives.button import Button  # noqa: F401, F811  -- shadow guard
 from app.ui.surfaces.card import Card, CardBody, CardHeader
+from app.ui.time import format_tallinn
 
 # Module-level lock — keeps rapid double-clicks on the "Sync now" button
 # from both spawning a thread before the DB's running row becomes visible.
@@ -314,7 +315,7 @@ def _sync_card(
             started = entry["started_at"]
             rows.append(
                 {
-                    "started": started.strftime("%d.%m.%Y %H:%M") if started else "\u2014",
+                    "started": format_tallinn(started),
                     "status_raw": entry["status"],
                     "status": entry["status"],
                     "entity_count": (

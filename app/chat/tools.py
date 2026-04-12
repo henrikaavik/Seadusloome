@@ -20,6 +20,12 @@ from uuid import UUID
 from app.db import get_connection
 from app.ontology.sparql_client import SparqlClient, _sanitize_sparql_value
 
+# Strict validation patterns for provision URIs (prevents SPARQL injection).
+# Prefixed names: only alphanumeric, underscore, hyphen after "estleg:"
+_SAFE_PREFIXED_RE = re.compile(r"^estleg:[A-Za-z0-9_\-]+$")
+# Full URIs: strict character allowlist (matches SparqlClient._inject_uri_bindings)
+_SAFE_FULL_URI_RE = re.compile(r"^https?://[A-Za-z0-9./:_#\-]{1,512}$")
+
 logger = logging.getLogger(__name__)
 
 
@@ -293,15 +299,28 @@ async def _exec_get_provision_details(
     if not provision_uri.strip():
         return {"error": "Empty provision_uri"}
 
-    safe_uri = _sanitize_sparql_value(provision_uri)
-
-    # If the URI uses the estleg: prefix, expand it for the VALUES clause.
-    # Otherwise treat it as a full URI.
-    if safe_uri.startswith("estleg:"):
-        uri_ref = safe_uri  # keep as prefixed name
+    # Strict URI validation — reject anything that doesn't match known-safe
+    # patterns.  _sanitize_sparql_value only escapes string-literal chars and
+    # is NOT safe for URI contexts (angle brackets, braces, spaces, etc.).
+    if provision_uri.startswith("estleg:"):
+        if not _SAFE_PREFIXED_RE.fullmatch(provision_uri):
+            return {
+                "error": (
+                    "Invalid prefixed URI. Only alphanumeric characters, "
+                    "underscores, and hyphens are allowed after 'estleg:'."
+                )
+            }
+        uri_ref = provision_uri  # keep as prefixed name
         filter_clause = f"BIND({uri_ref} AS ?uri)"
+    elif _SAFE_FULL_URI_RE.fullmatch(provision_uri):
+        filter_clause = f"BIND(<{provision_uri}> AS ?uri)"
     else:
-        filter_clause = f"BIND(<{safe_uri}> AS ?uri)"
+        return {
+            "error": (
+                "Invalid provision URI. Must be a prefixed name "
+                "(estleg:...) or a valid http(s) URI."
+            )
+        }
 
     query = f"""
         PREFIX estleg: <https://data.riik.ee/ontology/estleg#>

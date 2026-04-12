@@ -72,6 +72,7 @@ from app.ui.surfaces.alert import Alert
 from app.ui.surfaces.card import Card, CardBody, CardHeader
 from app.ui.surfaces.info_box import InfoBox
 from app.ui.theme import get_theme_from_request
+from app.ui.time import format_tallinn
 
 logger = logging.getLogger(__name__)
 
@@ -172,13 +173,8 @@ def _not_found_page(req: Request):
 
 
 def _format_timestamp(value: Any) -> str:
-    """Render a ``datetime`` as dd.mm.YYYY HH:MM."""
-    if value is None:
-        return "\u2014"
-    try:
-        return value.strftime("%d.%m.%Y %H:%M")
-    except AttributeError:
-        return str(value)
+    """Render a ``datetime`` in Europe/Tallinn (see app.ui.time)."""
+    return format_tallinn(value)
 
 
 # ---------------------------------------------------------------------------
