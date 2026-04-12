@@ -156,7 +156,7 @@ def _progress_pills(current_step: str | None):
             current_index = i
             break
 
-    pills = []
+    items = []
     for i, (_key, label) in enumerate(_PROGRESS_PHASES):
         if current_index == -1:
             state = "pending"
@@ -166,32 +166,69 @@ def _progress_pills(current_step: str | None):
             state = "active"
         else:
             state = "pending"
-        pills.append(
-            Span(  # noqa: F405
-                Span(str(i + 1), cls="sync-progress-pill-index"),  # noqa: F405
-                Span(label, cls="sync-progress-pill-label"),  # noqa: F405
-                cls=f"sync-progress-pill sync-progress-pill-{state}",
+
+        # done phases get a check glyph; active uses a pulsing dot;
+        # pending shows the plain index. This reads well at a glance
+        # even if text labels wrap on small screens.
+        if state == "done":
+            marker = Span("\u2713", cls="sync-step-marker", aria_hidden="true")  # noqa: F405
+        elif state == "active":
+            marker = Span(
+                Span(cls="sync-step-spinner", aria_hidden="true"),  # noqa: F405
+                cls="sync-step-marker",
+                aria_hidden="true",
+            )
+        else:
+            marker = Span(
+                str(i + 1),
+                cls="sync-step-marker",
+                aria_hidden="true",
+            )
+
+        items.append(
+            Li(  # noqa: F405
+                marker,
+                Span(label, cls="sync-step-label"),  # noqa: F405
+                cls=f"sync-step sync-step-{state}",
                 data_phase=_PROGRESS_PHASES[i][0],
+                aria_current="step" if state == "active" else None,
             )
         )
-    return Div(*pills, cls="sync-progress-pills", role="status", aria_live="polite")  # noqa: F405
+    return Ol(  # noqa: F405
+        *items,
+        cls="sync-steps",
+        role="list",
+        aria_label="S\u00fcnkroniseerimise edenemine",
+    )
 
 
 def _running_panel(entry: dict):  # type: ignore[type-arg]
     """Render the live progress panel shown while a sync is running."""
     started_at = entry.get("started_at")
     elapsed = _elapsed_seconds(started_at)
+    current_step = entry.get("current_step") or PHASE_CLONING
+    # Map current phase to a friendly caption shown under the header.
+    phase_caption = dict(_PROGRESS_PHASES).get(current_step, "Alustamine")
     return Div(  # noqa: F405
         Div(  # noqa: F405
-            _sync_status_badge("running"),
+            Div(  # noqa: F405
+                Span(cls="sync-live-indicator", aria_hidden="true"),  # noqa: F405
+                Span("S\u00fcnkroniseerimine k\u00e4ib", cls="sync-live-title"),  # noqa: F405
+                cls="sync-live-title-row",
+            ),
             Span(
-                f"Kestab {_format_elapsed(elapsed)}",
+                _format_elapsed(elapsed),
                 cls="sync-elapsed",
                 data_testid="sync-elapsed",
+                aria_label=f"Kestnud {_format_elapsed(elapsed)}",
             ),
             cls="sync-running-header",
         ),
-        _progress_pills(entry.get("current_step")),
+        Div(  # noqa: F405
+            f"Praegu: {phase_caption}",
+            cls="sync-phase-caption",
+        ),
+        _progress_pills(current_step),
         cls="sync-running-panel",
     )
 
@@ -217,6 +254,16 @@ def _sync_card(
     """
     is_running = bool(sync_logs) and sync_logs[0].get("status") == "running"
 
+    # Defensive: if the caller just triggered a sync (banner variant='info')
+    # but our query hasn't seen the running row yet (possible on slow DB
+    # round-trips even with synchronous insert), treat the card as running
+    # so the response always carries the polling trigger. The first poll
+    # (3s later) will pick up the real row and render the progress panel
+    # correctly. Without this fallback the card would render with no
+    # polling and never update until the admin manually refreshed.
+    just_triggered = status_banner is not None and status_banner[0] == "info"
+    poll_for_updates = is_running or just_triggered
+
     body_nodes: list = []
 
     if status_banner is not None:
@@ -227,6 +274,21 @@ def _sync_card(
 
     if is_running:
         body_nodes.append(_running_panel(sync_logs[0]))
+    elif just_triggered:
+        # Synthesize a minimal running panel from the trigger timestamp
+        # so the admin sees the progress skeleton immediately. First
+        # poll will swap in the real one.
+        from datetime import UTC as _UTC
+        from datetime import datetime as _dt
+
+        body_nodes.append(
+            _running_panel(
+                {
+                    "started_at": _dt.now(_UTC),
+                    "current_step": PHASE_CLONING,
+                }
+            )
+        )
 
     # Historical log table — always shown (gives context even while
     # the live panel is up).
@@ -268,7 +330,7 @@ def _sync_card(
     body_nodes.append(_sync_trigger_form())
 
     card_kwargs: dict = {"id": "sync-card"}
-    if is_running:
+    if poll_for_updates:
         # Poll ourselves every 3s while the sync is running. HTMX swaps
         # this same element outerHTML with the next render — when the
         # sync finishes the new response omits these attrs and polling

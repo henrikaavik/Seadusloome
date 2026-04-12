@@ -347,8 +347,29 @@ class TestSyncCardLiveProgress:
         html = to_xml(_sync_card([self._running_log()]))
         assert "/admin/sync/status" in html
         assert "every 3s" in html
-        # Progress pills render with Estonian phase labels
+        # Step labels render with Estonian phase names
         assert "Konverteerimine" in html
+        # Live header labels
+        assert "S\u00fcnkroniseerimine k\u00e4ib" in html
+        assert "Praegu: Konverteerimine" in html
+
+    def test_card_polls_defensively_when_banner_says_triggered(self):
+        """If the banner says a sync just started but the DB query hasn't
+        caught up yet (slow replica, race), the card must still emit the
+        HTMX polling trigger so the first poll can pick up the real row."""
+        from fasthtml.common import to_xml
+
+        from app.admin.sync import _sync_card
+
+        html = to_xml(
+            _sync_card([], status_banner=("info", "S\u00fcnkroniseerimine k\u00e4ivitati"))
+        )
+        assert "/admin/sync/status" in html
+        assert "every 3s" in html
+        # A skeleton running panel must render so the admin sees something
+        # immediately instead of a bare banner.
+        assert "S\u00fcnkroniseerimine k\u00e4ib" in html
+        assert "sync-step" in html
 
     def test_card_stops_polling_on_terminal_state(self):
         """A success/failed row must NOT emit polling attributes."""
@@ -361,19 +382,19 @@ class TestSyncCardLiveProgress:
         assert "every 3s" not in html
 
     def test_progress_pills_mark_completed_phases_done(self):
-        """Pills before the current step render with the 'done' state."""
+        """Steps before the current step render with the 'done' state."""
         from fasthtml.common import to_xml
 
         from app.admin.sync import _sync_card
 
         html = to_xml(_sync_card([self._running_log(step="uploading")]))
         # Cloning + converting + validating completed before uploading,
-        # so their pills should carry the -done modifier class.
-        assert "sync-progress-pill-done" in html
+        # so their steps should carry the -done modifier class.
+        assert "sync-step-done" in html
         # Uploading is active
-        assert "sync-progress-pill-active" in html
+        assert "sync-step-active" in html
         # Reingesting is still pending
-        assert "sync-progress-pill-pending" in html
+        assert "sync-step-pending" in html
 
     @patch("app.templates.admin_dashboard._get_sync_logs")
     def test_sync_status_endpoint_renders_card(self, mock_logs: MagicMock):
