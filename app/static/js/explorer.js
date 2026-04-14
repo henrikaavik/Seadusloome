@@ -33,7 +33,7 @@ const CATEGORY_COLORS = {
   'ProcedureStage':     '#cbd5e1',
 };
 
-// Human-readable labels for categories (Estonian)
+// Human-readable labels for categories (Estonian — all displayed text)
 const CATEGORY_LABELS = {
   'EnactedLaw':       'Kehtiv seadus',
   'DraftLegislation': 'Eeln\u00f5u',
@@ -43,26 +43,15 @@ const CATEGORY_LABELS = {
   'LegalProvision':   '\u00d5igusnorm',
   'TopicCluster':     'Teemaklaster',
   'LegalConcept':     '\u00d5igusm\u00f5iste',
-};
-
-// English labels used in legend (matching demo)
-const CATEGORY_LABELS_EN = {
-  'EnactedLaw':       'Enacted Law',
-  'DraftLegislation': 'Draft Legislation',
-  'CourtDecision':    'Court Decisions',
-  'EULegislation':    'EU Legislation',
-  'EUCourtDecision':  'EU Court Decisions',
-  'LegalProvision':   'Legal Provision',
-  'TopicCluster':     'Topic Cluster',
-  'LegalConcept':     'Legal Concept',
-  'Section':          'Section',
-  'Division':         'Division',
-  'Chapter':          'Chapter',
-  'Subdivision':      'Subdivision',
-  'LegalPart':        'Legal Part',
-  'CaseType':         'Case Type',
-  'LegislativePhase': 'Legislative Phase',
-  'ProcedureStage':   'Procedure Stage',
+  // Structural sub-categories
+  'Section':          'Jagu',
+  'Division':         'Jaotis',
+  'Chapter':          'Peat\u00fckk',
+  'Subdivision':      'Alljaotis',
+  'LegalPart':        '\u00d5igusosa',
+  'CaseType':         'Kohtuasja liik',
+  'LegislativePhase': 'Seadusloome etapp',
+  'ProcedureStage':   'Menetlusetapp',
 };
 
 const CATEGORY_POSITIONS = {
@@ -297,7 +286,7 @@ function buildOverviewFromApi(categories) {
     }
     const node = {
       id: `cat:${catKey}`,
-      label: CATEGORY_LABELS_EN[catKey] || catKey,
+      label: CATEGORY_LABELS[catKey] || catKey,
       category: catKey,
       desc: `${cat.count.toLocaleString('et-EE')} \u00fcksust`,
       count: cat.count,
@@ -336,7 +325,7 @@ function buildFallbackOverview() {
 
   const nodes = fallbackData.map(d => ({
     id: `cat:${d.key}`,
-    label: CATEGORY_LABELS_EN[d.key],
+    label: CATEGORY_LABELS[d.key],
     category: d.key,
     desc: d.desc,
     count: d.count,
@@ -652,7 +641,7 @@ function onNodeMouseEnter(event, d) {
   document.getElementById('tt-title').textContent = d.label;
 
   const catEl = document.getElementById('tt-cat');
-  catEl.textContent = CATEGORY_LABELS_EN[d.category] || d.category;
+  catEl.textContent = CATEGORY_LABELS[d.category] || d.category;
   catEl.style.background = colorFor(d.category) + '22';
   catEl.style.color = colorFor(d.category);
 
@@ -759,7 +748,7 @@ function updateLegend() {
     dot.style.background = colorFor(cat);
 
     item.appendChild(dot);
-    item.appendChild(document.createTextNode(CATEGORY_LABELS_EN[cat] || cat));
+    item.appendChild(document.createTextNode(CATEGORY_LABELS[cat] || cat));
     legendEl.appendChild(item);
   });
 }
@@ -822,7 +811,7 @@ async function showEntityDetail(d) {
   const panelLink = document.getElementById('panel-link');
 
   panelTitle.textContent = d.label;
-  panelCategory.textContent = CATEGORY_LABELS_EN[d.category] || d.category;
+  panelCategory.textContent = CATEGORY_LABELS[d.category] || d.category;
   panelCategory.style.background = colorFor(d.category) + '22';
   panelCategory.style.color = colorFor(d.category);
 
@@ -1013,7 +1002,7 @@ function updateBreadcrumb() {
 
     const cat = document.createElement('span');
     const catKey = state.expandedCategory || (state.selectedEntity ? '' : '');
-    cat.textContent = CATEGORY_LABELS_EN[catKey] || catKey || 'Kategooria';
+    cat.textContent = CATEGORY_LABELS[catKey] || catKey || 'Kategooria';
     if (state.view === 'entity' && catKey) {
       cat.addEventListener('click', () => {
         closeDetail();
@@ -1238,7 +1227,7 @@ async function applyTimelineFilter(year) {
     var info = catCounts[catKey];
     nodes.push({
       id: 'cat:' + catKey,
-      label: CATEGORY_LABELS_EN[catKey] || catKey,
+      label: CATEGORY_LABELS[catKey] || catKey,
       category: catKey,
       desc: info.count + ' kehtivat ' + year + '. a.',
       count: info.count,

@@ -321,8 +321,8 @@ def explorer_page(req: Request):
             draft_tip if draft_tip else "",
             # ----- Top bar -----
             Div(
-                H1("Estonian Legal Ontology"),
-                Span("Explorer", cls="badge"),
+                H1("Eesti \u00f5iguse ontoloogia"),
+                Span("Uurija", cls="badge"),
                 Span("D3.js", cls="badge"),
                 # Search box
                 Div(
@@ -412,27 +412,27 @@ def explorer_page(req: Request):
                 H3("Kategooriad"),
                 Div(
                     Div(cls="legend-dot", style="background:#38bdf8"),
-                    "Enacted Law",
+                    "Kehtiv seadus",
                     cls="legend-item",
                 ),
                 Div(
                     Div(cls="legend-dot", style="background:#a78bfa"),
-                    "Draft Legislation",
+                    "Eeln\u00f5u",
                     cls="legend-item",
                 ),
                 Div(
                     Div(cls="legend-dot", style="background:#fb923c"),
-                    "Court Decisions",
+                    "Kohtulahend",
                     cls="legend-item",
                 ),
                 Div(
                     Div(cls="legend-dot", style="background:#34d399"),
-                    "EU Legislation",
+                    "EL \u00f5igusakt",
                     cls="legend-item",
                 ),
                 Div(
                     Div(cls="legend-dot", style="background:#f472b6"),
-                    "EU Court Decisions",
+                    "EL kohtulahend",
                     cls="legend-item",
                 ),
                 id="legend",

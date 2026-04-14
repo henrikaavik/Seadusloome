@@ -165,12 +165,12 @@ SELECT DISTINCT ?draftRef ?conflictEntity ?conflictLabel ?reason WHERE {{
     FILTER(str(?otherGraph) != "{graph_uri}")
     BIND(?otherDraft AS ?conflictEntity)
     OPTIONAL {{ ?conflictEntity rdfs:label ?conflictLabel }}
-    BIND("Another draft already references this provision" AS ?reason)
+    BIND("Teine eelnõu viitab juba sellele sättele" AS ?reason)
   }} UNION {{
     # A Supreme Court decision interprets this provision.
     ?conflictEntity estleg:interpretsProvision ?draftRef .
     OPTIONAL {{ ?conflictEntity rdfs:label ?conflictLabel }}
-    BIND("Court decision interprets this provision" AS ?reason)
+    BIND("Kohtulahend tõlgendab seda sätet" AS ?reason)
   }}
 }}
 LIMIT 200

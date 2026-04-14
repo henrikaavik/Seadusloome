@@ -42,11 +42,11 @@ INFO = PALDISKI  # alias
 
 # Legacy — D3 explorer only; do not use in new code
 CATEGORY_COLORS = {
-    "Enacted Law": "#38bdf8",
-    "Draft Legislation": "#a78bfa",
-    "Court Decisions": "#fb923c",
-    "EU Legislation": "#34d399",
-    "EU Court Decisions": "#f472b6",
+    "Kehtiv seadus": "#38bdf8",
+    "Eeln\u00f5u": "#a78bfa",
+    "Kohtulahend": "#fb923c",
+    "EL \u00f5igusakt": "#34d399",
+    "EL kohtulahend": "#f472b6",
 }
 
 # ---------------------------------------------------------------------------
