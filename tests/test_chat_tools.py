@@ -241,6 +241,202 @@ class TestGetProvisionDetails:
 
         assert "error" in result
 
+    def test_valid_full_uri_accepted(self):
+        """A full http URI should be accepted and the query executed."""
+        sparql = _make_sparql()
+        sparql.query.return_value = [  # type: ignore[attr-defined]
+            {
+                "uri": "https://data.riik.ee/ontology/estleg#KarS_Norm_001",
+                "text": "Provision text",
+                "sourceAct": "Karistusseadustik",
+                "paragrahv": "121",
+                "related": "",
+                "relLabel": "",
+            }
+        ]
+
+        result = asyncio.run(
+            execute_tool(
+                "get_provision_details",
+                {"provision_uri": "https://data.riik.ee/ontology/estleg#KarS_Norm_001"},
+                sparql,
+            )
+        )
+
+        assert "provision" in result
+        sparql.query.assert_called_once()  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
+# M4: SPARQL injection prevention in get_provision_details
+# ---------------------------------------------------------------------------
+
+
+class TestProvisionURIInjection:
+    """Verify that malicious URIs are rejected before SPARQL query construction."""
+
+    def test_uri_with_angle_bracket_rejected(self):
+        """Embedded '>' can break out of <...> URI context."""
+        sparql = _make_sparql()
+
+        result = asyncio.run(
+            execute_tool(
+                "get_provision_details",
+                {"provision_uri": "http://example.org/> { } <http://evil"},
+                sparql,
+            )
+        )
+
+        assert "error" in result
+        assert "Invalid" in result["error"]
+        sparql.query.assert_not_called()  # type: ignore[attr-defined]
+
+    def test_uri_with_spaces_rejected(self):
+        """Spaces in URIs can inject SPARQL tokens."""
+        sparql = _make_sparql()
+
+        result = asyncio.run(
+            execute_tool(
+                "get_provision_details",
+                {"provision_uri": "http://example.org/foo bar"},
+                sparql,
+            )
+        )
+
+        assert "error" in result
+        assert "Invalid" in result["error"]
+        sparql.query.assert_not_called()  # type: ignore[attr-defined]
+
+    def test_uri_with_braces_rejected(self):
+        """Braces can inject SPARQL graph patterns."""
+        sparql = _make_sparql()
+
+        result = asyncio.run(
+            execute_tool(
+                "get_provision_details",
+                {"provision_uri": "http://example.org/{evil}"},
+                sparql,
+            )
+        )
+
+        assert "error" in result
+        assert "Invalid" in result["error"]
+        sparql.query.assert_not_called()  # type: ignore[attr-defined]
+
+    def test_prefixed_uri_with_sparql_injection_rejected(self):
+        """SPARQL keywords injected after estleg: prefix should be rejected."""
+        sparql = _make_sparql()
+
+        result = asyncio.run(
+            execute_tool(
+                "get_provision_details",
+                {"provision_uri": "estleg:foo> } INSERT DATA { <a> <b> <c"},
+                sparql,
+            )
+        )
+
+        assert "error" in result
+        assert "Invalid" in result["error"]
+        sparql.query.assert_not_called()  # type: ignore[attr-defined]
+
+    def test_prefixed_uri_with_spaces_rejected(self):
+        """Spaces in the local name portion of a prefixed URI are invalid."""
+        sparql = _make_sparql()
+
+        result = asyncio.run(
+            execute_tool(
+                "get_provision_details",
+                {"provision_uri": "estleg:foo bar"},
+                sparql,
+            )
+        )
+
+        assert "error" in result
+        assert "Invalid" in result["error"]
+        sparql.query.assert_not_called()  # type: ignore[attr-defined]
+
+    def test_non_http_uri_rejected(self):
+        """Non-http(s) URIs should be rejected."""
+        sparql = _make_sparql()
+
+        result = asyncio.run(
+            execute_tool(
+                "get_provision_details",
+                {"provision_uri": "ftp://example.org/bad"},
+                sparql,
+            )
+        )
+
+        assert "error" in result
+        assert "Invalid" in result["error"]
+        sparql.query.assert_not_called()  # type: ignore[attr-defined]
+
+    def test_plain_garbage_rejected(self):
+        """Random text that is neither a prefixed name nor a URI."""
+        sparql = _make_sparql()
+
+        result = asyncio.run(
+            execute_tool(
+                "get_provision_details",
+                {"provision_uri": "'; DROP TABLE provisions; --"},
+                sparql,
+            )
+        )
+
+        assert "error" in result
+        assert "Invalid" in result["error"]
+        sparql.query.assert_not_called()  # type: ignore[attr-defined]
+
+    def test_valid_prefixed_name_accepted(self):
+        """Valid prefixed names should pass validation and execute query."""
+        sparql = _make_sparql()
+        sparql.query.return_value = [  # type: ignore[attr-defined]
+            {
+                "uri": "https://data.riik.ee/ontology/estleg#KarS_Norm_001",
+                "text": "",
+                "sourceAct": "",
+                "paragrahv": "121",
+                "related": "",
+                "relLabel": "",
+            }
+        ]
+
+        result = asyncio.run(
+            execute_tool(
+                "get_provision_details",
+                {"provision_uri": "estleg:KarS_Norm_001"},
+                sparql,
+            )
+        )
+
+        assert "provision" in result
+        sparql.query.assert_called_once()  # type: ignore[attr-defined]
+
+    def test_prefixed_name_with_hyphen_accepted(self):
+        """Hyphens are allowed in the local name portion."""
+        sparql = _make_sparql()
+        sparql.query.return_value = [  # type: ignore[attr-defined]
+            {
+                "uri": "https://data.riik.ee/ontology/estleg#TsMS-Norm-42",
+                "text": "",
+                "sourceAct": "",
+                "paragrahv": "42",
+                "related": "",
+                "relLabel": "",
+            }
+        ]
+
+        result = asyncio.run(
+            execute_tool(
+                "get_provision_details",
+                {"provision_uri": "estleg:TsMS-Norm-42"},
+                sparql,
+            )
+        )
+
+        assert "provision" in result
+        sparql.query.assert_called_once()  # type: ignore[attr-defined]
+
 
 # ---------------------------------------------------------------------------
 # Executor dispatch
