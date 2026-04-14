@@ -392,15 +392,28 @@ class TestOrchestratorRateLimitIntegration:
         side_effect=CostBudgetExceededError("Kulueelarve on taidetud."),
     )
     @patch("app.chat.orchestrator.check_message_rate")
+    @patch(
+        "app.chat.orchestrator.get_conversation",
+        return_value=_make_conversation(),
+    )
+    @patch("app.chat.orchestrator.list_messages", return_value=[])
     @patch("app.chat.orchestrator.get_connection")
-    def test_cost_budget_sends_error_event(self, mock_get_conn, mock_rate, mock_cost):
-        """CostBudgetExceededError triggers an error event, no LLM call."""
+    def test_cost_budget_sends_error_event(
+        self, mock_get_conn, mock_list, mock_get_conv, mock_rate, mock_cost
+    ):
+        """CostBudgetExceededError triggers an error event, no LLM call.
+
+        The budget check was relocated inside the conversation-load
+        transaction so the advisory lock can actually serialise
+        concurrent checks (TOCTOU fix). The test therefore needs to
+        feed past conversation loading before the cost check fires.
+        """
         llm = FakeLLM()
         collector = _Collector()
         orchestrator = ChatOrchestrator(llm, FakeSparql())
 
         asyncio.run(orchestrator.handle_message(_CONV_ID, "Tere", _auth(), collector))
 
-        assert len(collector.events) == 1
-        assert collector.events[0]["type"] == "error"
-        assert "taidetud" in collector.events[0]["message"].lower()
+        error_events = [e for e in collector.events if e["type"] == "error"]
+        assert len(error_events) == 1
+        assert "taidetud" in error_events[0]["message"].lower()

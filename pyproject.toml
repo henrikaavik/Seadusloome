@@ -18,6 +18,8 @@ dependencies = [
     "anthropic>=0.93.0",
     "voyageai>=0.3.7",
     "sentry-sdk[starlette]>=2.57.0",
+    "mistune>=3.0",
+    "bleach>=6",
 ]
 
 [dependency-groups]

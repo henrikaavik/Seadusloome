@@ -131,6 +131,10 @@ _HDRS = (
     Link(rel="stylesheet", href="/static/css/fonts.css"),
     Link(rel="stylesheet", href="/static/css/tokens.css"),
     Link(rel="stylesheet", href="/static/css/ui.css"),
+    # Chat-specific stylesheet — small file (~7 KB), loaded globally so the
+    # card on /chat list page and the conversation view both pick it up without
+    # needing per-route <head> injection (which would land in <body> in FastHTML).
+    Link(rel="stylesheet", href="/static/css/chat.css"),
 )
 
 # Initialize Sentry before the ASGI app is created so that the Starlette
