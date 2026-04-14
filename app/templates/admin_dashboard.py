@@ -56,6 +56,9 @@ from app.admin.cost_dashboard import (
     admin_cost_page as _admin_cost_page_impl,
 )
 from app.admin.dashboard import (
+    _version_footer,  # noqa: F401  -- resolved at call-time in rebound admin_dashboard_page
+)
+from app.admin.dashboard import (
     admin_dashboard_page as _admin_dashboard_page_impl,
 )
 from app.admin.health import (
