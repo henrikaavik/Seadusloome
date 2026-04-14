@@ -43,3 +43,7 @@ docker/data/
 
 # Misc
 *.log
+
+# Local Claude Code tooling
+.claude/scheduled_tasks.lock
+.superpowers/
