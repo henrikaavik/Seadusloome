@@ -424,6 +424,12 @@
   to { transform: rotate(360deg); }
 }
 
+.form-field-error {
+  color: var(--color-danger, #c0392b);
+  font-size: var(--text-sm, 0.875rem);
+  margin-top: var(--space-1, 0.25rem);
+}
+
 /* ---- IconButton: square aspect ratio ---- */
 
 .btn-icon {

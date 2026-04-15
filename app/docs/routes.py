@@ -463,6 +463,53 @@ def drafts_list_page(req: Request):
 # ---------------------------------------------------------------------------
 
 
+# #602: client-side 50 MB cap matches the server-side limit in
+# ``app/docs/upload.py``. Surfaced in the browser so users don't wait
+# for a large upload to transfer before being told it's too big. The
+# inline script also renders "filename — 12.3 MB" below the picker so
+# there is immediate visual confirmation of the selection.
+_UPLOAD_MAX_BYTES = 50 * 1024 * 1024
+
+_FILE_PICKER_SCRIPT = (
+    "(function () {\n"
+    "  var input = document.getElementById('field-file');\n"
+    "  if (!input) return;\n"
+    "  var info = document.getElementById('field-file-info');\n"
+    "  var err = document.getElementById('field-file-error');\n"
+    "  var submit = document.getElementById('upload-submit');\n"
+    f"  var MAX = {_UPLOAD_MAX_BYTES};\n"
+    "  function fmt(bytes) {\n"
+    "    if (bytes < 1024) return bytes + ' B';\n"
+    "    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';\n"
+    "    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';\n"
+    "  }\n"
+    "  input.addEventListener('change', function () {\n"
+    "    var file = input.files && input.files[0];\n"
+    "    if (!file) {\n"
+    "      if (info) info.textContent = '';\n"
+    "      if (err) { err.textContent = ''; err.hidden = true; }\n"
+    "      if (submit) submit.disabled = false;\n"
+    "      return;\n"
+    "    }\n"
+    "    if (info) info.textContent = file.name + ' \\u2014 ' + fmt(file.size);\n"
+    "    if (file.size > MAX) {\n"
+    "      if (err) {\n"
+    "        err.textContent = 'Fail on liiga suur (' + fmt(file.size) "
+    "+ '). Maksimaalne suurus on 50 MB.';\n"
+    "        err.hidden = false;\n"
+    "      }\n"
+    "      if (submit) submit.disabled = true;\n"
+    "      input.value = '';\n"
+    "      if (info) info.textContent = '';\n"
+    "    } else {\n"
+    "      if (err) { err.textContent = ''; err.hidden = true; }\n"
+    "      if (submit) submit.disabled = false;\n"
+    "    }\n"
+    "  });\n"
+    "})();\n"
+)
+
+
 def _upload_form(*, title_value: str = "", error: str | None = None):
     """Render the multipart upload form.
 
@@ -515,13 +562,31 @@ def _upload_form(*, title_value: str = "", error: str | None = None):
                 "Toetatud failitüübid: .docx, .pdf. Maksimaalne suurus 50 MB.",
                 cls="form-field-help",
             ),
+            # #602: client-side picker feedback — filename + formatted
+            # size, plus an inline error when the picked file exceeds
+            # 50 MB so the user is not forced to wait for a large
+            # upload to transfer before being told it's too big.
+            P("", id="field-file-info", cls="form-field-help muted-text"),  # noqa: F405
+            Div(  # noqa: F405
+                "",
+                id="field-file-error",
+                cls="form-field-error",
+                role="alert",
+                hidden=True,
+            ),
             cls="form-field",
         ),
         Div(
-            Button("Laadi üles", type="submit", variant="primary"),
+            Button(
+                "Laadi üles",
+                type="submit",
+                variant="primary",
+                id="upload-submit",
+            ),
             A("Tühista", href="/drafts", cls="btn btn-ghost btn-md"),  # noqa: F405
             cls="form-actions",
         ),
+        Script(_FILE_PICKER_SCRIPT),  # noqa: F405
         method="post",
         action="/drafts",
         enctype="multipart/form-data",

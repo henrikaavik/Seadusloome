@@ -755,6 +755,26 @@ class TestDeleteDraftHandler:
 
 
 # ---------------------------------------------------------------------------
+# #602: client-side 50 MB pre-check JS is embedded in the upload form
+# ---------------------------------------------------------------------------
+
+
+class TestUploadPrecheck:
+    @patch("app.auth.middleware._get_provider")
+    def test_upload_form_includes_size_precheck(self, mock_get_provider: MagicMock):
+        mock_get_provider.return_value = _stub_provider()
+        client = _authed_client()
+        resp = client.get("/drafts/new")
+        assert resp.status_code == 200
+        body = resp.text
+        # The 50 MB limit is encoded as a byte constant in the script.
+        assert "52428800" in body
+        # Inline error node is present for the pre-check to populate.
+        assert 'id="field-file-error"' in body
+        assert 'id="field-file-info"' in body
+
+
+# ---------------------------------------------------------------------------
 # #598: flash-message round-trip through session cookie on redirect
 # ---------------------------------------------------------------------------
 
