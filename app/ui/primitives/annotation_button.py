@@ -39,8 +39,11 @@ def AnnotationButton(
         hx_target=f"#{popover_id}",
         hx_swap="innerHTML",
         cls="annotation-button",
-        aria_label=f"Markused ({count})",
-        title="Markused",
+        aria_label=f"Lisa märkus sellele reale ({count})",
+        # #615: spell out what the button does on hover. The old
+        # "Markused" tooltip didn't convey that clicking lets the user
+        # add a new annotation for the team.
+        title="Lisa märkus sellele reale",
     )
 
     container = Div(id=popover_id, cls="annotation-popover-container")  # noqa: F405
