@@ -324,12 +324,23 @@ def _conflicts_section(findings: dict[str, Any], draft_id: str = "") -> Any:
             empty_message="Konflikte ei tuvastatud.",
         )
 
+    body_children: list = [body]
+    if draft_id:
+        # #615: one-line helper so first-time users understand what the
+        # speech-balloon annotation button beside the header does.
+        body_children.insert(
+            0,
+            P(  # noqa: F405
+                "Saate märkida olulised read meeskonna jaoks.",
+                cls="muted-text annotation-hint",
+            ),
+        )
     return Card(
         CardHeader(
             H3("Konfliktid", cls="card-title"),  # noqa: F405
             AnnotationButton("draft", f"{draft_id}-conflicts") if draft_id else "",
         ),
-        CardBody(body),
+        CardBody(*body_children),
     )
 
 
@@ -360,18 +371,28 @@ def _eu_compliance_section(findings: dict[str, Any], draft_id: str = "") -> Any:
         Column(key="status", label="Staatus", sortable=False, render=_status),
     ]
 
+    body_children: list = [
+        DataTable(
+            columns=columns,
+            rows=rows,
+            empty_message="EL-i õigusaktide seoseid ei tuvastatud.",
+        )
+    ]
+    if draft_id:
+        # #615: onboarding hint for the annotation button.
+        body_children.insert(
+            0,
+            P(  # noqa: F405
+                "Saate märkida olulised read meeskonna jaoks.",
+                cls="muted-text annotation-hint",
+            ),
+        )
     return Card(
         CardHeader(
             H3("EL-i õigusaktide vastavus", cls="card-title"),  # noqa: F405
             AnnotationButton("draft", f"{draft_id}-eu-compliance") if draft_id else "",
         ),
-        CardBody(
-            DataTable(
-                columns=columns,
-                rows=rows,
-                empty_message="EL-i õigusaktide seoseid ei tuvastatud.",
-            )
-        ),
+        CardBody(*body_children),
     )
 
 
@@ -394,18 +415,28 @@ def _gaps_section(findings: dict[str, Any], draft_id: str = "") -> Any:
         Column(key="description", label="Kirjeldus", sortable=False, render=_description),
     ]
 
+    body_children: list = [
+        DataTable(
+            columns=columns,
+            rows=rows,
+            empty_message="Lünki ei tuvastatud.",
+        )
+    ]
+    if draft_id:
+        # #615: onboarding hint for the annotation button.
+        body_children.insert(
+            0,
+            P(  # noqa: F405
+                "Saate märkida olulised read meeskonna jaoks.",
+                cls="muted-text annotation-hint",
+            ),
+        )
     return Card(
         CardHeader(
             H3("Lüngad", cls="card-title"),  # noqa: F405
             AnnotationButton("draft", f"{draft_id}-gaps") if draft_id else "",
         ),
-        CardBody(
-            DataTable(
-                columns=columns,
-                rows=rows,
-                empty_message="Lünki ei tuvastatud.",
-            )
-        ),
+        CardBody(*body_children),
     )
 
 
@@ -488,10 +519,20 @@ def draft_report_page(req: Request, draft_id: str):
                 href=f"/drafts/{draft.id}",
                 cls="back-link",
             ),
-            A(  # noqa: F405
-                "Ava uurijas →",
-                href=f"/explorer?draft={draft.id}",
-                cls="btn btn-secondary btn-md",
+            Div(
+                A(  # noqa: F405
+                    "Ava uurijas →",
+                    href=f"/explorer?draft={draft.id}",
+                    cls="btn btn-secondary btn-md",
+                    title="Visualiseeri eelnõu ja mõjutatud sätted graafil.",
+                ),
+                # #614: one-line helper below the button so reviewers
+                # know what "Ava uurijas" actually does before clicking.
+                Small(  # noqa: F405
+                    "Visualiseeri eelnõu ja mõjutatud sätted graafil.",
+                    cls="muted-text explorer-cta-hint",
+                ),
+                cls="explorer-cta",
             ),
             cls="page-actions",
         ),
