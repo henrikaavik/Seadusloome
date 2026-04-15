@@ -568,6 +568,40 @@ def draft_report_page(req: Request, draft_id: str):
 # ---------------------------------------------------------------------------
 
 
+def _find_active_export_job(draft_id: uuid.UUID, report_id: str) -> int | None:
+    """Return an in-flight export_report job id for *draft_id* if one exists.
+
+    "In-flight" = status IN (pending, claimed, running, retrying). The
+    caller uses this to dedupe #627: a repeated click should reuse the
+    job already running rather than queueing a second .docx render.
+    Returns ``None`` if nothing is in flight, or on any DB error (the
+    fallback is to just enqueue a fresh job so we never block the user
+    on a broken lookup).
+    """
+    try:
+        with _connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id FROM background_jobs
+                WHERE job_type = 'export_report'
+                  AND status IN ('pending', 'claimed', 'running', 'retrying')
+                  AND payload->>'draft_id' = %s
+                  AND payload->>'report_id' = %s
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (str(draft_id), str(report_id)),
+            ).fetchone()
+    except Exception:
+        logger.exception(
+            "_find_active_export_job failed for draft=%s report=%s",
+            draft_id,
+            report_id,
+        )
+        return None
+    return int(row[0]) if row else None
+
+
 def _export_poll_interval_seconds(job_created: datetime | None) -> int:
     """Return the export-status poll interval with exponential-ish backoff.
 
@@ -624,6 +658,23 @@ def export_draft_report_handler(req: Request, draft_id: str):
         return _not_found_page(req)
 
     report_id = str(report_row[0])
+    # #627: dedupe. If an export job for this draft+report is already
+    # pending/claimed/running, reuse its id instead of enqueueing a new
+    # one. Without this guard a reviewer could spam-click the button
+    # (or the HTMX request could double-fire on flaky networks) and
+    # queue up a pile of redundant .docx renders.
+    existing_job_id = _find_active_export_job(parsed, report_id)
+    if existing_job_id is not None:
+        logger.info(
+            "Reusing existing export_report job %s for draft=%s report=%s",
+            existing_job_id,
+            parsed,
+            report_id,
+        )
+        # #572: still counts as access.
+        touch_draft_access_conn(parsed)
+        return _export_status_spinner(parsed, existing_job_id)
+
     try:
         job_id = JobQueue().enqueue(
             "export_report",

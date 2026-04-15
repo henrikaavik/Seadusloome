@@ -327,6 +327,38 @@ class TestExportDraftReportHandler:
         assert args[1] == {"draft_id": str(_DRAFT_ID), "report_id": str(_REPORT_ID)}
         assert kwargs.get("priority") == 10
 
+    @patch("app.docs.report_routes.JobQueue")
+    @patch("app.docs.report_routes._find_active_export_job")
+    @patch("app.docs.report_routes._fetch_latest_report")
+    @patch("app.docs.report_routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_export_dedupes_active_job(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_fetch_report: MagicMock,
+        mock_find_active: MagicMock,
+        mock_queue_cls: MagicMock,
+    ):
+        """#627: when an active export job already exists, reuse its id."""
+        mock_get_provider.return_value = _stub_provider()
+        mock_fetch.return_value = _make_draft()
+        mock_fetch_report.return_value = _make_report_row()
+        mock_find_active.return_value = 42
+        queue_instance = MagicMock()
+        mock_queue_cls.return_value = queue_instance
+
+        client = _authed_client()
+        resp = client.post(
+            f"/drafts/{_DRAFT_ID}/export",
+            headers={"HX-Request": "true"},
+        )
+
+        assert resp.status_code == 200
+        # No fresh enqueue — the existing job is reused.
+        queue_instance.enqueue.assert_not_called()
+        assert f"/drafts/{_DRAFT_ID}/export-status/42" in resp.text
+
     @patch("app.docs.report_routes.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_export_cross_org_returns_404(
