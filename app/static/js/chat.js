@@ -117,6 +117,14 @@
   let pendingMsgId = null;  // provisional id while streaming before done arrives
   let pendingBubble = null; // the live assistant bubble being streamed into
 
+  // Thinking-indicator state (bridges send → first content_delta so the UI
+  // never sits silent while the server does RAG retrieval + LLM first-token
+  // latency, which commonly takes 3-10s and sometimes longer).
+  let thinkingStartTs = 0;
+  let thinkingElapsedTimer = null;
+  let thinkingWatchdogA = null;  // 15s "võtab kauem kui tavaliselt"
+  let thinkingWatchdogB = null;  // 45s "server vastab aeglaselt"
+
   // Slash palette keyboard selection index
   let paletteIndex = -1;
 
@@ -406,11 +414,80 @@
 
     wrap.innerHTML =
       '<div class="chat-bubble chat-bubble-assistant">' +
+        '<div class="chat-thinking" aria-live="polite">' +
+          '<span class="chat-thinking-dots" aria-hidden="true">' +
+            '<span></span><span></span><span></span>' +
+          '</span>' +
+          '<span class="chat-thinking-status">Mõtlen...</span>' +
+          '<span class="chat-thinking-elapsed" aria-hidden="true"></span>' +
+        '</div>' +
         '<div class="chat-message-text"></div>' +
       '</div>';
 
     if (messagesEl) messagesEl.appendChild(wrap);
     return wrap;
+  }
+
+  /**
+   * Update the thinking-status text inside the current pending bubble.
+   * Safe to call even if no thinking state is active — it becomes a no-op.
+   */
+  function updateThinkingStatus(text) {
+    const bubble = pendingBubble;
+    if (!bubble) return;
+    const statusEl = bubble.querySelector('.chat-thinking-status');
+    if (statusEl && text) statusEl.textContent = text;
+  }
+
+  /**
+   * Start the per-request "thinking" state: opens an assistant bubble with
+   * animated dots, an elapsed-seconds ticker, and two watchdog toasts that
+   * fire at 15s and 45s so the user always has a signal that work is alive.
+   */
+  function startThinking() {
+    thinkingStartTs = Date.now();
+    const bubble = getOrCreateStreamingBubble(null);
+    bubble.classList.add('chat-message-thinking');
+    const elapsedEl = bubble.querySelector('.chat-thinking-elapsed');
+
+    // Tick the elapsed counter every second.
+    if (thinkingElapsedTimer) clearInterval(thinkingElapsedTimer);
+    thinkingElapsedTimer = setInterval(function () {
+      if (!elapsedEl) return;
+      const secs = Math.floor((Date.now() - thinkingStartTs) / 1000);
+      elapsedEl.textContent = secs > 2 ? (' (' + secs + 's)') : '';
+    }, 1000);
+
+    // Watchdogs.
+    if (thinkingWatchdogA) clearTimeout(thinkingWatchdogA);
+    thinkingWatchdogA = setTimeout(function () {
+      if (!streaming) return;
+      updateThinkingStatus('Võtab kauem kui tavaliselt...');
+      showToast('Päring on endiselt pooleli', 'info', 5000);
+    }, 15000);
+
+    if (thinkingWatchdogB) clearTimeout(thinkingWatchdogB);
+    thinkingWatchdogB = setTimeout(function () {
+      if (!streaming) return;
+      updateThinkingStatus('Server vastab aeglaselt, oodake veel hetk...');
+      showToast('Server vastab aeglaselt', 'warning', 6000);
+    }, 45000);
+
+    scrollToBottom();
+  }
+
+  /**
+   * Drop the thinking visuals without removing the bubble (it becomes the
+   * streaming bubble). Always clears timers + watchdogs.
+   */
+  function clearThinking() {
+    if (thinkingElapsedTimer) { clearInterval(thinkingElapsedTimer); thinkingElapsedTimer = null; }
+    if (thinkingWatchdogA)    { clearTimeout(thinkingWatchdogA);    thinkingWatchdogA = null; }
+    if (thinkingWatchdogB)    { clearTimeout(thinkingWatchdogB);    thinkingWatchdogB = null; }
+    if (!pendingBubble) return;
+    pendingBubble.classList.remove('chat-message-thinking');
+    const thinkingEl = pendingBubble.querySelector('.chat-thinking');
+    if (thinkingEl && thinkingEl.parentNode) thinkingEl.parentNode.removeChild(thinkingEl);
   }
 
   /**
@@ -749,19 +826,23 @@
 
       // -----------------------------------------------------------------------
       case 'retrieval_started':
-        // Could show a subtle "Otsin..." indicator; for now a no-op is fine
-        // since tool_use events immediately follow.
+        updateThinkingStatus('Otsin allikaid ontoloogiast...');
         break;
 
       // -----------------------------------------------------------------------
-      case 'retrieval_done':
-        // chunk_count available if UI wants to display it; currently no-op.
+      case 'retrieval_done': {
+        const n = typeof event.chunk_count === 'number' ? event.chunk_count : 0;
+        updateThinkingStatus(
+          n > 0 ? ('Leidsin ' + n + ' allikat, koostan vastust...') : 'Koostan vastust...'
+        );
         break;
+      }
 
       // -----------------------------------------------------------------------
       case 'tool_use': {
         const toolCallId = event.tool_call_id || ('tool_' + Date.now());
         createToolActivity(toolCallId, event.tool || '', event.input || {});
+        updateThinkingStatus(toolLabel(event.tool || '') + '...');
         maybeScrollToBottom();
         break;
       }
@@ -781,6 +862,8 @@
       case 'content_delta': {
         const msgId = event.message_id || null;
         const bubble = getOrCreateStreamingBubble(msgId);
+        // First real token: drop thinking animation / watchdogs.
+        if (bubble.classList.contains('chat-message-thinking')) clearThinking();
 
         // Resolve buffer key
         const bufKey = msgId || pendingMsgId;
@@ -795,6 +878,7 @@
       // -----------------------------------------------------------------------
       case 'done': {
         const msgId = event.message_id;
+        clearThinking();
         finaliseBubble(msgId);
         enableInput();
         scrollToBottom();
@@ -819,6 +903,7 @@
       // -----------------------------------------------------------------------
       case 'stopped': {
         const msgId = event.message_id;
+        clearThinking();
         finaliseBubble(msgId);
         // Append truncation note to the last assistant bubble
         const bubble = (msgId && msgBubbles[msgId]) || pendingBubble;
@@ -837,6 +922,15 @@
 
       // -----------------------------------------------------------------------
       case 'error': {
+        clearThinking();
+        // If the pending bubble was still in pure-thinking state (no deltas
+        // arrived), replace it with the error bubble instead of leaving an
+        // empty assistant shell.
+        if (pendingBubble && pendingBubble.classList.contains('chat-message-thinking')) {
+          if (pendingBubble.parentNode) pendingBubble.parentNode.removeChild(pendingBubble);
+          pendingBubble = null;
+          pendingMsgId = null;
+        }
         finaliseBubble(null);
         appendErrorBubble(event.message);
         enableInput();
@@ -893,9 +987,10 @@
     inputEl.value = '';
     autoGrowTextarea(inputEl);
     disableInput();
-    // disableInput() no longer toggles inputEl.disabled (textarea stays
-    // writable during streaming), so there is nothing to re-enable here.
-    // Return focus to the textarea for keyboard users.
+    // Open a "thinking" bubble immediately so the user has visual feedback
+    // during the seconds before the first content_delta arrives (RAG + LLM
+    // first-token latency typically adds 3-10s; can occasionally be longer).
+    startThinking();
     if (inputEl) inputEl.focus();
   }
 
