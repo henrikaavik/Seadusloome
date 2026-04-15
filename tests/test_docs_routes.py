@@ -409,12 +409,13 @@ class TestDraftDetailPage:
         mock_get_provider: MagicMock,
         mock_fetch: MagicMock,
     ):
-        """Regression for #443.
+        """Regression for #443 / #601.
 
-        The delete form needs ``hx_post`` so HTMX intercepts the submit
-        and the ``hx-confirm`` prompt actually fires. The native form
-        ``action`` is preserved as a no-JS fallback, and ``onclick``
-        adds a defence-in-depth confirm() for users without HTMX.
+        The delete flow now uses the shared Modal primitive instead of
+        the native ``confirm()`` + ``hx-confirm`` double prompt. The
+        visible trigger button opens the modal; the modal's confirm
+        button submits a hidden HTMX form behind the scenes. The
+        native ``action`` attribute is preserved as the no-JS fallback.
         """
         mock_get_provider.return_value = _stub_provider()
         draft = _make_draft(status="ready")
@@ -425,15 +426,19 @@ class TestDraftDetailPage:
 
         assert resp.status_code == 200
         body = resp.text
-        # Both attributes must be present on the same form so HTMX
-        # intercepts the submit AND prompts for confirmation.
+        # HTMX still drives the delete when the user confirms.
         assert f'hx-post="/drafts/{draft.id}/delete"' in body
-        assert "hx-confirm=" in body
         # Native form action remains as the no-JS fallback.
         assert f'action="/drafts/{draft.id}/delete"' in body
-        # Defense in depth: an inline ``onclick`` confirm so JS-disabled
-        # users still get prompted before the native submit.
-        assert "confirm(" in body
+        # #601: the dual confirm() + hx-confirm has been replaced by
+        # a single accessible Modal. Neither native-prompt artefact
+        # should leak back into the page.
+        assert "hx-confirm=" not in body
+        assert "return confirm(" not in body
+        # Modal primitive is mounted and the trigger is wired to it.
+        assert 'id="delete-draft-modal"' in body
+        assert 'id="delete-draft-trigger"' in body
+        assert 'role="dialog"' in body
 
 
 # ---------------------------------------------------------------------------

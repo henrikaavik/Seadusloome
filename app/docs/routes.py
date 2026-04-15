@@ -18,7 +18,6 @@ that a draft from another org exists.
 
 from __future__ import annotations
 
-import json
 import logging
 import uuid
 from collections.abc import Mapping
@@ -61,6 +60,7 @@ from app.ui.primitives.button import Button
 from app.ui.surfaces.alert import Alert
 from app.ui.surfaces.card import Card, CardBody, CardHeader
 from app.ui.surfaces.info_box import InfoBox
+from app.ui.surfaces.modal import ConfirmModal, ModalScript
 from app.ui.theme import get_theme_from_request
 from app.ui.time import format_tallinn
 
@@ -644,6 +644,38 @@ async def create_draft_handler(req: Request):
 # ---------------------------------------------------------------------------
 
 
+_DELETE_MODAL_ID = "delete-draft-modal"
+_DELETE_TRIGGER_ID = "delete-draft-trigger"
+_DELETE_FORM_ID = "delete-draft-form"
+
+# #601: bridge modal confirm click to the HTMX delete form. The modal
+# primitive exposes ``window.Modal.open(id)`` / ``.close(id)`` from
+# ``app/static/js/modal.js``; this inline script wires the trigger
+# button to open the modal and the modal's confirm button to fire the
+# hidden form's submit event via ``htmx.trigger()``. Focus is restored
+# to the trigger automatically by ``modal.js::close``.
+_DELETE_MODAL_SCRIPT = (
+    "(function () {\n"
+    f"  var trigger = document.getElementById('{_DELETE_TRIGGER_ID}');\n"
+    f"  var confirmBtn = document.getElementById('{_DELETE_MODAL_ID}-confirm');\n"
+    f"  var form = document.getElementById('{_DELETE_FORM_ID}');\n"
+    "  if (!trigger || !confirmBtn || !form || !window.Modal) return;\n"
+    "  trigger.addEventListener('click', function (evt) {\n"
+    "    evt.preventDefault();\n"
+    f"    window.Modal.open('{_DELETE_MODAL_ID}');\n"
+    "  });\n"
+    "  confirmBtn.addEventListener('click', function () {\n"
+    f"    window.Modal.close('{_DELETE_MODAL_ID}');\n"
+    "    if (window.htmx && typeof window.htmx.trigger === 'function') {\n"
+    "      window.htmx.trigger(form, 'submit');\n"
+    "    } else {\n"
+    "      form.submit();\n"
+    "    }\n"
+    "  });\n"
+    "})();\n"
+)
+
+
 def _draft_detail_body(draft: Draft, auth: Mapping[str, Any] | None = None) -> list[Any]:
     """Build the metadata + actions body of the draft detail page.
 
@@ -700,37 +732,54 @@ def _draft_detail_body(draft: Draft, auth: Mapping[str, Any] | None = None) -> l
             )
         )
 
-    # #443: the form needs an explicit ``hx_post`` so HTMX intercepts
-    # the submit and ``hx_confirm`` actually fires. Without it, the
-    # browser does a native form POST, the confirmation prompt is
-    # silently skipped, and a single click immediately deletes the
-    # draft. We keep ``action`` and ``method`` set as a no-JS fallback
-    # and add an inline ``onclick`` confirm() on the button as a
-    # defence-in-depth guard for users with JavaScript disabled. The
-    # confirm message is JSON-encoded so the Estonian special chars
-    # ('õ', 'õ') and the apostrophes round-trip safely into the
-    # generated HTML.
+    # #601: the delete action now uses the shared Modal primitive
+    # instead of the native ``confirm()`` + HTMX ``hx_confirm`` combo.
+    # The visible trigger button opens the modal; the modal's confirm
+    # button programmatically submits a hidden HTMX form. This gives
+    # us a single accessible prompt with focus trap, Escape-to-cancel,
+    # and focus restoration to the trigger on close.
     if can_delete_draft(auth, draft):
-        onclick_js = f"return confirm({json.dumps(_DELETE_CONFIRM)});"
+        actions.append(
+            Button(
+                "Kustuta eelnõu",
+                type="button",
+                variant="danger",
+                size="md",
+                id=_DELETE_TRIGGER_ID,
+                aria_haspopup="dialog",
+                aria_controls=_DELETE_MODAL_ID,
+            )
+        )
         actions.append(
             Form(  # noqa: F405
-                Button(
-                    "Kustuta eelnõu",
-                    type="submit",
-                    variant="danger",
-                    size="md",
-                    onclick=onclick_js,
-                ),
+                # Hidden HTMX form driven by the modal's confirm button
+                # (see ``_DELETE_MODAL_SCRIPT``). The native ``action``
+                # attribute remains as a no-JS fallback — users without
+                # JS can't open the modal, but if something else POSTs
+                # the form they still hit the right endpoint.
+                id=_DELETE_FORM_ID,
                 method="post",
                 action=f"/drafts/{draft.id}/delete",
                 enctype="application/x-www-form-urlencoded",
                 hx_post=f"/drafts/{draft.id}/delete",
                 hx_target="body",
                 hx_swap="outerHTML",
-                hx_confirm=_DELETE_CONFIRM,
                 cls="inline-form",
+                hidden=True,
             )
         )
+        actions.append(
+            ConfirmModal(
+                "Kustuta eelnõu",
+                _DELETE_CONFIRM,
+                id=_DELETE_MODAL_ID,
+                confirm_label="Kustuta",
+                cancel_label="Tühista",
+                confirm_variant="danger",
+            )
+        )
+        actions.append(ModalScript())
+        actions.append(Script(_DELETE_MODAL_SCRIPT))  # noqa: F405
 
     return [metadata, Div(*actions, cls="draft-actions")]
 
