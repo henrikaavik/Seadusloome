@@ -125,6 +125,41 @@ _REPORT_SELECT_COLUMNS = (
 )
 
 
+def _current_ontology_version() -> str:
+    """Return the live Jena sync snapshot tag for version-drift checks (#612).
+
+    Matches the ``<iso-timestamp>@<entity_count>`` format written by the
+    analyze handler into ``impact_reports.ontology_version`` so a
+    direct string comparison tells us whether the snapshot the report
+    ran against is still current. Returns ``"unknown"`` on any failure
+    so the banner gracefully degrades to "no drift detected".
+    """
+    try:
+        with _connect() as conn:
+            row = conn.execute(
+                """
+                select started_at, entity_count
+                from sync_log
+                where status = 'success'
+                order by started_at desc
+                limit 1
+                """
+            ).fetchone()
+    except Exception:
+        logger.warning("current ontology version lookup failed", exc_info=True)
+        return "unknown"
+    if row is None:
+        return "unknown"
+    started_at, entity_count = row
+    if started_at is None:
+        return "unknown"
+    if isinstance(started_at, datetime):
+        ts = started_at.astimezone(UTC).isoformat()
+    else:
+        ts = str(started_at)
+    return f"{ts}@{entity_count or 0}"
+
+
 def _fetch_latest_report(draft_id: uuid.UUID) -> tuple | None:
     """Return the most recent ``impact_reports`` row for *draft_id*.
 
@@ -599,6 +634,45 @@ def draft_report_page(req: Request, draft_id: str):
 
     findings = _parse_report_data(report_row[6])
 
+    # #612: detect ontology-version drift. The report's snapshot tag
+    # lives in report_row[7]; if it no longer matches the live Jena
+    # sync_log snapshot, surface a banner offering a one-click re-run.
+    report_version = str(report_row[7] or "unknown")
+    current_version = _current_ontology_version()
+    version_banner: Any = None
+    if (
+        report_version
+        and current_version
+        and report_version != "unknown"
+        and current_version != "unknown"
+        and report_version != current_version
+    ):
+        version_banner = Alert(
+            Div(
+                P(  # noqa: F405
+                    f"Ontoloogia on uuenenud versioonile {current_version} "
+                    f"(aruanne kasutas {report_version}).",
+                ),
+                Form(  # noqa: F405
+                    Button(
+                        "Analüüsi uuesti",
+                        type="submit",
+                        variant="primary",
+                        size="sm",
+                    ),
+                    method="post",
+                    action=f"/drafts/{draft.id}/report/reanalyze",
+                    hx_post=f"/drafts/{draft.id}/report/reanalyze",
+                    hx_swap="outerHTML",
+                    hx_target="closest .alert",
+                    cls="inline-form",
+                ),
+                cls="ontology-drift-banner",
+            ),
+            variant="warning",
+            title="Ontoloogia on uuenenud",
+        )
+
     header = Div(
         H1(draft.title, cls="page-title"),  # noqa: F405
         Div(
@@ -627,18 +701,25 @@ def draft_report_page(req: Request, draft_id: str):
         cls="report-page-header",
     )
 
-    return PageShell(
-        header,
-        InfoBox(
-            P(
-                "See aruanne n\u00e4itab, kuidas teie eeln\u00f5u m\u00f5jutab "
-                "olemasolevat \u00f5igusraamistikku. Mida k\u00f5rgem on "
-                "m\u00f5juskoor, seda rohkem muudatusi eeln\u00f5u p\u00f5hjustab."
+    shell_children: list = [header]
+    if version_banner is not None:
+        shell_children.append(version_banner)
+    shell_children.extend(
+        [
+            InfoBox(
+                P(
+                    "See aruanne n\u00e4itab, kuidas teie eeln\u00f5u m\u00f5jutab "
+                    "olemasolevat \u00f5igusraamistikku. Mida k\u00f5rgem on "
+                    "m\u00f5juskoor, seda rohkem muudatusi eeln\u00f5u p\u00f5hjustab."
+                ),
+                variant="info",
+                dismissible=True,
             ),
-            variant="info",
-            dismissible=True,
-        ),
-        _summary_card(report_row),
+            _summary_card(report_row),
+        ]
+    )
+    return PageShell(
+        *shell_children,
         _affected_entities_section(findings, draft_id=str(draft.id)),
         _conflicts_section(findings, draft_id=str(draft.id)),
         _eu_compliance_section(findings, draft_id=str(draft.id)),
@@ -649,6 +730,74 @@ def draft_report_page(req: Request, draft_id: str):
         theme=theme,
         active_nav="/drafts",
     )
+
+
+# ---------------------------------------------------------------------------
+# POST /drafts/{draft_id}/report/reanalyze — ontology-drift re-run (#612)
+# ---------------------------------------------------------------------------
+
+
+def reanalyze_report_handler(req: Request, draft_id: str):
+    """POST /drafts/{draft_id}/report/reanalyze — enqueue a fresh analyze job.
+
+    Wired to the "Analüüsi uuesti" button in the ontology-drift banner
+    (#612). Authentication + org scoping mirror :func:`draft_report_page`:
+    drafts from other orgs resolve to the 404 page so we don't leak
+    their existence.
+    """
+    auth_or_redirect = _require_auth(req)
+    if isinstance(auth_or_redirect, Response):
+        return auth_or_redirect
+    auth = auth_or_redirect
+
+    parsed = _parse_uuid(draft_id)
+    if parsed is None:
+        return _not_found_page(req)
+
+    draft = fetch_draft(parsed)
+    if draft is None or not can_view_draft(auth, draft):
+        return _not_found_page(req)
+
+    try:
+        job_id = JobQueue().enqueue(
+            "analyze_impact",
+            {"draft_id": str(parsed)},
+            priority=5,
+        )
+    except Exception:
+        logger.exception("Failed to enqueue re-analyze for draft=%s", parsed)
+        return Div(
+            Alert(
+                "Uuesti analüüsi käivitamine ebaõnnestus. Palun proovige uuesti.",
+                variant="danger",
+            ),
+            cls="alert",
+        )
+
+    log_action(
+        auth.get("id"),
+        "draft.report.reanalyze",
+        {"draft_id": str(parsed), "job_id": job_id},
+    )
+    logger.info(
+        "Ontology-drift re-analyze enqueued draft=%s job_id=%s user=%s",
+        parsed,
+        job_id,
+        auth.get("id"),
+    )
+
+    # HTMX: replace the banner with a success message in place.
+    if req.headers.get("HX-Request") == "true":
+        return Alert(
+            "Uuesti analüüs käivitati. Tulemused uuenevad mõne minuti jooksul.",
+            variant="success",
+            title="Analüüs alustati",
+        )
+    # Non-HTMX: redirect back to the draft detail where the status
+    # tracker will pick up the new pipeline run.
+    from starlette.responses import RedirectResponse
+
+    return RedirectResponse(url=f"/drafts/{parsed}", status_code=303)
 
 
 # ---------------------------------------------------------------------------
@@ -1072,6 +1221,9 @@ def register_report_routes(rt) -> None:  # type: ignore[no-untyped-def]
     rt("/drafts/{draft_id}/report", methods=["GET"])(draft_report_page)
     # #611: paginated "Näita rohkem" fragment for each report section.
     rt("/drafts/{draft_id}/report/section/{section}", methods=["GET"])(report_section_fragment)
+    # #612: "Analüüsi uuesti" when the ontology has drifted past the
+    # snapshot the report ran against.
+    rt("/drafts/{draft_id}/report/reanalyze", methods=["POST"])(reanalyze_report_handler)
     rt("/drafts/{draft_id}/export", methods=["POST"])(export_draft_report_handler)
     rt("/drafts/{draft_id}/export-status/{job_id}", methods=["GET"])(export_status_fragment)
     rt("/drafts/{draft_id}/export/{job_id}/download", methods=["GET"])(download_export_handler)

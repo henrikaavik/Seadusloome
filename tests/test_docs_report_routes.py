@@ -700,3 +700,96 @@ class TestReportSectionPagination:
         resp = client.get(f"/drafts/{_DRAFT_ID}/report/section/bogus")
         assert resp.status_code == 200
         assert "Eelnõu ei leitud" in resp.text
+
+
+# ---------------------------------------------------------------------------
+# #612: ontology-version drift banner + /report/reanalyze
+# ---------------------------------------------------------------------------
+
+
+class TestOntologyDriftBanner:
+    @patch("app.docs.report_routes._current_ontology_version")
+    @patch("app.docs.report_routes._fetch_latest_report")
+    @patch("app.docs.report_routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_drift_banner_renders_when_versions_differ(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_fetch_report: MagicMock,
+        mock_current: MagicMock,
+    ):
+        mock_get_provider.return_value = _stub_provider()
+        mock_fetch.return_value = _make_draft()
+        mock_fetch_report.return_value = _make_report_row()  # version tag v2.1-ish
+        mock_current.return_value = "2026-04-15T00:00+00:00@1061500"
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{_DRAFT_ID}/report")
+        assert resp.status_code == 200
+        assert "Ontoloogia on uuenenud" in resp.text
+        assert "Analüüsi uuesti" in resp.text
+
+    @patch("app.docs.report_routes._current_ontology_version")
+    @patch("app.docs.report_routes._fetch_latest_report")
+    @patch("app.docs.report_routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_drift_banner_absent_when_versions_match(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_fetch_report: MagicMock,
+        mock_current: MagicMock,
+    ):
+        mock_get_provider.return_value = _stub_provider()
+        mock_fetch.return_value = _make_draft()
+        report_row = _make_report_row()
+        mock_fetch_report.return_value = report_row
+        mock_current.return_value = str(report_row[7])
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{_DRAFT_ID}/report")
+        assert resp.status_code == 200
+        assert "Ontoloogia on uuenenud" not in resp.text
+
+    @patch("app.docs.report_routes.JobQueue")
+    @patch("app.docs.report_routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_reanalyze_enqueues_analyze_job(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_queue_cls: MagicMock,
+    ):
+        mock_get_provider.return_value = _stub_provider()
+        mock_fetch.return_value = _make_draft()
+        queue_instance = MagicMock()
+        queue_instance.enqueue.return_value = 321
+        mock_queue_cls.return_value = queue_instance
+
+        client = _authed_client()
+        resp = client.post(
+            f"/drafts/{_DRAFT_ID}/report/reanalyze",
+            headers={"HX-Request": "true"},
+        )
+        assert resp.status_code == 200
+        queue_instance.enqueue.assert_called_once()
+        args, _ = queue_instance.enqueue.call_args
+        assert args[0] == "analyze_impact"
+        assert args[1] == {"draft_id": str(_DRAFT_ID)}
+        # HTMX fragment replaces the banner with a success alert.
+        assert "Analüüs alustati" in resp.text
+
+    @patch("app.docs.report_routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_reanalyze_cross_org_returns_404(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+    ):
+        mock_get_provider.return_value = _stub_provider()
+        mock_fetch.return_value = _make_draft(org_id=_OTHER_ORG_ID)
+        client = _authed_client()
+        resp = client.post(f"/drafts/{_DRAFT_ID}/report/reanalyze")
+        assert resp.status_code == 200
+        assert "Eelnõu ei leitud" in resp.text
