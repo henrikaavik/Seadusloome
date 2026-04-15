@@ -1,0 +1,1529 @@
+/* ===========================================================================
+   Seadusloome — AI Advisory Chat Stylesheet
+   Depends on tokens.css (CSS variables) and ui.css (base reset + utilities).
+   NAV_HEIGHT = --topbar-height (64px) + --sidebar stays in the app-shell
+   layout; the chat column itself fills the main-content flex slot.
+   =========================================================================== */
+
+/* ===========================================================================
+   Visually-hidden utility
+   Note: ui.css defines .sr-only; we define .visually-hidden as a synonym
+   so templates may use either. If .sr-only is already present that is fine —
+   both definitions are identical and spec-conformant.
+   =========================================================================== */
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ===========================================================================
+   Layout: chat-container + sub-regions
+   =========================================================================== */
+
+/* Outermost wrapper — fills the main-content flex slot */
+.chat-container {
+  display: flex;
+  flex-direction: column;
+  /* max-height (not min-height) prevents iOS overflow when dvh + safe-area
+     stacks taller than the visible screen. Flex layout pins the input bar. */
+  max-height: 100dvh;
+  max-width: 860px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+/* Scrollable message area — takes all available vertical space */
+.chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  scroll-behavior: smooth;
+  /* Reserve a little breathing room around messages */
+  padding: var(--space-6) var(--space-4) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+/* Input bar — pinned to the bottom by flex layout; no sticky needed */
+.chat-input-area {
+  /* position: sticky removed — the container is already a flex column and the
+     input area naturally stays at the bottom. sticky has no effect here because
+     there is no scrolling ancestor at this level. */
+  /* Safe-area-inset accounts for iOS home indicator / Android nav bar */
+  padding: var(--space-3) var(--space-4) calc(var(--space-3) + env(safe-area-inset-bottom, 0px));
+  background-color: var(--color-surface);
+  border-top: 1px solid var(--color-border);
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-3);
+  z-index: var(--z-sticky);
+  /* Contain the palette popover */
+  position: relative;
+}
+
+/* Textarea inside the input bar */
+.chat-input {
+  flex: 1;
+  font-family: var(--font-family);
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+  color: var(--color-text);
+  background-color: var(--color-background);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: var(--space-3) var(--space-4);
+  /* Disable manual resize handle — height grows via JS field-sizing API */
+  resize: none;
+  /* Prevent textarea from overflowing into a gigantic block */
+  max-height: 200px;
+  overflow-y: auto;
+  transition: border-color var(--transition-fast);
+  /* CSS field-sizing (Chrome 123+) makes the textarea auto-grow natively */
+  field-sizing: content;
+}
+
+.chat-input:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+  border-color: var(--color-primary);
+}
+
+.chat-input::placeholder {
+  color: var(--color-text-muted);
+}
+
+/* ===========================================================================
+   Message bubbles
+   =========================================================================== */
+
+/* Full-width row — role modifiers control alignment */
+.chat-message {
+  display: flex;
+  flex-direction: column;
+  max-width: 100%;
+  /* Mild animation so new messages slide in gently */
+  animation: chat-msg-appear 0.18s ease both;
+}
+
+@keyframes chat-msg-appear {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Shared bubble baseline */
+.chat-bubble {
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-lg);
+  line-height: 1.55;
+  word-break: break-word;
+  overflow-wrap: break-word;
+}
+
+/* ---- User messages — right-aligned, brand tint ---- */
+
+.chat-message-user {
+  align-items: flex-end;
+}
+
+.chat-message-user .chat-bubble,
+/* Legacy class names already in routes.py JavaScript */
+.chat-bubble-user {
+  background-color: var(--color-primary-subtle);
+  color: var(--color-text);
+  border: 1px solid transparent;
+  /* Heavy radius on bottom-right, lighter on bottom-left (tail indication) */
+  border-radius: var(--radius-lg) var(--radius-lg) var(--radius-sm) var(--radius-lg);
+  max-width: 78%;
+  text-align: left;
+}
+
+/* ---- Assistant messages — left-aligned, surface card ---- */
+
+.chat-message-assistant {
+  align-items: flex-start;
+}
+
+.chat-message-assistant .chat-bubble,
+.chat-bubble-assistant {
+  background-color: var(--color-surface);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  box-shadow: var(--shadow-sm);
+  /* Heavy radius on bottom-left */
+  border-radius: var(--radius-lg) var(--radius-lg) var(--radius-lg) var(--radius-sm);
+  max-width: 88%;
+}
+
+/* ---- Tool activity messages — centered, monospace pill ---- */
+
+.chat-message-tool {
+  align-items: center;
+}
+
+.chat-message-tool .chat-bubble,
+.chat-bubble-tool {
+  background-color: var(--color-background);
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-border);
+  font-family: var(--font-family-mono);
+  font-size: var(--text-xs);
+  padding: var(--space-1) var(--space-4);
+  border-radius: var(--radius-full);
+  max-width: 90%;
+}
+
+.chat-tool-label {
+  margin: 0;
+  font-family: var(--font-family-mono);
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+}
+
+/* ---- Error messages — red-tinted ---- */
+
+.chat-message-error {
+  align-items: flex-start;
+}
+
+.chat-message-error .chat-bubble,
+.chat-bubble-error {
+  background-color: var(--color-danger-bg);
+  color: var(--color-danger);
+  border: 1px solid var(--color-danger);
+  border-radius: var(--radius-lg) var(--radius-lg) var(--radius-lg) var(--radius-sm);
+  max-width: 88%;
+}
+
+/* ===========================================================================
+   Markdown typography inside .chat-message-text
+   =========================================================================== */
+
+.chat-message-text {
+  line-height: 1.55;
+}
+
+/* Paragraphs — reset the browser default bottom margin to a controlled value */
+.chat-message-text p {
+  margin-block: 0.5em;
+}
+
+.chat-message-text p:first-child {
+  margin-block-start: 0;
+}
+
+.chat-message-text p:last-child {
+  margin-block-end: 0;
+}
+
+/* Headings inside chat — use a modest size hierarchy */
+.chat-message-text h1 {
+  font-size: var(--text-2xl);
+  margin-block: 0.75em 0.35em;
+}
+
+.chat-message-text h2 {
+  font-size: var(--text-xl);
+  margin-block: 0.7em 0.3em;
+}
+
+.chat-message-text h3 {
+  font-size: var(--text-lg);
+  margin-block: 0.65em 0.25em;
+}
+
+.chat-message-text h4 {
+  font-size: var(--text-base);
+  margin-block: 0.6em 0.2em;
+}
+
+/* Inline code */
+.chat-message-text code {
+  font-family: var(--font-family-mono);
+  font-size: 0.88em;
+  background-color: var(--color-background);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 0.1em 0.35em;
+}
+
+/* Code blocks */
+.chat-message-text pre {
+  background-color: var(--color-background);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: var(--space-4);
+  overflow-x: auto;
+  margin-block: var(--space-3);
+}
+
+.chat-message-text pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: var(--text-sm);
+  color: var(--color-text);
+}
+
+/* Blockquotes */
+.chat-message-text blockquote {
+  border-left: 3px solid var(--color-primary);
+  margin: var(--space-3) 0;
+  padding: var(--space-2) var(--space-4);
+  color: var(--color-text-muted);
+  background-color: var(--color-background);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+
+/* Lists */
+.chat-message-text ul,
+.chat-message-text ol {
+  padding-inline-start: var(--space-6);
+  margin-block: var(--space-2);
+}
+
+.chat-message-text li {
+  margin-block: var(--space-1);
+}
+
+/* Tables */
+.chat-message-text table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: var(--text-sm);
+  margin-block: var(--space-4);
+  overflow-x: auto;
+  display: block;
+}
+
+.chat-message-text th,
+.chat-message-text td {
+  border: 1px solid var(--color-border);
+  padding: var(--space-2) var(--space-3);
+  text-align: left;
+}
+
+.chat-message-text th {
+  background-color: var(--color-background);
+  font-weight: var(--font-bold);
+}
+
+/* Zebra-stripe rows */
+.chat-message-text tbody tr:nth-child(even) {
+  background-color: var(--color-background);
+}
+
+/* Links inside chat text */
+.chat-message-text a {
+  color: var(--color-primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.chat-message-text a:visited {
+  color: var(--color-primary);
+}
+
+.chat-message-text a:hover {
+  color: var(--color-primary-hover);
+}
+
+/* ===========================================================================
+   Citation links (from sanitize.py §-ref auto-link)
+   =========================================================================== */
+
+.citation-link {
+  color: var(--color-primary);
+  text-decoration: underline dashed;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.citation-link:visited {
+  color: var(--color-primary);
+}
+
+.citation-link:hover,
+.citation-link:focus-visible {
+  text-decoration: underline solid;
+  color: var(--color-primary-hover);
+}
+
+/* ===========================================================================
+   Sources panel (collapsible <details> below assistant bubble)
+   =========================================================================== */
+
+.chat-sources {
+  max-width: 88%;
+  margin-top: var(--space-2);
+  font-size: var(--text-sm);
+}
+
+.chat-sources summary {
+  cursor: pointer;
+  font-size: var(--text-xs);
+  font-weight: var(--font-medium);
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  user-select: none;
+  padding: var(--space-1) 0;
+  list-style: none; /* hide default arrow on some browsers */
+}
+
+/* Custom disclosure arrow */
+.chat-sources summary::before {
+  content: "▶";
+  display: inline-block;
+  margin-inline-end: var(--space-2);
+  font-size: 0.65em;
+  transition: transform var(--transition-fast);
+  vertical-align: middle;
+}
+
+.chat-sources[open] summary::before {
+  transform: rotate(90deg);
+}
+
+.chat-sources summary:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* Source cards list */
+.chat-sources ul {
+  list-style: none;
+  padding: 0;
+  margin: var(--space-2) 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.chat-sources li {
+  background-color: var(--color-background);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  line-height: var(--leading-normal);
+}
+
+/* ===========================================================================
+   Tool activity inline indicator
+   =========================================================================== */
+
+.chat-tool-activity {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  padding: var(--space-1) 0;
+}
+
+/* Animated spinner dot */
+.chat-tool-activity-spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--color-text-muted);
+  border-right-color: transparent;
+  border-radius: var(--radius-full);
+  flex-shrink: 0;
+  animation: chat-spinner 0.75s linear infinite;
+}
+
+@keyframes chat-spinner {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* When done: hide spinner, show checkmark pseudo-element */
+.chat-tool-activity.chat-tool-activity-done .chat-tool-activity-spinner {
+  display: none;
+}
+
+.chat-tool-activity.chat-tool-activity-done::before {
+  content: "✓";
+  color: var(--color-success);
+  font-size: var(--text-xs);
+  font-weight: var(--font-bold);
+}
+
+.chat-tool-activity summary {
+  cursor: pointer;
+  font-size: var(--text-xs);
+  font-weight: var(--font-medium);
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  user-select: none;
+}
+
+.chat-tool-activity summary:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* ===========================================================================
+   Header strip — connection status + quota
+   =========================================================================== */
+
+.chat-header-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-2) var(--space-4);
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  border-bottom: 1px solid var(--color-border);
+  background-color: var(--color-surface);
+}
+
+/* ---- Connection status dot + label ---- */
+
+.chat-status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* Status indicator dot — color is toggled with modifier classes */
+.chat-status::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  background-color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+
+.chat-status--connected::before {
+  background-color: var(--color-success);
+}
+
+.chat-status--disconnected::before {
+  background-color: var(--color-warning);
+}
+
+/* Pulsing animation while reconnecting */
+.chat-status--reconnecting::before {
+  background-color: var(--color-warning);
+  animation: chat-status-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes chat-status-pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+
+/* ---- Quota pill ---- */
+
+/* Container: a relative pill with a fill bar inside */
+.chat-quota {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+}
+
+.chat-quota-bar-wrap {
+  position: relative;
+  width: 64px;
+  height: 6px;
+  background-color: var(--color-border);
+  border-radius: var(--radius-full);
+  overflow: hidden;
+}
+
+.chat-quota-bar {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  height: 100%;
+  background-color: var(--color-primary);
+  border-radius: var(--radius-full);
+  transition: width var(--transition);
+}
+
+/* Amber threshold: add class .chat-quota--warning when usage >= 80% */
+.chat-quota--warning .chat-quota-bar {
+  background-color: var(--color-warning);
+}
+
+/* Red threshold: add class .chat-quota--critical when usage >= 100% */
+.chat-quota--critical .chat-quota-bar {
+  background-color: var(--color-danger);
+}
+
+/* Quota label — the text portion of the pill ("12 / 50 queries") */
+.chat-quota-label {
+  white-space: nowrap;
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+}
+
+/* Compact quota on very small screens: bar-only, no label text */
+@media (max-width: 420px) {
+  /* Default full quota pill — hide the label text, keep the bar */
+  .chat-quota .chat-quota-label {
+    display: none;
+  }
+
+  /* Compact variant: bar only, no gap, minimal padding — fits in tight spaces */
+  .chat-quota--compact {
+    gap: 0;
+  }
+
+  .chat-quota--compact .chat-quota-label {
+    display: none;
+  }
+}
+
+/* ===========================================================================
+   Draft context badge strip
+   =========================================================================== */
+
+.chat-draft-context {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  font-size: var(--text-sm);
+  background-color: var(--color-info-bg);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.draft-context-link {
+  color: var(--color-primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* Secondary action link next to the draft badge (e.g. "View impact analysis") */
+.draft-context-impact-link {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  text-decoration: underline dashed;
+  text-underline-offset: 2px;
+  margin-inline-start: var(--space-2);
+  transition: color var(--transition-fast);
+}
+
+.draft-context-impact-link:hover {
+  color: var(--color-primary);
+  text-decoration: underline solid;
+}
+
+/* ===========================================================================
+   Empty state + example prompts
+   =========================================================================== */
+
+.chat-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  max-width: 640px;
+  margin: 0 auto;
+  padding-block: 4rem;
+  gap: var(--space-6);
+  color: var(--color-text-muted);
+}
+
+.chat-empty-state-icon {
+  font-size: 3rem;
+  line-height: 1;
+}
+
+.chat-empty-state-title {
+  font-size: var(--text-xl);
+  font-weight: var(--font-bold);
+  color: var(--color-text);
+  margin: 0;
+}
+
+.chat-empty-state-body {
+  font-size: var(--text-base);
+  margin: 0;
+}
+
+/* ---- Example prompt grid ---- */
+
+.chat-example-prompts {
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: var(--space-3);
+  text-align: left;
+}
+
+/* Individual prompt card — a reset <button> styled as a card */
+.chat-example-prompt {
+  /* Button reset */
+  appearance: none;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-family: var(--font-family);
+  font-size: var(--text-sm);
+  color: var(--color-text);
+
+  /* Card styling */
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: var(--space-4);
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  transition:
+    box-shadow var(--transition-fast),
+    border-color var(--transition-fast),
+    transform var(--transition-fast);
+}
+
+.chat-example-prompt:hover {
+  border-color: var(--color-primary);
+  box-shadow: var(--shadow);
+  transform: translateY(-2px);
+}
+
+.chat-example-prompt:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-lg);
+}
+
+.chat-example-prompt-label {
+  font-weight: var(--font-medium);
+  margin-block-end: var(--space-1);
+  color: var(--color-text);
+}
+
+.chat-example-prompt-hint {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+}
+
+/* ===========================================================================
+   Follow-up chips
+   =========================================================================== */
+
+.chat-follow-ups {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-block: var(--space-3);
+}
+
+.chat-follow-up-chip {
+  /* Button reset */
+  appearance: none;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-family: var(--font-family);
+
+  /* Pill styling */
+  display: inline-flex;
+  align-items: center;
+  padding: var(--space-1) var(--space-4);
+  font-size: var(--text-sm);
+  color: var(--color-primary);
+  background-color: var(--color-primary-subtle);
+  border: 1px solid var(--color-primary);
+  border-radius: var(--radius-full);
+  line-height: var(--leading-normal);
+  transition:
+    background-color var(--transition-fast),
+    color var(--transition-fast);
+}
+
+.chat-follow-up-chip:hover {
+  background-color: var(--color-primary);
+  color: var(--color-primary-text);
+}
+
+.chat-follow-up-chip:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* ===========================================================================
+   Message action buttons (regenerate / copy / feedback)
+   =========================================================================== */
+
+.chat-message-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin-top: var(--space-2);
+  /* Hidden until the parent message is hovered or has keyboard focus */
+  opacity: 0;
+  transition: opacity var(--transition-fast);
+}
+
+.chat-message:hover .chat-message-actions,
+.chat-message:focus-within .chat-message-actions {
+  opacity: 1;
+}
+
+/* Icon action button — minimal square with tooltip via title attribute */
+.chat-message-actions button {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  cursor: pointer;
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+  transition:
+    background-color var(--transition-fast),
+    border-color var(--transition-fast),
+    color var(--transition-fast);
+}
+
+.chat-message-actions button:hover {
+  background-color: var(--color-background);
+  border-color: var(--color-border);
+  color: var(--color-text);
+}
+
+.chat-message-actions button:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* ===========================================================================
+   Toast notifications (CSS-only animation; JS controls visibility)
+   =========================================================================== */
+
+/* A single toast pill — positioned by .chat-toast-container below */
+.chat-toast {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-5);
+  border-radius: var(--radius-full);
+  font-size: var(--text-sm);
+  font-weight: var(--font-medium);
+  box-shadow: var(--shadow-lg);
+  /* Entry/exit animation */
+  animation: chat-toast-in 0.22s ease both;
+  pointer-events: auto;
+}
+
+/* Auto-dismiss fade out — JS adds .chat-toast--leaving to trigger */
+.chat-toast--leaving {
+  animation: chat-toast-out 0.3s ease both;
+}
+
+@keyframes chat-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes chat-toast-out {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(8px) scale(0.96);
+  }
+}
+
+/* ---- Toast variants ---- */
+
+.chat-toast--info {
+  background-color: var(--color-info-bg);
+  color: var(--color-info);
+  border: 1px solid var(--color-info);
+}
+
+.chat-toast--success {
+  background-color: var(--color-success-bg);
+  color: var(--color-success);
+  border: 1px solid var(--color-success);
+}
+
+.chat-toast--warning {
+  background-color: var(--color-warning-bg);
+  color: var(--color-warning);
+  border: 1px solid var(--color-warning);
+}
+
+.chat-toast--error {
+  background-color: var(--color-danger-bg);
+  color: var(--color-danger);
+  border: 1px solid var(--color-danger);
+}
+
+/* Container stack — fixed bottom-center, above everything */
+.chat-toast-container {
+  position: fixed;
+  bottom: calc(var(--space-6) + env(safe-area-inset-bottom, 0px));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: var(--z-toast);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  pointer-events: none;
+}
+
+/* ===========================================================================
+   Misc utility classes used in chat routes
+   =========================================================================== */
+
+/* Delete form alignment */
+.chat-delete-form {
+  display: inline-block;
+}
+
+/* ---- Send / Stop buttons in the input bar ---- */
+
+.chat-send-btn,
+.chat-stop-btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: var(--text-base);
+  transition:
+    background-color var(--transition-fast),
+    opacity var(--transition-fast);
+}
+
+.chat-send-btn {
+  background-color: var(--color-primary);
+  color: var(--color-primary-text);
+}
+
+.chat-send-btn:hover {
+  background-color: var(--color-primary-hover);
+}
+
+.chat-send-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.chat-send-btn:focus-visible,
+.chat-stop-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.chat-stop-btn {
+  background-color: var(--color-danger-bg);
+  color: var(--color-danger);
+  border: 1px solid var(--color-danger);
+}
+
+.chat-stop-btn:hover {
+  background-color: var(--color-danger);
+  color: #fff;
+}
+
+/* ---- Per-message action icon button (named variant) ---- */
+
+.chat-message-action-btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  cursor: pointer;
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+  transition:
+    background-color var(--transition-fast),
+    border-color var(--transition-fast),
+    color var(--transition-fast);
+}
+
+.chat-message-action-btn:hover {
+  background-color: var(--color-background);
+  border-color: var(--color-border);
+  color: var(--color-text);
+}
+
+.chat-message-action-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* ===========================================================================
+   Responsive adjustments
+   =========================================================================== */
+
+@media (max-width: 640px) {
+  .chat-messages {
+    padding: var(--space-4) var(--space-3) var(--space-3);
+    gap: var(--space-3);
+  }
+
+  .chat-input-area {
+    padding: var(--space-2) var(--space-3) calc(var(--space-2) + env(safe-area-inset-bottom, 0px));
+  }
+
+  /* Wider bubbles on small screens */
+  .chat-message-user .chat-bubble,
+  .chat-bubble-user {
+    max-width: 95%;
+  }
+
+  .chat-message-assistant .chat-bubble,
+  .chat-bubble-assistant {
+    max-width: 95%;
+  }
+
+  .chat-message-error .chat-bubble,
+  .chat-bubble-error {
+    max-width: 95%;
+  }
+
+  .chat-sources {
+    max-width: 95%;
+  }
+
+  .chat-empty-state {
+    padding-block: 2.5rem;
+  }
+
+  .chat-example-prompts {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ===========================================================================
+   Slash command palette
+   Anchored above the input area. JS sets display to block when open.
+   =========================================================================== */
+
+.chat-slash-palette {
+  display: none; /* shown by JS on "/" keypress */
+  position: absolute;
+  bottom: 100%; /* anchors just above the input bar */
+  left: var(--space-4);
+  right: var(--space-4);
+  z-index: var(--z-dropdown, 200);
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  max-height: 260px;
+  overflow-y: auto;
+  padding: var(--space-1) 0;
+  /* Subtle slide-up entry when JS sets display:block */
+  animation: chat-palette-in 0.14s ease both;
+}
+
+@keyframes chat-palette-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Single command row */
+.chat-slash-palette-item {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-4);
+  cursor: pointer;
+  transition: background-color var(--transition-fast);
+}
+
+.chat-slash-palette-item:hover,
+.chat-slash-palette-item.is-active {
+  background-color: var(--color-primary-subtle);
+}
+
+.chat-slash-palette-item:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: -2px;
+}
+
+/* Command name — brand colour, medium weight */
+.chat-slash-palette-label {
+  font-weight: var(--font-medium);
+  color: var(--color-primary);
+  font-size: var(--text-sm);
+  flex-shrink: 0;
+}
+
+/* Short description — muted, monospace, slightly smaller */
+.chat-slash-palette-hint {
+  font-family: var(--font-family-mono);
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ===========================================================================
+   New-messages pill
+   Floats above the input bar when the user is scrolled up and a new
+   assistant message arrives.
+   =========================================================================== */
+
+.chat-new-messages-pill {
+  position: absolute;
+  bottom: calc(100% + var(--space-2));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: var(--z-dropdown, 200);
+
+  /* Pill appearance */
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-4);
+  background-color: var(--color-primary);
+  color: var(--color-primary-text);
+  font-size: var(--text-sm);
+  font-weight: var(--font-medium);
+  border-radius: var(--radius-full);
+  box-shadow: var(--shadow);
+  cursor: pointer;
+  white-space: nowrap;
+  border: none;
+  appearance: none;
+
+  animation: chat-pill-fadein 0.2s ease both;
+}
+
+@keyframes chat-pill-fadein {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
+.chat-new-messages-pill:hover {
+  background-color: var(--color-primary-hover);
+}
+
+.chat-new-messages-pill:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* ===========================================================================
+   Edit-in-place (user message editing)
+   =========================================================================== */
+
+/* Full-width textarea that replaces the message bubble while editing */
+.chat-edit-textarea {
+  width: 100%;
+  max-width: 78%; /* match .chat-bubble-user max-width */
+  font-family: var(--font-family);
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+  color: var(--color-text);
+  background-color: var(--color-background);
+  border: 2px solid var(--color-primary);
+  border-radius: var(--radius-lg);
+  padding: var(--space-3) var(--space-4);
+  resize: vertical;
+  field-sizing: content;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.chat-edit-textarea:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* Row of Save + Cancel buttons beneath the textarea */
+.chat-edit-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  justify-content: flex-end;
+  max-width: 78%;
+}
+
+/* Save — primary filled button */
+.chat-edit-save {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  padding: var(--space-1) var(--space-4);
+  background-color: var(--color-primary);
+  color: var(--color-primary-text);
+  border: none;
+  border-radius: var(--radius);
+  font-family: var(--font-family);
+  font-size: var(--text-sm);
+  font-weight: var(--font-medium);
+  cursor: pointer;
+  transition: background-color var(--transition-fast);
+}
+
+.chat-edit-save:hover {
+  background-color: var(--color-primary-hover);
+}
+
+.chat-edit-save:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* Cancel — ghost button */
+.chat-edit-cancel {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  padding: var(--space-1) var(--space-4);
+  background-color: transparent;
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  font-family: var(--font-family);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition:
+    background-color var(--transition-fast),
+    color var(--transition-fast);
+}
+
+.chat-edit-cancel:hover {
+  background-color: var(--color-background);
+  color: var(--color-text);
+}
+
+.chat-edit-cancel:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* ===========================================================================
+   Stopped / truncated message states
+   =========================================================================== */
+
+/* Italic note appended when streaming was interrupted */
+.chat-stopped-note {
+  display: block;
+  margin-block-start: var(--space-2);
+  font-style: italic;
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+
+/* Bubble modifier for truncated messages — amber dashed bottom border */
+.chat-message-truncated .chat-bubble {
+  border-bottom: 2px dashed var(--color-warning);
+}
+
+/* Modifier for pinned messages — amber left accent + subtle tinted background */
+.chat-message--pinned .chat-bubble {
+  border-left: 3px solid var(--color-warning);
+  background-color: color-mix(in srgb, var(--color-warning) 6%, var(--color-surface));
+}
+
+/* Small gold star in the top-right of a pinned message / conversation row */
+.chat-pin-indicator {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-2);
+  font-size: var(--text-xs);
+  line-height: 1;
+  color: var(--color-warning);
+  pointer-events: none;
+  user-select: none;
+}
+
+/* Make pinned message rows the positioning context for the indicator */
+.chat-message--pinned {
+  position: relative;
+}
+
+/* ===========================================================================
+   Tool activity details — spinner + pre blocks
+   =========================================================================== */
+
+/* Small circular CSS spinner used inside tool activity rows */
+.chat-tool-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--color-border);
+  border-top-color: var(--color-primary);
+  border-radius: var(--radius-full);
+  flex-shrink: 0;
+  animation: chat-tool-spin 0.7s linear infinite;
+}
+
+@keyframes chat-tool-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Scrollable code block for tool input payload */
+.chat-tool-input,
+.chat-tool-result {
+  display: block;
+  margin-block: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  background-color: var(--color-background);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  font-family: var(--font-family-mono);
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  overflow-x: auto;
+  max-height: 240px;
+  overflow-y: auto;
+  white-space: pre;
+  /* Horizontal scroll without a horizontal scrollbar eating vertical space */
+  word-break: normal;
+  overflow-wrap: normal;
+}
+
+/* ===========================================================================
+   Source cards — snippet truncation
+   =========================================================================== */
+
+/* Two-line truncated preview of the retrieved source passage */
+.chat-source-snippet {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  line-height: var(--leading-normal);
+  margin-block-start: var(--space-1);
+}
+
+/* Sources list — semantic ul override for the card list */
+.chat-sources-list {
+  list-style: none;
+  padding: 0;
+  margin: var(--space-2) 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* ===========================================================================
+   Conversation list toolbar + row actions
+   =========================================================================== */
+
+/* Toolbar row above the conversation list: search + archive toggle + New btn */
+.chat-list-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--color-border);
+  background-color: var(--color-surface);
+  flex-wrap: wrap;
+}
+
+/* Search input matching the design system */
+.chat-search-input {
+  flex: 1;
+  min-width: 140px;
+  font-family: var(--font-family);
+  font-size: var(--text-sm);
+  color: var(--color-text);
+  background-color: var(--color-background);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: var(--space-2) var(--space-3);
+  transition: border-color var(--transition-fast);
+}
+
+.chat-search-input::placeholder {
+  color: var(--color-text-muted);
+}
+
+.chat-search-input:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+  border-color: var(--color-primary);
+}
+
+/* Inline checkbox+label for "Show archived" toggle */
+.chat-archived-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.chat-archived-toggle input[type="checkbox"] {
+  accent-color: var(--color-primary);
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+}
+
+/* Flex row of action buttons inside each conversation list row */
+.chat-list-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+/* Inline form wrapper so pin/archive submit buttons sit beside each other */
+.chat-list-action-form {
+  display: inline-flex;
+  align-items: center;
+}
+
+/* Body region of the conversation list (the scrollable row area) */
+.chat-list-body {
+  flex: 1;
+  overflow-y: auto;
+}
+
+/* Inline rename textbox */
+.chat-list-rename-input {
+  font-family: var(--font-family);
+  font-size: var(--text-sm);
+  color: var(--color-text);
+  background-color: var(--color-background);
+  border: 1px solid var(--color-primary);
+  border-radius: var(--radius-sm);
+  padding: var(--space-1) var(--space-2);
+  width: 100%;
+  transition: border-color var(--transition-fast);
+}
+
+.chat-list-rename-input:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* Inline form wrapping the rename input + submit button */
+.chat-list-rename-form {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+}
+
+/* ===========================================================================
+   Motion safety
+   =========================================================================== */
+
+@media (prefers-reduced-motion: reduce) {
+  /* Disable all animations / transitions in this sheet */
+  .chat-tool-activity-spinner {
+    animation: none;
+  }
+
+  .chat-status--reconnecting::before {
+    animation: none;
+  }
+
+  .chat-message {
+    animation: none;
+  }
+
+  .chat-toast,
+  .chat-toast--leaving {
+    animation: none;
+  }
+
+  .chat-quota-bar {
+    transition: none;
+  }
+
+  .chat-example-prompt:hover {
+    transform: none;
+  }
+
+  .chat-sources summary::before {
+    transition: none;
+  }
+
+  /* New spinner — disabled when motion is reduced */
+  .chat-tool-spinner {
+    animation: none;
+  }
+
+  /* Palette slide-in — disabled */
+  .chat-slash-palette {
+    animation: none;
+  }
+
+  /* New messages pill fade-in — disabled */
+  .chat-new-messages-pill {
+    animation: none;
+  }
+}

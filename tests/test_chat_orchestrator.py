@@ -22,9 +22,12 @@ from app.chat.orchestrator import (
     _MAX_HISTORY_MESSAGES,
     MAX_TOOL_ROUNDS,
     ChatOrchestrator,
+    WebSocketSendTimeout,
     _build_llm_messages,
     _load_impact_summary,
     _messages_to_prompt,
+    _safe_send,
+    _tool_result_count,
 )
 from app.llm.provider import LLMProvider, StreamEvent
 
@@ -854,3 +857,565 @@ class TestOrchestratorPartialPersistence:
 
         # Only 1 commit (for the user message), not 2 (no assistant msg persisted)
         assert conn.commit.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Phase UX polish tests (issue #594)
+# ---------------------------------------------------------------------------
+
+
+from dataclasses import dataclass  # noqa: E402
+
+
+@dataclass
+class _FakeChunk:
+    """Mimics ``app.rag.retriever.RetrievedChunk`` for test purposes."""
+
+    content: str
+    metadata: dict
+    score: float
+
+
+class _FakeRetriever:
+    """Retriever stub that returns a canned chunk list."""
+
+    def __init__(self, chunks: list[_FakeChunk] | None = None) -> None:
+        self.chunks = chunks or []
+
+    async def retrieve(
+        self,
+        query: str,
+        k: int = 10,
+        source_type: str | None = None,
+        org_id: str | None = None,
+    ) -> list[_FakeChunk]:
+        return self.chunks
+
+
+def _setup_orchestrator_conn(mock_get_conn: Any, *, context_draft_id: Any = None) -> MagicMock:
+    """Minimal conn mock matching conversations + messages table shapes."""
+    conn = MagicMock()
+    mock_get_conn.return_value.__enter__ = MagicMock(return_value=conn)
+    mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
+
+    conv = _make_conversation()
+    now = datetime.now(UTC)
+
+    call_counter = {"n": 0}
+    base_conv_row = (
+        conv.id,
+        conv.user_id,
+        conv.org_id,
+        conv.title,
+        context_draft_id,
+        conv.created_at,
+        conv.updated_at,
+    )
+
+    def side_effect_fetchone():
+        call_counter["n"] += 1
+        if call_counter["n"] == 1:
+            return base_conv_row
+        return (
+            uuid.uuid4(),
+            _CONV_ID,
+            "user",
+            "x",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            now,
+            None,
+            None,
+            None,
+            None,
+        )
+
+    conn.execute.return_value.fetchone = side_effect_fetchone
+    conn.execute.return_value.fetchall.return_value = []
+    return conn
+
+
+class TestSafeSend:
+    """Coverage for the ``_safe_send`` helper."""
+
+    def test_successful_send_passes_event_through(self):
+        received: list[dict[str, Any]] = []
+
+        async def ok_send(event: dict[str, Any]) -> None:
+            received.append(event)
+
+        asyncio.run(_safe_send(ok_send, {"type": "content_delta", "delta": "x"}))
+        assert received == [{"type": "content_delta", "delta": "x"}]
+
+    def test_timeout_raises_domain_exception(self):
+        async def slow_send(event: dict[str, Any]) -> None:
+            await asyncio.sleep(0.5)
+
+        async def run():
+            await _safe_send(slow_send, {"type": "content_delta"}, timeout=0.05)
+
+        try:
+            asyncio.run(run())
+            raised = False
+        except WebSocketSendTimeout:
+            raised = True
+        assert raised
+
+
+class TestToolResultCount:
+    def test_list_results(self):
+        assert _tool_result_count({"results": [1, 2, 3]}) == 3
+
+    def test_empty_list_results(self):
+        assert _tool_result_count({"results": []}) == 0
+
+    def test_dict_without_results_is_one(self):
+        assert _tool_result_count({"uri": "x"}) == 1
+
+    def test_error_payload_is_zero(self):
+        assert _tool_result_count({"error": "boom"}) == 0
+
+    def test_non_dict_is_zero(self):
+        assert _tool_result_count("nope") == 0
+        assert _tool_result_count(None) == 0
+
+
+class TestRetrievalDoneAlwaysEmitted:
+    """retrieval_done fires on both have-chunks and no-chunks paths."""
+
+    @patch("app.chat.orchestrator.check_org_cost_budget")
+    @patch("app.chat.orchestrator.check_message_rate")
+    @patch("app.chat.orchestrator.get_connection")
+    def test_retrieval_done_with_chunks(self, mock_get_conn, mock_rate, mock_cost):
+        _setup_orchestrator_conn(mock_get_conn)
+
+        chunks = [
+            _FakeChunk("foo", {"source_uri": "estleg:A/p1"}, 0.9),
+            _FakeChunk("bar", {"source_uri": "estleg:B/p2"}, 0.8),
+        ]
+        collector = _Collector()
+        orchestrator = ChatOrchestrator(FakeLLM(), FakeSparql(), retriever=_FakeRetriever(chunks))
+        asyncio.run(orchestrator.handle_message(_CONV_ID, "Tere", _auth(), collector))
+
+        done_events = [e for e in collector.events if e.get("type") == "retrieval_done"]
+        assert len(done_events) == 1
+        assert done_events[0]["chunk_count"] == 2
+
+    @patch("app.chat.orchestrator.check_org_cost_budget")
+    @patch("app.chat.orchestrator.check_message_rate")
+    @patch("app.chat.orchestrator.get_connection")
+    def test_retrieval_done_with_no_chunks(self, mock_get_conn, mock_rate, mock_cost):
+        _setup_orchestrator_conn(mock_get_conn)
+
+        collector = _Collector()
+        orchestrator = ChatOrchestrator(FakeLLM(), FakeSparql(), retriever=_FakeRetriever([]))
+        asyncio.run(orchestrator.handle_message(_CONV_ID, "Tere", _auth(), collector))
+
+        done_events = [e for e in collector.events if e.get("type") == "retrieval_done"]
+        assert len(done_events) == 1
+        assert done_events[0]["chunk_count"] == 0
+
+
+class TestToolCallIdPairing:
+    """tool_use and tool_result must carry the same ``tool_call_id``."""
+
+    @patch("app.chat.orchestrator.execute_tool")
+    @patch("app.chat.orchestrator.check_org_cost_budget")
+    @patch("app.chat.orchestrator.check_message_rate")
+    @patch("app.chat.orchestrator.get_connection")
+    def test_tool_use_and_result_share_id(
+        self, mock_get_conn, mock_rate, mock_cost, mock_exec_tool
+    ):
+        _setup_orchestrator_conn(mock_get_conn)
+
+        async def fake_exec_tool(name, inp, sparql, auth=None):
+            return {"results": [{"uri": "estleg:Test"}, {"uri": "estleg:Test2"}]}
+
+        mock_exec_tool.side_effect = fake_exec_tool
+
+        events_seq = [
+            [
+                StreamEvent(
+                    type="tool_use",
+                    tool_name="query_ontology",
+                    tool_input={"q": "x"},
+                ),
+                StreamEvent(type="stop"),
+            ],
+            [
+                StreamEvent(type="content", delta="ok"),
+                StreamEvent(type="stop"),
+            ],
+        ]
+
+        collector = _Collector()
+        orchestrator = ChatOrchestrator(FakeLLM(events_seq), FakeSparql())
+        asyncio.run(orchestrator.handle_message(_CONV_ID, "Otsi", _auth(), collector))
+
+        use_events = [e for e in collector.events if e.get("type") == "tool_use"]
+        result_events = [e for e in collector.events if e.get("type") == "tool_result"]
+        assert len(use_events) == 1
+        assert len(result_events) == 1
+        assert use_events[0]["tool_call_id"]
+        assert use_events[0]["tool_call_id"] == result_events[0]["tool_call_id"]
+        assert result_events[0]["result_count"] == 2
+        assert result_events[0]["result"] == {
+            "results": [{"uri": "estleg:Test"}, {"uri": "estleg:Test2"}]
+        }
+
+
+class TestSourcesEvent:
+    @patch("app.chat.orchestrator.check_org_cost_budget")
+    @patch("app.chat.orchestrator.check_message_rate")
+    @patch("app.chat.orchestrator.get_connection")
+    def test_sources_event_has_chunks(self, mock_get_conn, mock_rate, mock_cost):
+        _setup_orchestrator_conn(mock_get_conn)
+
+        chunks = [
+            _FakeChunk(
+                content="A long provision text " * 20,
+                metadata={"source_uri": "https://example.ee/laws/KarS/p121"},
+                score=0.92,
+            ),
+        ]
+        collector = _Collector()
+        orchestrator = ChatOrchestrator(FakeLLM(), FakeSparql(), retriever=_FakeRetriever(chunks))
+        asyncio.run(orchestrator.handle_message(_CONV_ID, "Tere", _auth(), collector))
+
+        sources_events = [e for e in collector.events if e.get("type") == "sources"]
+        assert len(sources_events) == 1
+        srcs = sources_events[0]["sources"]
+        assert len(srcs) == 1
+        assert srcs[0]["source_uri"] == "https://example.ee/laws/KarS/p121"
+        assert srcs[0]["title"] == "p121"
+        assert srcs[0]["score"] == 0.92
+        assert len(srcs[0]["snippet"]) <= 200
+
+    @patch("app.chat.orchestrator.check_org_cost_budget")
+    @patch("app.chat.orchestrator.check_message_rate")
+    @patch("app.chat.orchestrator.get_connection")
+    def test_sources_event_empty_when_no_chunks(self, mock_get_conn, mock_rate, mock_cost):
+        _setup_orchestrator_conn(mock_get_conn)
+
+        collector = _Collector()
+        orchestrator = ChatOrchestrator(FakeLLM(), FakeSparql(), retriever=_FakeRetriever([]))
+        asyncio.run(orchestrator.handle_message(_CONV_ID, "Tere", _auth(), collector))
+
+        sources_events = [e for e in collector.events if e.get("type") == "sources"]
+        assert len(sources_events) == 1
+        assert sources_events[0]["sources"] == []
+
+
+class TestFollowUpsFeatureFlag:
+    @patch.dict("os.environ", {"CHAT_FOLLOW_UPS_ENABLED": "0"}, clear=False)
+    @patch("app.chat.orchestrator.check_org_cost_budget")
+    @patch("app.chat.orchestrator.check_message_rate")
+    @patch("app.chat.orchestrator.get_connection")
+    def test_follow_ups_not_emitted_when_disabled(self, mock_get_conn, mock_rate, mock_cost):
+        _setup_orchestrator_conn(mock_get_conn)
+        collector = _Collector()
+        orchestrator = ChatOrchestrator(FakeLLM(), FakeSparql())
+        asyncio.run(orchestrator.handle_message(_CONV_ID, "Tere", _auth(), collector))
+        assert not any(e.get("type") == "follow_ups" for e in collector.events)
+
+    @patch.dict("os.environ", {"CHAT_FOLLOW_UPS_ENABLED": "1"}, clear=False)
+    @patch("app.llm.get_default_provider")
+    @patch("app.chat.orchestrator.check_org_cost_budget")
+    @patch("app.chat.orchestrator.check_message_rate")
+    @patch("app.chat.orchestrator.get_connection")
+    def test_follow_ups_emitted_when_enabled(
+        self, mock_get_conn, mock_rate, mock_cost, mock_default_provider
+    ):
+        _setup_orchestrator_conn(mock_get_conn)
+
+        async def fake_acomplete(prompt, **kwargs):
+            return '["Esimene?", "Teine?", "Kolmas?"]'
+
+        provider_stub = MagicMock()
+        provider_stub.acomplete = fake_acomplete
+        mock_default_provider.return_value = provider_stub
+
+        collector = _Collector()
+        orchestrator = ChatOrchestrator(FakeLLM(), FakeSparql())
+        asyncio.run(orchestrator.handle_message(_CONV_ID, "Tere", _auth(), collector))
+
+        follow_events = [e for e in collector.events if e.get("type") == "follow_ups"]
+        assert len(follow_events) == 1
+        assert follow_events[0]["suggestions"] == ["Esimene?", "Teine?", "Kolmas?"]
+
+    @patch.dict("os.environ", {"CHAT_FOLLOW_UPS_ENABLED": "1"}, clear=False)
+    @patch("app.llm.get_default_provider")
+    @patch("app.chat.orchestrator.check_org_cost_budget")
+    @patch("app.chat.orchestrator.check_message_rate")
+    @patch("app.chat.orchestrator.get_connection")
+    def test_follow_ups_silent_on_llm_failure(
+        self, mock_get_conn, mock_rate, mock_cost, mock_default_provider
+    ):
+        _setup_orchestrator_conn(mock_get_conn)
+
+        async def boom(prompt, **kwargs):
+            raise RuntimeError("no follow-up model today")
+
+        provider_stub = MagicMock()
+        provider_stub.acomplete = boom
+        mock_default_provider.return_value = provider_stub
+
+        collector = _Collector()
+        orchestrator = ChatOrchestrator(FakeLLM(), FakeSparql())
+        asyncio.run(orchestrator.handle_message(_CONV_ID, "Tere", _auth(), collector))
+
+        assert not any(e.get("type") == "follow_ups" for e in collector.events)
+
+
+class TestStopGenerationCancel:
+    @patch("app.chat.orchestrator.check_org_cost_budget")
+    @patch("app.chat.orchestrator.check_message_rate")
+    @patch("app.chat.orchestrator.get_connection")
+    def test_cancelled_persists_partial_and_emits_stopped(
+        self, mock_get_conn, mock_rate, mock_cost
+    ):
+        conn = _setup_orchestrator_conn(mock_get_conn)
+
+        class SlowLLM(FakeLLM):
+            async def astream(self, prompt: str, **kwargs: Any):
+                yield StreamEvent(type="content", delta="Osaline ")
+                yield StreamEvent(type="content", delta="vastus ")
+                await asyncio.sleep(10)
+                yield StreamEvent(type="stop")
+
+        collector = _Collector()
+        orchestrator = ChatOrchestrator(SlowLLM(), FakeSparql())
+
+        async def runner():
+            task = asyncio.create_task(
+                orchestrator.handle_message(_CONV_ID, "Tere", _auth(), collector)
+            )
+            # Give the orchestrator a chance to produce partial content.
+            await asyncio.sleep(0.05)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        asyncio.run(runner())
+
+        stopped = [e for e in collector.events if e.get("type") == "stopped"]
+        assert len(stopped) == 1
+
+        # Partial assistant content must have been persisted: we expect
+        # at least one UPDATE setting is_truncated = TRUE.
+        sql_calls = [
+            call.args[0]
+            for call in conn.execute.call_args_list
+            if call.args and isinstance(call.args[0], str)
+        ]
+        assert any("is_truncated = TRUE" in sql for sql in sql_calls)
+
+
+class TestMaxToolRoundsCapVerified:
+    """Explicitly verify MAX_TOOL_ROUNDS=5 is enforced (issue #594.10)."""
+
+    def test_cap_is_five(self):
+        assert MAX_TOOL_ROUNDS == 5
+
+
+# ---------------------------------------------------------------------------
+# Code-review follow-ups
+# ---------------------------------------------------------------------------
+
+
+class TestCostBudgetAdvisoryLock:
+    """The advisory lock must engage on the same conn that persists the user msg."""
+
+    @patch("app.chat.orchestrator.check_message_rate")
+    @patch("app.chat.orchestrator.get_connection")
+    def test_cost_budget_uses_advisory_lock_when_conn_passed(self, mock_get_conn, mock_rate):
+        """The advisory lock must be taken on the conn that then INSERTs the
+        user message — the two operations must share a transaction so the
+        lock serialises the read-then-insert window.
+        """
+        # Two independent conn mocks: the first is used for loading the
+        # conversation + history, the second is the budget-check-plus-
+        # user-message-insert conn we care about.
+        conv = _make_conversation()
+        now = datetime.now(UTC)
+
+        # Shared counter so subsequent calls return message rows.
+        call_counter = {"n": 0}
+        base_conv_row = (
+            conv.id,
+            conv.user_id,
+            conv.org_id,
+            conv.title,
+            None,
+            conv.created_at,
+            conv.updated_at,
+        )
+
+        def side_effect_fetchone():
+            call_counter["n"] += 1
+            if call_counter["n"] == 1:
+                return base_conv_row
+            return (
+                uuid.uuid4(),
+                _CONV_ID,
+                "user",
+                "x",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                now,
+                None,
+                None,
+                None,
+                None,
+            )
+
+        # We'll hand out a stream of conns — the orchestrator opens a fresh
+        # connection per ``with get_connection()`` block. Capture per-conn
+        # execute history so we can verify the budget+insert conn started
+        # with the advisory-lock SQL.
+        conn_histories: list[list[str]] = []
+
+        def make_conn() -> MagicMock:
+            history: list[str] = []
+            conn_histories.append(history)
+            conn = MagicMock()
+            conn.execute.return_value.fetchone = side_effect_fetchone
+            conn.execute.return_value.fetchall.return_value = []
+
+            original_execute = conn.execute
+
+            def execute_spy(sql, *a, **kw):
+                history.append(sql)
+                return original_execute.return_value
+
+            conn.execute.side_effect = execute_spy
+            return conn
+
+        conns: list[MagicMock] = []
+
+        class _FakeCm:
+            def __enter__(self):
+                c = make_conn()
+                conns.append(c)
+                return c
+
+            def __exit__(self, *_a):
+                return False
+
+        mock_get_conn.side_effect = lambda: _FakeCm()
+
+        collector = _Collector()
+        orchestrator = ChatOrchestrator(FakeLLM(), FakeSparql())
+        asyncio.run(orchestrator.handle_message(_CONV_ID, "Tere", _auth(), collector))
+
+        # Locate the conn whose first SQL statement contains the advisory
+        # lock. That conn must ALSO run an INSERT INTO messages call (the
+        # shared-transaction guarantee from the review fix).
+        lock_conn_history: list[str] | None = None
+        for history in conn_histories:
+            if history and "pg_advisory_xact_lock" in history[0]:
+                lock_conn_history = history
+                break
+
+        assert lock_conn_history is not None, (
+            "No connection took pg_advisory_xact_lock as its first SQL. "
+            f"Observed histories: {conn_histories}"
+        )
+        # The very first SQL on that conn is the lock call — this is the
+        # TOCTOU-closing property.
+        assert "pg_advisory_xact_lock" in lock_conn_history[0]
+        # And the same conn later inserts the user message.
+        assert any(
+            "INSERT INTO messages" in sql for sql in lock_conn_history if isinstance(sql, str)
+        ), (
+            "Lock-holding conn never persisted a user message — the "
+            "transaction-sharing guarantee is not wired up."
+        )
+
+
+class TestSendTimeoutMidStream:
+    """A timeout on a mid-stream send must persist the partial with is_truncated=True."""
+
+    @patch("app.chat.orchestrator.check_org_cost_budget")
+    @patch("app.chat.orchestrator.check_message_rate")
+    @patch("app.chat.orchestrator.get_connection")
+    def test_send_timeout_persists_partial_as_truncated(self, mock_get_conn, mock_rate, mock_cost):
+        conn = _setup_orchestrator_conn(mock_get_conn)
+
+        # LLM emits several content deltas before stopping. We make the
+        # second send call raise WebSocketSendTimeout to mimic a wedged
+        # client socket.
+        class TwoDeltaLLM(FakeLLM):
+            async def astream(self, prompt: str, **kwargs: Any):
+                yield StreamEvent(type="content", delta="Esimene ")
+                yield StreamEvent(type="content", delta="teine ")
+                yield StreamEvent(type="stop")
+
+        call_count = {"n": 0}
+
+        async def flaky_send(event: dict[str, Any]) -> None:
+            # Allow retrieval_done etc. through; only time out on the
+            # second content_delta.
+            if event.get("type") == "content_delta":
+                call_count["n"] += 1
+                if call_count["n"] == 1:
+                    return  # first delta ok
+                raise WebSocketSendTimeout("content_delta")
+            return
+
+        orchestrator = ChatOrchestrator(TwoDeltaLLM(), FakeSparql())
+        asyncio.run(orchestrator.handle_message(_CONV_ID, "Tere", _auth(), flaky_send))
+
+        # The first delta went through, the second triggered a timeout.
+        assert call_count["n"] == 2
+
+        # Partial content was persisted with is_truncated=TRUE.
+        sql_calls = [
+            call.args[0]
+            for call in conn.execute.call_args_list
+            if call.args and isinstance(call.args[0], str)
+        ]
+        assert any("is_truncated = TRUE" in sql for sql in sql_calls), (
+            "Partial assistant turn should be flagged is_truncated after send timeout."
+        )
+
+    @patch("app.chat.orchestrator.check_org_cost_budget")
+    @patch("app.chat.orchestrator.check_message_rate")
+    @patch("app.chat.orchestrator.get_connection")
+    def test_send_timeout_stops_further_events(self, mock_get_conn, mock_rate, mock_cost):
+        _setup_orchestrator_conn(mock_get_conn)
+
+        class TwoDeltaLLM(FakeLLM):
+            async def astream(self, prompt: str, **kwargs: Any):
+                yield StreamEvent(type="content", delta="A")
+                yield StreamEvent(type="content", delta="B")
+                yield StreamEvent(type="stop")
+
+        received: list[dict[str, Any]] = []
+        call_count = {"n": 0}
+
+        async def flaky_send(event: dict[str, Any]) -> None:
+            if event.get("type") == "content_delta":
+                call_count["n"] += 1
+                if call_count["n"] >= 2:
+                    raise WebSocketSendTimeout("content_delta")
+            received.append(event)
+
+        orchestrator = ChatOrchestrator(TwoDeltaLLM(), FakeSparql())
+        asyncio.run(orchestrator.handle_message(_CONV_ID, "Tere", _auth(), flaky_send))
+
+        # After the timeout we must NOT see a ``done`` event on the
+        # wedged socket — the orchestrator should bail silently.
+        assert not any(e.get("type") == "done" for e in received)

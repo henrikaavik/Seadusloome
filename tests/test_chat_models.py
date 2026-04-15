@@ -20,10 +20,17 @@ from app.chat.models import (
     create_conversation,
     create_message,
     delete_conversation,
+    delete_messages_after,
+    fork_conversation,
     get_conversation,
     list_conversations_for_user,
     list_messages,
+    list_pinned_messages,
+    set_conversation_archived,
+    set_conversation_pinned,
+    set_message_pinned,
     update_conversation_title,
+    update_message_truncated,
 )
 
 # ---------------------------------------------------------------------------
@@ -239,6 +246,39 @@ class TestUpdateConversationTitle:
         assert "updated_at" in sql
         assert "Uuendatud pealkiri" in params
 
+    def test_update_title_defaults_title_is_custom_false(self):
+        """Default invocation (auto-title job) writes title_is_custom=False."""
+        conn = MagicMock()
+        update_conversation_title(conn, uuid.uuid4(), "Automaatne pealkiri")
+        params = conn.execute.call_args.args[1]
+        # Params: (title, is_custom, id)
+        assert params[0] == "Automaatne pealkiri"
+        assert params[1] is False
+
+    def test_update_title_is_custom_true_sets_flag(self):
+        """Manual rename flips title_is_custom so auto-titling is skipped."""
+        conn = MagicMock()
+        update_conversation_title(conn, uuid.uuid4(), "Käsitsi pealkiri", is_custom=True)
+        params = conn.execute.call_args.args[1]
+        assert params[0] == "Käsitsi pealkiri"
+        assert params[1] is True
+        sql = conn.execute.call_args.args[0]
+        assert "title_is_custom" in sql
+
+    def test_update_title_does_not_clobber_custom_flag(self):
+        """Auto-title job (is_custom=False) must preserve an existing TRUE flag.
+
+        Regression: the old SQL unconditionally wrote ``title_is_custom = %s``
+        so an auto-title call after a manual rename re-opened the row to
+        further auto-title overwrites. The fix uses a CASE WHEN that only
+        transitions FALSE → TRUE, never TRUE → FALSE.
+        """
+        conn = MagicMock()
+        update_conversation_title(conn, uuid.uuid4(), "Automaatne", is_custom=False)
+        sql = conn.execute.call_args.args[0]
+        # SQL must preserve the existing flag on is_custom=False.
+        assert "CASE WHEN %s THEN TRUE ELSE title_is_custom END" in sql
+
 
 # ---------------------------------------------------------------------------
 # delete_conversation
@@ -330,3 +370,378 @@ class TestListMessages:
 
         result = list_messages(conn, uuid.uuid4())
         assert result == []
+
+
+# ---------------------------------------------------------------------------
+# set_conversation_pinned / set_conversation_archived
+# ---------------------------------------------------------------------------
+
+
+class TestSetConversationPinned:
+    def test_pin_sets_pinned_at_now(self):
+        conn = MagicMock()
+        conv_id = uuid.uuid4()
+        set_conversation_pinned(conn, conv_id, True)
+
+        conn.execute.assert_called_once()
+        sql, params = conn.execute.call_args.args
+        assert "is_pinned" in sql
+        assert "pinned_at" in sql
+        # Params: (is_pinned, is_pinned_for_case_when, id)
+        assert params[0] is True
+        assert params[1] is True
+        assert params[2] == str(conv_id)
+
+    def test_unpin_sets_pinned_at_null(self):
+        conn = MagicMock()
+        conv_id = uuid.uuid4()
+        set_conversation_pinned(conn, conv_id, False)
+
+        sql, params = conn.execute.call_args.args
+        assert params[0] is False
+        # CASE WHEN FALSE THEN now() ELSE NULL uses the same flag.
+        assert params[1] is False
+        assert "NULL" in sql
+
+
+class TestSetConversationArchived:
+    def test_archive(self):
+        conn = MagicMock()
+        conv_id = uuid.uuid4()
+        set_conversation_archived(conn, conv_id, True)
+
+        sql, params = conn.execute.call_args.args
+        assert "is_archived" in sql
+        assert params == (True, str(conv_id))
+
+    def test_unarchive(self):
+        conn = MagicMock()
+        conv_id = uuid.uuid4()
+        set_conversation_archived(conn, conv_id, False)
+
+        _, params = conn.execute.call_args.args
+        assert params == (False, str(conv_id))
+
+
+# ---------------------------------------------------------------------------
+# list_conversations_for_user — ordering, filters, search
+# ---------------------------------------------------------------------------
+
+
+class TestListConversationsAdvanced:
+    def test_default_excludes_archived(self):
+        conn = MagicMock()
+        conn.execute.return_value.fetchall.return_value = []
+
+        list_conversations_for_user(conn, _USER_ID)
+
+        sql = conn.execute.call_args.args[0]
+        assert "is_archived = FALSE" in sql
+
+    def test_include_archived_removes_filter(self):
+        conn = MagicMock()
+        conn.execute.return_value.fetchall.return_value = []
+
+        list_conversations_for_user(conn, _USER_ID, include_archived=True)
+
+        sql = conn.execute.call_args.args[0]
+        assert "is_archived = FALSE" not in sql
+
+    def test_pinned_first_orders_by_is_pinned(self):
+        conn = MagicMock()
+        conn.execute.return_value.fetchall.return_value = []
+
+        list_conversations_for_user(conn, _USER_ID, pinned_first=True)
+
+        sql = conn.execute.call_args.args[0]
+        assert "is_pinned DESC" in sql
+        assert "pinned_at DESC NULLS LAST" in sql
+
+    def test_pinned_first_false_orders_by_updated_at_only(self):
+        conn = MagicMock()
+        conn.execute.return_value.fetchall.return_value = []
+
+        list_conversations_for_user(conn, _USER_ID, pinned_first=False)
+
+        sql = conn.execute.call_args.args[0]
+        assert "is_pinned DESC" not in sql
+        assert "updated_at DESC" in sql
+
+    def test_search_uses_ilike(self):
+        conn = MagicMock()
+        conn.execute.return_value.fetchall.return_value = []
+
+        list_conversations_for_user(conn, _USER_ID, search="maks")
+
+        sql, params = conn.execute.call_args.args
+        assert "ILIKE" in sql
+        assert "%maks%" in params
+
+    def test_search_escapes_percent_wildcard(self):
+        """A literal ``%`` in the search term must not act as a wildcard."""
+        conn = MagicMock()
+        conn.execute.return_value.fetchall.return_value = []
+
+        list_conversations_for_user(conn, _USER_ID, search="50%")
+
+        sql, params = conn.execute.call_args.args
+        # SQL must declare the escape character.
+        assert "ESCAPE '\\'" in sql
+        # The percent sign inside the search term is prefixed with a
+        # backslash so it matches literally; the surrounding wildcards
+        # stay unescaped.
+        assert r"%50\%%" in params
+
+    def test_search_escapes_underscore_wildcard(self):
+        """A literal ``_`` must not match any single character."""
+        conn = MagicMock()
+        conn.execute.return_value.fetchall.return_value = []
+
+        list_conversations_for_user(conn, _USER_ID, search="a_b")
+
+        _, params = conn.execute.call_args.args
+        assert r"%a\_b%" in params
+
+    def test_search_escapes_backslash(self):
+        """Backslashes themselves are doubled so ESCAPE stays unambiguous."""
+        conn = MagicMock()
+        conn.execute.return_value.fetchall.return_value = []
+
+        list_conversations_for_user(conn, _USER_ID, search="a\\b")
+
+        _, params = conn.execute.call_args.args
+        # Input ``a\b`` → escape the backslash to ``a\\b`` inside a
+        # pattern that says ``ESCAPE '\'``.
+        assert r"%a\\b%" in params
+
+    def test_no_search_omits_ilike(self):
+        conn = MagicMock()
+        conn.execute.return_value.fetchall.return_value = []
+
+        list_conversations_for_user(conn, _USER_ID)
+
+        sql = conn.execute.call_args.args[0]
+        assert "ILIKE" not in sql
+
+    def test_pre_017_row_hydrates_with_defaults(self):
+        """A 7-tuple row (pre-migration 017) should still hydrate cleanly."""
+        conn = MagicMock()
+        row = _make_conversation_row(title="Old row")  # 7-tuple
+        conn.execute.return_value.fetchall.return_value = [row]
+
+        result = list_conversations_for_user(conn, _USER_ID)
+        assert len(result) == 1
+        assert result[0].is_pinned is False
+        assert result[0].is_archived is False
+        assert result[0].pinned_at is None
+        assert result[0].title_is_custom is False
+
+
+# ---------------------------------------------------------------------------
+# Message pin / truncated / list_pinned
+# ---------------------------------------------------------------------------
+
+
+class TestSetMessagePinned:
+    def test_pin(self):
+        conn = MagicMock()
+        msg_id = uuid.uuid4()
+        set_message_pinned(conn, msg_id, True)
+
+        sql, params = conn.execute.call_args.args
+        assert "is_pinned" in sql
+        assert params == (True, str(msg_id))
+
+    def test_unpin(self):
+        conn = MagicMock()
+        msg_id = uuid.uuid4()
+        set_message_pinned(conn, msg_id, False)
+
+        _, params = conn.execute.call_args.args
+        assert params == (False, str(msg_id))
+
+
+class TestUpdateMessageTruncated:
+    def test_mark_truncated_default_true(self):
+        conn = MagicMock()
+        msg_id = uuid.uuid4()
+        update_message_truncated(conn, msg_id)
+
+        sql, params = conn.execute.call_args.args
+        assert "is_truncated" in sql
+        assert params == (True, str(msg_id))
+
+    def test_mark_truncated_false(self):
+        conn = MagicMock()
+        msg_id = uuid.uuid4()
+        update_message_truncated(conn, msg_id, truncated=False)
+
+        _, params = conn.execute.call_args.args
+        assert params == (False, str(msg_id))
+
+
+class TestListPinnedMessages:
+    def test_filters_by_pinned_true(self):
+        conn = MagicMock()
+        conv_id = uuid.uuid4()
+        row = _make_message_row(conversation_id=conv_id)
+        conn.execute.return_value.fetchall.return_value = [row]
+
+        result = list_pinned_messages(conn, conv_id)
+        assert len(result) == 1
+
+        sql = conn.execute.call_args.args[0]
+        assert "is_pinned = TRUE" in sql
+
+    def test_empty(self):
+        conn = MagicMock()
+        conn.execute.return_value.fetchall.return_value = []
+
+        assert list_pinned_messages(conn, uuid.uuid4()) == []
+
+
+# ---------------------------------------------------------------------------
+# delete_messages_after
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteMessagesAfter:
+    def test_delete_uses_strict_greater_than(self):
+        """Messages *at* the boundary created_at must NOT be deleted."""
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.rowcount = 3
+        conn.execute.return_value = cursor
+        boundary = datetime(2026, 4, 14, 10, 0, 0, tzinfo=UTC)
+
+        result = delete_messages_after(conn, uuid.uuid4(), boundary)
+
+        assert result == 3
+        sql, params = conn.execute.call_args.args
+        assert "DELETE" in sql
+        assert "created_at > %s" in sql
+        assert params[1] == boundary
+
+    def test_returns_zero_on_db_error(self):
+        conn = MagicMock()
+        conn.execute.side_effect = RuntimeError("boom")
+
+        result = delete_messages_after(conn, uuid.uuid4(), datetime.now(UTC))
+        assert result == 0
+
+
+# ---------------------------------------------------------------------------
+# fork_conversation
+# ---------------------------------------------------------------------------
+
+
+class TestForkConversation:
+    def test_fork_copies_messages_up_to_boundary(self):
+        conn = MagicMock()
+        source_conv_id = uuid.uuid4()
+        boundary_msg_id = uuid.uuid4()
+        boundary_created_at = datetime(2026, 4, 14, 9, 30, tzinfo=UTC)
+
+        # 1. boundary lookup 2. get_conversation 3. create_conversation
+        # 4. INSERT ... SELECT
+        source_row = _make_conversation_row(conv_id=source_conv_id, title="Algvestlus")
+        new_conv_id = uuid.uuid4()
+        new_row = _make_conversation_row(conv_id=new_conv_id, title="Jätk: Algvestlus")
+
+        fetchone_results = [
+            (boundary_created_at, source_conv_id),  # boundary lookup
+            source_row,  # get_conversation(source)
+            new_row,  # create_conversation(new)
+        ]
+        conn.execute.return_value.fetchone.side_effect = fetchone_results
+
+        new_conv = fork_conversation(
+            conn,
+            source_conv_id,
+            boundary_msg_id,
+            user_id=_USER_ID,
+            org_id=_ORG_ID,
+        )
+
+        assert new_conv.id == new_conv_id
+        assert new_conv.title == "Jätk: Algvestlus"
+
+        # Final call should be the INSERT ... SELECT with created_at bound.
+        final_call = conn.execute.call_args_list[-1]
+        sql = final_call.args[0]
+        params = final_call.args[1]
+        assert "INSERT INTO messages" in sql
+        assert "created_at <= %s" in sql
+        assert "content_encrypted" in sql
+        assert "tool_input_encrypted" in sql
+        assert "tool_output_encrypted" in sql
+        assert "rag_context_encrypted" in sql
+        assert params == (
+            str(new_conv_id),
+            str(source_conv_id),
+            boundary_created_at,
+        )
+
+    def test_fork_title_prefixes_jatk(self):
+        conn = MagicMock()
+        source_conv_id = uuid.uuid4()
+        boundary_msg_id = uuid.uuid4()
+        created_at = datetime.now(UTC)
+
+        source_row = _make_conversation_row(conv_id=source_conv_id, title="Maksureform")
+        new_row = _make_conversation_row(title="Jätk: Maksureform")
+
+        conn.execute.return_value.fetchone.side_effect = [
+            (created_at, source_conv_id),
+            source_row,
+            new_row,
+        ]
+
+        fork_conversation(
+            conn,
+            source_conv_id,
+            boundary_msg_id,
+            user_id=_USER_ID,
+            org_id=_ORG_ID,
+        )
+
+        # create_conversation call — look for the INSERT INTO conversations
+        insert_calls = [
+            c for c in conn.execute.call_args_list if "INSERT INTO conversations" in c.args[0]
+        ]
+        assert len(insert_calls) == 1
+        params = insert_calls[0].args[1]
+        # (user_id, org_id, title, context_draft_id)
+        assert params[2] == "Jätk: Maksureform"
+
+    def test_fork_raises_if_boundary_message_missing(self):
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = None
+
+        with pytest.raises(ValueError, match="not found"):
+            fork_conversation(
+                conn,
+                uuid.uuid4(),
+                uuid.uuid4(),
+                user_id=_USER_ID,
+                org_id=_ORG_ID,
+            )
+
+    def test_fork_raises_if_boundary_belongs_to_other_conversation(self):
+        conn = MagicMock()
+        source_conv_id = uuid.uuid4()
+        other_conv_id = uuid.uuid4()
+
+        conn.execute.return_value.fetchone.return_value = (
+            datetime.now(UTC),
+            other_conv_id,
+        )
+
+        with pytest.raises(ValueError, match="does not belong"):
+            fork_conversation(
+                conn,
+                source_conv_id,
+                uuid.uuid4(),
+                user_id=_USER_ID,
+                org_id=_ORG_ID,
+            )

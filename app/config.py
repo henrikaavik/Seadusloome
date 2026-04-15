@@ -42,3 +42,16 @@ def is_stub_allowed() -> bool:
     lock-step with each other.
     """
     return os.environ.get("APP_ENV", "development") != "production"
+
+
+def is_chat_auto_title_enabled() -> bool:
+    """Return True when the chat auto-title feature should run.
+
+    Controlled by ``CHAT_AUTO_TITLE_ENABLED``. Any truthy value
+    (``"1"``, ``"true"``, ``"yes"``, ``"on"``, case-insensitive)
+    enables the feature. Defaults to True when unset.
+    """
+    raw = os.environ.get("CHAT_AUTO_TITLE_ENABLED")
+    if raw is None:
+        return True
+    return raw.strip().lower() in {"1", "true", "yes", "on"}

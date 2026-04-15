@@ -48,6 +48,13 @@ class Conversation:
     context_draft_id: uuid.UUID | None
     created_at: datetime
     updated_at: datetime
+    # Migration 017 — Vestlus UX polish (pin / archive / custom-title).
+    # Defaulted so older DB rows and unit-test fixtures (which may still
+    # ship pre-017 column layouts) continue to load cleanly.
+    is_pinned: bool = False
+    is_archived: bool = False
+    pinned_at: datetime | None = None
+    title_is_custom: bool = False
 
 
 @dataclass
@@ -66,13 +73,24 @@ class Message:
     tokens_output: int | None
     model: str | None
     created_at: datetime
+    # Migration 017 — per-message pin and partial-generation truncation
+    # flags. Defaulted for backward compatibility with pre-017 fixtures.
+    is_pinned: bool = False
+    is_truncated: bool = False
 
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-_CONVERSATION_COLUMNS = "id, user_id, org_id, title, context_draft_id, created_at, updated_at"
+# Migration 017 adds ``is_pinned``, ``is_archived``, ``pinned_at`` and
+# ``title_is_custom``. They are appended at the end of the SELECT list so
+# pre-017 test fixtures (which build 7-tuple rows) still map cleanly via
+# :func:`_row_to_conversation`, which indexes defensively.
+_CONVERSATION_COLUMNS = (
+    "id, user_id, org_id, title, context_draft_id, created_at, updated_at, "
+    "is_pinned, is_archived, pinned_at, title_is_custom"
+)
 
 # NOTE (#570): SELECT returns both the plaintext and the ``*_encrypted``
 # columns. ``_row_to_message`` prefers the encrypted column when set and
@@ -83,7 +101,7 @@ _MESSAGE_COLUMNS = (
     "id, conversation_id, role, content, tool_name, tool_input, "
     "tool_output, rag_context, tokens_input, tokens_output, model, created_at, "
     "content_encrypted, tool_input_encrypted, tool_output_encrypted, "
-    "rag_context_encrypted"
+    "rag_context_encrypted, is_pinned, is_truncated"
 )
 
 
@@ -122,16 +140,25 @@ def _decode_encrypted_json(ciphertext: bytes | memoryview | None) -> Any:
 
 
 def _row_to_conversation(row: tuple[Any, ...]) -> Conversation:
-    """Build a ``Conversation`` from a raw cursor row."""
-    (
-        conv_id,
-        user_id,
-        org_id,
-        title,
-        context_draft_id,
-        created_at,
-        updated_at,
-    ) = row
+    """Build a ``Conversation`` from a raw cursor row.
+
+    Indexing is defensive: the migration-017 pin / archive / title-is-custom
+    columns are read via positional lookup with ``None``/``False`` fallbacks
+    so pre-017 test fixtures (7-tuple rows) and freshly-migrated prod rows
+    (11-tuple rows) both load cleanly.
+    """
+    conv_id = row[0]
+    user_id = row[1]
+    org_id = row[2]
+    title = row[3]
+    context_draft_id = row[4]
+    created_at = row[5]
+    updated_at = row[6]
+
+    is_pinned = bool(row[7]) if len(row) > 7 and row[7] is not None else False
+    is_archived = bool(row[8]) if len(row) > 8 and row[8] is not None else False
+    pinned_at = row[9] if len(row) > 9 else None
+    title_is_custom = bool(row[10]) if len(row) > 10 and row[10] is not None else False
 
     return Conversation(
         id=coerce_uuid(conv_id),
@@ -141,6 +168,10 @@ def _row_to_conversation(row: tuple[Any, ...]) -> Conversation:
         context_draft_id=coerce_uuid(context_draft_id) if context_draft_id else None,
         created_at=created_at,
         updated_at=updated_at,
+        is_pinned=is_pinned,
+        is_archived=is_archived,
+        pinned_at=pinned_at,
+        title_is_custom=title_is_custom,
     )
 
 
@@ -152,24 +183,26 @@ def _row_to_message(row: tuple[Any, ...]) -> Message:
     only matters for rows written before the #570 rollout (see migration
     014 and ``scripts/migrate_chat_encryption.py``).
     """
-    (
-        msg_id,
-        conversation_id,
-        role,
-        content_plain,
-        tool_name,
-        tool_input_raw,
-        tool_output_raw,
-        rag_context_raw,
-        tokens_input,
-        tokens_output,
-        model,
-        created_at,
-        content_encrypted,
-        tool_input_encrypted,
-        tool_output_encrypted,
-        rag_context_encrypted,
-    ) = row
+    msg_id = row[0]
+    conversation_id = row[1]
+    role = row[2]
+    content_plain = row[3]
+    tool_name = row[4]
+    tool_input_raw = row[5]
+    tool_output_raw = row[6]
+    rag_context_raw = row[7]
+    tokens_input = row[8]
+    tokens_output = row[9]
+    model = row[10]
+    created_at = row[11]
+    content_encrypted = row[12]
+    tool_input_encrypted = row[13]
+    tool_output_encrypted = row[14]
+    rag_context_encrypted = row[15]
+    # Migration 017 — pin / truncated flags. Defensive indexing so pre-017
+    # test fixtures that build 16-tuple rows continue to work.
+    is_pinned = bool(row[16]) if len(row) > 16 and row[16] is not None else False
+    is_truncated = bool(row[17]) if len(row) > 17 and row[17] is not None else False
 
     # Content: prefer encrypted blob, fall back to plaintext TEXT column.
     decrypted_content = _decode_encrypted_text(content_encrypted)
@@ -207,6 +240,8 @@ def _row_to_message(row: tuple[Any, ...]) -> Message:
         tokens_output=int(tokens_output) if tokens_output is not None else None,
         model=model,
         created_at=created_at,
+        is_pinned=is_pinned,
+        is_truncated=is_truncated,
     )
 
 
@@ -266,8 +301,22 @@ def list_conversations_for_user(
     *,
     limit: int = 25,
     offset: int = 0,
+    include_archived: bool = False,
+    pinned_first: bool = True,
+    search: str | None = None,
 ) -> list[Conversation]:
-    """Return conversations owned by *user_id*, newest first.
+    """Return conversations owned by *user_id*.
+
+    Ordering:
+      * ``pinned_first=True`` (default) — pinned conversations float to the
+        top, ordered by ``pinned_at DESC NULLS LAST`` then ``updated_at DESC``.
+      * ``pinned_first=False`` — order purely by ``updated_at DESC``.
+
+    Filters:
+      * ``include_archived=False`` (default) — excludes archived rows; the
+        partial index ``idx_conversations_active`` supports this path.
+      * ``search`` — case-insensitive substring match on ``title`` via
+        ``ILIKE`` (v1; a pgvector-backed semantic search lands later).
 
     Note: unlike drafting sessions, conversations are scoped by user_id
     only (a user can list their own conversations across orgs they belong
@@ -275,16 +324,40 @@ def list_conversations_for_user(
     """
     if limit <= 0:
         return []
+
+    where_clauses = ["user_id = %s"]
+    params: list[Any] = [str(user_id)]
+
+    if not include_archived:
+        where_clauses.append("is_archived = FALSE")
+
+    if search:
+        # ILIKE substring match; escape LIKE metacharacters so user-typed
+        # ``%`` / ``_`` / ``\`` match literally instead of acting as
+        # wildcards. ``ESCAPE '\'`` tells PostgreSQL to treat the
+        # backslash as the escape character for the pattern.
+        escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        where_clauses.append("title ILIKE %s ESCAPE '\\'")
+        params.append(f"%{escaped}%")
+
+    if pinned_first:
+        order_by = "is_pinned DESC, pinned_at DESC NULLS LAST, updated_at DESC"
+    else:
+        order_by = "updated_at DESC"
+
+    where_sql = " AND ".join(where_clauses)
+    params.extend([limit, max(0, offset)])
+
     try:
         rows = conn.execute(
             f"""
             SELECT {_CONVERSATION_COLUMNS}
             FROM conversations
-            WHERE user_id = %s
-            ORDER BY updated_at DESC
+            WHERE {where_sql}
+            ORDER BY {order_by}
             LIMIT %s OFFSET %s
             """,
-            (str(user_id), limit, max(0, offset)),
+            tuple(params),
         ).fetchall()
     except Exception:
         logger.exception(
@@ -299,15 +372,71 @@ def update_conversation_title(
     conn: Any,
     conv_id: uuid.UUID | str,
     title: str,
+    *,
+    is_custom: bool = False,
 ) -> None:
-    """Update the title (and bump ``updated_at``) of a conversation."""
+    """Update the title (and bump ``updated_at``) of a conversation.
+
+    ``is_custom=True`` flips ``title_is_custom`` on so the auto-title
+    background job will not overwrite a name the user explicitly set.
+    ``is_custom=False`` (the default, used by the auto-title job) must
+    *not* clobber a previously-set custom flag — otherwise running the
+    auto-titler after a user rename would re-open the row to auto-title
+    overwrites. The ``CASE`` expression keeps the flag sticky: we only
+    ever transition FALSE → TRUE, never TRUE → FALSE.
+    """
     conn.execute(
         """
         UPDATE conversations
-        SET title = %s, updated_at = now()
+        SET title = %s,
+            title_is_custom = CASE WHEN %s THEN TRUE ELSE title_is_custom END,
+            updated_at = now()
         WHERE id = %s
         """,
-        (title, str(conv_id)),
+        (title, bool(is_custom), str(conv_id)),
+    )
+
+
+def set_conversation_pinned(
+    conn: Any,
+    conv_id: uuid.UUID | str,
+    pinned: bool,
+) -> None:
+    """Pin or unpin a conversation.
+
+    Sets ``pinned_at`` to ``now()`` on pin and ``NULL`` on unpin so the
+    pinned-first ordering reflects the most-recently-pinned conversation
+    at the top of the list. Does not touch ``updated_at`` — pinning is a
+    UI affordance, not an edit.
+    """
+    conn.execute(
+        """
+        UPDATE conversations
+        SET is_pinned = %s,
+            pinned_at = CASE WHEN %s THEN now() ELSE NULL END
+        WHERE id = %s
+        """,
+        (bool(pinned), bool(pinned), str(conv_id)),
+    )
+
+
+def set_conversation_archived(
+    conn: Any,
+    conv_id: uuid.UUID | str,
+    archived: bool,
+) -> None:
+    """Archive or unarchive a conversation.
+
+    Archived conversations are hidden from the default list view but are
+    not deleted; the user can restore them from the archive panel.
+    """
+    conn.execute(
+        """
+        UPDATE conversations
+        SET is_archived = %s
+        WHERE id = %s
+        """,
+        (bool(archived), str(conv_id)),
     )
 
 
@@ -424,3 +553,182 @@ def list_messages(
         )
         return []
     return [_row_to_message(row) for row in rows]
+
+
+# ---------------------------------------------------------------------------
+# Message pin / truncation / delete helpers (migration 017)
+# ---------------------------------------------------------------------------
+
+
+def set_message_pinned(
+    conn: Any,
+    message_id: uuid.UUID | str,
+    pinned: bool,
+) -> None:
+    """Pin or unpin an individual message inside a conversation."""
+    conn.execute(
+        "UPDATE messages SET is_pinned = %s WHERE id = %s",
+        (bool(pinned), str(message_id)),
+    )
+
+
+def update_message_truncated(
+    conn: Any,
+    message_id: uuid.UUID | str,
+    truncated: bool = True,
+) -> None:
+    """Mark an assistant message as truncated (stop-generation path).
+
+    The orchestrator currently writes this column with raw SQL — this
+    helper exists for parity with the other setters and to give tests a
+    single entry point to assert against.
+    """
+    conn.execute(
+        "UPDATE messages SET is_truncated = %s WHERE id = %s",
+        (bool(truncated), str(message_id)),
+    )
+
+
+def list_pinned_messages(
+    conn: Any,
+    conv_id: uuid.UUID | str,
+) -> list[Message]:
+    """Return all pinned messages in a conversation, oldest first."""
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT {_MESSAGE_COLUMNS}
+            FROM messages
+            WHERE conversation_id = %s AND is_pinned = TRUE
+            ORDER BY created_at ASC
+            """,
+            (str(conv_id),),
+        ).fetchall()
+    except Exception:
+        logger.exception(
+            "Failed to list pinned messages for conversation=%s",
+            conv_id,
+        )
+        return []
+    return [_row_to_message(row) for row in rows]
+
+
+def delete_messages_after(
+    conn: Any,
+    conv_id: uuid.UUID | str,
+    after_created_at: datetime,
+) -> int:
+    """Delete all messages strictly after *after_created_at* in the thread.
+
+    Used by the edit-and-resend flow to drop downstream messages when the
+    user rewrites an earlier turn. The boundary message itself
+    (``created_at == after_created_at``) is kept. Returns the number of
+    rows deleted; returns ``0`` on DB error (logged) so callers can treat
+    the operation as a no-op.
+    """
+    try:
+        cursor = conn.execute(
+            """
+            DELETE FROM messages
+            WHERE conversation_id = %s AND created_at > %s
+            """,
+            (str(conv_id), after_created_at),
+        )
+    except Exception:
+        logger.exception(
+            "Failed to delete messages after %s for conversation=%s",
+            after_created_at,
+            conv_id,
+        )
+        return 0
+    # psycopg exposes rowcount on the cursor; the DELETE returns an empty
+    # result set, so rowcount is the only signal.
+    return int(getattr(cursor, "rowcount", 0) or 0)
+
+
+# ---------------------------------------------------------------------------
+# Fork a conversation (migration 017)
+# ---------------------------------------------------------------------------
+
+
+def fork_conversation(
+    conn: Any,
+    source_conv_id: uuid.UUID | str,
+    up_to_message_id: uuid.UUID | str,
+    *,
+    user_id: uuid.UUID | str,
+    org_id: uuid.UUID | str,
+) -> Conversation:
+    """Branch a conversation at *up_to_message_id* into a new thread.
+
+    Copies the source conversation's messages up to and including the
+    given message into a newly-created conversation owned by *user_id* /
+    *org_id*. Encrypted BYTEA columns (``content_encrypted``,
+    ``tool_input_encrypted``, ``tool_output_encrypted``,
+    ``rag_context_encrypted``) are copied byte-for-byte so the fork
+    inherits the exact ciphertexts — no re-encryption, no plaintext
+    round-trip.
+
+    The new conversation's title is ``"Jätk: <original title>"`` with
+    ``title_is_custom=False`` so the auto-title job can still refine it.
+
+    The caller is responsible for committing the transaction.
+    """
+    # Look up the fork point so we can bound the message copy by
+    # ``created_at``. Looking up the message (rather than filtering by
+    # id alone) lets us copy a contiguous time-ordered slice instead of
+    # relying on the caller to know the insertion order.
+    boundary = conn.execute(
+        """
+        SELECT created_at, conversation_id
+        FROM messages
+        WHERE id = %s
+        """,
+        (str(up_to_message_id),),
+    ).fetchone()
+    if boundary is None:
+        raise ValueError(f"Message {up_to_message_id} not found")
+    boundary_created_at, boundary_conv_id = boundary
+    if coerce_uuid(boundary_conv_id) != coerce_uuid(source_conv_id):
+        raise ValueError(
+            f"Message {up_to_message_id} does not belong to conversation {source_conv_id}"
+        )
+
+    source = get_conversation(conn, source_conv_id)
+    if source is None:
+        raise ValueError(f"Source conversation {source_conv_id} not found")
+
+    new_title = f"Jätk: {source.title}" if source.title else "Jätk"
+    new_conv = create_conversation(
+        conn,
+        user_id,
+        org_id,
+        title=new_title,
+        context_draft_id=source.context_draft_id,
+    )
+    # ``create_conversation`` does not set ``title_is_custom``; migration
+    # 017 defaults it to FALSE so we do not need an extra UPDATE.
+
+    # Copy messages byte-for-byte — include the encrypted BYTEA columns
+    # directly. ``created_at`` is preserved so the fork reads in the same
+    # order as the source up to the boundary.
+    conn.execute(
+        """
+        INSERT INTO messages (
+            conversation_id, role, content, tool_name, tool_input,
+            tool_output, rag_context, tokens_input, tokens_output, model,
+            content_encrypted, tool_input_encrypted, tool_output_encrypted,
+            rag_context_encrypted, is_pinned, is_truncated, created_at
+        )
+        SELECT
+            %s, role, content, tool_name, tool_input,
+            tool_output, rag_context, tokens_input, tokens_output, model,
+            content_encrypted, tool_input_encrypted, tool_output_encrypted,
+            rag_context_encrypted, is_pinned, is_truncated, created_at
+        FROM messages
+        WHERE conversation_id = %s AND created_at <= %s
+        ORDER BY created_at ASC
+        """,
+        (str(new_conv.id), str(source_conv_id), boundary_created_at),
+    )
+    return new_conv
