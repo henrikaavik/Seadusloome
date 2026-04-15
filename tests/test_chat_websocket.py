@@ -255,7 +255,7 @@ class TestWsHandlerAuthExtraction:
 
         # Capture the registered handler
         mock_app = MagicMock()
-        captured_handler = None
+        captured_handler: Any = None
 
         def capture_ws(path, conn=None, disconn=None):
             def decorator(fn):
@@ -305,7 +305,7 @@ class TestWsHandlerAuthExtraction:
         from app.chat.websocket import register_chat_ws_routes
 
         mock_app = MagicMock()
-        captured_handler = None
+        captured_handler: Any = None
 
         def capture_ws(path, conn=None, disconn=None):
             def decorator(fn):
@@ -406,7 +406,7 @@ class TestWsChatJwtFailClosed:
         from app.chat.websocket import register_chat_ws_routes
 
         mock_app = MagicMock()
-        captured_handler = None
+        captured_handler: Any = None
 
         def capture_ws(path, conn=None, disconn=None):
             def decorator(fn):
@@ -552,7 +552,7 @@ class TestWsHandlerDisconnectCleanup:
         from app.chat.websocket import register_chat_ws_routes
 
         mock_app = MagicMock()
-        captured_handler = None
+        captured_handler: Any = None
 
         def capture_ws(path, conn=None, disconn=None):
             def decorator(fn):
@@ -584,15 +584,20 @@ class TestWsHandlerDisconnectCleanup:
             }
         )
 
-        async def scenario():
-            handler_task = asyncio.create_task(captured_handler(send_msg, send, scope))
+        handler_fn = captured_handler  # re-bind so pyright narrows through the closure
+        assert handler_fn is not None
+        disconnect_fn = on_disconnect_hook
+        assert disconnect_fn is not None
+
+        async def scenario() -> None:
+            handler_task = asyncio.create_task(handler_fn(send_msg, send, scope))
             # Let the orchestrator register its per-conv task.
             await asyncio.sleep(0.05)
             # Exactly one connection is registered.
             assert id(send) in registry
             assert len(registry[id(send)]) == 1
             # Simulate the socket going away.
-            await on_disconnect_hook(send)
+            await disconnect_fn(send)
             # Registry slot gone, tasks cancelled.
             assert id(send) not in registry
             # Let the handler coroutine drain the CancelledError.
