@@ -92,6 +92,29 @@ _CONVERSATION_COLUMNS = (
     "is_pinned, is_archived, pinned_at, title_is_custom"
 )
 
+# Legacy 7-column list used when migration 017 is not yet applied. Mirrors
+# the same fallback pattern as _MESSAGE_COLUMNS_PRE017 below.
+_CONVERSATION_COLUMNS_PRE017 = (
+    "id, user_id, org_id, title, context_draft_id, created_at, updated_at"
+)
+
+
+def _is_missing_v017_column_error(exc: BaseException) -> bool:
+    """Return True if the exception looks like psycopg's UndefinedColumn
+    raised by a reference to a migration-017 column."""
+    msg = str(exc).lower()
+    return "does not exist" in msg and any(
+        col in msg
+        for col in (
+            "is_pinned",
+            "is_archived",
+            "pinned_at",
+            "title_is_custom",
+            "is_truncated",
+        )
+    )
+
+
 # NOTE (#570): SELECT returns both the plaintext and the ``*_encrypted``
 # columns. ``_row_to_message`` prefers the encrypted column when set and
 # falls back to the plaintext column for rows that predate the backfill
@@ -102,6 +125,18 @@ _MESSAGE_COLUMNS = (
     "tool_output, rag_context, tokens_input, tokens_output, model, created_at, "
     "content_encrypted, tool_input_encrypted, tool_output_encrypted, "
     "rag_context_encrypted, is_pinned, is_truncated"
+)
+
+# Legacy SELECT list used when migration 017 has not yet applied (the
+# ``is_pinned`` / ``is_truncated`` columns are absent). Without this
+# fallback, loading any conversation raises ``UndefinedColumn`` and the
+# conversation view silently renders the empty state — users then see
+# the example-prompt cards instead of their history. See #596 follow-up.
+_MESSAGE_COLUMNS_PRE017 = (
+    "id, conversation_id, role, content, tool_name, tool_input, "
+    "tool_output, rag_context, tokens_input, tokens_output, model, created_at, "
+    "content_encrypted, tool_input_encrypted, tool_output_encrypted, "
+    "rag_context_encrypted"
 )
 
 
@@ -289,9 +324,27 @@ def get_conversation(
             f"SELECT {_CONVERSATION_COLUMNS} FROM conversations WHERE id = %s",
             (str(conv_id),),
         ).fetchone()
-    except Exception:
-        logger.exception("Failed to fetch conversation id=%s", conv_id)
-        return None
+    except Exception as exc:
+        if _is_missing_v017_column_error(exc):
+            logger.warning(
+                "get_conversation: migration 017 columns missing — fallback for id=%s",
+                conv_id,
+            )
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            try:
+                row = conn.execute(
+                    f"SELECT {_CONVERSATION_COLUMNS_PRE017} FROM conversations WHERE id = %s",
+                    (str(conv_id),),
+                ).fetchone()
+            except Exception:
+                logger.exception("Fallback get_conversation failed for id=%s", conv_id)
+                return None
+        else:
+            logger.exception("Failed to fetch conversation id=%s", conv_id)
+            return None
     return _row_to_conversation(row) if row else None
 
 
@@ -348,23 +401,48 @@ def list_conversations_for_user(
     where_sql = " AND ".join(where_clauses)
     params.extend([limit, max(0, offset)])
 
-    try:
-        rows = conn.execute(
+    def _run(cols: str, where: str, order: str) -> list[tuple[Any, ...]]:
+        return conn.execute(
             f"""
-            SELECT {_CONVERSATION_COLUMNS}
+            SELECT {cols}
             FROM conversations
-            WHERE {where_sql}
-            ORDER BY {order_by}
+            WHERE {where}
+            ORDER BY {order}
             LIMIT %s OFFSET %s
             """,
             tuple(params),
         ).fetchall()
-    except Exception:
-        logger.exception(
-            "Failed to list conversations for user=%s",
-            user_id,
-        )
-        return []
+
+    try:
+        rows = _run(_CONVERSATION_COLUMNS, where_sql, order_by)
+    except Exception as exc:
+        if _is_missing_v017_column_error(exc):
+            logger.warning(
+                "list_conversations_for_user: migration 017 columns missing —"
+                " falling back to pre-017 SELECT for user=%s",
+                user_id,
+            )
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            # Strip pre-017 unsafe predicates / ordering.
+            legacy_where = " AND ".join(c for c in where_clauses if "is_archived" not in c)
+            legacy_order = "updated_at DESC"
+            try:
+                rows = _run(_CONVERSATION_COLUMNS_PRE017, legacy_where, legacy_order)
+            except Exception:
+                logger.exception(
+                    "Fallback list_conversations_for_user failed for user=%s",
+                    user_id,
+                )
+                return []
+        else:
+            logger.exception(
+                "Failed to list conversations for user=%s",
+                user_id,
+            )
+            return []
     return [_row_to_conversation(row) for row in rows]
 
 
@@ -535,7 +613,15 @@ def list_messages(
     conn: Any,
     conversation_id: uuid.UUID | str,
 ) -> list[Message]:
-    """Return all messages in a conversation, ordered by ``created_at`` ASC."""
+    """Return all messages in a conversation, ordered by ``created_at`` ASC.
+
+    Falls back to a SELECT without the migration-017 columns if those
+    columns do not yet exist on the target database. This keeps the
+    conversation view functional during a window where the app image
+    was deployed but migration 017 has not yet been applied — otherwise
+    users open a historical conversation and see the empty-state prompt
+    cards instead of their history (reported after #596 rolled out).
+    """
     try:
         rows = conn.execute(
             f"""
@@ -546,12 +632,44 @@ def list_messages(
             """,
             (str(conversation_id),),
         ).fetchall()
-    except Exception:
-        logger.exception(
-            "Failed to list messages for conversation=%s",
-            conversation_id,
-        )
-        return []
+    except Exception as exc:
+        # Psycopg raises ``UndefinedColumn`` (SQLSTATE 42703) when the
+        # new columns are missing. Matching by message text keeps us
+        # compatible with psycopg2 and psycopg3 without importing
+        # driver-specific exception classes.
+        msg = str(exc).lower()
+        if "is_pinned" in msg or "is_truncated" in msg or "does not exist" in msg:
+            logger.warning(
+                "list_messages: migration 017 columns missing — falling back"
+                " to pre-017 SELECT for conversation=%s",
+                conversation_id,
+            )
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            try:
+                rows = conn.execute(
+                    f"""
+                    SELECT {_MESSAGE_COLUMNS_PRE017}
+                    FROM messages
+                    WHERE conversation_id = %s
+                    ORDER BY created_at ASC
+                    """,
+                    (str(conversation_id),),
+                ).fetchall()
+            except Exception:
+                logger.exception(
+                    "Fallback list_messages also failed for conversation=%s",
+                    conversation_id,
+                )
+                return []
+        else:
+            logger.exception(
+                "Failed to list messages for conversation=%s",
+                conversation_id,
+            )
+            return []
     return [_row_to_message(row) for row in rows]
 
 
