@@ -53,6 +53,7 @@ from app.storage import delete_file as delete_encrypted_file
 from app.sync.jena_loader import delete_named_graph
 from app.ui.data.data_table import Column, DataTable
 from app.ui.data.pagination import Pagination
+from app.ui.feedback.empty_state import EmptyState
 from app.ui.feedback.flash import push_flash
 from app.ui.layout import PageShell
 from app.ui.primitives.annotation_button import AnnotationButton
@@ -390,27 +391,23 @@ def drafts_list_page(req: Request):
         total_pages = max(1, (total + _PAGE_SIZE - 1) // _PAGE_SIZE)
 
         if total == 0:
-            body = Div(
-                InfoBox(
-                    P(
-                        "Laadige \u00fcles .docx v\u00f5i .pdf eeln\u00f5u, "
-                        "et n\u00e4ha selle m\u00f5ju olemasolevatele seadustele. "
-                        "S\u00fcsteem anal\u00fc\u00fcsib automaatselt viiteid, "
-                        "konflikte ja EL-i vastavust."
-                    ),
-                    variant="info",
-                    dismissible=True,
+            # #631: use the shared EmptyState primitive for a consistent
+            # zero-state experience across the app. The action button
+            # links to the upload form.
+            body = EmptyState(
+                "Teie organisatsioon ei ole veel \u00fchtegi eeln\u00f5u \u00fcles laadinud.",
+                message=(
+                    "Laadige \u00fcles .docx v\u00f5i .pdf eeln\u00f5u, "
+                    "et n\u00e4ha selle m\u00f5ju olemasolevatele seadustele. "
+                    "S\u00fcsteem anal\u00fc\u00fcsib automaatselt viiteid, "
+                    "konflikte ja EL-i vastavust."
                 ),
-                P(
-                    "Teie organisatsioon ei ole veel \u00fchtegi eeln\u00f5u \u00fcles laadinud.",
-                    cls="muted-text",
-                ),
-                A(
+                icon="📄",
+                action=A(
                     "Laadi \u00fcles uus eeln\u00f5u",
                     href="/drafts/new",
                     cls="btn btn-primary btn-md",
                 ),
-                cls="empty-state",
             )
             pagination = None
         else:
