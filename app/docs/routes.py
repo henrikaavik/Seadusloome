@@ -25,8 +25,9 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fasthtml.common import *  # noqa: F403
+from fasthtml.common import to_xml
 from starlette.requests import Request
-from starlette.responses import RedirectResponse, Response
+from starlette.responses import HTMLResponse, RedirectResponse, Response
 
 from app.auth.audit import log_action
 from app.auth.helpers import require_auth as _require_auth
@@ -700,6 +701,10 @@ def _draft_detail_body(draft: Draft, auth: Mapping[str, Any] | None = None) -> l
     )
 
     actions: list = []
+    # #600: the CTA block is rendered here but the wrapping container
+    # is always present so it can listen for the ``draft-ready`` event
+    # and re-fetch itself once the pipeline transitions. Only add the
+    # "Vaata mõjuaruannet" link when the draft has reached ``ready``.
     if draft.status == "ready":
         actions.append(
             A(  # noqa: F405
@@ -781,7 +786,20 @@ def _draft_detail_body(draft: Draft, auth: Mapping[str, Any] | None = None) -> l
         actions.append(ModalScript())
         actions.append(Script(_DELETE_MODAL_SCRIPT))  # noqa: F405
 
-    return [metadata, Div(*actions, cls="draft-actions")]
+    # #600: wrap the actions in a self-refetching container keyed on
+    # the ``draft-ready`` event that the status-fragment handler emits
+    # via HX-Trigger when the pipeline transitions into the terminal
+    # ``ready`` state. The container re-fetches its own HTML so the
+    # "Vaata mõjuaruannet" CTA appears without a full-page refresh.
+    actions_container = Div(  # noqa: F405
+        *actions,
+        id=f"draft-actions-{draft.id}",
+        cls="draft-actions",
+        hx_get=f"/drafts/{draft.id}/actions",
+        hx_trigger="draft-ready from:body",
+        hx_swap="outerHTML",
+    )
+    return [metadata, actions_container]
 
 
 def draft_detail_page(req: Request, draft_id: str):
@@ -859,6 +877,11 @@ def draft_status_fragment(req: Request, draft_id: str):
     Returned raw (no PageShell) so HTMX can swap it with ``outerHTML``
     without injecting a second copy of the layout into the page body.
     Covers issue #347.
+
+    #600: when the draft reaches ``ready`` we also emit an
+    ``HX-Trigger: draft-ready`` response header so the detail page's
+    actions container re-fetches itself and surfaces the "Vaata
+    mõjuaruannet" CTA without requiring a full page refresh.
     """
     auth_or_redirect = _require_auth(req)
     if isinstance(auth_or_redirect, Response):
@@ -879,7 +902,49 @@ def draft_status_fragment(req: Request, draft_id: str):
             id=f"draft-status-{draft_id}",
         )
 
-    return _status_tracker(draft)
+    tracker = _status_tracker(draft)
+    if draft.status == "ready":
+        # Emit HX-Trigger: draft-ready so the actions container on the
+        # detail page (hx-trigger="draft-ready from:body") re-fetches
+        # itself and surfaces the "Vaata mõjuaruannet" CTA. We have to
+        # render to HTML explicitly because HTMX reads the trigger from
+        # the response headers, and the raw FT return path doesn't let
+        # us attach custom headers.
+        return HTMLResponse(to_xml(tracker), headers={"HX-Trigger": "draft-ready"})
+    return tracker
+
+
+# ---------------------------------------------------------------------------
+# GET /drafts/{draft_id}/actions — HTMX fragment for the action row (#600)
+# ---------------------------------------------------------------------------
+
+
+def draft_actions_fragment(req: Request, draft_id: str):
+    """Return just the ``.draft-actions`` container for HTMX re-render.
+
+    The container is wired with ``hx-trigger="draft-ready from:body"``
+    so that when :func:`draft_status_fragment` emits
+    ``HX-Trigger: draft-ready`` on the ``ready`` transition, the action
+    row refreshes itself with the "Vaata mõjuaruannet" CTA and any
+    other status-gated controls.
+    """
+    auth_or_redirect = _require_auth(req)
+    if isinstance(auth_or_redirect, Response):
+        return auth_or_redirect
+    auth = auth_or_redirect
+
+    parsed = _parse_uuid(draft_id)
+    if parsed is None:
+        return Div(id=f"draft-actions-{draft_id}", cls="draft-actions")  # noqa: F405
+
+    draft = fetch_draft(parsed)
+    if draft is None or not can_view_draft(auth, draft):
+        return Div(id=f"draft-actions-{draft_id}", cls="draft-actions")  # noqa: F405
+
+    body = _draft_detail_body(draft, auth=auth)
+    # ``_draft_detail_body`` returns ``[metadata_dl, actions_container]``;
+    # we only swap the actions container here.
+    return body[-1]
 
 
 # ---------------------------------------------------------------------------
@@ -1083,5 +1148,6 @@ def register_draft_routes(rt) -> None:  # type: ignore[no-untyped-def]
     rt("/drafts", methods=["POST"])(create_draft_handler)
     rt("/drafts/{draft_id}", methods=["GET"])(draft_detail_page)
     rt("/drafts/{draft_id}/status", methods=["GET"])(draft_status_fragment)
+    rt("/drafts/{draft_id}/actions", methods=["GET"])(draft_actions_fragment)
     rt("/drafts/{draft_id}/keep", methods=["POST"])(keep_draft_handler)
     rt("/drafts/{draft_id}/delete", methods=["POST"])(delete_draft_handler)

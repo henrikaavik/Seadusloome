@@ -884,6 +884,88 @@ class TestFlashMessages:
 
 
 # ---------------------------------------------------------------------------
+# #600: HX-Trigger draft-ready surfaces the CTA without full-page refresh
+# ---------------------------------------------------------------------------
+
+
+class TestDraftReadyTrigger:
+    @patch("app.docs.routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_status_fragment_emits_hx_trigger_when_ready(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+    ):
+        mock_get_provider.return_value = _stub_provider()
+        draft = _make_draft(status="ready")
+        mock_fetch.return_value = draft
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{draft.id}/status")
+        assert resp.status_code == 200
+        # The trigger header is what the detail page actions container
+        # listens for (``hx-trigger="draft-ready from:body"``).
+        assert resp.headers.get("hx-trigger") == "draft-ready"
+
+    @patch("app.docs.routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_status_fragment_no_trigger_while_still_running(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+    ):
+        mock_get_provider.return_value = _stub_provider()
+        draft = _make_draft(status="parsing")
+        mock_fetch.return_value = draft
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{draft.id}/status")
+        assert resp.status_code == 200
+        # No HX-Trigger header while the draft is still pre-ready.
+        assert resp.headers.get("hx-trigger") is None
+
+    @patch("app.docs.routes.log_draft_view")
+    @patch("app.docs.routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_actions_container_wired_for_draft_ready(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_log: MagicMock,
+    ):
+        mock_get_provider.return_value = _stub_provider()
+        draft = _make_draft(status="parsing")
+        mock_fetch.return_value = draft
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{draft.id}")
+        assert resp.status_code == 200
+        body = resp.text
+        # Container exists even before the draft is ready.
+        assert f'id="draft-actions-{draft.id}"' in body
+        # And is wired to re-fetch itself on the draft-ready event.
+        assert 'hx-trigger="draft-ready from:body"' in body
+        assert f'hx-get="/drafts/{draft.id}/actions"' in body
+
+    @patch("app.docs.routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_actions_fragment_renders_report_cta_when_ready(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+    ):
+        mock_get_provider.return_value = _stub_provider()
+        draft = _make_draft(status="ready")
+        mock_fetch.return_value = draft
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{draft.id}/actions")
+        assert resp.status_code == 200
+        assert "Vaata mõjuaruannet" in resp.text
+        assert f"/drafts/{draft.id}/report" in resp.text
+
+
+# ---------------------------------------------------------------------------
 # #603: graph_uri no longer leaked to end users
 # ---------------------------------------------------------------------------
 
