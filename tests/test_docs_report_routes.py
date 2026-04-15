@@ -597,3 +597,106 @@ class TestDownloadExportHandler:
         resp = client.get(f"/drafts/{_DRAFT_ID}/export/7/download")
         assert resp.status_code == 200
         assert "Eelnõu ei leitud" in resp.text
+
+
+# ---------------------------------------------------------------------------
+# GET /drafts/{id}/report/section/{section} — pagination (#611)
+# ---------------------------------------------------------------------------
+
+
+class TestReportSectionPagination:
+    @patch("app.docs.report_routes._fetch_latest_report")
+    @patch("app.docs.report_routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_report_page_shows_pager_when_more_than_50_rows(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_fetch_report: MagicMock,
+    ):
+        mock_get_provider.return_value = _stub_provider()
+        mock_fetch.return_value = _make_draft()
+        many = [
+            {
+                "uri": f"urn:x:{i}",
+                "label": f"Säte {i}",
+                "type": "https://data.riik.ee/ontology/estleg#EnactedLaw",
+            }
+            for i in range(75)
+        ]
+        mock_fetch_report.return_value = _make_report_row(
+            affected=75,
+            findings={
+                "affected_entities": many,
+                "conflicts": [],
+                "eu_compliance": [],
+                "gaps": [],
+            },
+        )
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{_DRAFT_ID}/report")
+        assert resp.status_code == 200
+        # Pager footer + "Näita rohkem" button are both present.
+        assert "Kuvatud 50 / 75" in resp.text
+        assert "Näita rohkem" in resp.text
+        # And the HTMX target for the next batch is wired up.
+        assert "/report/section/affected?offset=50" in resp.text
+
+    @patch("app.docs.report_routes._fetch_latest_report")
+    @patch("app.docs.report_routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_section_fragment_returns_next_batch(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_fetch_report: MagicMock,
+    ):
+        mock_get_provider.return_value = _stub_provider()
+        mock_fetch.return_value = _make_draft()
+        many = [
+            {
+                "uri": f"urn:x:{i}",
+                "label": f"Säte {i}",
+                "type": "https://data.riik.ee/ontology/estleg#EnactedLaw",
+            }
+            for i in range(120)
+        ]
+        mock_fetch_report.return_value = _make_report_row(
+            affected=120,
+            findings={
+                "affected_entities": many,
+                "conflicts": [],
+                "eu_compliance": [],
+                "gaps": [],
+            },
+        )
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{_DRAFT_ID}/report/section/affected?offset=50&limit=50")
+        assert resp.status_code == 200
+        # The 51st row (index 50) is in the fragment.
+        assert "Säte 50" in resp.text
+        # The 101st row (index 100) is NOT yet — the next click loads it.
+        assert "Säte 100" not in resp.text
+        # Follow-up pager is wired for the remaining rows (20 left).
+        assert "Kuvatud 100 / 120" in resp.text
+        assert "offset=100" in resp.text
+
+    @patch("app.docs.report_routes._fetch_latest_report")
+    @patch("app.docs.report_routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_section_fragment_unknown_section_returns_404(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_fetch_report: MagicMock,
+    ):
+        mock_get_provider.return_value = _stub_provider()
+        mock_fetch.return_value = _make_draft()
+        mock_fetch_report.return_value = _make_report_row()
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{_DRAFT_ID}/report/section/bogus")
+        assert resp.status_code == 200
+        assert "Eelnõu ei leitud" in resp.text

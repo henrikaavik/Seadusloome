@@ -229,11 +229,17 @@ def _summary_card(report_row: tuple) -> Any:
     )
 
 
-def _affected_entities_section(findings: dict[str, Any]) -> Any:
-    """Build the "Mõjutatud üksused" data table section."""
-    rows = list(findings.get("affected_entities") or [])
-    total = len(rows)
+# #611: identifier for the paginated report sections. Kept in sync
+# with :func:`_resolve_section` which maps these keys to the column
+# builder + source of rows. Any new section must be added both here
+# and in ``_SECTION_CONFIG`` so the "Näita rohkem" route recognises it.
+_SECTION_AFFECTED = "affected"
+_SECTION_CONFLICTS = "conflicts"
+_SECTION_EU = "eu"
+_SECTION_GAPS = "gaps"
 
+
+def _affected_columns() -> list[Column]:
     def _type_cell(row: dict[str, Any]):
         return _short_type(str(row.get("type", "")))
 
@@ -250,29 +256,167 @@ def _affected_entities_section(findings: dict[str, Any]) -> Any:
             cls="data-table-link",
         )
 
-    columns = [
+    return [
         Column(key="type", label="Tüüp", sortable=False, render=_type_cell),
         Column(key="label", label="Nimetus", sortable=False, render=_label_cell),
         Column(key="uri", label="URI", sortable=False, render=_uri_cell),
     ]
 
+
+def _conflicts_columns() -> list[Column]:
+    def _draft_ref(row: dict[str, Any]):
+        return str(row.get("draft_ref") or "—")
+
+    def _conflict_entity(row: dict[str, Any]):
+        uri = str(row.get("conflicting_entity") or "")
+        label = str(row.get("conflicting_label") or uri or "—")
+        if not uri:
+            return label
+        return A(  # noqa: F405
+            label,
+            href=f"/explorer?focus={uri}",
+            cls="data-table-link",
+        )
+
+    def _reason(row: dict[str, Any]):
+        return str(row.get("reason") or "—")
+
+    return [
+        Column(key="draft_ref", label="Eelnõu viide", sortable=False, render=_draft_ref),
+        Column(
+            key="conflicting_entity",
+            label="Konflikti üksus",
+            sortable=False,
+            render=_conflict_entity,
+        ),
+        Column(key="reason", label="Põhjus", sortable=False, render=_reason),
+    ]
+
+
+def _eu_columns() -> list[Column]:
+    def _eu_act(row: dict[str, Any]):
+        uri = str(row.get("eu_act") or "")
+        label = str(row.get("eu_label") or uri or "—")
+        if not uri:
+            return label
+        return A(  # noqa: F405
+            label,
+            href=f"/explorer?focus={uri}",
+            cls="data-table-link",
+        )
+
+    def _ee_provision(row: dict[str, Any]):
+        return str(row.get("provision_label") or row.get("estonian_provision") or "—")
+
+    def _status(row: dict[str, Any]):
+        return str(row.get("transposition_status") or "—")
+
+    return [
+        Column(key="eu_act", label="EL õigusakt", sortable=False, render=_eu_act),
+        Column(key="provision", label="Eesti säte", sortable=False, render=_ee_provision),
+        Column(key="status", label="Staatus", sortable=False, render=_status),
+    ]
+
+
+def _gaps_columns() -> list[Column]:
+    def _cluster(row: dict[str, Any]):
+        return str(row.get("topic_cluster_label") or row.get("topic_cluster") or "—")
+
+    def _coverage(row: dict[str, Any]):
+        return f"{row.get('referenced_provisions', '0')} / {row.get('total_provisions', '0')}"
+
+    def _description(row: dict[str, Any]):
+        return str(row.get("description") or "—")
+
+    return [
+        Column(key="cluster", label="Teemaklaster", sortable=False, render=_cluster),
+        Column(key="coverage", label="Sätete kaetus", sortable=False, render=_coverage),
+        Column(key="description", label="Kirjeldus", sortable=False, render=_description),
+    ]
+
+
+# Section → (findings key, columns builder, empty message). Used by
+# the "Näita rohkem" route to look up the source rows + column shape
+# from just the URL slug.
+_SECTION_CONFIG: dict[str, tuple[str, Any, str]] = {
+    _SECTION_AFFECTED: (
+        "affected_entities",
+        _affected_columns,
+        "Mõjutatud üksuseid ei tuvastatud.",
+    ),
+    _SECTION_CONFLICTS: (
+        "conflicts",
+        _conflicts_columns,
+        "Konflikte ei tuvastatud.",
+    ),
+    _SECTION_EU: (
+        "eu_compliance",
+        _eu_columns,
+        "EL-i õigusaktide seoseid ei tuvastatud.",
+    ),
+    _SECTION_GAPS: (
+        "gaps",
+        _gaps_columns,
+        "Lünki ei tuvastatud.",
+    ),
+}
+
+
+def _section_pager(
+    draft_id: str,
+    section: str,
+    shown: int,
+    total: int,
+) -> Any:
+    """Render the "Kuvatud X / Y" footer + optional "Näita rohkem" button.
+
+    The whole pager is wrapped in a Div with id
+    ``section-<section>-pager`` so the HTMX fragment can swap it with
+    ``outerHTML`` when the user clicks to load more.
+    """
+    pager_id = f"section-{section}-pager"
+    children: list = []
+    if total > _MAX_INLINE_ROWS:
+        children.append(
+            P(  # noqa: F405
+                f"Kuvatud {shown} / {total}",
+                cls="muted-text section-pager-count",
+            )
+        )
+    if shown < total and draft_id:
+        children.append(
+            Button(
+                "Näita rohkem",
+                type="button",
+                variant="secondary",
+                size="sm",
+                hx_get=(
+                    f"/drafts/{draft_id}/report/section/{section}"
+                    f"?offset={shown}&limit={_MAX_INLINE_ROWS}"
+                ),
+                hx_target=f"#{pager_id}",
+                hx_swap="outerHTML",
+            )
+        )
+    return Div(*children, id=pager_id, cls="section-pager")  # noqa: F405
+
+
+def _affected_entities_section(findings: dict[str, Any], draft_id: str = "") -> Any:
+    """Build the "Mõjutatud üksused" data table section."""
+    rows = list(findings.get("affected_entities") or [])
+    total = len(rows)
     visible = rows[:_MAX_INLINE_ROWS]
     table_rows = [{"_": True, **row} for row in visible]
 
     body_children: list = [
         DataTable(
-            columns=columns,
+            columns=_affected_columns(),
             rows=table_rows,
             empty_message="Mõjutatud üksuseid ei tuvastatud.",
-        )
+        ),
+        # #611: paginated footer + "Näita rohkem" button
+        _section_pager(draft_id, _SECTION_AFFECTED, len(visible), total),
     ]
-    if total > _MAX_INLINE_ROWS:
-        body_children.append(
-            P(  # noqa: F405
-                f"Kuvatud {len(visible)} esimest reast {total}-st.",
-                cls="muted-text",
-            )
-        )
 
     return Card(
         CardHeader(H3("Mõjutatud üksused", cls="card-title")),  # noqa: F405
@@ -283,48 +427,24 @@ def _affected_entities_section(findings: dict[str, Any]) -> Any:
 def _conflicts_section(findings: dict[str, Any], draft_id: str = "") -> Any:
     """Build the "Konfliktid" section."""
     rows = list(findings.get("conflicts") or [])
+    total = len(rows)
 
     if not rows:
-        body = Alert(
+        body: Any = Alert(
             "Konflikte ei tuvastatud.",
             variant="success",
         )
+        pager: Any = _section_pager(draft_id, _SECTION_CONFLICTS, 0, 0)
     else:
-
-        def _draft_ref(row: dict[str, Any]):
-            return str(row.get("draft_ref") or "—")
-
-        def _conflict_entity(row: dict[str, Any]):
-            uri = str(row.get("conflicting_entity") or "")
-            label = str(row.get("conflicting_label") or uri or "—")
-            if not uri:
-                return label
-            return A(  # noqa: F405
-                label,
-                href=f"/explorer?focus={uri}",
-                cls="data-table-link",
-            )
-
-        def _reason(row: dict[str, Any]):
-            return str(row.get("reason") or "—")
-
-        columns = [
-            Column(key="draft_ref", label="Eelnõu viide", sortable=False, render=_draft_ref),
-            Column(
-                key="conflicting_entity",
-                label="Konflikti üksus",
-                sortable=False,
-                render=_conflict_entity,
-            ),
-            Column(key="reason", label="Põhjus", sortable=False, render=_reason),
-        ]
+        visible = rows[:_MAX_INLINE_ROWS]
         body = DataTable(
-            columns=columns,
-            rows=rows,
+            columns=_conflicts_columns(),
+            rows=visible,
             empty_message="Konflikte ei tuvastatud.",
         )
+        pager = _section_pager(draft_id, _SECTION_CONFLICTS, len(visible), total)
 
-    body_children: list = [body]
+    body_children: list = [body, pager]
     if draft_id:
         # #615: one-line helper so first-time users understand what the
         # speech-balloon annotation button beside the header does.
@@ -347,36 +467,16 @@ def _conflicts_section(findings: dict[str, Any], draft_id: str = "") -> Any:
 def _eu_compliance_section(findings: dict[str, Any], draft_id: str = "") -> Any:
     """Build the "EL-i õigusaktide vastavus" section."""
     rows = list(findings.get("eu_compliance") or [])
-
-    def _eu_act(row: dict[str, Any]):
-        uri = str(row.get("eu_act") or "")
-        label = str(row.get("eu_label") or uri or "—")
-        if not uri:
-            return label
-        return A(  # noqa: F405
-            label,
-            href=f"/explorer?focus={uri}",
-            cls="data-table-link",
-        )
-
-    def _ee_provision(row: dict[str, Any]):
-        return str(row.get("provision_label") or row.get("estonian_provision") or "—")
-
-    def _status(row: dict[str, Any]):
-        return str(row.get("transposition_status") or "—")
-
-    columns = [
-        Column(key="eu_act", label="EL õigusakt", sortable=False, render=_eu_act),
-        Column(key="provision", label="Eesti säte", sortable=False, render=_ee_provision),
-        Column(key="status", label="Staatus", sortable=False, render=_status),
-    ]
+    total = len(rows)
+    visible = rows[:_MAX_INLINE_ROWS]
 
     body_children: list = [
         DataTable(
-            columns=columns,
-            rows=rows,
+            columns=_eu_columns(),
+            rows=visible,
             empty_message="EL-i õigusaktide seoseid ei tuvastatud.",
-        )
+        ),
+        _section_pager(draft_id, _SECTION_EU, len(visible), total),
     ]
     if draft_id:
         # #615: onboarding hint for the annotation button.
@@ -399,28 +499,16 @@ def _eu_compliance_section(findings: dict[str, Any], draft_id: str = "") -> Any:
 def _gaps_section(findings: dict[str, Any], draft_id: str = "") -> Any:
     """Build the "Lüngad" section."""
     rows = list(findings.get("gaps") or [])
-
-    def _cluster(row: dict[str, Any]):
-        return str(row.get("topic_cluster_label") or row.get("topic_cluster") or "—")
-
-    def _coverage(row: dict[str, Any]):
-        return f"{row.get('referenced_provisions', '0')} / {row.get('total_provisions', '0')}"
-
-    def _description(row: dict[str, Any]):
-        return str(row.get("description") or "—")
-
-    columns = [
-        Column(key="cluster", label="Teemaklaster", sortable=False, render=_cluster),
-        Column(key="coverage", label="Sätete kaetus", sortable=False, render=_coverage),
-        Column(key="description", label="Kirjeldus", sortable=False, render=_description),
-    ]
+    total = len(rows)
+    visible = rows[:_MAX_INLINE_ROWS]
 
     body_children: list = [
         DataTable(
-            columns=columns,
-            rows=rows,
+            columns=_gaps_columns(),
+            rows=visible,
             empty_message="Lünki ei tuvastatud.",
-        )
+        ),
+        _section_pager(draft_id, _SECTION_GAPS, len(visible), total),
     ]
     if draft_id:
         # #615: onboarding hint for the annotation button.
@@ -551,7 +639,7 @@ def draft_report_page(req: Request, draft_id: str):
             dismissible=True,
         ),
         _summary_card(report_row),
-        _affected_entities_section(findings),
+        _affected_entities_section(findings, draft_id=str(draft.id)),
         _conflicts_section(findings, draft_id=str(draft.id)),
         _eu_compliance_section(findings, draft_id=str(draft.id)),
         _gaps_section(findings, draft_id=str(draft.id)),
@@ -561,6 +649,83 @@ def draft_report_page(req: Request, draft_id: str):
         theme=theme,
         active_nav="/drafts",
     )
+
+
+# ---------------------------------------------------------------------------
+# GET /drafts/{draft_id}/report/section/{section} — pagination fragment (#611)
+# ---------------------------------------------------------------------------
+
+
+def report_section_fragment(req: Request, draft_id: str, section: str):
+    """Return the next page of rows for a report section.
+
+    Emits a batch of rows rendered as a DataTable (same columns as the
+    initial page) followed by a refreshed ``_section_pager`` that
+    drives the next click. The caller swaps this fragment in with
+    ``hx-target=#section-{section}-pager, hx-swap=outerHTML``.
+    """
+    auth_or_redirect = _require_auth(req)
+    if isinstance(auth_or_redirect, Response):
+        return auth_or_redirect
+    auth = auth_or_redirect
+
+    parsed_draft = _parse_uuid(draft_id)
+    if parsed_draft is None:
+        return _not_found_page(req)
+
+    draft = fetch_draft(parsed_draft)
+    if draft is None or not can_view_draft(auth, draft):
+        return _not_found_page(req)
+
+    config = _SECTION_CONFIG.get(section)
+    if config is None:
+        return _not_found_page(req)
+    findings_key, columns_builder, empty_message = config
+
+    try:
+        offset = max(0, int(req.query_params.get("offset", "0")))
+    except ValueError:
+        offset = 0
+    try:
+        limit = max(1, int(req.query_params.get("limit", str(_MAX_INLINE_ROWS))))
+    except ValueError:
+        limit = _MAX_INLINE_ROWS
+
+    report_row = _fetch_latest_report(parsed_draft)
+    if report_row is None:
+        return _not_found_page(req)
+
+    findings = _parse_report_data(report_row[6])
+    rows = list(findings.get(findings_key) or [])
+    total = len(rows)
+    batch = rows[offset : offset + limit]
+
+    # Affected-entities rows are rendered through a tuple-dict shim —
+    # keep the same key on the follow-up batch for consistency.
+    if section == _SECTION_AFFECTED:
+        batch = [{"_": True, **row} for row in batch]
+
+    children: list = []
+    if batch:
+        children.append(
+            DataTable(
+                columns=columns_builder(),
+                rows=batch,
+                empty_message=empty_message,
+            )
+        )
+    children.append(
+        _section_pager(
+            str(draft.id),
+            section,
+            shown=min(offset + len(batch), total),
+            total=total,
+        )
+    )
+    # Because the trigger pager is swapped outerHTML, we wrap the
+    # overflow batch + the new pager in a Fragment-like container so
+    # both land in the DOM in place of the old pager.
+    return Div(*children, cls="section-pager-fragment")  # noqa: F405
 
 
 # ---------------------------------------------------------------------------
@@ -905,6 +1070,8 @@ def download_export_handler(req: Request, draft_id: str, job_id: str):
 def register_report_routes(rt) -> None:  # type: ignore[no-untyped-def]
     """Mount the impact-report + export routes on FastHTML's *rt* decorator."""
     rt("/drafts/{draft_id}/report", methods=["GET"])(draft_report_page)
+    # #611: paginated "Näita rohkem" fragment for each report section.
+    rt("/drafts/{draft_id}/report/section/{section}", methods=["GET"])(report_section_fragment)
     rt("/drafts/{draft_id}/export", methods=["POST"])(export_draft_report_handler)
     rt("/drafts/{draft_id}/export-status/{job_id}", methods=["GET"])(export_status_fragment)
     rt("/drafts/{draft_id}/export/{job_id}/download", methods=["GET"])(download_export_handler)
