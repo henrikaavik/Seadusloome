@@ -88,21 +88,6 @@ def extract_entities(
         update_draft_status(conn, draft_id, "extracting")
         conn.commit()
 
-    # #469: clear any draft_entities rows left behind by a previous
-    # failed attempt. Without this, a retry that succeeds after a
-    # partial insert would double-count entities because the final
-    # UPDATE only sets ``entity_count`` from ``len(resolved)`` but the
-    # table still holds the orphan rows from the prior attempt. Doing
-    # this BEFORE the extractor runs keeps the transaction bounded and
-    # idempotent — a retry that never reaches step 5 still leaves the
-    # table in a known-clean state.
-    with get_connection() as conn:
-        conn.execute(
-            "DELETE FROM draft_entities WHERE draft_id = %s",
-            (str(draft_id),),
-        )
-        conn.commit()
-
     try:
         # -- 3. Extract refs via LLM -----------------------------------
         extracted = extract_refs_from_text(parsed_text)
@@ -123,7 +108,32 @@ def extract_entities(
         )
 
         # -- 5. Persist draft_entities + status transition -------------
+        #
+        # #626: DELETE + INSERT + UPDATE happen in a SINGLE transaction
+        # so a crash between any two steps cannot leave
+        # ``entity_count != 0`` with zero ``draft_entities`` rows (or
+        # the mirror-image, duplicate rows left over from a prior
+        # failed attempt).
+        #
+        # Supersedes the split two-transaction approach from #469. The
+        # original #469 rationale ("keep the transaction bounded and
+        # idempotent") is still respected — the DELETE runs first
+        # inside the same transaction, so the end state is still
+        # "exactly the rows this attempt produced". What changed is
+        # that a mid-transaction failure now rolls back to the *prior*
+        # consistent state (previous attempt's rows, or empty) instead
+        # of the empty state, which prevents the entity_count / row
+        # count drift #626 describes.
+        #
+        # The #448 retry-gating pattern still holds: this transaction
+        # is inside the try block, so any failure propagates to the
+        # except Exception handler below, which only flips the draft
+        # to ``failed`` on the final attempt.
         with get_connection() as conn:
+            conn.execute(
+                "delete from draft_entities where draft_id = %s",
+                (str(draft_id),),
+            )
             for r in resolved:
                 conn.execute(
                     """

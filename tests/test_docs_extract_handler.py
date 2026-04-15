@@ -85,12 +85,13 @@ class TestHappyPath:
         draft_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
         draft = _make_draft(draft_id=draft_id)
 
-        # Four conn mocks for four ``with get_connection()`` blocks:
+        # #626: DELETE + INSERT + UPDATE now run in a SINGLE
+        # ``with get_connection()`` block, so the happy path opens
+        # three connections total:
         # 1) initial get_draft
         # 2) status→extracting
-        # 3) #469: DELETE FROM draft_entities for retry cleanup
-        # 4) inserts + commit
-        mock_conns = [MagicMock(), MagicMock(), MagicMock(), MagicMock()]
+        # 3) combined delete + inserts + update
+        mock_conns = [MagicMock(), MagicMock(), MagicMock()]
         # Status update (block 2) must report rowcount > 0 so
         # update_draft_status returns True.
         mock_conns[1].execute.return_value.rowcount = 1
@@ -146,21 +147,31 @@ class TestHappyPath:
             "next_job": "analyze_impact",
         }
 
-        # Three INSERT ... draft_entities calls + one UPDATE drafts
-        # on the fourth connection.
-        insert_exec = mock_conns[3].execute
-        # 3 inserts + 1 update = 4 calls
-        assert insert_exec.call_count == 4
+        # Combined-transaction connection (index 2) receives:
+        #   1 DELETE + 3 INSERTs + 1 UPDATE = 5 execute calls total.
+        combined_exec = mock_conns[2].execute
+        assert combined_exec.call_count == 5
+
+        delete_calls = [
+            call
+            for call in combined_exec.call_args_list
+            if "delete from draft_entities" in call.args[0].lower()
+        ]
+        assert len(delete_calls) == 1
+        assert delete_calls[0].args[1] == (str(draft_id),)
+
         insert_calls = [
             call
-            for call in insert_exec.call_args_list
+            for call in combined_exec.call_args_list
             if "insert into draft_entities" in call.args[0].lower()
         ]
         assert len(insert_calls) == 3
 
         # The UPDATE drafts call must set entity_count=3 and status='analyzing'.
         update_calls = [
-            call for call in insert_exec.call_args_list if "update drafts" in call.args[0].lower()
+            call
+            for call in combined_exec.call_args_list
+            if "update drafts" in call.args[0].lower()
         ]
         assert len(update_calls) == 1
         update_sql, update_params = update_calls[0].args
@@ -168,18 +179,15 @@ class TestHappyPath:
         assert update_params[0] == 3  # entity_count
         assert update_params[1] == str(draft_id)
 
-        # Commit happened on the inserts connection.
-        mock_conns[3].commit.assert_called_once()
+        # Exactly ONE commit for the combined transaction.
+        mock_conns[2].commit.assert_called_once()
 
-        # #469: the retry-cleanup DELETE ran on conn 3 (the dedicated
-        # pre-extract cleanup block). Verify it used the draft id.
-        cleanup_calls = [
-            call
-            for call in mock_conns[2].execute.call_args_list
-            if "delete from draft_entities" in call.args[0].lower()
-        ]
-        assert len(cleanup_calls) == 1
-        assert cleanup_calls[0].args[1] == (str(draft_id),)
+        # Ordering: the DELETE must run before the first INSERT so the
+        # rollback semantics of #626 hold.
+        sqls = [c.args[0].lower() for c in combined_exec.call_args_list]
+        first_delete = next(i for i, s in enumerate(sqls) if "delete from draft_entities" in s)
+        first_insert = next(i for i, s in enumerate(sqls) if "insert into draft_entities" in s)
+        assert first_delete < first_insert
 
         # Next job was enqueued.
         mock_queue.enqueue.assert_called_once_with(
@@ -191,7 +199,8 @@ class TestHappyPath:
     def test_json_location_is_serialised(self):
         draft_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
         draft = _make_draft(draft_id=draft_id)
-        mock_conns = [MagicMock(), MagicMock(), MagicMock(), MagicMock()]
+        # 3 connections: get_draft, status→extracting, combined tx.
+        mock_conns = [MagicMock(), MagicMock(), MagicMock()]
         mock_conns[1].execute.return_value.rowcount = 1
 
         location = {"chunk": 5, "offset": 1234, "extra": "meta"}
@@ -234,7 +243,7 @@ class TestHappyPath:
         # Find the insert call and make sure location was json.dumps'd.
         insert_calls = [
             call
-            for call in mock_conns[3].execute.call_args_list
+            for call in mock_conns[2].execute.call_args_list
             if "insert into draft_entities" in call.args[0].lower()
         ]
         assert len(insert_calls) == 1
@@ -243,17 +252,20 @@ class TestHappyPath:
         assert params[-1] == json.dumps(location)
 
     def test_retry_cleanup_clears_prior_partial_rows(self):
-        """#469: on retry, the handler must DELETE pre-existing rows.
+        """#469 + #626: on retry, the handler must DELETE pre-existing rows.
 
         Simulates the scenario where a previous attempt inserted
         ``draft_entities`` rows but then failed before the final
-        UPDATE. The retry should wipe those rows before the extractor
-        runs so duplicates never reach the database.
+        UPDATE. The retry should wipe those rows before the new inserts.
+
+        #626 made DELETE + INSERT + UPDATE atomic, so the cleanup
+        now lives on the same connection as the rest of the persist
+        step rather than a dedicated transaction.
         """
         draft_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
         draft = _make_draft(draft_id=draft_id)
 
-        mock_conns = [MagicMock(), MagicMock(), MagicMock(), MagicMock()]
+        mock_conns = [MagicMock(), MagicMock(), MagicMock()]
         mock_conns[1].execute.return_value.rowcount = 1
 
         extracted = [_ref("KarS § 133")]
@@ -289,16 +301,18 @@ class TestHappyPath:
                 max_attempts=3,
             )
 
-        # The DELETE must have run on the dedicated cleanup connection
-        # (conn 3), BEFORE any INSERTs on conn 4.
+        # The DELETE runs on the same connection as the inserts +
+        # final UPDATE (conn index 2), before any INSERT.
+        combined_exec = mock_conns[2].execute
         cleanup_sql_calls = [
             call
-            for call in mock_conns[2].execute.call_args_list
+            for call in combined_exec.call_args_list
             if "delete from draft_entities" in call.args[0].lower()
         ]
         assert len(cleanup_sql_calls) == 1
         assert cleanup_sql_calls[0].args[1] == (str(draft_id),)
-        # The cleanup connection must have committed.
+
+        # Exactly one commit — the combined transaction's single commit.
         mock_conns[2].commit.assert_called_once()
 
 
@@ -348,9 +362,13 @@ class TestFailurePaths:
     def test_extractor_failure_marks_draft_failed_on_final_attempt(self):
         draft_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
         draft = _make_draft(draft_id=draft_id)
-        # Connections: 1) get_draft, 2) status→extracting,
-        # 3) #469 cleanup DELETE, 4) status→failed
-        mock_conns = [MagicMock(), MagicMock(), MagicMock(), MagicMock()]
+        # #626: connections are now
+        #   1) get_draft
+        #   2) status→extracting
+        #   3) status→failed (opened inside the except branch)
+        # The old #469 cleanup-DELETE connection is gone — DELETE is
+        # part of the combined tx which never runs on the failure path.
+        mock_conns = [MagicMock(), MagicMock(), MagicMock()]
         for c in mock_conns:
             c.execute.return_value.rowcount = 1
 
@@ -379,30 +397,32 @@ class TestFailurePaths:
             # Resolver must not have been called — extractor died first.
             mock_resolve.assert_not_called()
 
-        # The fourth connection's execute should be the status=failed UPDATE.
-        # #609: the failed transition uses a direct UPDATE with
-        # (user_msg, debug_detail, draft_id) params.
-        last_exec = mock_conns[3].execute.call_args_list
+        # The third connection's execute should be the failed UPDATE.
+        failed_exec = mock_conns[2].execute.call_args_list
         assert any(
             "update drafts" in call.args[0].lower() and "status = 'failed'" in call.args[0].lower()
-            for call in last_exec
+            for call in failed_exec
         )
+        # #609: the first param is the user-facing Estonian message,
+        # the second is the raw debug detail.
         failed_call = next(
-            call for call in last_exec if "status = 'failed'" in call.args[0].lower()
+            call for call in failed_exec if "status = 'failed'" in call.args[0].lower()
         )
-        # Raw "LLM boom" text lands in the debug_detail (second param).
-        user_msg, debug_detail, _ = failed_call.args[1]
+        user_msg, debug_detail, draft_id_param = failed_call.args[1]
         assert isinstance(user_msg, str)
         assert "LLM boom" in debug_detail
+        assert draft_id_param == str(draft_id)
 
     def test_extractor_failure_does_not_mark_failed_when_retry_pending(self):
-        """#448: a transient extractor error on attempt 1 must not flip the draft."""
+        """#448: a transient extractor error on attempt 1 must not flip the draft.
+
+        #626 removed the dedicated pre-extract cleanup connection, so
+        the early-failure path now opens exactly 2 connections:
+        ``get_draft`` and the status→``extracting`` transition.
+        """
         draft_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
         draft = _make_draft(draft_id=draft_id)
-        # Three connections: 1) get_draft, 2) status→extracting,
-        # 3) #469 cleanup DELETE. No fourth conn since the handler
-        # should bail before the failed-status-update path.
-        mock_conns = [MagicMock(), MagicMock(), MagicMock()]
+        mock_conns = [MagicMock(), MagicMock()]
         for c in mock_conns:
             c.execute.return_value.rowcount = 1
 
@@ -427,15 +447,16 @@ class TestFailurePaths:
                     max_attempts=3,
                 )
 
-        # get_draft + extracting transition + cleanup DELETE = 3 conns.
-        # No fourth connection was opened for a failed-status update.
-        assert mock_get_conn.call_count == 3
+        # get_draft + extracting transition = 2 conns.
+        # No failed-status-update connection was opened.
+        assert mock_get_conn.call_count == 2
 
     def test_resolver_failure_marks_draft_failed_on_final_attempt(self):
         draft_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
         draft = _make_draft(draft_id=draft_id)
-        # 1) get_draft, 2) status→extracting, 3) cleanup, 4) status→failed
-        mock_conns = [MagicMock(), MagicMock(), MagicMock(), MagicMock()]
+        # #626: 1) get_draft, 2) status→extracting, 3) status→failed.
+        # No dedicated cleanup connection any more.
+        mock_conns = [MagicMock(), MagicMock(), MagicMock()]
         for c in mock_conns:
             c.execute.return_value.rowcount = 1
 
@@ -464,9 +485,175 @@ class TestFailurePaths:
                     max_attempts=3,
                 )
 
-        # #609: the failed UPDATE is direct SQL with status = 'failed'.
-        last_exec = mock_conns[3].execute.call_args_list
+        last_exec = mock_conns[2].execute.call_args_list
         assert any(
             "update drafts" in call.args[0].lower() and "status = 'failed'" in call.args[0].lower()
             for call in last_exec
         )
+
+
+# ---------------------------------------------------------------------------
+# #626: DELETE + INSERT + UPDATE transaction atomicity
+# ---------------------------------------------------------------------------
+
+
+class TestCombinedTransaction:
+    """Regression tests for #626 — ``draft_entities`` DELETE, INSERT,
+    and ``drafts`` UPDATE must land atomically.
+
+    Before #626, the DELETE ran in its own transaction before the
+    extractor call. A crash between the DELETE commit and the later
+    INSERT+UPDATE commit left ``drafts.entity_count`` pointing at the
+    previous attempt's count while ``draft_entities`` was empty.
+    """
+
+    def test_mid_transaction_failure_does_not_commit(self):
+        """Mock INSERT to raise halfway through and assert no commit fires.
+
+        The contract the real psycopg connection would honour: no
+        ``conn.commit()`` means the DELETE is rolled back too, so the
+        draft_entities table is unchanged from whatever it held before
+        this attempt. Here we assert that assumption at the call level —
+        on a mid-transaction error the handler never calls ``commit()``
+        on the combined-tx connection, which is what preserves
+        atomicity in production.
+        """
+        draft_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
+        draft = _make_draft(draft_id=draft_id, status="extracting")
+
+        combined_conn = MagicMock()
+        combined_conn.execute.return_value.rowcount = 1
+
+        # Make the INSERT fail; DELETE succeeds first (call #1).
+        call_count = {"n": 0}
+
+        def execute_side_effect(sql, *_a, **_kw):
+            call_count["n"] += 1
+            sql_lower = sql.lower()
+            if "insert into draft_entities" in sql_lower:
+                raise RuntimeError("Postgres connection dropped mid-insert")
+            # DELETE and everything else return a normal mock.
+            return MagicMock()
+
+        combined_conn.execute.side_effect = execute_side_effect
+
+        mock_conns = [MagicMock(), MagicMock(), combined_conn]
+        mock_conns[1].execute.return_value.rowcount = 1
+
+        extracted = [_ref("KarS § 133"), _ref("TsÜS § 12")]
+        resolved = [
+            ResolvedRef(
+                extracted=extracted[0],
+                entity_uri="urn:test-1",
+                matched_label=None,
+                match_score=1.0,
+            ),
+            ResolvedRef(
+                extracted=extracted[1],
+                entity_uri="urn:test-2",
+                matched_label=None,
+                match_score=1.0,
+            ),
+        ]
+
+        with (
+            patch("app.docs.extract_handler.get_connection") as mock_get_conn,
+            patch("app.docs.extract_handler.get_draft", return_value=draft),
+            patch(
+                "app.docs.extract_handler.decrypt_text",
+                return_value="§ 1. Test.",
+            ),
+            patch(
+                "app.docs.extract_handler.extract_refs_from_text",
+                return_value=extracted,
+            ),
+            patch("app.docs.extract_handler.resolve_refs", return_value=resolved),
+        ):
+            mock_get_conn.side_effect = [_ConnectCM(c) for c in mock_conns]
+
+            # Earlier attempt: retry still has budget, handler must
+            # re-raise without flipping the draft to ``failed``.
+            with pytest.raises(RuntimeError, match="dropped mid-insert"):
+                extract_entities(
+                    {"draft_id": str(draft_id)},
+                    attempt=1,
+                    max_attempts=3,
+                )
+
+        # The combined-tx connection must NOT have committed.
+        # This is the load-bearing #626 assertion: the DELETE sitting
+        # in the same txn rolls back with everything else, so the
+        # table is unchanged from whatever it was before the attempt.
+        combined_conn.commit.assert_not_called()
+
+        # #448 retry gating: no status='failed' UPDATE ran because
+        # the retry budget was not exhausted. Only 3 connections
+        # were opened (get_draft, extracting, combined-tx).
+        assert mock_get_conn.call_count == 3
+
+    def test_mid_transaction_failure_final_attempt_marks_failed(self):
+        """On the last retry attempt, a mid-transaction crash still
+        ends in ``status='failed'`` — but the combined-tx connection
+        itself never commits, so draft_entities stays consistent.
+        """
+        draft_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
+        draft = _make_draft(draft_id=draft_id)
+
+        combined_conn = MagicMock()
+        combined_conn.execute.return_value.rowcount = 1
+
+        def execute_side_effect(sql, *_a, **_kw):
+            if "insert into draft_entities" in sql.lower():
+                raise RuntimeError("mid-insert crash")
+            return MagicMock()
+
+        combined_conn.execute.side_effect = execute_side_effect
+
+        # 1) get_draft, 2) extracting, 3) combined-tx (crashes),
+        # 4) failed-status UPDATE (on final attempt).
+        mock_conns = [MagicMock(), MagicMock(), combined_conn, MagicMock()]
+        for c in mock_conns:
+            if c is not combined_conn:
+                c.execute.return_value.rowcount = 1
+
+        extracted = [_ref("KarS § 133")]
+        resolved = [
+            ResolvedRef(
+                extracted=extracted[0],
+                entity_uri="urn:x",
+                matched_label=None,
+                match_score=1.0,
+            )
+        ]
+
+        with (
+            patch("app.docs.extract_handler.get_connection") as mock_get_conn,
+            patch("app.docs.extract_handler.get_draft", return_value=draft),
+            patch(
+                "app.docs.extract_handler.decrypt_text",
+                return_value="§ 1. Test.",
+            ),
+            patch(
+                "app.docs.extract_handler.extract_refs_from_text",
+                return_value=extracted,
+            ),
+            patch("app.docs.extract_handler.resolve_refs", return_value=resolved),
+        ):
+            mock_get_conn.side_effect = [_ConnectCM(c) for c in mock_conns]
+
+            with pytest.raises(RuntimeError, match="mid-insert crash"):
+                extract_entities(
+                    {"draft_id": str(draft_id)},
+                    attempt=3,
+                    max_attempts=3,
+                )
+
+        # Combined-tx connection must not have committed.
+        combined_conn.commit.assert_not_called()
+
+        # Dedicated failed-status UPDATE ran on conn index 3 and
+        # committed (independent transaction, doesn't touch
+        # draft_entities).
+        failed_exec = mock_conns[3].execute.call_args_list
+        assert any("status = 'failed'" in call.args[0].lower() for call in failed_exec)
+        mock_conns[3].commit.assert_called_once()
