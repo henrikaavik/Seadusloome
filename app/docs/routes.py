@@ -252,10 +252,17 @@ def _status_tracker(draft: Draft):
             )
         )
 
+    # #604: announce stage transitions to screen readers. ``polite``
+    # avoids interrupting the user mid-task; ``aria_atomic=false`` means
+    # assistive tech reads just the changed node instead of the whole
+    # tracker. The existing failed-state Alert still carries
+    # ``role="alert"`` for the more urgent announcement.
     return Div(  # noqa: F405
         *children,
         id=f"draft-status-{draft.id}",
         cls="draft-status-wrapper",
+        aria_live="polite",
+        aria_atomic="false",
         **poll_attrs,
     )
 

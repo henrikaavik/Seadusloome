@@ -747,3 +747,31 @@ class TestDeleteDraftHandler:
         mock_delete_file.assert_called_once_with("/tmp/ciphertext.enc")
         mock_log.assert_called_once()
         mock_delete_graph.assert_called_once_with(draft.graph_uri)
+
+
+# ---------------------------------------------------------------------------
+# #604: aria-live on the polled status wrapper
+# ---------------------------------------------------------------------------
+
+
+class TestStatusAriaLive:
+    @patch("app.docs.routes.log_draft_view")
+    @patch("app.docs.routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_status_wrapper_has_aria_live_polite(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_log: MagicMock,
+    ):
+        mock_get_provider.return_value = _stub_provider()
+        draft = _make_draft(status="parsing")
+        mock_fetch.return_value = draft
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{draft.id}")
+        assert resp.status_code == 200
+        # The wrapper needs aria-live so VoiceOver/NVDA announce stage
+        # transitions as the polled fragment swaps.
+        assert f'id="draft-status-{draft.id}"' in resp.text
+        assert 'aria-live="polite"' in resp.text
