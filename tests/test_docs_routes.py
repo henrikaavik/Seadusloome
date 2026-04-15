@@ -642,34 +642,37 @@ class TestDraftStatusFragment:
 
 
 class TestDeleteDraftHandler:
-    @patch("app.docs.routes.delete_named_graph")
+    @patch("app.docs.routes.JobQueue")
     @patch("app.docs.routes.log_draft_delete")
-    @patch("app.docs.routes.delete_encrypted_file")
     @patch("app.docs.routes.delete_draft")
     @patch("app.docs.routes._connect")
     @patch("app.docs.routes.fetch_draft")
     @patch("app.auth.middleware._get_provider")
-    def test_delete_removes_draft_and_file(
+    def test_delete_removes_draft_and_enqueues_cleanup(
         self,
         mock_get_provider: MagicMock,
         mock_fetch: MagicMock,
         mock_connect: MagicMock,
         mock_delete: MagicMock,
-        mock_delete_file: MagicMock,
         mock_log: MagicMock,
-        mock_delete_graph: MagicMock,
+        mock_queue_cls: MagicMock,
     ):
+        """#628: the DB-side work runs in a single transaction and the
+        external cleanup (encrypted file + Jena graph) is handed off to
+        an async ``draft_cleanup`` job so flaky infrastructure can't
+        block the user flow."""
         mock_get_provider.return_value = _stub_provider()
         draft = _make_draft()
         mock_fetch.return_value = draft
 
-        # _connect() is a context manager. The handler opens it twice
-        # now (once for the row delete, once for cancelling pending
-        # background jobs — #454) so we wire up a generic factory.
         mock_conn = MagicMock()
         mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
         mock_connect.return_value.__exit__ = MagicMock(return_value=False)
         mock_delete.return_value = "/tmp/ciphertext.enc"
+
+        queue_instance = MagicMock()
+        queue_instance.enqueue.return_value = 99
+        mock_queue_cls.return_value = queue_instance
 
         client = _authed_client()
         resp = client.post(f"/drafts/{draft.id}/delete")
@@ -677,29 +680,36 @@ class TestDeleteDraftHandler:
         assert resp.status_code == 303
         assert resp.headers["location"] == "/drafts"
         mock_delete.assert_called_once()
-        mock_delete_file.assert_called_once_with("/tmp/ciphertext.enc")
         mock_log.assert_called_once()
-        # Named graph cleanup must have been triggered with the draft's URI.
-        mock_delete_graph.assert_called_once_with(draft.graph_uri)
 
-        # #454: a DELETE FROM background_jobs ... must have run as part
-        # of the cleanup so any pending/claimed/running/retrying job
-        # for this draft doesn't outlive the row.
+        # #628: a single _connect() transaction covers row delete,
+        # rag_chunks clearing and job cancellation. The handler opens
+        # exactly one connection now (down from two).
+        assert mock_connect.call_count == 1
+
+        # #454: DELETE FROM background_jobs still runs, now inside the
+        # same transaction as the row delete.
         delete_job_calls = [
             c
             for c in mock_conn.execute.call_args_list
             if "DELETE FROM background_jobs" in (c.args[0] if c.args else "")
         ]
         assert delete_job_calls, "delete_draft_handler must cancel pending background jobs (#454)"
-        # The DELETE must have been parameterised with the draft id so
-        # we don't accidentally cancel jobs from other drafts.
         delete_call = delete_job_calls[0]
         assert delete_call.args[1] == (str(draft.id),)
-        # #478: running jobs must also be in the status filter — a
-        # worker that picked up the job just before the delete would
-        # otherwise leave the row behind.
-        delete_sql = delete_call.args[0]
-        assert "'running'" in delete_sql
+        # #478: running jobs must also be in the status filter.
+        assert "'running'" in delete_call.args[0]
+
+        # #628: the external cleanup is enqueued as a background job
+        # with the storage_path + graph_uri payload so the worker can
+        # retry independently.
+        queue_instance.enqueue.assert_called_once()
+        args, kwargs = queue_instance.enqueue.call_args
+        assert args[0] == "draft_cleanup"
+        payload = args[1]
+        assert payload["draft_id"] == str(draft.id)
+        assert payload["storage_path"] == "/tmp/ciphertext.enc"
+        assert payload["graph_uri"] == draft.graph_uri
 
     @patch("app.docs.routes.fetch_draft")
     @patch("app.auth.middleware._get_provider")
@@ -737,9 +747,8 @@ class TestDeleteDraftHandler:
         assert resp.status_code == 200
         assert "Eelnõu ei leitud" in resp.text
 
-    @patch("app.docs.routes.delete_named_graph")
+    @patch("app.docs.routes.JobQueue")
     @patch("app.docs.routes.log_draft_delete")
-    @patch("app.docs.routes.delete_encrypted_file")
     @patch("app.docs.routes.delete_draft")
     @patch("app.docs.routes._connect")
     @patch("app.docs.routes.fetch_draft")
@@ -750,9 +759,8 @@ class TestDeleteDraftHandler:
         mock_fetch: MagicMock,
         mock_connect: MagicMock,
         mock_delete: MagicMock,
-        mock_delete_file: MagicMock,
         mock_log: MagicMock,
-        mock_delete_graph: MagicMock,
+        mock_queue_cls: MagicMock,
     ):
         """Matrix grants system admin a cross-org delete override."""
         admin = {
@@ -781,9 +789,8 @@ class TestDeleteDraftHandler:
         assert resp.headers["location"] == "/drafts"
         mock_delete.assert_called_once()
 
-    @patch("app.docs.routes.delete_named_graph")
+    @patch("app.docs.routes.JobQueue")
     @patch("app.docs.routes.log_draft_delete")
-    @patch("app.docs.routes.delete_encrypted_file")
     @patch("app.docs.routes.delete_draft")
     @patch("app.docs.routes._connect")
     @patch("app.docs.routes.fetch_draft")
@@ -794,9 +801,8 @@ class TestDeleteDraftHandler:
         mock_fetch: MagicMock,
         mock_connect: MagicMock,
         mock_delete: MagicMock,
-        mock_delete_file: MagicMock,
         mock_log: MagicMock,
-        mock_delete_graph: MagicMock,
+        mock_queue_cls: MagicMock,
     ):
         """Regression for #467.
 
@@ -815,6 +821,9 @@ class TestDeleteDraftHandler:
         mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
         mock_connect.return_value.__exit__ = MagicMock(return_value=False)
         mock_delete.return_value = "/tmp/ciphertext.enc"
+        queue_instance = MagicMock()
+        queue_instance.enqueue.return_value = 99
+        mock_queue_cls.return_value = queue_instance
 
         client = _authed_client()
         resp = client.post(
@@ -825,11 +834,12 @@ class TestDeleteDraftHandler:
         # HTMX path returns 204 + HX-Redirect, not a 303.
         assert resp.status_code == 204
         assert resp.headers["hx-redirect"] == "/drafts"
-        # The underlying cleanup must still have run.
+        # The underlying DB delete must still have run.
         mock_delete.assert_called_once()
-        mock_delete_file.assert_called_once_with("/tmp/ciphertext.enc")
         mock_log.assert_called_once()
-        mock_delete_graph.assert_called_once_with(draft.graph_uri)
+        # #628: external cleanup is now async — verify the job was enqueued.
+        queue_instance.enqueue.assert_called_once()
+        assert queue_instance.enqueue.call_args.args[0] == "draft_cleanup"
 
 
 # ---------------------------------------------------------------------------
@@ -921,9 +931,8 @@ class TestUploadPrecheck:
 class TestFlashMessages:
     @patch("app.docs.routes.fetch_drafts_for_org")
     @patch("app.docs.routes.count_drafts_for_org_conn")
-    @patch("app.docs.routes.delete_named_graph")
+    @patch("app.docs.routes.JobQueue")
     @patch("app.docs.routes.log_draft_delete")
-    @patch("app.docs.routes.delete_encrypted_file")
     @patch("app.docs.routes.delete_draft")
     @patch("app.docs.routes._connect")
     @patch("app.docs.routes.fetch_draft")
@@ -934,9 +943,8 @@ class TestFlashMessages:
         mock_fetch: MagicMock,
         mock_connect: MagicMock,
         mock_delete: MagicMock,
-        mock_delete_file: MagicMock,
         mock_log: MagicMock,
-        mock_delete_graph: MagicMock,
+        mock_queue_cls: MagicMock,
         mock_count: MagicMock,
         mock_list: MagicMock,
     ):
@@ -948,6 +956,9 @@ class TestFlashMessages:
         mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
         mock_connect.return_value.__exit__ = MagicMock(return_value=False)
         mock_delete.return_value = "/tmp/ciphertext.enc"
+        queue_instance = MagicMock()
+        queue_instance.enqueue.return_value = 99
+        mock_queue_cls.return_value = queue_instance
         mock_count.return_value = 0
         mock_list.return_value = []
 

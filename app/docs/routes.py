@@ -48,9 +48,8 @@ from app.docs.draft_model import (
     touch_draft_access_conn,
 )
 from app.docs.upload import DraftUploadError, handle_upload
+from app.jobs.queue import JobQueue
 from app.rag.retriever import delete_chunks_for_draft
-from app.storage import delete_file as delete_encrypted_file
-from app.sync.jena_loader import delete_named_graph
 from app.ui.data.data_table import Column, DataTable
 from app.ui.data.pagination import Pagination
 from app.ui.feedback.empty_state import EmptyState
@@ -1193,6 +1192,16 @@ def delete_draft_handler(req: Request, draft_id: str):
         # draft to cross-org or non-owner callers.
         return _not_found_page(req)
 
+    # #628: single transaction for every DB-side deletion. Previously
+    # the handler opened two separate ``_connect()`` contexts (row +
+    # rag_chunks, then background_jobs cancellation) and sandwiched
+    # two external calls (encrypted file + Jena graph) between them
+    # with no boundary. A failure partway through left the system in
+    # an inconsistent state: row gone but jobs still pending, or jobs
+    # cancelled but encrypted file still on disk. The refactor folds
+    # every DB mutation into ONE transactional block and hands the
+    # slow/flaky external cleanup off to a background ``draft_cleanup``
+    # job that can retry independently.
     storage_path: str | None = None
     try:
         with _connect() as conn:
@@ -1206,23 +1215,13 @@ def delete_draft_handler(req: Request, draft_id: str):
                 delete_chunks_for_draft(conn, parsed)
             except Exception:
                 logger.exception("Failed to delete rag_chunks for draft id=%s", parsed)
-            conn.commit()
-    except Exception:
-        logger.exception("Failed to delete draft id=%s", parsed)
-        return _not_found_page(req)
-
-    # #454/#478: cancel any pending/claimed/running/retrying background
-    # jobs that still reference this draft. The handlers all
-    # early-return on a missing draft row, but leaving the rows on the
-    # queue keeps a stale ``Ebaõnnestus``-style error appearing on the
-    # admin job dashboard once the worker fails to find the row. Doing
-    # this *after* the row delete is intentional: it's idempotent and
-    # means any job claimed by the worker between the row delete and
-    # this cleanup is also covered. #478 added ``running`` because a
-    # worker that picked up the job just before deletion would
-    # otherwise leave the row behind and produce a spurious failure.
-    try:
-        with _connect() as conn:
+            # #454/#478: cancel any pending/claimed/running/retrying
+            # background jobs that still reference this draft. Doing
+            # this in the SAME transaction as the row delete means a
+            # rollback doesn't strand orphaned jobs on the queue.
+            # #478 added ``running`` because a worker that picked up
+            # the job just before deletion would otherwise leave the
+            # row behind and produce a spurious failure.
             conn.execute(
                 """
                 DELETE FROM background_jobs
@@ -1233,31 +1232,33 @@ def delete_draft_handler(req: Request, draft_id: str):
             )
             conn.commit()
     except Exception:
-        logger.exception(
-            "Failed to cancel pending background jobs for draft id=%s",
-            parsed,
-        )
+        logger.exception("Failed to delete draft id=%s", parsed)
+        return _not_found_page(req)
 
-    if storage_path:
-        try:
-            delete_encrypted_file(storage_path)
-        except Exception:
-            logger.exception(
-                "Failed to delete encrypted file for draft id=%s path=%s",
-                parsed,
-                storage_path,
-            )
-
-    # Purge the draft's named graph from Jena (idempotent — a 404 from
-    # Fuseki is treated as success, which covers drafts deleted before
-    # the analyze_impact handler ever loaded the graph).
+    # #628: enqueue an async cleanup job for the external effects that
+    # can fail independently of the user-visible delete. The job
+    # retries on its own schedule; a flaky Jena instance no longer
+    # blocks the user flow or leaves the DB inconsistent. Failure to
+    # enqueue is logged but non-fatal — the DB is already clean and
+    # the operator can always delete the file/graph manually.
+    cleanup_payload = {
+        "draft_id": str(parsed),
+        "storage_path": storage_path,
+        "graph_uri": draft.graph_uri,
+    }
     try:
-        delete_named_graph(draft.graph_uri)
+        cleanup_job_id = JobQueue().enqueue("draft_cleanup", cleanup_payload, priority=0)
+        logger.info(
+            "Orphan cleanup job enqueued draft=%s job_id=%s storage_path=%s",
+            parsed,
+            cleanup_job_id,
+            storage_path,
+        )
     except Exception:
         logger.exception(
-            "Failed to delete named graph for draft id=%s uri=%s",
+            "Failed to enqueue draft_cleanup job for draft id=%s — "
+            "external resources may be orphaned",
             parsed,
-            draft.graph_uri,
         )
 
     log_draft_delete(
