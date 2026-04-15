@@ -45,6 +45,7 @@ from docx.enum.section import WD_SECTION
 from docx.shared import Pt
 
 from app.docs.draft_model import Draft
+from app.docs.labels import TYPE_LABELS_ET as _TYPE_LABELS_ET
 from app.ui.time import format_tallinn
 
 logger = logging.getLogger(__name__)
@@ -131,18 +132,6 @@ def _parse_report_data(raw: Any) -> dict[str, Any]:
             return {}
     logger.warning("docx_export: unexpected type in report_data: %s", type(raw).__name__)
     return {}
-
-
-# Estonian labels for the affected entity type column.
-_TYPE_LABELS_ET: dict[str, str] = {
-    "EnactedLaw": "Kehtiv seadus",
-    "DraftLegislation": "Eelnõu",
-    "CourtDecision": "Kohtulahend",
-    "EULegislation": "EL õigusakt",
-    "EUCourtDecision": "EL kohtulahend",
-    "Provision": "Säte",
-    "TopicCluster": "Teemaklaster",
-}
 
 
 def _short_type(uri: str) -> str:

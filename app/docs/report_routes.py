@@ -32,6 +32,7 @@ from app.auth.helpers import require_auth as _require_auth
 from app.auth.policy import can_view_draft
 from app.db import get_connection as _connect
 from app.docs.draft_model import Draft, fetch_draft, touch_draft_access_conn
+from app.docs.labels import TYPE_LABELS_ET as _TYPE_LABELS_ET
 from app.jobs.queue import JobQueue
 from app.ui.data.data_table import Column, DataTable
 from app.ui.forms.app_form import AppForm
@@ -60,22 +61,6 @@ _MAX_INLINE_ROWS = 50
 # fragment hammers /export-status/<id> forever whenever a worker
 # stalls, and the user has no actionable signal.
 _EXPORT_POLLING_TIMEOUT_SECONDS = 300
-
-
-# Estonian translations for the entity ``type`` short names that show
-# up in the affected-entities table. The same map lives in
-# :mod:`app.docs.docx_export`; we keep two copies (rather than a shared
-# helper) because the routes module is allowed to depend on UI helpers
-# but the docx module is intentionally UI-free for easier testing.
-_TYPE_LABELS_ET: dict[str, str] = {
-    "EnactedLaw": "Kehtiv seadus",
-    "DraftLegislation": "Eelnõu",
-    "CourtDecision": "Kohtulahend",
-    "EULegislation": "EL õigusakt",
-    "EUCourtDecision": "EL kohtulahend",
-    "Provision": "Säte",
-    "TopicCluster": "Teemaklaster",
-}
 
 
 # ---------------------------------------------------------------------------
