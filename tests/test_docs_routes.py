@@ -529,6 +529,31 @@ class TestDraftStatusFragment:
 
     @patch("app.docs.routes.fetch_draft")
     @patch("app.auth.middleware._get_provider")
+    def test_status_fragment_shows_elapsed_and_typical_range(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+    ):
+        """#606: the active stage surfaces elapsed time + typical range."""
+        mock_get_provider.return_value = _stub_provider()
+        now = datetime.now(UTC)
+        draft = _make_draft(
+            status="extracting",
+            created_at=now - timedelta(seconds=100),
+            updated_at=now - timedelta(seconds=100),
+        )
+        mock_fetch.return_value = draft
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{draft.id}/status", headers={"HX-Request": "true"})
+        assert resp.status_code == 200
+        assert "möödas" in resp.text
+        assert "tüüpiline aeg" in resp.text
+        # The ticker script must be included on the fragment.
+        assert "draft-stage-elapsed" in resp.text
+
+    @patch("app.docs.routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
     def test_status_fragment_poll_backoff_fresh_is_3s(
         self,
         mock_get_provider: MagicMock,
@@ -600,8 +625,15 @@ class TestDraftStatusFragment:
         )
 
         assert resp.status_code == 200
-        assert "Vajab tähelepanu" in resp.text
-        assert "hx-trigger" not in resp.text
+        # #606: the admin-dashboard dead-end was replaced with a
+        # "Kontrolli uuesti kohe" manual-repoll button + escalation
+        # guidance.
+        assert "Töötlemine venib" in resp.text
+        assert "Kontrolli uuesti kohe" in resp.text
+        assert "võtke ühendust meeskonnaga" in resp.text
+        # The wrapper's periodic hx-trigger is dropped. The manual
+        # repoll button has its own hx-get but no "every Ns" trigger.
+        assert "every " not in resp.text
 
 
 # ---------------------------------------------------------------------------

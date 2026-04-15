@@ -242,8 +242,11 @@ def _status_tracker(draft: Draft):
             current_index = idx
             break
 
+    elapsed = _elapsed_seconds(draft)
+
     for idx, (key, label) in enumerate(_STATUS_STAGES):
         classes = ["draft-stage"]
+        is_active = False
         if draft.status == "failed":
             # On failure every stage past the last successful one is dim.
             classes.append("draft-stage-idle")
@@ -251,12 +254,45 @@ def _status_tracker(draft: Draft):
             classes.append("draft-stage-done")
         elif current_index >= 0 and idx == current_index:
             classes.append("draft-stage-active")
+            is_active = True
         else:
             classes.append("draft-stage-idle")
+
+        # #606: render elapsed time + typical range under the active
+        # stage. The elapsed value is bumped client-side by a small
+        # inline interval so the user sees a live ticker without any
+        # extra HTMX polls.
+        extras: list = []
+        if is_active and elapsed is not None:
+            extras.append(
+                Span(  # noqa: F405
+                    _format_elapsed(elapsed),
+                    cls="draft-stage-elapsed",
+                    data_elapsed_seconds=str(elapsed),
+                )
+            )
+            typical = _TYPICAL_STAGE_SECONDS.get(key)
+            if typical is not None:
+                low, high = typical
+                low_min, high_min = low // 60 or 1, high // 60 or 1
+                # Prefer a "N-M min" display; fall back to seconds when
+                # the lower bound is sub-minute (e.g. parsing 10s-60s).
+                if low < 60:
+                    range_text = f"tüüpiline aeg {low}s-{high // 60 or 1} min"
+                else:
+                    range_text = f"tüüpiline aeg {low_min}-{high_min} min"
+                extras.append(
+                    Span(  # noqa: F405
+                        range_text,
+                        cls="draft-stage-typical muted-text",
+                    )
+                )
+
         items.append(
             Li(  # noqa: F405
                 Span(str(idx + 1), cls="draft-stage-number", aria_hidden="true"),  # noqa: F405
                 Span(label, cls="draft-stage-label"),  # noqa: F405
+                *extras,
                 cls=" ".join(classes),
             )
         )
@@ -297,14 +333,62 @@ def _status_tracker(draft: Draft):
         )
     elif polling_stale and draft.status not in _TERMINAL_STATUSES:
         # The pipeline has been running longer than the polling
-        # timeout. Surface a yellow alert and stop polling so the
-        # user knows to escalate instead of waiting indefinitely.
+        # timeout. Stop the auto-poll and replace the old admin-
+        # dashboard dead-end (#606) with an actionable pair: a manual
+        # "Kontrolli uuesti kohe" button that fires one immediate
+        # /status fetch, plus a short guidance line telling the user
+        # when to escalate.
         children.append(
             Alert(
-                "Vajab tähelepanu — töötlemine võtab oodatust kauem aega. "
-                "Kontrollige administreerimispaneelilt, kas taustajob on kinni jäänud.",
+                Div(
+                    P(  # noqa: F405
+                        "Töötlemine võtab oodatust kauem aega. "
+                        "Kui analüüs on kauem kui 10 minutit peatunud, "
+                        "võtke ühendust meeskonnaga.",
+                        cls="stale-guidance",
+                    ),
+                    Button(
+                        "Kontrolli uuesti kohe",
+                        type="button",
+                        variant="secondary",
+                        size="sm",
+                        hx_get=f"/drafts/{draft.id}/status",
+                        hx_target=f"#draft-status-{draft.id}",
+                        hx_swap="outerHTML",
+                    ),
+                    cls="stale-repoll",
+                ),
                 variant="warning",
                 title="Töötlemine venib",
+            )
+        )
+
+    # #606: inline ticker that increments the ".draft-stage-elapsed"
+    # span once per second so users see a live "1:40 möödas" counter
+    # without extra HTMX polls. The script runs on every HTMX swap
+    # because HTMX executes inline scripts inside swapped fragments.
+    # The window-level interval id is reused across swaps to avoid
+    # stacking multiple timers.
+    if any("draft-stage-elapsed" in str(child) for child in children):
+        children.append(
+            Script(  # noqa: F405
+                "(function () {\n"
+                "  if (window.__draftElapsedTimer) "
+                "clearInterval(window.__draftElapsedTimer);\n"
+                "  function tick() {\n"
+                "    var nodes = document.querySelectorAll('.draft-stage-elapsed');\n"
+                "    nodes.forEach(function (el) {\n"
+                "      var raw = parseInt(el.getAttribute('data-elapsed-seconds'), 10);\n"
+                "      if (isNaN(raw)) return;\n"
+                "      raw += 1;\n"
+                "      el.setAttribute('data-elapsed-seconds', raw);\n"
+                "      var m = Math.floor(raw / 60);\n"
+                "      var s = raw % 60;\n"
+                "      el.textContent = m + ':' + (s < 10 ? '0' + s : s) + ' möödas';\n"
+                "    });\n"
+                "  }\n"
+                "  window.__draftElapsedTimer = setInterval(tick, 1000);\n"
+                "})();\n"
             )
         )
 
