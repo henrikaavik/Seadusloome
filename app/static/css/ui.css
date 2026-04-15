@@ -424,6 +424,30 @@
   to { transform: rotate(360deg); }
 }
 
+/* HTMX hx-indicator support (#599): hide stand-alone spinners by
+   default and reveal them while the referenced form is mid-request.
+   HTMX sets ``.htmx-request`` on the element referenced by
+   ``hx-indicator`` (or on the form itself) during the request. */
+.upload-spinner,
+.delete-spinner,
+.inline-spinner,
+.export-spinner {
+  opacity: 0;
+  transition: opacity var(--transition-fast, 150ms) ease;
+  margin-inline-start: var(--space-2, 0.5rem);
+  vertical-align: middle;
+}
+.htmx-request .upload-spinner,
+.htmx-request .delete-spinner,
+.htmx-request .inline-spinner,
+.htmx-request .export-spinner,
+.upload-spinner.htmx-request,
+.delete-spinner.htmx-request,
+.inline-spinner.htmx-request,
+.export-spinner.htmx-request {
+  opacity: 1;
+}
+
 .form-field-error {
   color: var(--color-danger, #c0392b);
   font-size: var(--text-sm, 0.875rem);

@@ -584,6 +584,11 @@ def _upload_form(*, title_value: str = "", error: str | None = None):
                 id="upload-submit",
             ),
             A("Tühista", href="/drafts", cls="btn btn-ghost btn-md"),  # noqa: F405
+            # #599: spinner shown while the upload request is in
+            # flight. HTMX toggles ``.htmx-request`` on the indicator
+            # element referenced by ``hx-indicator`` so the form never
+            # appears frozen.
+            Span("", cls="btn-spinner upload-spinner", aria_hidden="true"),  # noqa: F405
             cls="form-actions",
         ),
         Script(_FILE_PICKER_SCRIPT),  # noqa: F405
@@ -591,6 +596,7 @@ def _upload_form(*, title_value: str = "", error: str | None = None):
         action="/drafts",
         enctype="multipart/form-data",
         cls="upload-form",
+        hx_indicator=".upload-spinner",
         **({"data-error": "1"} if error_alert else {}),
     ), error_alert
 
@@ -792,12 +798,16 @@ def _draft_detail_body(draft: Draft, auth: Mapping[str, Any] | None = None) -> l
                     variant="primary",
                     size="md",
                 ),
+                # #599: spinner beside the submit so the form isn't
+                # visually frozen during the HTMX round-trip.
+                Span("", cls="btn-spinner inline-spinner", aria_hidden="true"),  # noqa: F405
                 method="post",
                 action=f"/drafts/{draft.id}/keep",
                 enctype="application/x-www-form-urlencoded",
                 hx_post=f"/drafts/{draft.id}/keep",
                 hx_target="body",
                 hx_swap="outerHTML",
+                hx_indicator=".inline-spinner",
                 cls="inline-form",
             )
         )
@@ -827,6 +837,12 @@ def _draft_detail_body(draft: Draft, auth: Mapping[str, Any] | None = None) -> l
                 # attribute remains as a no-JS fallback — users without
                 # JS can't open the modal, but if something else POSTs
                 # the form they still hit the right endpoint.
+                # #599: spinner shown while HTMX is mid-request. Even
+                # though the form itself is ``hidden``, HTMX toggles
+                # ``.htmx-request`` on the indicator class on the root
+                # element so the sibling visible spinner (placed next
+                # to the trigger) can display.
+                Span("", cls="btn-spinner delete-spinner", aria_hidden="true"),  # noqa: F405
                 id=_DELETE_FORM_ID,
                 method="post",
                 action=f"/drafts/{draft.id}/delete",
@@ -834,6 +850,7 @@ def _draft_detail_body(draft: Draft, auth: Mapping[str, Any] | None = None) -> l
                 hx_post=f"/drafts/{draft.id}/delete",
                 hx_target="body",
                 hx_swap="outerHTML",
+                hx_indicator=".delete-spinner",
                 cls="inline-form",
                 hidden=True,
             )

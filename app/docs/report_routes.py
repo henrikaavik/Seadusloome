@@ -439,11 +439,20 @@ def _export_section(draft: Draft) -> Any:
                     type="submit",
                     variant="primary",
                 ),
+                # #599: spinner beside the submit so the form does not
+                # appear frozen while the export is generated. HTMX
+                # toggles ``.htmx-request`` on the indicator element.
+                Span(  # noqa: F405
+                    "",
+                    cls="btn-spinner export-spinner",
+                    aria_hidden="true",
+                ),
                 method="post",
                 action=f"/drafts/{draft.id}/export",
                 hx_post=f"/drafts/{draft.id}/export",
                 hx_swap="innerHTML",
                 hx_target="#export-status",
+                hx_indicator=".export-spinner",
                 cls="export-form",
             ),
             Div(id="export-status", cls="export-status"),

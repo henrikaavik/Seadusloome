@@ -755,6 +755,42 @@ class TestDeleteDraftHandler:
 
 
 # ---------------------------------------------------------------------------
+# #599: hx-indicator wires spinners to HTMX-driven forms
+# ---------------------------------------------------------------------------
+
+
+class TestHxIndicator:
+    @patch("app.auth.middleware._get_provider")
+    def test_upload_form_has_hx_indicator(self, mock_get_provider: MagicMock):
+        mock_get_provider.return_value = _stub_provider()
+        client = _authed_client()
+        resp = client.get("/drafts/new")
+        assert resp.status_code == 200
+        body = resp.text
+        assert 'hx-indicator=".upload-spinner"' in body
+        assert "upload-spinner" in body
+
+    @patch("app.docs.routes.log_draft_view")
+    @patch("app.docs.routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_delete_form_has_hx_indicator(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_log: MagicMock,
+    ):
+        mock_get_provider.return_value = _stub_provider()
+        draft = _make_draft(status="ready")
+        mock_fetch.return_value = draft
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{draft.id}")
+        assert resp.status_code == 200
+        assert 'hx-indicator=".delete-spinner"' in resp.text
+        assert "delete-spinner" in resp.text
+
+
+# ---------------------------------------------------------------------------
 # #602: client-side 50 MB pre-check JS is embedded in the upload form
 # ---------------------------------------------------------------------------
 
