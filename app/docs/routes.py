@@ -178,6 +178,54 @@ def _is_status_polling_stale(draft: Draft) -> bool:
     return elapsed > _POLLING_TIMEOUT_SECONDS
 
 
+# #606/#607: typical wall-clock range per pipeline stage, in seconds.
+# Hard-coded for now — a real histogram from background_jobs.finished_at
+# minus claimed_at can replace this later. Keep keys in sync with
+# _STATUS_STAGES (and note that ``uploaded`` + ``ready`` are excluded
+# because they're not running stages).
+_TYPICAL_STAGE_SECONDS: dict[str, tuple[int, int]] = {
+    "parsing": (10, 60),
+    "extracting": (60, 240),
+    "analyzing": (30, 180),
+}
+
+
+def _poll_interval_seconds(draft: Draft) -> int:
+    """Return the HTMX poll interval in seconds with exponential-ish backoff.
+
+    0-30s since creation → 3s, 30-120s → 6s, 120s+ → 10s. See #607.
+    """
+    reference = draft.created_at
+    if reference is None:
+        return 3
+    try:
+        elapsed = (datetime.now(UTC) - reference).total_seconds()
+    except (TypeError, ValueError):
+        return 3
+    if elapsed < 30:
+        return 3
+    if elapsed < 120:
+        return 6
+    return 10
+
+
+def _elapsed_seconds(draft: Draft) -> int | None:
+    """Seconds between ``draft.updated_at`` and now (for #606 timer)."""
+    reference = draft.updated_at or draft.created_at
+    if reference is None:
+        return None
+    try:
+        return max(0, int((datetime.now(UTC) - reference).total_seconds()))
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_elapsed(seconds: int) -> str:
+    """Render seconds as ``M:SS möödas`` for the active-stage timer."""
+    minutes, secs = divmod(max(0, int(seconds)), 60)
+    return f"{minutes}:{secs:02d} möödas"
+
+
 def _status_tracker(draft: Draft):
     """Render the 6-stage horizontal status tracker.
 
@@ -222,7 +270,12 @@ def _status_tracker(draft: Draft):
     if draft.status not in _TERMINAL_STATUSES and not polling_stale:
         poll_attrs = {
             "hx_get": f"/drafts/{draft.id}/status",
-            "hx_trigger": "every 3s",
+            # #607: exponential-ish polling backoff. Freshly created
+            # drafts poll every 3s so the tracker feels responsive, but
+            # as the wall-clock elapses we slow down to avoid hammering
+            # the server for genuinely-slow pipelines. The upper bound
+            # is still the _POLLING_TIMEOUT_SECONDS budget above.
+            "hx_trigger": f"every {_poll_interval_seconds(draft)}s",
             "hx_target": "this",
             "hx_swap": "outerHTML",
         }

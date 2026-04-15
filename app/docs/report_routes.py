@@ -568,15 +568,38 @@ def draft_report_page(req: Request, draft_id: str):
 # ---------------------------------------------------------------------------
 
 
-def _export_status_spinner(draft_id: uuid.UUID, job_id: int) -> Any:
+def _export_poll_interval_seconds(job_created: datetime | None) -> int:
+    """Return the export-status poll interval with exponential-ish backoff.
+
+    0-30s since enqueue → 2s, 30-120s → 5s, 120s+ → 10s. See #607.
+    """
+    if job_created is None:
+        return 2
+    try:
+        elapsed = (datetime.now(UTC) - job_created).total_seconds()
+    except (TypeError, ValueError):
+        return 2
+    if elapsed < 30:
+        return 2
+    if elapsed < 120:
+        return 5
+    return 10
+
+
+def _export_status_spinner(
+    draft_id: uuid.UUID,
+    job_id: int,
+    job_created: datetime | None = None,
+) -> Any:
     """Return the spinner-with-poll fragment used while a job is in flight."""
+    interval = _export_poll_interval_seconds(job_created)
     return Div(
         Span(cls="btn-spinner", aria_hidden="true"),  # noqa: F405
         Span(" Eksport käimas... (jälgi allpool olevast logist)"),  # noqa: F405
         id="export-status",
         cls="export-status export-status-pending",
         hx_get=f"/drafts/{draft_id}/export-status/{job_id}",
-        hx_trigger="every 2s",
+        hx_trigger=f"every {interval}s",
         hx_swap="outerHTML",
     )
 
@@ -745,7 +768,9 @@ def export_status_fragment(req: Request, draft_id: str, job_id: str):
         )
 
     # pending / claimed / running / retrying — keep polling.
-    return _export_status_spinner(parsed_draft, parsed_job_id)
+    # #607: hand the job's created_at to the spinner helper so it can
+    # back off the poll interval (2s → 5s → 10s) as the job ages.
+    return _export_status_spinner(parsed_draft, parsed_job_id, job.created_at)
 
 
 # ---------------------------------------------------------------------------

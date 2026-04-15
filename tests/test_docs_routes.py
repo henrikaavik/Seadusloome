@@ -521,9 +521,55 @@ class TestDraftStatusFragment:
         )
 
         assert resp.status_code == 200
-        # Polling attributes must still be present.
-        assert "every 3s" in resp.text
+        # Polling attributes must still be present. #607: the draft was
+        # created >120s ago so the interval backs off to 10s; the
+        # recent ``updated_at`` still prevents the stale alert.
+        assert 'hx-trigger="every 10s"' in resp.text
         assert "Vajab tähelepanu" not in resp.text
+
+    @patch("app.docs.routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_status_fragment_poll_backoff_fresh_is_3s(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+    ):
+        """#607: drafts <30s old poll every 3s."""
+        mock_get_provider.return_value = _stub_provider()
+        now = datetime.now(UTC)
+        draft = _make_draft(
+            status="parsing",
+            created_at=now - timedelta(seconds=5),
+            updated_at=now - timedelta(seconds=5),
+        )
+        mock_fetch.return_value = draft
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{draft.id}/status", headers={"HX-Request": "true"})
+        assert resp.status_code == 200
+        assert 'hx-trigger="every 3s"' in resp.text
+
+    @patch("app.docs.routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_status_fragment_poll_backoff_medium_is_6s(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+    ):
+        """#607: drafts 30-120s old poll every 6s."""
+        mock_get_provider.return_value = _stub_provider()
+        now = datetime.now(UTC)
+        draft = _make_draft(
+            status="extracting",
+            created_at=now - timedelta(seconds=60),
+            updated_at=now - timedelta(seconds=5),
+        )
+        mock_fetch.return_value = draft
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{draft.id}/status", headers={"HX-Request": "true"})
+        assert resp.status_code == 200
+        assert 'hx-trigger="every 6s"' in resp.text
 
     @patch("app.docs.routes.fetch_draft")
     @patch("app.auth.middleware._get_provider")
@@ -555,7 +601,7 @@ class TestDraftStatusFragment:
 
         assert resp.status_code == 200
         assert "Vajab tähelepanu" in resp.text
-        assert "every 3s" not in resp.text
+        assert "hx-trigger" not in resp.text
 
 
 # ---------------------------------------------------------------------------
