@@ -755,6 +755,31 @@ class TestDeleteDraftHandler:
 
 
 # ---------------------------------------------------------------------------
+# #629: /drafts/{id}/delete must be registered via register_draft_routes
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteRouteRegistration:
+    """Regression guard for #629 — keep the delete route alongside its
+    siblings in ``register_draft_routes`` rather than scattered across
+    ``app/main.py``. If a future refactor accidentally removes the row,
+    a 405 Method Not Allowed response will fire here.
+    """
+
+    def test_delete_route_is_registered(self):
+        from starlette.routing import Route
+
+        from app import main as main_module
+
+        post_paths = {
+            route.path
+            for route in main_module.app.router.routes
+            if isinstance(route, Route) and "POST" in (route.methods or set())
+        }
+        assert "/drafts/{draft_id}/delete" in post_paths
+
+
+# ---------------------------------------------------------------------------
 # #599: hx-indicator wires spinners to HTMX-driven forms
 # ---------------------------------------------------------------------------
 
