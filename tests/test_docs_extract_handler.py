@@ -380,10 +380,20 @@ class TestFailurePaths:
             mock_resolve.assert_not_called()
 
         # The fourth connection's execute should be the status=failed UPDATE.
+        # #609: the failed transition uses a direct UPDATE with
+        # (user_msg, debug_detail, draft_id) params.
         last_exec = mock_conns[3].execute.call_args_list
-        # update_draft_status runs one UPDATE and commits.
-        assert any("update drafts" in call.args[0].lower() for call in last_exec)
-        assert any("failed" in str(call.args[1]) for call in last_exec if len(call.args) > 1)
+        assert any(
+            "update drafts" in call.args[0].lower() and "status = 'failed'" in call.args[0].lower()
+            for call in last_exec
+        )
+        failed_call = next(
+            call for call in last_exec if "status = 'failed'" in call.args[0].lower()
+        )
+        # Raw "LLM boom" text lands in the debug_detail (second param).
+        user_msg, debug_detail, _ = failed_call.args[1]
+        assert isinstance(user_msg, str)
+        assert "LLM boom" in debug_detail
 
     def test_extractor_failure_does_not_mark_failed_when_retry_pending(self):
         """#448: a transient extractor error on attempt 1 must not flip the draft."""
@@ -454,5 +464,9 @@ class TestFailurePaths:
                     max_attempts=3,
                 )
 
+        # #609: the failed UPDATE is direct SQL with status = 'failed'.
         last_exec = mock_conns[3].execute.call_args_list
-        assert any("update drafts" in call.args[0].lower() for call in last_exec)
+        assert any(
+            "update drafts" in call.args[0].lower() and "status = 'failed'" in call.args[0].lower()
+            for call in last_exec
+        )

@@ -45,6 +45,7 @@ from uuid import UUID
 
 from app.db import get_connection
 from app.docs.draft_model import get_draft, update_draft_status
+from app.docs.error_mapping import map_failure_to_user_message
 from app.docs.tika_client import TikaError, get_default_tika_client
 from app.jobs import JobQueue
 from app.storage import DecryptionError, encrypt_text, read_file
@@ -142,6 +143,7 @@ def parse_draft(
                 set parsed_text_encrypted = %s,
                     status = 'extracting',
                     error_message = null,
+                    error_debug = null,
                     updated_at = now()
                 where id = %s
                 """,
@@ -174,7 +176,7 @@ def parse_draft(
                 attempt,
                 exc,
             )
-            _mark_draft_failed(draft_id, str(exc))
+            _mark_draft_failed(draft_id, exc)
         else:
             logger.warning(
                 "parse_draft attempt %d/%d failed for draft %s, will retry: %s",
@@ -194,7 +196,7 @@ def parse_draft(
                 draft_id,
                 attempt,
             )
-            _mark_draft_failed(draft_id, str(exc))
+            _mark_draft_failed(draft_id, exc)
         else:
             logger.warning(
                 "parse_draft unexpected error on attempt %d/%d for draft %s, will retry: %s",
@@ -206,20 +208,31 @@ def parse_draft(
         raise
 
 
-def _mark_draft_failed(draft_id: UUID, error_message: str) -> None:
+def _mark_draft_failed(draft_id: UUID, exc: BaseException) -> None:
     """Best-effort transition of a draft into ``status='failed'``.
+
+    Translates ``exc`` through :func:`map_failure_to_user_message` so
+    ``drafts.error_message`` carries an actionable Estonian string (#609)
+    and ``drafts.error_debug`` carries the raw technical detail for
+    admin triage.
 
     Swallows DB errors so a secondary failure (e.g. Postgres went away
     mid-handler) never masks the original exception that triggered this
     call. The original exception is still re-raised by the caller.
     """
+    user_msg, debug_detail = map_failure_to_user_message(exc, stage="parse")
     try:
         with get_connection() as conn:
-            update_draft_status(
-                conn,
-                draft_id,
-                "failed",
-                error_message=error_message[:500],
+            conn.execute(
+                """
+                update drafts
+                set status = 'failed',
+                    error_message = %s,
+                    error_debug = %s,
+                    updated_at = now()
+                where id = %s
+                """,
+                (user_msg[:500], debug_detail, str(draft_id)),
             )
             conn.commit()
     except Exception:  # noqa: BLE001 — best-effort cleanup

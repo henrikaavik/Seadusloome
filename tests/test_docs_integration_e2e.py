@@ -234,6 +234,13 @@ def _make_conn_factory(state: _State):
                 row[9] = "analyzing"
             elif "status = 'ready'" in sql_lower:
                 row[9] = "ready"
+            elif "status = 'failed'" in sql_lower:
+                # #609: _mark_draft_failed uses a direct UPDATE with
+                # params (user_msg, debug_detail, draft_id). The
+                # user-facing Estonian text lands in error_message.
+                row[9] = "failed"
+                if params is not None and len(params) >= 1:
+                    row[12] = params[0]  # error_message
             elif params and len(params) >= 2:
                 # update_draft_status — first param is the new status.
                 row[9] = str(params[0])
@@ -624,6 +631,11 @@ class TestDocsPipelineE2E:
             assert state.draft_row[9] == "failed", (
                 "final attempt must flip the draft to failed so the UI surfaces the error"
             )
-            # Error message column must have been populated.
+            # #609: error_message now holds the actionable Estonian
+            # user-facing string (the raw "Tika down" text lives in the
+            # separate ``error_debug`` column, which the fake DB doesn't
+            # model because routes.py never reads it).
             assert state.draft_row[12] is not None
-            assert "Tika down" in str(state.draft_row[12])
+            from app.docs.error_mapping import MSG_UNKNOWN
+
+            assert state.draft_row[12] == MSG_UNKNOWN

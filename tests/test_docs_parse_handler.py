@@ -26,6 +26,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.docs.draft_model import Draft
+from app.docs.error_mapping import (
+    MSG_FILE_MISSING,
+    MSG_TIKA_CAPACITY,
+    MSG_UNKNOWN,
+)
 from app.docs.parse_handler import parse_draft
 from app.docs.tika_client import TikaError
 from app.storage import DecryptionError
@@ -136,6 +141,50 @@ class _Patches:
         self.tika.stop()
         self.queue_cls.stop()
         return False
+
+
+# ---------------------------------------------------------------------------
+# Assertion helpers
+# ---------------------------------------------------------------------------
+
+
+def _failed_update_params(conns: list[_FakeConn]) -> tuple | None:
+    """Return the params of the first ``update drafts set status='failed'`` call.
+
+    ``_mark_draft_failed`` runs a direct SQL UPDATE so tests have to
+    introspect the connection's ``execute.call_args_list`` rather than
+    the ``update_draft_status`` mock.
+    """
+    for conn in conns:
+        for call in conn.execute.call_args_list:
+            sql = call.args[0].lower()
+            if "update drafts" in sql and "status = 'failed'" in sql:
+                return call.args[1]
+    return None
+
+
+def _statuses_written(conns: list[_FakeConn], update_draft_status_mock) -> list[str]:
+    """Return every draft status written by the handler under test.
+
+    Covers both:
+      - ``update_draft_status(conn, id, <status>)`` (``parsing``
+        transition is routed through the draft_model helper)
+      - the direct SQL UPDATEs for the ``extracting`` and ``failed``
+        transitions.
+    """
+    statuses = [c.args[2] for c in update_draft_status_mock.call_args_list]
+    for conn in conns:
+        for call in conn.execute.call_args_list:
+            sql = call.args[0].lower()
+            if "update drafts" not in sql:
+                continue
+            if "status = 'failed'" in sql:
+                statuses.append("failed")
+            elif "status = 'extracting'" in sql:
+                statuses.append("extracting")
+            elif "status = 'ready'" in sql:
+                statuses.append("ready")
+    return statuses
 
 
 # ---------------------------------------------------------------------------
@@ -267,16 +316,21 @@ class TestEmptyTikaResult:
                     max_attempts=3,
                 )
 
-        # parsing → failed transition
-        status_calls = [c.args[2] for c in p.m_update_draft_status.call_args_list]
-        assert "parsing" in status_calls
-        assert "failed" in status_calls
+        # parsing → failed transition (parsing via update_draft_status,
+        # failed via direct SQL UPDATE in _mark_draft_failed).
+        statuses = _statuses_written(p.conns, p.m_update_draft_status)
+        assert "parsing" in statuses
+        assert "failed" in statuses
 
-        # error_message must mention "empty text"
-        failed_call = next(
-            c for c in p.m_update_draft_status.call_args_list if c.args[2] == "failed"
-        )
-        assert "empty text" in failed_call.kwargs["error_message"]
+        # #609: the stored error_message must be the mapped Estonian
+        # string, and error_debug must carry the raw ValueError text.
+        params = _failed_update_params(p.conns)
+        assert params is not None, "expected an UPDATE ... status='failed' call"
+        user_msg, debug_detail, _draft_id = params
+        # "empty text" is not a currently mapped failure mode, so it
+        # falls back to the generic MSG_UNKNOWN message.
+        assert user_msg == MSG_UNKNOWN
+        assert "empty text" in debug_detail
 
         # No follow-up job was enqueued.
         p.m_queue.enqueue.assert_not_called()
@@ -304,9 +358,9 @@ class TestEmptyTikaResult:
 
         # parsing → (NOT failed) — the handler held off so the next
         # retry can pick up cleanly.
-        status_calls = [c.args[2] for c in p.m_update_draft_status.call_args_list]
-        assert "parsing" in status_calls
-        assert "failed" not in status_calls
+        statuses = _statuses_written(p.conns, p.m_update_draft_status)
+        assert "parsing" in statuses
+        assert "failed" not in statuses
         p.m_queue.enqueue.assert_not_called()
 
 
@@ -331,12 +385,17 @@ class TestTikaFailure:
                     max_attempts=3,
                 )
 
-        status_calls = [c.args[2] for c in p.m_update_draft_status.call_args_list]
-        assert "failed" in status_calls
-        failed_call = next(
-            c for c in p.m_update_draft_status.call_args_list if c.args[2] == "failed"
-        )
-        assert "connect refused" in failed_call.kwargs["error_message"]
+        statuses = _statuses_written(p.conns, p.m_update_draft_status)
+        assert "failed" in statuses
+        # #609: raw exception text goes to error_debug, user-facing
+        # Estonian string goes to error_message.
+        params = _failed_update_params(p.conns)
+        assert params is not None
+        user_msg, debug_detail, _ = params
+        assert "connect refused" in debug_detail
+        # "connect refused" is not one of the mapped markers, so the
+        # user sees the generic fallback.
+        assert user_msg == MSG_UNKNOWN
         p.m_queue.enqueue.assert_not_called()
 
     def test_tika_error_does_not_mark_failed_when_retry_pending(self):
@@ -355,11 +414,17 @@ class TestTikaFailure:
                     max_attempts=3,
                 )
 
-        status_calls = [c.args[2] for c in p.m_update_draft_status.call_args_list]
-        assert "parsing" in status_calls
-        assert "failed" not in status_calls
+        statuses = _statuses_written(p.conns, p.m_update_draft_status)
+        assert "parsing" in statuses
+        assert "failed" not in statuses
 
-    def test_tika_timeout_error_message_is_truncated_to_500(self):
+    def test_tika_user_message_is_always_under_500_chars(self):
+        """#609: error_message is capped at 500 chars so routes never
+        render a runaway Alert.
+
+        The mapped Estonian strings are all short, so this mostly
+        guards against future refactors that forget the slice.
+        """
         draft = _make_draft()
 
         with _Patches() as p:
@@ -375,10 +440,10 @@ class TestTikaFailure:
                     max_attempts=3,
                 )
 
-        failed_call = next(
-            c for c in p.m_update_draft_status.call_args_list if c.args[2] == "failed"
-        )
-        assert len(failed_call.kwargs["error_message"]) == 500
+        params = _failed_update_params(p.conns)
+        assert params is not None
+        user_msg, _debug, _ = params
+        assert len(user_msg) <= 500
 
 
 # ---------------------------------------------------------------------------
@@ -403,8 +468,14 @@ class TestStorageFailures:
                     max_attempts=3,
                 )
 
-        status_calls = [c.args[2] for c in p.m_update_draft_status.call_args_list]
-        assert "failed" in status_calls
+        statuses = _statuses_written(p.conns, p.m_update_draft_status)
+        assert "failed" in statuses
+        # #609: FileNotFoundError maps to the "laadige uuesti üles"
+        # Estonian message so the user knows the next action.
+        params = _failed_update_params(p.conns)
+        assert params is not None
+        user_msg, _debug, _ = params
+        assert user_msg == MSG_FILE_MISSING
         p.m_tika_client.extract_text.assert_not_called()
         p.m_queue.enqueue.assert_not_called()
 
@@ -422,12 +493,13 @@ class TestStorageFailures:
                     max_attempts=3,
                 )
 
-        status_calls = [c.args[2] for c in p.m_update_draft_status.call_args_list]
-        assert "failed" in status_calls
-        failed_call = next(
-            c for c in p.m_update_draft_status.call_args_list if c.args[2] == "failed"
-        )
-        assert "invalid token" in failed_call.kwargs["error_message"]
+        statuses = _statuses_written(p.conns, p.m_update_draft_status)
+        assert "failed" in statuses
+        params = _failed_update_params(p.conns)
+        assert params is not None
+        _user_msg, debug_detail, _ = params
+        # Raw error text must be preserved in error_debug for admins.
+        assert "invalid token" in debug_detail
 
 
 # ---------------------------------------------------------------------------
@@ -451,8 +523,14 @@ class TestUnexpectedException:
                     max_attempts=3,
                 )
 
-        status_calls = [c.args[2] for c in p.m_update_draft_status.call_args_list]
-        assert "failed" in status_calls
+        statuses = _statuses_written(p.conns, p.m_update_draft_status)
+        assert "failed" in statuses
+        # #609: unknown -> generic Estonian fallback + raw debug text.
+        params = _failed_update_params(p.conns)
+        assert params is not None
+        user_msg, debug_detail, _ = params
+        assert user_msg == MSG_UNKNOWN
+        assert "kaboom" in debug_detail
 
     def test_unknown_exception_does_not_mark_failed_when_retry_pending(self):
         """#448: belt-and-braces — even unknown exceptions defer."""
@@ -470,5 +548,50 @@ class TestUnexpectedException:
                     max_attempts=3,
                 )
 
-        status_calls = [c.args[2] for c in p.m_update_draft_status.call_args_list]
-        assert "failed" not in status_calls
+        statuses = _statuses_written(p.conns, p.m_update_draft_status)
+        assert "failed" not in statuses
+
+    def test_memory_error_maps_to_capacity_message(self):
+        """#609: ``MemoryError`` during Tika parse → capacity Estonian msg."""
+        draft = _make_draft()
+
+        with _Patches() as p:
+            p.m_get_draft.return_value = draft
+            p.m_read_file.return_value = b"data"
+            p.m_tika_client.extract_text.side_effect = MemoryError("java heap")
+
+            with pytest.raises(MemoryError):
+                parse_draft(
+                    {"draft_id": str(draft.id)},
+                    attempt=3,
+                    max_attempts=3,
+                )
+
+        params = _failed_update_params(p.conns)
+        assert params is not None
+        user_msg, debug_detail, _ = params
+        assert user_msg == MSG_TIKA_CAPACITY
+        assert "MemoryError" in debug_detail
+
+    def test_encrypted_pdf_maps_to_password_message(self):
+        """#609: Tika "encrypted" error → actionable password message."""
+        from app.docs.error_mapping import MSG_ENCRYPTED_PDF
+
+        draft = _make_draft()
+
+        with _Patches() as p:
+            p.m_get_draft.return_value = draft
+            p.m_read_file.return_value = b"data"
+            p.m_tika_client.extract_text.side_effect = TikaError("PDFBox: document is encrypted")
+
+            with pytest.raises(TikaError):
+                parse_draft(
+                    {"draft_id": str(draft.id)},
+                    attempt=3,
+                    max_attempts=3,
+                )
+
+        params = _failed_update_params(p.conns)
+        assert params is not None
+        user_msg, _debug, _ = params
+        assert user_msg == MSG_ENCRYPTED_PDF

@@ -31,6 +31,7 @@ from uuid import UUID
 from app.db import get_connection
 from app.docs.draft_model import get_draft, update_draft_status
 from app.docs.entity_extractor import extract_refs_from_text
+from app.docs.error_mapping import map_failure_to_user_message
 from app.docs.reference_resolver import resolve_refs
 from app.jobs import JobQueue
 from app.jobs.worker import register_handler
@@ -144,6 +145,8 @@ def extract_entities(
                 update drafts
                 set entity_count = %s,
                     status = 'analyzing',
+                    error_message = null,
+                    error_debug = null,
                     updated_at = now()
                 where id = %s
                 """,
@@ -166,13 +169,19 @@ def extract_entities(
         # earlier attempts re-raise so the queue can retry without the
         # UI showing a misleading permanent-failure state.
         if attempt >= max_attempts:
+            user_msg, debug_detail = map_failure_to_user_message(exc, stage="extract")
             try:
                 with get_connection() as conn:
-                    update_draft_status(
-                        conn,
-                        draft_id,
-                        "failed",
-                        error_message=str(exc)[:500],
+                    conn.execute(
+                        """
+                        update drafts
+                        set status = 'failed',
+                            error_message = %s,
+                            error_debug = %s,
+                            updated_at = now()
+                        where id = %s
+                        """,
+                        (user_msg[:500], debug_detail, str(draft_id)),
                     )
                     conn.commit()
             except Exception:  # noqa: BLE001

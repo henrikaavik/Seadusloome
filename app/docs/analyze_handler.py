@@ -37,8 +37,9 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from app.db import get_connection
-from app.docs.draft_model import get_draft, update_draft_status
+from app.docs.draft_model import get_draft
 from app.docs.entity_extractor import ExtractedRef
+from app.docs.error_mapping import map_failure_to_user_message
 from app.docs.graph_builder import build_draft_graph
 from app.docs.impact import ImpactAnalyzer, calculate_impact_score
 from app.docs.reference_resolver import ResolvedRef
@@ -142,6 +143,7 @@ def analyze_impact(
                 update drafts
                 set status = 'ready',
                     error_message = null,
+                    error_debug = null,
                     updated_at = now()
                 where id = %s
                 """,
@@ -189,7 +191,7 @@ def analyze_impact(
                 draft_id,
                 attempt,
             )
-            _mark_draft_failed(draft_id, str(exc))
+            _mark_draft_failed(draft_id, exc)
         else:
             logger.warning(
                 "analyze_impact attempt %d/%d failed for draft %s, will retry: %s",
@@ -278,15 +280,26 @@ def _get_current_ontology_version() -> str:
     return f"{ts}@{entity_count or 0}"
 
 
-def _mark_draft_failed(draft_id: UUID, error_message: str) -> None:
-    """Best-effort transition of the draft to ``status='failed'``."""
+def _mark_draft_failed(draft_id: UUID, exc: BaseException) -> None:
+    """Best-effort transition of the draft to ``status='failed'``.
+
+    Maps ``exc`` through :func:`map_failure_to_user_message` (#609) so
+    the UI surfaces a short actionable Estonian message and the raw
+    technical detail lands in ``drafts.error_debug`` for admin triage.
+    """
+    user_msg, debug_detail = map_failure_to_user_message(exc, stage="analyze")
     try:
         with get_connection() as conn:
-            update_draft_status(
-                conn,
-                draft_id,
-                "failed",
-                error_message=error_message[:500],
+            conn.execute(
+                """
+                update drafts
+                set status = 'failed',
+                    error_message = %s,
+                    error_debug = %s,
+                    updated_at = now()
+                where id = %s
+                """,
+                (user_msg[:500], debug_detail, str(draft_id)),
             )
             conn.commit()
     except Exception:  # noqa: BLE001
