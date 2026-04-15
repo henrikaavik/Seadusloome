@@ -1,5 +1,7 @@
 """Smoke tests for feedback components: Toast, Spinner, Skeleton, EmptyState."""
 
+from types import SimpleNamespace
+
 import pytest
 from fasthtml.common import Button, to_xml
 
@@ -9,6 +11,9 @@ from app.ui.feedback import (
     Skeleton,
     Toast,
     ToastContainer,
+    pop_flashes,
+    push_flash,
+    render_flash_toasts,
 )
 
 # ---- Toast ----------------------------------------------------------------
@@ -100,3 +105,75 @@ def test_empty_state_with_action():
     html = to_xml(EmptyState("Pole eelnõusid", action=action))
     assert "Lisa uus" in html
     assert "empty-state-action" in html
+
+
+# ---- Flash messages (#598) ------------------------------------------------
+
+
+def _fake_request_with_session() -> SimpleNamespace:
+    """Build a stand-in Request object exposing a ``.session`` dict.
+
+    ``push_flash`` / ``pop_flashes`` only touch ``request.session``, so
+    any object with that attribute is sufficient for unit testing.
+    """
+    return SimpleNamespace(session={})
+
+
+def test_push_flash_queues_entry():
+    req = _fake_request_with_session()
+    push_flash(req, "Salvestatud.", kind="success")
+    assert req.session["flash"] == [{"kind": "success", "msg": "Salvestatud."}]
+
+
+def test_push_flash_accumulates_in_order():
+    req = _fake_request_with_session()
+    push_flash(req, "Esimene.", kind="success")
+    push_flash(req, "Teine.", kind="danger")
+    assert [e["msg"] for e in req.session["flash"]] == ["Esimene.", "Teine."]
+
+
+def test_pop_flashes_drains_session():
+    req = _fake_request_with_session()
+    push_flash(req, "Teade.", kind="info")
+    out = pop_flashes(req)
+    assert out == [{"kind": "info", "msg": "Teade."}]
+    # Session key is cleared so a second call returns nothing.
+    assert pop_flashes(req) == []
+    assert "flash" not in req.session
+
+
+def test_pop_flashes_ignores_malformed_entries():
+    req = _fake_request_with_session()
+    req.session["flash"] = [
+        {"kind": "success", "msg": "ok"},
+        "bogus-string",
+        {"msg": ""},  # empty message dropped
+        {"kind": "unknown", "msg": "coerced to info"},
+    ]
+    out = pop_flashes(req)
+    assert len(out) == 2
+    assert out[0]["msg"] == "ok"
+    assert out[1]["kind"] == "info"
+
+
+def test_push_flash_no_session_is_noop():
+    # Request-like object without a session attribute — must not raise.
+    class NoSession:
+        @property
+        def session(self):
+            raise AssertionError("no session middleware")
+
+    push_flash(NoSession(), "ignored.", kind="info")  # type: ignore[arg-type]
+    assert pop_flashes(NoSession()) == []  # type: ignore[arg-type]
+
+
+def test_render_flash_toasts_produces_toast_components():
+    req = _fake_request_with_session()
+    push_flash(req, "Eelnõu kustutatud.", kind="success")
+    toasts = render_flash_toasts(req)
+    assert len(toasts) == 1
+    html = to_xml(toasts[0])
+    assert "Eelnõu kustutatud." in html
+    assert "toast-success" in html
+    # Consumed — subsequent render returns nothing.
+    assert render_flash_toasts(req) == []

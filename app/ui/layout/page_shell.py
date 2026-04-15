@@ -1,11 +1,40 @@
 """PageShell — standard page wrapper used by every route."""
 
 from fasthtml.common import *  # noqa: F403
+from starlette.requests import Request
 
 from app.auth.provider import UserDict
+from app.ui.feedback.flash import render_flash_toasts
 from app.ui.layout.container import Container, ContainerSize
 from app.ui.layout.sidebar import Sidebar
 from app.ui.layout.top_bar import TopBar
+
+# Inline dismisser — reads ``data-duration`` off each toast that was
+# server-seeded into #toast-container and removes it after that many
+# milliseconds. Runs once per page load; HTMX swaps into the container
+# are re-scanned by re-invoking the function on ``htmx:afterSettle``.
+_TOAST_DISMISS_SCRIPT = """
+(function () {
+  function bind(container) {
+    if (!container) return;
+    container.querySelectorAll('.toast[data-duration]').forEach(function (toast) {
+      if (toast.dataset.bound === '1') return;
+      toast.dataset.bound = '1';
+      var d = parseInt(toast.getAttribute('data-duration'), 10);
+      if (!isNaN(d) && d > 0) {
+        setTimeout(function () { toast.remove(); }, d);
+      }
+    });
+  }
+  function init() { bind(document.getElementById('toast-container')); }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+  document.body && document.body.addEventListener('htmx:afterSettle', init);
+})();
+"""
 
 
 def _head_tags(title: str):  # noqa: ANN202
@@ -29,12 +58,16 @@ def PageShell(  # noqa: ANN201
     active_nav: str | None = None,
     unread_count: int = 0,
     container_size: ContainerSize = "lg",
+    request: Request | None = None,
 ):
     """Wrap page content with topbar, sidebar, and main container.
 
     Every application page should return PageShell(...) to ensure consistent
-    layout and accessibility landmarks.
+    layout and accessibility landmarks. Pass ``request=req`` so any pending
+    session-flashed toast messages are drained and rendered into
+    ``#toast-container`` (see :mod:`app.ui.feedback.flash`).
     """
+    flash_toasts = render_flash_toasts(request) if request is not None else []
     return (
         *_head_tags(title),
         A(  # noqa: F405
@@ -53,7 +86,14 @@ def PageShell(  # noqa: ANN201
                 ),
                 cls="app-body",
             ),
-            Div(id="toast-container", cls="toast-container"),  # noqa: F405
+            Div(  # noqa: F405
+                *flash_toasts,
+                id="toast-container",
+                cls="toast-container",
+                aria_live="polite",
+                aria_atomic="false",
+            ),
+            Script(_TOAST_DISMISS_SCRIPT),  # noqa: F405
             cls="app-shell",
         ),
     )
