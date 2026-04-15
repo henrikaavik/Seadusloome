@@ -58,7 +58,7 @@ from app.ui.primitives.annotation_button import AnnotationButton
 from app.ui.primitives.badge import Badge, BadgeVariant
 from app.ui.primitives.button import Button
 from app.ui.surfaces.alert import Alert
-from app.ui.surfaces.card import Card, CardBody, CardFooter, CardHeader
+from app.ui.surfaces.card import Card, CardBody, CardHeader
 from app.ui.surfaces.info_box import InfoBox
 from app.ui.theme import get_theme_from_request
 from app.ui.time import format_tallinn
@@ -768,13 +768,12 @@ def draft_detail_page(req: Request, draft_id: str):
         ),
         Card(
             CardHeader(H3("\u00dcksikasjad", cls="card-title")),  # noqa: F405
+            # #603: the old CardFooter rendered ``draft.graph_uri`` — an
+            # internal Jena named-graph URI — to the user. That leaked
+            # implementation detail with no operational value; audit
+            # logs and admin tools still have the URI, only the
+            # user-facing detail page omits it.
             CardBody(*detail_body),
-            CardFooter(
-                P(
-                    f"Graafi URI: {draft.graph_uri}",
-                    cls="muted-text",
-                ),
-            ),
         ),
         title=draft.title,
         user=auth,

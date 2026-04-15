@@ -750,6 +750,33 @@ class TestDeleteDraftHandler:
 
 
 # ---------------------------------------------------------------------------
+# #603: graph_uri no longer leaked to end users
+# ---------------------------------------------------------------------------
+
+
+class TestGraphUriHidden:
+    @patch("app.docs.routes.log_draft_view")
+    @patch("app.docs.routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_detail_page_does_not_render_graph_uri(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_log: MagicMock,
+    ):
+        mock_get_provider.return_value = _stub_provider()
+        draft = _make_draft()
+        mock_fetch.return_value = draft
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{draft.id}")
+        assert resp.status_code == 200
+        assert "Graafi URI" not in resp.text
+        # And the actual URI string is not present either.
+        assert draft.graph_uri not in resp.text
+
+
+# ---------------------------------------------------------------------------
 # #604: aria-live on the polled status wrapper
 # ---------------------------------------------------------------------------
 
