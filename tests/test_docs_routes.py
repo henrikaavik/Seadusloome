@@ -750,6 +750,135 @@ class TestDeleteDraftHandler:
 
 
 # ---------------------------------------------------------------------------
+# #598: flash-message round-trip through session cookie on redirect
+# ---------------------------------------------------------------------------
+
+
+class TestFlashMessages:
+    @patch("app.docs.routes.fetch_drafts_for_org")
+    @patch("app.docs.routes.count_drafts_for_org_conn")
+    @patch("app.docs.routes.delete_named_graph")
+    @patch("app.docs.routes.log_draft_delete")
+    @patch("app.docs.routes.delete_encrypted_file")
+    @patch("app.docs.routes.delete_draft")
+    @patch("app.docs.routes._connect")
+    @patch("app.docs.routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_delete_flash_toast_appears_on_listing(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_connect: MagicMock,
+        mock_delete: MagicMock,
+        mock_delete_file: MagicMock,
+        mock_log: MagicMock,
+        mock_delete_graph: MagicMock,
+        mock_count: MagicMock,
+        mock_list: MagicMock,
+    ):
+        """A successful delete queues a success toast for /drafts."""
+        mock_get_provider.return_value = _stub_provider()
+        draft = _make_draft()
+        mock_fetch.return_value = draft
+        mock_conn = MagicMock()
+        mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+        mock_delete.return_value = "/tmp/ciphertext.enc"
+        mock_count.return_value = 0
+        mock_list.return_value = []
+
+        client = _authed_client()
+        resp = client.post(f"/drafts/{draft.id}/delete")
+        assert resp.status_code == 303
+        assert any(c.name.startswith("session_") for c in client.cookies.jar), (
+            "flash message must set a session cookie"
+        )
+
+        listing = client.get("/drafts")
+        assert listing.status_code == 200
+        assert "Eelnõu kustutatud." in listing.text
+        assert 'id="toast-container"' in listing.text
+        assert "toast-success" in listing.text
+
+        # A second GET must NOT re-show the toast (it was drained).
+        listing2 = client.get("/drafts")
+        assert listing2.status_code == 200
+        assert "Eelnõu kustutatud." not in listing2.text
+
+    @patch("app.docs.routes.log_draft_upload")
+    @patch("app.docs.routes.handle_upload")
+    @patch("app.docs.routes.log_draft_view")
+    @patch("app.docs.routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_upload_success_flashes_toast_on_detail(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_log_view: MagicMock,
+        mock_handle: MagicMock,
+        mock_log_upload: MagicMock,
+    ):
+        mock_get_provider.return_value = _stub_provider()
+        draft = _make_draft()
+        mock_fetch.return_value = draft
+
+        async def _fake_handle(*_a: Any, **_kw: Any) -> Draft:
+            return draft
+
+        mock_handle.side_effect = _fake_handle
+
+        client = _authed_client()
+        resp = client.post(
+            "/drafts",
+            data={"title": "Test eelnõu"},
+            files={
+                "file": (
+                    "eelnou.docx",
+                    b"Test sisu",
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+            },
+        )
+        assert resp.status_code == 303
+        assert resp.headers["location"] == f"/drafts/{draft.id}"
+
+        detail = client.get(f"/drafts/{draft.id}")
+        assert detail.status_code == 200
+        assert "Eelnõu üles laaditud, analüüs algas." in detail.text
+        assert "toast-success" in detail.text
+
+    @patch("app.docs.routes.touch_draft_access")
+    @patch("app.docs.routes._connect")
+    @patch("app.docs.routes.log_draft_view")
+    @patch("app.docs.routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_keep_flashes_toast_on_detail(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_log_view: MagicMock,
+        mock_connect: MagicMock,
+        mock_touch: MagicMock,
+    ):
+        mock_get_provider.return_value = _stub_provider()
+        draft = _make_draft()
+        mock_fetch.return_value = draft
+        mock_conn = MagicMock()
+        mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        client = _authed_client()
+        resp = client.post(f"/drafts/{draft.id}/keep")
+        assert resp.status_code == 303
+        assert resp.headers["location"] == f"/drafts/{draft.id}"
+
+        detail = client.get(f"/drafts/{draft.id}")
+        assert detail.status_code == 200
+        assert "90-päevane loendur lähtestatud." in detail.text
+        assert "toast-success" in detail.text
+
+
+# ---------------------------------------------------------------------------
 # #603: graph_uri no longer leaked to end users
 # ---------------------------------------------------------------------------
 

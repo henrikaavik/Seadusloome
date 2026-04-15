@@ -53,6 +53,7 @@ from app.storage import delete_file as delete_encrypted_file
 from app.sync.jena_loader import delete_named_graph
 from app.ui.data.data_table import Column, DataTable
 from app.ui.data.pagination import Pagination
+from app.ui.feedback.flash import push_flash
 from app.ui.layout import PageShell
 from app.ui.primitives.annotation_button import AnnotationButton
 from app.ui.primitives.badge import Badge, BadgeVariant
@@ -295,6 +296,7 @@ def _not_found_page(req: Request):
         user=auth,
         theme=theme,
         active_nav="/drafts",
+        request=req,
     )
 
 
@@ -451,6 +453,7 @@ def drafts_list_page(req: Request):
         user=auth,
         theme=theme,
         active_nav="/drafts",
+        request=req,
     )
 
 
@@ -547,6 +550,7 @@ def new_draft_page(req: Request):
             user=auth,
             theme=theme,
             active_nav="/drafts",
+            request=req,
         )
 
     form, error_alert = _upload_form()
@@ -572,6 +576,7 @@ def new_draft_page(req: Request):
         user=auth,
         theme=theme,
         active_nav="/drafts",
+        request=req,
     )
 
 
@@ -608,7 +613,17 @@ async def create_draft_handler(req: Request):
                 content_type=draft.content_type,
                 file_size=draft.file_size,
             )
+            # #598: queue a success toast for the detail page.
+            push_flash(
+                req,
+                "Eelnõu üles laaditud, analüüs algas.",
+                kind="success",
+            )
             return RedirectResponse(url=f"/drafts/{draft.id}", status_code=303)
+
+    # #598: also surface the validation error as a danger toast so the
+    # banner + toast pattern is consistent with the happy-path redirect.
+    push_flash(req, error_message, kind="danger")
 
     form_el, _ = _upload_form(title_value=title_value, error=error_message)
     return PageShell(
@@ -620,6 +635,7 @@ async def create_draft_handler(req: Request):
         user=auth,
         theme=theme,
         active_nav="/drafts",
+        request=req,
     )
 
 
@@ -779,6 +795,7 @@ def draft_detail_page(req: Request, draft_id: str):
         user=auth,
         theme=theme,
         active_nav="/drafts",
+        request=req,
     )
 
 
@@ -919,6 +936,9 @@ def delete_draft_handler(req: Request, draft_id: str):
         filename=draft.filename,
     )
 
+    # #598: queue a success toast for the drafts listing page.
+    push_flash(req, "Eelnõu kustutatud.", kind="success")
+
     # #467: when the browser drives the delete via HTMX (the form has
     # ``hx_post`` + ``hx_target='body'`` + ``hx_swap='outerHTML'`` — see
     # ``_draft_detail_body``), returning a plain 303 here makes HTMX
@@ -984,6 +1004,9 @@ def keep_draft_handler(req: Request, draft_id: str):
         "draft.keep",
         {"draft_id": str(parsed)},
     )
+
+    # #598: queue a success toast for the detail page redirect target.
+    push_flash(req, "90-päevane loendur lähtestatud.", kind="success")
 
     # HTMX-driven submits get an HX-Redirect so the browser performs a
     # real navigation rather than swapping a partial into <body>.
