@@ -67,7 +67,7 @@ from app.chat.rate_limiter import (
     check_org_cost_budget,
 )
 from app.chat.system_prompt import build_system_prompt
-from app.chat.tools import execute_tool
+from app.chat.tools import CHAT_TOOLS, execute_tool
 from app.db import get_connection
 from app.llm.provider import LLMProvider, StreamEvent
 from app.ontology.sparql_client import SparqlClient
@@ -694,6 +694,7 @@ class ChatOrchestrator:
                     feature="chat",
                     user_id=user_id,
                     org_id=org_id,
+                    tools=CHAT_TOOLS,
                 )
                 # ``aclosing`` guarantees the upstream HTTP connection is
                 # released on every exit path (timeout, cancel, exception).
