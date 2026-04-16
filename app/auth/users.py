@@ -593,7 +593,13 @@ def org_user_create(req: Request, email: str, password: str, full_name: str, rol
 
 
 def org_user_role_form(req: Request, user_id: str):
-    """GET /org/users/{user_id}/role — change role form (org admin)."""
+    """GET /org/users/{user_id}/role — change role form (org admin).
+
+    Targets whose current role is outside ``ORG_ASSIGNABLE_ROLES``
+    (i.e. ``admin`` or ``org_admin``) are protected: the form is
+    replaced by an 'ei saa muuta' state without any action buttons,
+    so the UI never exposes a way to mutate their role (#634).
+    """
     auth = req.scope.get("auth", {})
     theme = get_theme_from_request(req)
     org_id = auth.get("org_id")
@@ -601,6 +607,36 @@ def org_user_role_form(req: Request, user_id: str):
     user = get_user(user_id)
     if user is None or user.get("org_id") != org_id:
         return _error_page(req, "Kasutajat ei leitud.", "/org/users", "/org/users")
+
+    # #634 — refuse to render the mutating form for protected targets.
+    if user["role"] not in ORG_ASSIGNABLE_ROLES:
+        return PageShell(
+            H1("Muuda rolli", cls="page-title"),
+            Card(
+                CardHeader(
+                    P(
+                        f"Kasutaja: {user['full_name']} ({user['email']})",
+                        cls="card-subtitle",
+                    )
+                ),
+                CardBody(
+                    Alert(
+                        "Selle kasutaja rolli ei saa muuta: "
+                        "administraatori ja organisatsiooni admin kasutajaid "
+                        "saab hallata ainult süsteemi administraator.",
+                        variant="warning",
+                    ),
+                    Div(
+                        A("Tagasi", href="/org/users", cls="btn btn-ghost btn-md"),
+                        cls="form-actions",
+                    ),
+                ),
+            ),
+            title="Muuda rolli",
+            user=auth or None,
+            theme=theme,
+            active_nav="/org/users",
+        )
 
     role_options = [(r, _ROLE_LABELS.get(r, r)) for r in ORG_ASSIGNABLE_ROLES]
 
@@ -634,13 +670,30 @@ def org_user_role_form(req: Request, user_id: str):
 
 
 def org_user_role_update(req: Request, user_id: str, role: str):
-    """POST /org/users/{user_id}/role — update user role (org admin)."""
+    """POST /org/users/{user_id}/role — update user role (org admin).
+
+    Refuses to mutate targets whose current role is outside
+    ``ORG_ASSIGNABLE_ROLES`` (#634). An org_admin must never be able
+    to demote another org_admin or the seeded system admin through
+    the org-scoped UI.
+    """
     auth = req.scope.get("auth", {})
     org_id = auth.get("org_id")
 
     user = get_user(user_id)
     if user is None or user.get("org_id") != org_id:
         return _error_page(req, "Kasutajat ei leitud.", "/org/users", "/org/users")
+
+    # #634 — block demoting admins / org_admins via the org UI.
+    if user["role"] not in ORG_ASSIGNABLE_ROLES:
+        return _error_page(
+            req,
+            "Selle kasutaja rolli ei saa muuta: "
+            "administraatori ja organisatsiooni admin kasutajaid "
+            "saab hallata ainult süsteemi administraator.",
+            "/org/users",
+            "/org/users",
+        )
 
     if role not in ORG_ASSIGNABLE_ROLES:
         return _error_page(
@@ -658,13 +711,40 @@ def org_user_role_update(req: Request, user_id: str, role: str):
 
 
 def org_user_deactivate(req: Request, user_id: str):
-    """POST /org/users/{user_id}/deactivate — deactivate user (org admin)."""
+    """POST /org/users/{user_id}/deactivate — deactivate user (org admin).
+
+    Blocks two escalation paths (#634):
+
+    1. An org_admin cannot deactivate another org_admin or the seeded
+       system admin (whose row also carries the org_id).
+    2. An org_admin cannot deactivate themselves.
+    """
     auth = req.scope.get("auth", {})
     org_id = auth.get("org_id")
+
+    # #634 — self-deactivation is never allowed.
+    if str(user_id) == str(auth.get("id")):
+        return _error_page(
+            req,
+            "Te ei saa ennast deaktiveerida.",
+            "/org/users",
+            "/org/users",
+        )
 
     user = get_user(user_id)
     if user is None or user.get("org_id") != org_id:
         return _error_page(req, "Kasutajat ei leitud.", "/org/users", "/org/users")
+
+    # #634 — protect admins / org_admins from the org UI.
+    if user["role"] not in ORG_ASSIGNABLE_ROLES:
+        return _error_page(
+            req,
+            "Seda kasutajat ei saa deaktiveerida: "
+            "administraatori ja organisatsiooni admin kasutajaid "
+            "saab hallata ainult süsteemi administraator.",
+            "/org/users",
+            "/org/users",
+        )
 
     success = deactivate_user(user_id)
     if not success:
