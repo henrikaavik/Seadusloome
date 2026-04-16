@@ -159,11 +159,13 @@ class TestJWTTokens:
 
 
 class TestGetCurrentUser:
-    """Test JWTAuthProvider.get_current_user without a database.
+    """Test JWTAuthProvider.get_current_user.
 
-    We instantiate the provider but only call get_current_user which is
-    purely stateless (JWT decode).  We pass a dummy DB URL since the
-    constructor requires one, but no connection is made.
+    Post-#635 ``get_current_user`` rehydrates the user from the DB to
+    enforce token-version revocation. The happy-path test therefore
+    mocks ``_connect`` to return a matching ``token_version`` /
+    ``is_active`` / ``role`` row. Failure-mode tests exercise the
+    early JWT-decode exits where no DB lookup happens.
     """
 
     def _provider(self):  # noqa: ANN202
@@ -172,6 +174,8 @@ class TestGetCurrentUser:
         return JWTAuthProvider(database_url="postgresql://fake:fake@localhost/fake")
 
     def test_valid_token_returns_user(self):
+        from unittest.mock import MagicMock, patch
+
         provider = self._provider()
         now = datetime.now(UTC)
         payload = {
@@ -180,11 +184,23 @@ class TestGetCurrentUser:
             "role": "drafter",
             "full_name": "A B",
             "org_id": None,
+            "tv": 0,
             "exp": now + timedelta(hours=1),
             "iat": now,
         }
         token = jwt.encode(payload, SECRET_KEY, algorithm=JWT_ALGORITHM)
-        user = provider.get_current_user(token)
+
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = (0, True, "drafter", None)
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=conn)
+        ctx.__exit__ = MagicMock(return_value=False)
+
+        with patch(
+            "app.auth.jwt_provider.JWTAuthProvider._connect",
+            return_value=ctx,
+        ):
+            user = provider.get_current_user(token)
 
         assert user is not None
         assert user["id"] == "uid"
