@@ -32,7 +32,7 @@ from starlette.responses import HTMLResponse, RedirectResponse, Response
 from app.auth.audit import log_action
 from app.auth.helpers import require_auth as _require_auth
 from app.auth.policy import can_delete_draft, can_edit_draft, can_view_draft
-from app.auth.users import get_user, list_users
+from app.auth.users import list_users
 from app.db import get_connection as _connect
 from app.docs.audit import (
     log_draft_delete,
@@ -1757,14 +1757,20 @@ def _link_vtk_modal(
     ]
 
 
-def _vtk_children_card(vtk: Draft, *, children: list[Draft]) -> Any:
+def _vtk_children_card(
+    vtk: Draft,
+    *,
+    children: list[Draft],
+    uploader_index: dict[str, dict[str, Any]] | None = None,
+) -> Any:
     """#643: render the "Sellest VTKst tulenevad eelnõud" card on VTK detail.
 
     Lists eelnõud whose ``parent_vtk_id`` equals this VTK, newest-first.
     Each row links to the child eelnõu's detail page and shows status
-    badge, uploader name (best-effort lookup), and upload date. Empty
-    state surfaces the EmptyState primitive so the card matches the
-    rest of the design system.
+    badge, uploader name (resolved from the bulk ``uploader_index``
+    dict so we don't N+1 a per-child user lookup), and upload date.
+    Empty state surfaces the EmptyState primitive so the card matches
+    the rest of the design system.
     """
     if not children:
         body: Any = EmptyState(
@@ -1776,9 +1782,10 @@ def _vtk_children_card(vtk: Draft, *, children: list[Draft]) -> Any:
             icon="📄",
         )
     else:
+        index = uploader_index or {}
         rows: list[Any] = []
         for child in children:
-            uploader = get_user(str(child.user_id)) if child.user_id else None
+            uploader = index.get(str(child.user_id)) if child.user_id else None
             uploader_label = (
                 str(uploader.get("full_name") or uploader.get("email") or "—") if uploader else "—"
             )
@@ -2008,19 +2015,18 @@ def draft_detail_page(req: Request, draft_id: str):
     if can_edit_draft(auth, draft) and draft.doc_type == "eelnou":
         org_vtks = list_vtks_for_org(draft.org_id)
 
-    # #643: VTK detail surfaces a "Sellest VTKst tulenevad eelnõud" card.
-    # The query is org-scoped indirectly through parent_vtk_id (VTK already
-    # in the caller's org), but we still defensively filter on org_id to
-    # rule out cross-org leakage if an eelnõu in another org somehow
-    # references this VTK (shouldn't happen — A2 validates same-org on
-    # link — but defence in depth costs us nothing).
+    # #643: VTK detail surfaces a "Sellest VTKst tulenevad eelnõud"
+    # card. Org-scoping is enforced inside `list_eelnous_for_vtk` at
+    # the SQL layer — no post-filter needed.
     vtk_children: list[Draft] = []
+    uploader_index: dict[str, dict[str, Any]] = {}
     if draft.doc_type == "vtk":
-        vtk_children = [
-            child
-            for child in list_eelnous_for_vtk(draft.id)
-            if str(child.org_id) == str(draft.org_id)
-        ]
+        vtk_children = list_eelnous_for_vtk(draft.id, org_id=draft.org_id)
+        # Bulk-resolve uploader names for the children card so we
+        # don't fan out N+1 `get_user` calls. One org-scoped lookup
+        # gives us every uploader we could possibly need to render.
+        if vtk_children:
+            uploader_index = {str(u["id"]): u for u in list_users(org_id=str(draft.org_id))}
 
     detail_body = _draft_detail_body(
         draft,
@@ -2062,7 +2068,9 @@ def draft_detail_page(req: Request, draft_id: str):
         # #643: VTK-only card listing follow-on eelnõud. Skipped on
         # eelnõu detail since VTKs are the only doc_type that can have
         # children in our model.
-        _vtk_children_card(draft, children=vtk_children) if draft.doc_type == "vtk" else "",
+        _vtk_children_card(draft, children=vtk_children, uploader_index=uploader_index)
+        if draft.doc_type == "vtk"
+        else "",
         title=draft.title,
         user=auth,
         theme=theme,

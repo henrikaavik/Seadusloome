@@ -1912,7 +1912,7 @@ class TestVtkDetailChildrenCard:
         assert "<dt>Seotud VTK</dt>" not in resp.text
         assert "Seo VTKga" not in resp.text
 
-    @patch("app.docs.routes.get_user")
+    @patch("app.docs.routes.list_users")
     @patch("app.docs.routes.list_eelnous_for_vtk")
     @patch("app.docs.routes.list_vtks_for_org")
     @patch("app.docs.routes.fetch_draft")
@@ -1923,10 +1923,14 @@ class TestVtkDetailChildrenCard:
         mock_fetch: MagicMock,
         mock_list_vtks: MagicMock,
         mock_list_children: MagicMock,
-        mock_get_user: MagicMock,
+        mock_list_users: MagicMock,
     ):
         """Children render in the order returned by the helper, with
-        title link, status badge, uploader name, and upload date."""
+        title link, status badge, uploader name, and upload date.
+
+        Uploader resolution must be a single bulk lookup, NOT N+1
+        per-child get_user calls.
+        """
         mock_get_provider.return_value = _stub_provider()
         mock_fetch.return_value = _make_vtk(title="My VTK", status="ready")
         mock_list_vtks.return_value = []
@@ -1942,7 +1946,11 @@ class TestVtkDetailChildrenCard:
             status="parsing",
         )
         mock_list_children.return_value = [newer, older]
-        mock_get_user.return_value = {"full_name": "Jaan Tamm", "email": "jaan@example.ee"}
+        # Bulk uploader resolution — one call returns every user in the
+        # org. Both children share the same uploader id (_USER_ID).
+        mock_list_users.return_value = [
+            {"id": _USER_ID, "full_name": "Jaan Tamm", "email": "jaan@example.ee"}
+        ]
 
         client = _authed_client()
         resp = client.get(f"/drafts/{_VTK_ID}")
@@ -1957,6 +1965,14 @@ class TestVtkDetailChildrenCard:
         # Status badges for both children rendered.
         assert "draft-status-ok" in resp.text  # ready -> ok
         assert "draft-status-running" in resp.text  # parsing -> running
+        # No-N+1 invariant: list_users called exactly once, regardless
+        # of child count.
+        assert mock_list_users.call_count == 1
+        # And it was scoped to the VTK's org_id.
+        assert mock_list_users.call_args.kwargs["org_id"] == _ORG_ID
+        # list_eelnous_for_vtk now requires keyword org_id at the SQL
+        # layer — no post-filter in the route.
+        assert mock_list_children.call_args.kwargs["org_id"] == uuid.UUID(_ORG_ID)
 
     @patch("app.docs.routes.list_eelnous_for_vtk")
     @patch("app.docs.routes.list_vtks_for_org")
@@ -2008,38 +2024,33 @@ class TestVtkDetailChildrenCard:
 
 
 class TestListEelnousForVtkHelper:
-    """Sanity smoke for the new draft_model helper, exercised via routes."""
+    """Route-level wiring of the children helper."""
 
     @patch("app.docs.routes.list_eelnous_for_vtk")
     @patch("app.docs.routes.list_vtks_for_org")
     @patch("app.docs.routes.fetch_draft")
     @patch("app.auth.middleware._get_provider")
-    def test_cross_org_children_filtered_out(
+    def test_route_passes_org_id_to_helper(
         self,
         mock_get_provider: MagicMock,
         mock_fetch: MagicMock,
         mock_list_vtks: MagicMock,
         mock_list_children: MagicMock,
     ):
-        """Defence-in-depth: any child whose org_id differs from the VTK's
-        is silently filtered before render. (A2 already validates same-org
-        on link, but the detail page is the user-facing safety net.)"""
+        """The route must call ``list_eelnous_for_vtk(vtk_id, org_id=...)``
+        — primary defence is at the SQL layer, not in the route. Any
+        future caller of the helper that forgets ``org_id`` will fail
+        loudly (kw-only required) rather than silently leaking."""
         mock_get_provider.return_value = _stub_provider()
         vtk = _make_vtk(title="My VTK", status="ready")
         mock_fetch.return_value = vtk
         mock_list_vtks.return_value = []
-        same_org = _make_draft(title="Same-org eelnõu", status="ready")
-        cross_org = _make_draft(
-            draft_id=uuid.UUID("cccccccc-cccc-cccc-cccc-cccccccccccc"),
-            org_id="22222222-2222-2222-2222-222222222222",
-            title="Cross-org eelnõu",
-            status="ready",
-        )
-        mock_list_children.return_value = [same_org, cross_org]
+        mock_list_children.return_value = []
 
         client = _authed_client()
         resp = client.get(f"/drafts/{_VTK_ID}")
 
         assert resp.status_code == 200
-        assert "Same-org eelnõu" in resp.text
-        assert "Cross-org eelnõu" not in resp.text
+        # Helper called with the VTK's own org_id at the SQL boundary.
+        assert mock_list_children.call_args.args[0] == uuid.UUID(_VTK_ID)
+        assert mock_list_children.call_args.kwargs["org_id"] == uuid.UUID(_ORG_ID)
