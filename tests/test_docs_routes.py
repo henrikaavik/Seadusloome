@@ -1841,3 +1841,216 @@ class TestLinkVtkModalOnDetailPage:
         assert 'id="link-vtk-modal"' in resp.text
         assert "Maantee VTK" in resp.text
         assert 'hx-post="/drafts/44444444-4444-4444-4444-444444444444/link-vtk"' in resp.text
+
+
+# ---------------------------------------------------------------------------
+# #643: Tüüp column on the drafts list + VTK detail children card
+# ---------------------------------------------------------------------------
+
+
+class TestDocTypeColumn:
+    """Drafts list now renders a Tüüp badge as the leftmost column."""
+
+    @patch("app.docs.routes.list_users")
+    @patch("app.docs.routes.list_drafts_for_org_filtered")
+    @patch("app.auth.middleware._get_provider")
+    def test_doc_type_badge_per_row(
+        self,
+        mock_get_provider: MagicMock,
+        mock_list_filtered: MagicMock,
+        mock_list_users: MagicMock,
+    ):
+        """Mixed-type listing shows the Eelnõu badge AND the VTK badge."""
+        mock_get_provider.return_value = _stub_provider()
+        mock_list_users.return_value = []
+        eelnou = _make_draft(title="Eelnõu A", status="ready")
+        vtk = _make_vtk(title="VTK A")
+        mock_list_filtered.return_value = ([eelnou, vtk], 2)
+
+        client = _authed_client()
+        resp = client.get("/drafts")
+
+        assert resp.status_code == 200
+        # Header for the new column is present
+        assert "Tüüp" in resp.text
+        # Two badge cells, one per row (different variants)
+        assert "doc-type-eelnou" in resp.text
+        assert "doc-type-vtk" in resp.text
+        # And the labels themselves
+        assert ">Eelnõu<" in resp.text
+        assert ">VTK<" in resp.text
+
+
+class TestVtkDetailChildrenCard:
+    """VTK detail page surfaces its follow-on eelnõud."""
+
+    @patch("app.docs.routes.list_eelnous_for_vtk")
+    @patch("app.docs.routes.list_vtks_for_org")
+    @patch("app.docs.routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_vtk_detail_does_not_show_seotud_vtk_row(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_list_vtks: MagicMock,
+        mock_list_children: MagicMock,
+    ):
+        """VTKs cannot have parents — the metadata row must be omitted."""
+        mock_get_provider.return_value = _stub_provider()
+        mock_fetch.return_value = _make_vtk(title="My VTK", status="ready")
+        mock_list_vtks.return_value = []
+        mock_list_children.return_value = []
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{_VTK_ID}")
+
+        assert resp.status_code == 200
+        # The "Seotud VTK" metadata row is the eelnõu-only widget; for
+        # a VTK we render neither the <dt> label nor the picker trigger.
+        # (The literal phrase "Seotud VTK" can still appear in the
+        # children-card empty-state helper text — that's fine.)
+        assert "<dt>Seotud VTK</dt>" not in resp.text
+        assert "Seo VTKga" not in resp.text
+
+    @patch("app.docs.routes.list_users")
+    @patch("app.docs.routes.list_eelnous_for_vtk")
+    @patch("app.docs.routes.list_vtks_for_org")
+    @patch("app.docs.routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_vtk_detail_lists_children_newest_first(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_list_vtks: MagicMock,
+        mock_list_children: MagicMock,
+        mock_list_users: MagicMock,
+    ):
+        """Children render in the order returned by the helper, with
+        title link, status badge, uploader name, and upload date.
+
+        Uploader resolution must be a single bulk lookup, NOT N+1
+        per-child get_user calls.
+        """
+        mock_get_provider.return_value = _stub_provider()
+        mock_fetch.return_value = _make_vtk(title="My VTK", status="ready")
+        mock_list_vtks.return_value = []
+        # Helper already orders newest-first; route must preserve order.
+        newer = _make_draft(
+            draft_id=uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+            title="Newer eelnõu",
+            status="ready",
+        )
+        older = _make_draft(
+            draft_id=uuid.UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+            title="Older eelnõu",
+            status="parsing",
+        )
+        mock_list_children.return_value = [newer, older]
+        # Bulk uploader resolution — one call returns every user in the
+        # org. Both children share the same uploader id (_USER_ID).
+        mock_list_users.return_value = [
+            {"id": _USER_ID, "full_name": "Jaan Tamm", "email": "jaan@example.ee"}
+        ]
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{_VTK_ID}")
+
+        assert resp.status_code == 200
+        assert "Sellest VTKst tulenevad eelnõud" in resp.text
+        assert "Newer eelnõu" in resp.text
+        assert "Older eelnõu" in resp.text
+        assert "Jaan Tamm" in resp.text
+        # Newest first — find both substrings, assert ordering.
+        assert resp.text.index("Newer eelnõu") < resp.text.index("Older eelnõu")
+        # Status badges for both children rendered.
+        assert "draft-status-ok" in resp.text  # ready -> ok
+        assert "draft-status-running" in resp.text  # parsing -> running
+        # No-N+1 invariant: list_users called exactly once, regardless
+        # of child count.
+        assert mock_list_users.call_count == 1
+        # And it was scoped to the VTK's org_id.
+        assert mock_list_users.call_args.kwargs["org_id"] == _ORG_ID
+        # list_eelnous_for_vtk now requires keyword org_id at the SQL
+        # layer — no post-filter in the route.
+        assert mock_list_children.call_args.kwargs["org_id"] == uuid.UUID(_ORG_ID)
+
+    @patch("app.docs.routes.list_eelnous_for_vtk")
+    @patch("app.docs.routes.list_vtks_for_org")
+    @patch("app.docs.routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_vtk_detail_with_no_children_shows_empty_state(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_list_vtks: MagicMock,
+        mock_list_children: MagicMock,
+    ):
+        """Empty-children state renders the EmptyState primitive copy."""
+        mock_get_provider.return_value = _stub_provider()
+        mock_fetch.return_value = _make_vtk(title="My VTK", status="ready")
+        mock_list_vtks.return_value = []
+        mock_list_children.return_value = []
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{_VTK_ID}")
+
+        assert resp.status_code == 200
+        assert "Sellest VTKst tulenevad eelnõud" in resp.text
+        assert "VTKga pole veel eelnõusid seotud." in resp.text
+
+    @patch("app.docs.routes.list_eelnous_for_vtk")
+    @patch("app.docs.routes.list_vtks_for_org")
+    @patch("app.docs.routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_eelnou_detail_does_not_render_children_card(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_list_vtks: MagicMock,
+        mock_list_children: MagicMock,
+    ):
+        """Children card is VTK-only — eelnõu detail must not render it."""
+        mock_get_provider.return_value = _stub_provider()
+        mock_fetch.return_value = _make_draft(status="ready")
+        mock_list_vtks.return_value = []
+
+        client = _authed_client()
+        resp = client.get("/drafts/44444444-4444-4444-4444-444444444444")
+
+        assert resp.status_code == 200
+        assert "Sellest VTKst tulenevad eelnõud" not in resp.text
+        # And we never even called list_eelnous_for_vtk on the eelnõu path.
+        mock_list_children.assert_not_called()
+
+
+class TestListEelnousForVtkHelper:
+    """Route-level wiring of the children helper."""
+
+    @patch("app.docs.routes.list_eelnous_for_vtk")
+    @patch("app.docs.routes.list_vtks_for_org")
+    @patch("app.docs.routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_route_passes_org_id_to_helper(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_list_vtks: MagicMock,
+        mock_list_children: MagicMock,
+    ):
+        """The route must call ``list_eelnous_for_vtk(vtk_id, org_id=...)``
+        — primary defence is at the SQL layer, not in the route. Any
+        future caller of the helper that forgets ``org_id`` will fail
+        loudly (kw-only required) rather than silently leaking."""
+        mock_get_provider.return_value = _stub_provider()
+        vtk = _make_vtk(title="My VTK", status="ready")
+        mock_fetch.return_value = vtk
+        mock_list_vtks.return_value = []
+        mock_list_children.return_value = []
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{_VTK_ID}")
+
+        assert resp.status_code == 200
+        # Helper called with the VTK's own org_id at the SQL boundary.
+        assert mock_list_children.call_args.args[0] == uuid.UUID(_VTK_ID)
+        assert mock_list_children.call_args.kwargs["org_id"] == uuid.UUID(_ORG_ID)

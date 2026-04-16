@@ -32,6 +32,7 @@ from app.docs.draft_model import (
     fetch_draft,
     get_draft,
     list_drafts_for_org,
+    list_eelnous_for_vtk,
     list_vtks_for_org,
     update_draft_parent_vtk,
 )
@@ -877,3 +878,67 @@ class TestListDraftsForOrgFiltered:
         assert drafts == []
         assert total == 0
         mock_connect.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# #643: list_eelnous_for_vtk — children of a VTK on its detail page
+# ---------------------------------------------------------------------------
+
+
+class TestListEelnousForVtk:
+    @patch("app.docs.draft_model._connect")
+    def test_filters_on_parent_vtk_id_and_org_id_and_doc_type(self, mock_connect):
+        """SQL enforces parent + org + doc_type at the data-access layer."""
+        conn = MagicMock()
+        conn.execute.return_value.fetchall.return_value = [
+            _make_raw_row(
+                draft_id=uuid.uuid4(),
+                doc_type="eelnou",
+                parent_vtk_id=_VTK_ID,
+                title="Child A",
+            ),
+        ]
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        children = list_eelnous_for_vtk(_VTK_ID, org_id=_ORG_ID)
+
+        assert len(children) == 1
+        assert children[0].doc_type == "eelnou"
+        assert children[0].parent_vtk_id == _VTK_ID
+        sql: str = conn.execute.call_args.args[0]
+        params: tuple = conn.execute.call_args.args[1]
+        assert "parent_vtk_id = %s" in sql
+        assert "org_id = %s" in sql
+        assert "doc_type = 'eelnou'" in sql
+        assert "order by created_at desc" in sql.lower()
+        # SQL params: (vtk_id, org_id) — both stringified UUIDs.
+        assert params == (str(_VTK_ID), str(_ORG_ID))
+
+    def test_org_id_is_keyword_only(self):
+        """org_id is required and keyword-only — callers cannot forget it.
+
+        This is the contract guarantee that lets every other reader rely
+        on `list_eelnous_for_vtk` for org-scoped reads without their own
+        post-filter.
+        """
+        with pytest.raises(TypeError):
+            list_eelnous_for_vtk(_VTK_ID)  # type: ignore[call-arg]
+
+    @patch("app.docs.draft_model._connect")
+    def test_db_error_returns_empty_list(self, mock_connect):
+        """A DB outage must not crash the VTK detail page."""
+        mock_connect.side_effect = RuntimeError("db unavailable")
+
+        children = list_eelnous_for_vtk(_VTK_ID, org_id=_ORG_ID)
+
+        assert children == []
+
+    @patch("app.docs.draft_model._connect")
+    def test_no_children_returns_empty_list(self, mock_connect):
+        conn = MagicMock()
+        conn.execute.return_value.fetchall.return_value = []
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        assert list_eelnous_for_vtk(_VTK_ID, org_id=_ORG_ID) == []

@@ -596,6 +596,38 @@ def list_vtks_for_org(
     return [_row_to_draft(row) for row in rows]
 
 
+def list_eelnous_for_vtk(vtk_id: uuid.UUID | str, *, org_id: uuid.UUID | str) -> list[Draft]:
+    """Return eelnõud whose ``parent_vtk_id`` is *vtk_id* (#643).
+
+    Newest-first so the most recent follow-on draft surfaces at the top
+    of the "Sellest VTKst tulenevad eelnõud" card on the VTK detail
+    page. Manages its own connection. On DB error returns ``[]``.
+
+    ``org_id`` is required and enforced at the SQL layer — matches the
+    org-scoping convention of every other reader in this module
+    (``list_vtks_for_org``, ``fetch_drafts_for_org``, etc.). Callers
+    pass the VTK's own org so cross-org leaks are impossible by design,
+    not by post-filter.
+    """
+    try:
+        with _connect() as conn:
+            rows = conn.execute(
+                f"""
+                select {_DRAFT_COLUMNS}
+                from drafts
+                where parent_vtk_id = %s
+                  and org_id = %s
+                  and doc_type = 'eelnou'
+                order by created_at desc
+                """,
+                (str(vtk_id), str(org_id)),
+            ).fetchall()
+    except Exception:
+        logger.exception("Failed to list eelnõud for VTK=%s", vtk_id)
+        return []
+    return [_row_to_draft(row) for row in rows]
+
+
 # ---------------------------------------------------------------------------
 # Convenience wrappers that manage their own connection
 # ---------------------------------------------------------------------------
