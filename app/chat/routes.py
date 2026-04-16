@@ -392,8 +392,31 @@ def chat_list_page(req: Request):
     header_children.append(
         InfoBox(
             P(
-                "AI n\u00f5ustaja vastab k\u00fcsimustele Eesti \u00f5iguse kohta. "
-                "Vestlused on privaatsed ja seotud teie organisatsiooniga."
+                "AI \u00f5igusn\u00f5ustaja Claude vastab teie k\u00fcsimustele "
+                "Eesti \u00f5iguse kohta. Vastused tuginevad ontoloogiale "
+                "(50\u202f000+ kehtivat s\u00e4tet, 615 seadust, "
+                "22\u202f832 eeln\u00f5ud, 12\u202f137 Riigikohtu lahendit, "
+                "33\u202f242 EL \u00f5igusakti, 22\u202f290 EL kohtulahendit) "
+                "ning RAG-s\u00fcsteemile, mis leiab semantiliselt sarnaseid "
+                "\u00f5igusakti l\u00f5ike."
+            ),
+            P(
+                "Saate k\u00fcsida konkreetsete s\u00e4tete t\u00e4henduse "
+                "kohta, v\u00f5rrelda eeln\u00f5ud kehtiva regulatsiooniga, "
+                "otsida pretsedente, paluda EL direktiivide "
+                "transponeerimisanal\u00fc\u00fcsi v\u00f5i arutada "
+                "eeln\u00f5u m\u00f5ju. AI kasutab vajadusel t\u00f6\u00f6riistu "
+                "(ontoloogiap\u00e4ringud, s\u00e4tete otsing, m\u00f5juanal\u00fc\u00fcs, "
+                "s\u00e4tte detailid) ja viitab vastustes alusallikatele, et "
+                "saaksite v\u00e4ited kontrollida."
+            ),
+            P(
+                "Vestlused on privaatsed ja seotud teie organisatsiooniga. "
+                "Saate vestluse siduda konkreetse eeln\u00f5uga "
+                "(kontekst paneb AI vastused selle dokumendi suhtes), "
+                "kinnitada olulised vestlused t\u00e4hekesega, otsida "
+                "vanadest vestlustest ja vajadusel arhiveerida l\u00f5petatud "
+                "vestlused. Vajutage \u201eUus vestlus\u201c, et alustada."
             ),
             variant="info",
             dismissible=True,
