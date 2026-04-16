@@ -333,13 +333,23 @@ def register_chat_ws_routes(app: Any) -> None:
 
                 if user is None and refresh_token:
                     # #637 — silent refresh for long-lived chat sessions.
-                    # Import here so the chat module has no side-effect-y
-                    # dependency on the HTTP middleware at import time.
-                    from app.auth.middleware import try_refresh_access_token
+                    # The WS upgrade response cannot set replacement
+                    # cookies, so we use the verify-only helper here
+                    # (see #637, review). Consuming the refresh token
+                    # without being able to persist the rotated
+                    # cookies would leave the browser with a dead
+                    # refresh_token and break the next HTTP request's
+                    # silent-refresh. The refresh token still rotates
+                    # atomically on the next HTTP call through
+                    # ``auth_before``.
+                    #
+                    # Import here so the chat module has no
+                    # side-effect-y dependency on the HTTP middleware
+                    # at import time.
+                    from app.auth.middleware import verify_refresh_token_user
 
-                    rotated = try_refresh_access_token(refresh_token, provider=provider)
-                    if rotated is not None:
-                        _new_access, _new_refresh, refreshed_user = rotated
+                    refreshed_user = verify_refresh_token_user(refresh_token, provider=provider)
+                    if refreshed_user is not None:
                         user = refreshed_user
 
                 if user is not None:
