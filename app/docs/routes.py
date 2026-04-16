@@ -982,6 +982,36 @@ def drafts_list_page(req: Request):
 
     header_children: list = [H1("Eelnõud", cls="page-title")]  # noqa: F405
     header_children.append(
+        InfoBox(
+            P(
+                "See on teie organisatsiooni eelnõude töölaud. Siin saate "
+                "üles laadida uusi eelnõu kavandeid (.docx või .pdf) ja "
+                "väljatöötamiskavatsusi (VTK), jälgida nende töötlust "
+                "(parsimine → entiteetide ekstraktimine → mõjuanalüüs) "
+                "ning vaadata ja eksportida valmis mõjuaruandeid."
+            ),
+            P(
+                "Iga üleslaaditud eelnõu kohta süsteem tuvastab "
+                "automaatselt viited (õigusaktidele, sätetele, EL "
+                "direktiividele, Riigikohtu lahenditele), võrdleb seda "
+                "kehtiva õiguskorraga, leiab võimalikud konfliktid ja "
+                "katmata regulatsioonialad ning koostab .docx "
+                "mõjuaruande. Saate nimekirja filtreerida tüübi, staatuse, "
+                "üleslaadija ja kuupäeva järgi ning otsida pealkirjast, "
+                "failinimest või eelnõus mainitud viidete tekstist."
+            ),
+            P(
+                "Vajutage „Laadi üles uus eelnõu“, et alustada. "
+                "Maksimaalne failisuurus on 50 MB. Eelnõud säilivad kuni "
+                "nende kustutamiseni; tundlikud failid on krüpteeritud "
+                "puhkeolekus ja nähtavad ainult teie organisatsiooni "
+                "liikmetele."
+            ),
+            variant="info",
+            dismissible=True,
+        )
+    )
+    header_children.append(
         Div(
             A(
                 "Laadi üles uus eelnõu",
