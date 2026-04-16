@@ -20,6 +20,38 @@ from app.notifications.notify import notify
 logger = logging.getLogger(__name__)
 
 
+def _annotation_target_link(annotation: Any) -> str:
+    """Return a real GET page for an annotation target.
+
+    Notifications used to link to ``/annotations/{id}`` but that route
+    does not exist — the only routes under ``/api/annotations`` are
+    POST/DELETE endpoints. Each annotation carries a ``target_type``
+    and ``target_id`` pointing at the resource it's attached to, so the
+    notification link should navigate to the target's detail page
+    (where the user can see the annotation in context).
+
+    Falls back to the notification inbox (``/notifications``) when the
+    target type is unknown or fields are missing, which always renders
+    a 200 GET page.
+    """
+    target_type = getattr(annotation, "target_type", None)
+    target_id = getattr(annotation, "target_id", None)
+    if not target_type or not target_id:
+        return "/notifications"
+
+    # Known target types map to existing GET pages. If a future target
+    # type is added without a matching GET route, we still return a
+    # safe fallback rather than a dead link.
+    if target_type == "draft":
+        return f"/drafts/{target_id}"
+    if target_type == "conversation":
+        return f"/chat/{target_id}"
+    # Provisions and entities don't yet have a dedicated standalone
+    # GET detail page; point the user at the inbox as the safest
+    # existing 200-GET destination. (Follow-up: route for those.)
+    return "/notifications"
+
+
 def notify_annotation_reply(annotation: Any, reply: Any) -> None:
     """Notify the annotation author when someone replies to their annotation.
 
@@ -37,11 +69,13 @@ def notify_annotation_reply(annotation: Any, reply: Any) -> None:
             type="annotation_reply",
             title="Uus vastus teie margistusele",
             body=reply.content[:200] if reply.content else None,
-            link=f"/annotations/{annotation.id}",
+            link=_annotation_target_link(annotation),
             metadata={
                 "annotation_id": str(annotation.id),
                 "reply_id": str(reply.id),
                 "reply_user_id": str(reply.user_id),
+                "target_type": getattr(annotation, "target_type", None),
+                "target_id": getattr(annotation, "target_id", None),
             },
         )
     except Exception:
@@ -127,7 +161,9 @@ def notify_sync_failed(error_message: str) -> None:
                 type="sync_failed",
                 title="Ontoloogia sunkroonimine ebaonnestus",
                 body=error_message[:300] if error_message else None,
-                link="/admin/sync",
+                # /admin/sync is POST-only; anchor on the sync card on
+                # the admin dashboard, which is a real GET page.
+                link="/admin#sync-card",
                 metadata={"error": error_message[:500] if error_message else None},
             )
     except Exception:

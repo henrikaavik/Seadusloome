@@ -19,6 +19,7 @@ from starlette.responses import RedirectResponse, Response
 
 from app.notifications.models import Notification
 from app.notifications.routes import (
+    NotificationItem,
     api_notifications_partial,
     api_unread_count,
     mark_all_read_handler,
@@ -170,6 +171,151 @@ class TestMarkSingleRead:
         result = mark_single_read(req, str(_NOTIF_ID))
 
         assert isinstance(result, RedirectResponse)
+
+    @patch("app.notifications.routes._require_auth")
+    @patch("app.notifications.routes._connect")
+    def test_returns_hx_redirect_when_redirect_query_param_present(self, mock_connect, mock_auth):
+        """Bug 1: clicking an unread linked notification must navigate.
+
+        The `<a href>` click is swallowed by HTMX's POST and the native
+        navigation is suppressed. The handler must emit ``HX-Redirect``
+        so the browser navigates after the mark-read POST.
+        """
+        mock_auth.return_value = _AUTH
+        conn = MagicMock()
+        mock_connect.return_value = _ConnectCM(conn)
+
+        with patch("app.notifications.routes.mark_read"):
+            req = _make_request(
+                path=f"/notifications/{_NOTIF_ID}/read",
+                method="POST",
+                query_string=b"redirect=/drafts/abc",
+            )
+            result = mark_single_read(req, str(_NOTIF_ID))
+
+        assert isinstance(result, Response)
+        assert result.headers.get("HX-Redirect") == "/drafts/abc"
+
+    @patch("app.notifications.routes._require_auth")
+    @patch("app.notifications.routes._connect")
+    def test_rejects_external_redirect_target(self, mock_connect, mock_auth):
+        """The redirect target must stay same-origin."""
+        mock_auth.return_value = _AUTH
+        conn = MagicMock()
+        mock_connect.return_value = _ConnectCM(conn)
+
+        fresh_notif = _make_notification(read=True)
+        with (
+            patch("app.notifications.routes.mark_read"),
+            patch(
+                "app.notifications.routes.get_notification",
+                return_value=fresh_notif,
+            ),
+        ):
+            req = _make_request(
+                path=f"/notifications/{_NOTIF_ID}/read",
+                method="POST",
+                query_string=b"redirect=https%3A%2F%2Fevil.example%2Fpwn",
+            )
+            result = mark_single_read(req, str(_NOTIF_ID))
+
+        # Must NOT forward an off-site redirect. Either the result is
+        # not a Response (it's the re-rendered item) or its HX-Redirect
+        # header is absent.
+        if isinstance(result, Response):
+            assert result.headers.get("HX-Redirect") is None
+        else:
+            html = to_xml(result)
+            assert "evil.example" not in html
+
+    @patch("app.notifications.routes._require_auth")
+    @patch("app.notifications.routes._connect")
+    def test_returns_rendered_read_state_item_when_no_redirect(self, mock_connect, mock_auth):
+        """Bug 2: marking a non-link notification must return a re-rendered
+        read-state notification item — not a bare Span that collapses the
+        HTMX ``outerHTML`` swap target into a single dot."""
+        mock_auth.return_value = _AUTH
+        conn = MagicMock()
+        mock_connect.return_value = _ConnectCM(conn)
+
+        fresh_notif = _make_notification(read=True, link=None)
+
+        with (
+            patch("app.notifications.routes.mark_read"),
+            patch(
+                "app.notifications.routes.get_notification",
+                return_value=fresh_notif,
+            ),
+        ):
+            req = _make_request(
+                path=f"/notifications/{_NOTIF_ID}/read",
+                method="POST",
+            )
+            result = mark_single_read(req, str(_NOTIF_ID))
+
+        html = to_xml(result)
+        # Must render a full notification item wrapper, not just a dot.
+        assert f'id="notification-{_NOTIF_ID}"' in html
+        assert "notification-item--read" in html
+        # It must not be the bare standalone dot.
+        assert not html.strip().startswith("<span")
+
+
+# ---------------------------------------------------------------------------
+# Tests: NotificationItem rendering
+# ---------------------------------------------------------------------------
+
+
+class TestNotificationItemRendering:
+    def test_unread_linked_item_embeds_redirect_query_param(self):
+        """Bug 1 (rendering side): the hx_post URL must carry the
+        destination in a ``redirect`` query param so the handler can
+        issue ``HX-Redirect`` and navigate after marking read."""
+        notif = _make_notification(read=False, link="/drafts/abc")
+
+        html = to_xml(NotificationItem(notif))
+
+        # The hx-post endpoint must encode the target link in the URL.
+        assert "hx-post=" in html
+        assert "redirect=" in html
+        assert "%2Fdrafts%2Fabc" in html or "/drafts/abc" in html
+
+    def test_unread_non_link_wrapper_has_stable_id_and_button_targets_wrapper(self):
+        """Review fix (PR #645): the unread non-link row renders as a
+        wrapper containing the inner row + a "Loe" button. The button
+        must target the WRAPPER (not the inner row) with ``outerHTML``
+        so the mark-read response can replace the whole wrapper -
+        otherwise the stale "Loe" button would remain in the DOM after
+        mark-read completes."""
+        notif = _make_notification(read=False, link=None)
+
+        html = to_xml(NotificationItem(notif))
+
+        # Wrapper must carry a stable ID so the button can target it.
+        assert f'id="notification-wrapper-{_NOTIF_ID}"' in html
+        # "Loe" button must target the wrapper, not the inner item.
+        assert f'hx-target="#notification-wrapper-{_NOTIF_ID}"' in html
+        assert f'hx-target="#notification-{_NOTIF_ID}"' not in html
+        # Button must still request outerHTML swap.
+        assert 'hx-swap="outerHTML"' in html
+        # Sanity: the button is present in the unread state.
+        assert "Loe" in html
+
+    def test_read_non_link_item_has_no_loe_button_and_is_wrapper_rooted(self):
+        """Review fix (PR #645): after mark-read, the response markup
+        must (a) be rooted at an element carrying the wrapper ID so
+        HTMX's ``outerHTML`` swap against the wrapper lands cleanly,
+        and (b) contain no stale "Loe" button."""
+        notif = _make_notification(read=True, link=None)
+
+        html = to_xml(NotificationItem(notif))
+
+        # The response root must carry the wrapper ID so the outerHTML
+        # swap against #notification-wrapper-{id} has a matching target.
+        assert f'id="notification-wrapper-{_NOTIF_ID}"' in html
+        # No stale "Loe" button must remain.
+        assert "Loe" not in html
+        assert "notification-mark-btn" not in html
 
 
 # ---------------------------------------------------------------------------
