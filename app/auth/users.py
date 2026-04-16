@@ -169,13 +169,20 @@ def create_user(
 
 
 def update_user_role(user_id: str, role: str) -> bool:
-    """Update a user's role. Returns True on success."""
+    """Update a user's role. Returns True on success.
+
+    Bumps ``token_version`` in the same UPDATE so every previously-issued
+    access token is invalidated immediately (#635).
+    """
     if role not in VALID_ROLES:
         logger.error("Invalid role: %s", role)
         return False
     try:
         with _connect() as conn:
-            conn.execute("UPDATE users SET role = %s WHERE id = %s", (role, user_id))
+            conn.execute(
+                "UPDATE users SET role = %s, token_version = token_version + 1 WHERE id = %s",
+                (role, user_id),
+            )
             conn.commit()
         return True
     except Exception:
@@ -187,11 +194,19 @@ def update_user_role(user_id: str, role: str) -> bool:
 def deactivate_user(user_id: str) -> bool:
     """Deactivate a user by setting is_active to false and revoking sessions.
 
+    Bumps ``token_version`` so any outstanding access token is rejected
+    on its next use (#635), and deletes the user's refresh sessions.
+
     Returns True on success.
     """
     try:
         with _connect() as conn:
-            conn.execute("UPDATE users SET is_active = FALSE WHERE id = %s", (user_id,))
+            conn.execute(
+                "UPDATE users "
+                "SET is_active = FALSE, token_version = token_version + 1 "
+                "WHERE id = %s",
+                (user_id,),
+            )
             conn.execute("DELETE FROM sessions WHERE user_id = %s", (user_id,))
             conn.commit()
         return True
