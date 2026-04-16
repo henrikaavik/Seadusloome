@@ -22,8 +22,8 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Any, Literal
+from datetime import date, datetime, timedelta
+from typing import Any, Literal, LiteralString
 
 from app.db import get_connection as _connect
 from app.db_utils import coerce_uuid
@@ -370,6 +370,191 @@ def count_drafts_for_org(conn: Any, org_id: uuid.UUID | str) -> int:
         logger.exception("Failed to count drafts for org=%s", org_id)
         return 0
     return int(row[0]) if row else 0
+
+
+# #642: maximum number of candidate IDs carried out of the q-search
+# (title/filename/entity-label) before we hand them to the final
+# filter+sort+paginate query.  A single org holding more than 500 drafts
+# whose search term matches everything would start hurting the final
+# ``id = any(...)`` scan, and at that point the user should narrow the
+# query anyway.  The cap keeps worst-case latency bounded.
+_CANDIDATE_CAP = 500
+
+# Valid sort option keys accepted by ``list_drafts_for_org_filtered``.
+# Kept as a small mapping so routes can reject unknown values without
+# duplicating the SQL fragments.
+_SORT_CLAUSES: dict[str, LiteralString] = {
+    "created_desc": "created_at desc",
+    "created_asc": "created_at asc",
+    "title_asc": "title asc",
+    "title_desc": "title desc",
+    "status": "status asc, created_at desc",
+}
+
+DEFAULT_SORT = "created_desc"
+
+_ONE_DAY = timedelta(days=1)
+
+
+def list_drafts_for_org_filtered(
+    org_id: uuid.UUID | str,
+    *,
+    q: str | None = None,
+    doc_types: set[str] | None = None,
+    statuses: set[str] | None = None,
+    uploader_id: uuid.UUID | str | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    sort: str = DEFAULT_SORT,
+    limit: int = 25,
+    offset: int = 0,
+) -> tuple[list[Draft], int]:
+    """Filtered + paginated listing for the /drafts workspace (#642).
+
+    Returns ``(drafts, total_count)`` where ``total_count`` is the grand
+    total for pagination (i.e. ignores ``limit``/``offset``).  Opens a
+    fresh connection -- routes should not need to manage transactions
+    just to render a listing.
+
+    Filtering behaviour (spec §4.2):
+
+    * ``q`` (title/filename/entity-label) runs a two-phase candidate
+      lookup powered by ``pg_trgm`` GIN indexes from migration 019.
+      Phase 1 scans ``drafts`` for title + filename matches.  Phase 2
+      pulls distinct draft IDs whose ``draft_entities.label`` matches.
+      The union is capped at :data:`_CANDIDATE_CAP` IDs before the
+      final ``id = any(...)`` filter runs.
+    * ``doc_types`` / ``statuses`` default to "all" when ``None`` or
+      empty.  Filtering is ``col = any(%s)`` over the requested subset.
+    * ``uploader_id`` narrows to a single user.
+    * ``date_from`` / ``date_to`` are inclusive bounds against
+      ``created_at``.  ``date_to`` is rendered as ``< date_to + 1 day``
+      so a single-day bound ``from=to=2026-04-01`` picks up everything
+      on that calendar day regardless of time-of-day.
+    * ``sort`` chooses from :data:`_SORT_CLAUSES`; unknown values fall
+      back to the default.
+
+    On DB error the function logs and returns ``([], 0)`` -- consistent
+    with the rest of this module.
+    """
+    if limit <= 0:
+        return [], 0
+
+    order_clause = _SORT_CLAUSES.get(sort, _SORT_CLAUSES[DEFAULT_SORT])
+    org_str = str(org_id)
+    q_norm = q.strip() if q else ""
+
+    # Normalise the filter sets so downstream SQL can treat "None" and
+    # "empty set" identically -- both mean "no constraint on this axis".
+    active_doc_types = {dt for dt in (doc_types or ()) if dt}
+    active_statuses = {s for s in (statuses or ()) if s}
+
+    where_parts: list[LiteralString] = ["org_id = %s"]
+    params: list[Any] = [org_str]
+
+    try:
+        with _connect() as conn:
+            # Phase 1/2: narrow to a candidate ID set when q is set.
+            if q_norm:
+                pattern = f"%{q_norm}%"
+
+                # Phase 1 -- title / filename trigram match.  The GIN
+                # trgm index on both columns makes ``ilike '%q%'``
+                # index-supported even though the pattern is unanchored.
+                phase1 = conn.execute(
+                    """
+                    select id
+                      from drafts
+                     where org_id = %s
+                       and (title ilike %s or filename ilike %s)
+                     limit %s
+                    """,
+                    (org_str, pattern, pattern, _CANDIDATE_CAP),
+                ).fetchall()
+
+                # Phase 2 -- entity-label trigram match, scoped to the
+                # caller's org via a sub-select.  Scoping at the SQL
+                # level means a stray draft_id leak is impossible even
+                # if pg_trgm surfaces an unexpected row.
+                phase2 = conn.execute(
+                    """
+                    select distinct draft_id
+                      from draft_entities
+                     where label ilike %s
+                       and draft_id in (
+                           select id from drafts where org_id = %s
+                       )
+                     limit %s
+                    """,
+                    (pattern, org_str, _CANDIDATE_CAP),
+                ).fetchall()
+
+                seen: set[str] = set()
+                merged: list[str] = []
+                for row in list(phase1) + list(phase2):
+                    raw_id = str(row[0])
+                    if raw_id in seen:
+                        continue
+                    seen.add(raw_id)
+                    merged.append(raw_id)
+                    if len(merged) >= _CANDIDATE_CAP:
+                        break
+
+                if not merged:
+                    return [], 0
+
+                where_parts.append("id = any(%s)")
+                params.append(merged)
+
+            if active_doc_types:
+                where_parts.append("doc_type = any(%s)")
+                params.append(sorted(active_doc_types))
+            if active_statuses:
+                where_parts.append("status = any(%s)")
+                params.append(sorted(active_statuses))
+            if uploader_id:
+                where_parts.append("user_id = %s")
+                params.append(str(uploader_id))
+            if date_from is not None:
+                where_parts.append("created_at >= %s")
+                params.append(date_from)
+            if date_to is not None:
+                # Inclusive upper bound -- add a day and use ``<`` so
+                # rows with ``created_at`` at 23:59 on the day are
+                # included.
+                where_parts.append("created_at < %s")
+                params.append(date_to + _ONE_DAY)
+
+            where_sql = " and ".join(where_parts)
+
+            total_row = conn.execute(
+                f"select count(*) from drafts where {where_sql}",
+                tuple(params),
+            ).fetchone()
+            total = int(total_row[0]) if total_row else 0
+
+            if total == 0:
+                return [], 0
+
+            rows = conn.execute(
+                f"""
+                select {_DRAFT_COLUMNS}
+                  from drafts
+                 where {where_sql}
+                 order by {order_clause}
+                 limit %s offset %s
+                """,
+                tuple(params) + (limit, max(0, offset)),
+            ).fetchall()
+    except Exception:
+        logger.exception(
+            "list_drafts_for_org_filtered failed for org=%s q=%r",
+            org_id,
+            q_norm,
+        )
+        return [], 0
+
+    return [_row_to_draft(row) for row in rows], total
 
 
 def list_vtks_for_org(

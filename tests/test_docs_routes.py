@@ -136,18 +136,18 @@ class TestAuthRequired:
 
 
 class TestDraftsList:
-    @patch("app.docs.routes.count_drafts_for_org_conn")
-    @patch("app.docs.routes.fetch_drafts_for_org")
+    @patch("app.docs.routes.list_users")
+    @patch("app.docs.routes.list_drafts_for_org_filtered")
     @patch("app.auth.middleware._get_provider")
     def test_empty_list_renders_empty_state(
         self,
         mock_get_provider: MagicMock,
-        mock_fetch: MagicMock,
-        mock_count: MagicMock,
+        mock_list_filtered: MagicMock,
+        mock_list_users: MagicMock,
     ):
         mock_get_provider.return_value = _stub_provider()
-        mock_fetch.return_value = []
-        mock_count.return_value = 0
+        mock_list_filtered.return_value = ([], 0)
+        mock_list_users.return_value = []
 
         client = _authed_client()
         resp = client.get("/drafts")
@@ -157,15 +157,17 @@ class TestDraftsList:
         # Empty state CTA must be present.
         assert "Laadi üles uus eelnõu" in resp.text
         assert "ei ole veel ühtegi eelnõu üles laadinud" in resp.text
+        # Filter bar must always render so the user can recover.
+        assert 'name="q"' in resp.text
 
-    @patch("app.docs.routes.count_drafts_for_org_conn")
-    @patch("app.docs.routes.fetch_drafts_for_org")
+    @patch("app.docs.routes.list_users")
+    @patch("app.docs.routes.list_drafts_for_org_filtered")
     @patch("app.auth.middleware._get_provider")
     def test_populated_list_shows_rows(
         self,
         mock_get_provider: MagicMock,
-        mock_fetch: MagicMock,
-        mock_count: MagicMock,
+        mock_list_filtered: MagicMock,
+        mock_list_users: MagicMock,
     ):
         mock_get_provider.return_value = _stub_provider()
         draft_a = _make_draft(
@@ -178,8 +180,8 @@ class TestDraftsList:
             status="ready",
             title="Eelnõu B",
         )
-        mock_fetch.return_value = [draft_a, draft_b]
-        mock_count.return_value = 2
+        mock_list_filtered.return_value = ([draft_a, draft_b], 2)
+        mock_list_users.return_value = []
 
         client = _authed_client()
         resp = client.get("/drafts")
@@ -188,10 +190,342 @@ class TestDraftsList:
         assert "Eelnõu A" in resp.text
         assert "Eelnõu B" in resp.text
         # Fetch was org-scoped.
-        mock_fetch.assert_called_once()
-        fetch_kwargs = mock_fetch.call_args
+        mock_list_filtered.assert_called_once()
+        call = mock_list_filtered.call_args
         # First positional arg is the org_id.
-        assert fetch_kwargs.args[0] == _ORG_ID
+        assert call.args[0] == _ORG_ID
+
+
+# ---------------------------------------------------------------------------
+# #642: filter bar + URL state + filtered empty state
+# ---------------------------------------------------------------------------
+
+
+_UPLOADER_ID = "44444444-4444-4444-4444-444444444444"
+
+
+def _make_uploader(
+    *,
+    user_id: str = _USER_ID,
+    full_name: str = "Test Koostaja",
+    email: str = "koostaja@seadusloome.ee",
+) -> dict[str, Any]:
+    return {
+        "id": user_id,
+        "email": email,
+        "full_name": full_name,
+        "role": "drafter",
+        "org_id": _ORG_ID,
+        "is_active": True,
+        "org_name": "Test ministeerium",
+    }
+
+
+class TestDraftsListFilterBar:
+    """Filter bar UI + URL state round-trip (#642)."""
+
+    @patch("app.docs.routes.list_users")
+    @patch("app.docs.routes.list_drafts_for_org_filtered")
+    @patch("app.auth.middleware._get_provider")
+    def test_filter_bar_renders_all_controls(
+        self,
+        mock_get_provider: MagicMock,
+        mock_list_filtered: MagicMock,
+        mock_list_users: MagicMock,
+    ):
+        """All seven filter controls must be present in the rendered HTML."""
+        mock_get_provider.return_value = _stub_provider()
+        mock_list_filtered.return_value = ([], 0)
+        mock_list_users.return_value = [_make_uploader()]
+
+        client = _authed_client()
+        resp = client.get("/drafts")
+
+        assert resp.status_code == 200
+        # Search input
+        assert 'name="q"' in resp.text
+        # Type checkbox group (both default-checked).
+        assert 'name="type"' in resp.text
+        assert 'value="eelnou"' in resp.text
+        assert 'value="vtk"' in resp.text
+        # Status checkboxes -- all six.
+        for status in (
+            "uploaded",
+            "parsing",
+            "extracting",
+            "analyzing",
+            "ready",
+            "failed",
+        ):
+            assert f'value="{status}"' in resp.text
+        # Uploader select (defaults to "all" sentinel + the single user).
+        assert 'name="uploader"' in resp.text
+        assert "Test Koostaja" in resp.text
+        # Date range.
+        assert 'name="from"' in resp.text
+        assert 'name="to"' in resp.text
+        # Sort dropdown.
+        assert 'name="sort"' in resp.text
+        # Reset link.
+        assert "Lähtesta filtrid" in resp.text
+
+    @patch("app.docs.routes.list_users")
+    @patch("app.docs.routes.list_drafts_for_org_filtered")
+    @patch("app.auth.middleware._get_provider")
+    def test_querystring_round_trips_to_filter_helper(
+        self,
+        mock_get_provider: MagicMock,
+        mock_list_filtered: MagicMock,
+        mock_list_users: MagicMock,
+    ):
+        """Pasting a URL with all filters set must call the helper with
+        the matching kwargs."""
+        mock_get_provider.return_value = _stub_provider()
+        mock_list_filtered.return_value = ([], 0)
+        mock_list_users.return_value = [_make_uploader(user_id=_UPLOADER_ID)]
+
+        client = _authed_client()
+        resp = client.get(
+            "/drafts"
+            "?q=maantee"
+            "&type=eelnou"
+            "&status=ready"
+            f"&uploader={_UPLOADER_ID}"
+            "&from=2026-01-01"
+            "&to=2026-04-01"
+            "&sort=title_asc"
+        )
+        assert resp.status_code == 200
+
+        kwargs = mock_list_filtered.call_args.kwargs
+        assert kwargs["q"] == "maantee"
+        assert kwargs["doc_types"] == {"eelnou"}
+        assert kwargs["statuses"] == {"ready"}
+        assert str(kwargs["uploader_id"]) == _UPLOADER_ID
+        assert kwargs["date_from"].isoformat() == "2026-01-01"
+        assert kwargs["date_to"].isoformat() == "2026-04-01"
+        assert kwargs["sort"] == "title_asc"
+
+    @patch("app.docs.routes.list_users")
+    @patch("app.docs.routes.list_drafts_for_org_filtered")
+    @patch("app.auth.middleware._get_provider")
+    def test_filter_bar_pre_fills_from_querystring(
+        self,
+        mock_get_provider: MagicMock,
+        mock_list_filtered: MagicMock,
+        mock_list_users: MagicMock,
+    ):
+        """Search input must echo the current ``q`` so the user sees it.
+
+        This is the load-bearing assertion for browser-back-button
+        round-trips: when the browser restores a URL we must also
+        restore the filter bar UI state to match.
+        """
+        mock_get_provider.return_value = _stub_provider()
+        mock_list_filtered.return_value = ([], 0)
+        mock_list_users.return_value = []
+
+        client = _authed_client()
+        resp = client.get("/drafts?q=maanteeseadus&sort=title_asc")
+        assert resp.status_code == 200
+        assert 'value="maanteeseadus"' in resp.text
+        # The selected sort option must be marked.
+        assert 'value="title_asc"' in resp.text
+        # The default sort must NOT be the selected one.
+        assert 'value="title_asc" selected' in resp.text or (
+            'selected value="title_asc"' in resp.text
+        )
+
+    @patch("app.docs.routes.list_users")
+    @patch("app.docs.routes.list_drafts_for_org_filtered")
+    @patch("app.auth.middleware._get_provider")
+    def test_unknown_sort_falls_back_to_default(
+        self,
+        mock_get_provider: MagicMock,
+        mock_list_filtered: MagicMock,
+        mock_list_users: MagicMock,
+    ):
+        """A tampered ``sort=hax0r`` querystring must not crash; the
+        helper receives the default sort."""
+        mock_get_provider.return_value = _stub_provider()
+        mock_list_filtered.return_value = ([], 0)
+        mock_list_users.return_value = []
+
+        client = _authed_client()
+        resp = client.get("/drafts?sort=hax0r")
+        assert resp.status_code == 200
+        assert mock_list_filtered.call_args.kwargs["sort"] == "created_desc"
+
+    @patch("app.docs.routes.list_users")
+    @patch("app.docs.routes.list_drafts_for_org_filtered")
+    @patch("app.auth.middleware._get_provider")
+    def test_invalid_uploader_uuid_silently_drops(
+        self,
+        mock_get_provider: MagicMock,
+        mock_list_filtered: MagicMock,
+        mock_list_users: MagicMock,
+    ):
+        """Tampered uploader UUID degrades to "no uploader filter"."""
+        mock_get_provider.return_value = _stub_provider()
+        mock_list_filtered.return_value = ([], 0)
+        mock_list_users.return_value = []
+
+        client = _authed_client()
+        resp = client.get("/drafts?uploader=not-a-uuid")
+        assert resp.status_code == 200
+        assert mock_list_filtered.call_args.kwargs["uploader_id"] is None
+
+    @patch("app.docs.routes.list_users")
+    @patch("app.docs.routes.list_drafts_for_org_filtered")
+    @patch("app.auth.middleware._get_provider")
+    def test_unknown_status_value_dropped(
+        self,
+        mock_get_provider: MagicMock,
+        mock_list_filtered: MagicMock,
+        mock_list_users: MagicMock,
+    ):
+        """``?status=ready&status=hax`` keeps ``ready`` and drops the rest."""
+        mock_get_provider.return_value = _stub_provider()
+        mock_list_filtered.return_value = ([], 0)
+        mock_list_users.return_value = []
+
+        client = _authed_client()
+        resp = client.get("/drafts?status=ready&status=hax")
+        assert resp.status_code == 200
+        assert mock_list_filtered.call_args.kwargs["statuses"] == {"ready"}
+
+
+class TestDraftsListEmptyStates:
+    @patch("app.docs.routes.list_users")
+    @patch("app.docs.routes.list_drafts_for_org_filtered")
+    @patch("app.auth.middleware._get_provider")
+    def test_empty_with_filters_uses_filter_empty_state(
+        self,
+        mock_get_provider: MagicMock,
+        mock_list_filtered: MagicMock,
+        mock_list_users: MagicMock,
+    ):
+        """When 0 rows match an active filter the empty-state title
+        must steer the user toward ``Lähtesta filtrid`` rather than
+        the upload CTA."""
+        mock_get_provider.return_value = _stub_provider()
+        mock_list_filtered.return_value = ([], 0)
+        mock_list_users.return_value = []
+
+        client = _authed_client()
+        resp = client.get("/drafts?q=nope")
+
+        assert resp.status_code == 200
+        assert "Filtritele vastavaid eelnõusid pole" in resp.text
+        # The filter-aware empty state must NOT show the original
+        # upload CTA copy.
+        assert "ei ole veel ühtegi eelnõu üles laadinud" not in resp.text
+
+    @patch("app.docs.routes.list_users")
+    @patch("app.docs.routes.list_drafts_for_org_filtered")
+    @patch("app.auth.middleware._get_provider")
+    def test_empty_without_filters_uses_zero_state(
+        self,
+        mock_get_provider: MagicMock,
+        mock_list_filtered: MagicMock,
+        mock_list_users: MagicMock,
+    ):
+        """When no filters are active and the org has no drafts the
+        original "no drafts at all" empty state remains in place."""
+        mock_get_provider.return_value = _stub_provider()
+        mock_list_filtered.return_value = ([], 0)
+        mock_list_users.return_value = []
+
+        client = _authed_client()
+        resp = client.get("/drafts")
+
+        assert resp.status_code == 200
+        assert "ei ole veel ühtegi eelnõu üles laadinud" in resp.text
+        assert "Filtritele vastavaid eelnõusid pole" not in resp.text
+
+
+class TestDraftsListPagination:
+    @patch("app.docs.routes.list_users")
+    @patch("app.docs.routes.list_drafts_for_org_filtered")
+    @patch("app.auth.middleware._get_provider")
+    def test_pagination_links_preserve_filter_querystring(
+        self,
+        mock_get_provider: MagicMock,
+        mock_list_filtered: MagicMock,
+        mock_list_users: MagicMock,
+    ):
+        """Pagination's ``page`` link must round-trip every active filter
+        so the user stays inside the same filtered slice when paging."""
+        mock_get_provider.return_value = _stub_provider()
+        # 60 results -> 3 pages of 25.
+        rows = [
+            _make_draft(
+                draft_id=uuid.UUID(int=i),
+                status="ready",
+                title=f"Eelnõu {i}",
+            )
+            for i in range(25)
+        ]
+        mock_list_filtered.return_value = (rows, 60)
+        mock_list_users.return_value = []
+
+        client = _authed_client()
+        resp = client.get("/drafts?q=eelnou&status=ready")
+        assert resp.status_code == 200
+        # Pagination next link must include both ``q`` and ``status``.
+        assert "q=eelnou" in resp.text
+        assert "status=ready" in resp.text
+        # And the page= number must be on the same anchor URL.
+        assert "page=2" in resp.text
+
+
+class TestDraftsListHtmxSwap:
+    @patch("app.docs.routes.list_users")
+    @patch("app.docs.routes.list_drafts_for_org_filtered")
+    @patch("app.auth.middleware._get_provider")
+    def test_htmx_request_returns_table_partial(
+        self,
+        mock_get_provider: MagicMock,
+        mock_list_filtered: MagicMock,
+        mock_list_users: MagicMock,
+    ):
+        """A request with ``HX-Request: true`` must return only the
+        table-wrapper partial, not the full page shell.  This keeps
+        focus inside the filter bar between filter changes."""
+        mock_get_provider.return_value = _stub_provider()
+        mock_list_filtered.return_value = ([], 0)
+        mock_list_users.return_value = []
+
+        client = _authed_client()
+        resp = client.get("/drafts?q=foo", headers={"HX-Request": "true"})
+
+        assert resp.status_code == 200
+        # No PageShell artefacts -- no <html>, no <head>, no nav.
+        assert "<html" not in resp.text.lower()
+        # But the table-wrapper id is present.
+        assert 'id="drafts-table-wrapper"' in resp.text
+
+    @patch("app.docs.routes.list_users")
+    @patch("app.docs.routes.list_drafts_for_org_filtered")
+    @patch("app.auth.middleware._get_provider")
+    def test_full_page_request_returns_page_shell(
+        self,
+        mock_get_provider: MagicMock,
+        mock_list_filtered: MagicMock,
+        mock_list_users: MagicMock,
+    ):
+        """Without the HX header, render the full page shell so direct
+        URL navigation produces a complete document."""
+        mock_get_provider.return_value = _stub_provider()
+        mock_list_filtered.return_value = ([], 0)
+        mock_list_users.return_value = []
+
+        client = _authed_client()
+        resp = client.get("/drafts")
+
+        assert resp.status_code == 200
+        assert "<html" in resp.text.lower()
+        assert 'id="drafts-table-wrapper"' in resp.text
 
 
 # ---------------------------------------------------------------------------
@@ -933,8 +1267,8 @@ class TestUploadPrecheck:
 
 
 class TestFlashMessages:
-    @patch("app.docs.routes.fetch_drafts_for_org")
-    @patch("app.docs.routes.count_drafts_for_org_conn")
+    @patch("app.docs.routes.list_users")
+    @patch("app.docs.routes.list_drafts_for_org_filtered")
     @patch("app.docs.routes.JobQueue")
     @patch("app.docs.routes.log_draft_delete")
     @patch("app.docs.routes.delete_draft")
@@ -949,8 +1283,8 @@ class TestFlashMessages:
         mock_delete: MagicMock,
         mock_log: MagicMock,
         mock_queue_cls: MagicMock,
-        mock_count: MagicMock,
-        mock_list: MagicMock,
+        mock_list_filtered: MagicMock,
+        mock_list_users: MagicMock,
     ):
         """A successful delete queues a success toast for /drafts."""
         mock_get_provider.return_value = _stub_provider()
@@ -963,8 +1297,8 @@ class TestFlashMessages:
         queue_instance = MagicMock()
         queue_instance.enqueue.return_value = 99
         mock_queue_cls.return_value = queue_instance
-        mock_count.return_value = 0
-        mock_list.return_value = []
+        mock_list_filtered.return_value = ([], 0)
+        mock_list_users.return_value = []
 
         client = _authed_client()
         resp = client.post(f"/drafts/{draft.id}/delete")

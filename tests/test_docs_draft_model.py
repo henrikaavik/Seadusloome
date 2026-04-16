@@ -546,3 +546,334 @@ class TestUpdateDraftParentVtk:
         conn.execute.return_value.rowcount = 0
 
         assert update_draft_parent_vtk(conn, _DRAFT_ID, None) is False
+
+
+# ---------------------------------------------------------------------------
+# list_drafts_for_org_filtered -- A4 search + filter (#642)
+# ---------------------------------------------------------------------------
+
+
+class TestListDraftsForOrgFiltered:
+    """Verifies the two-phase search + WHERE-clause builder.
+
+    The helper opens its own connection, so we patch ``_connect`` and
+    drive ``conn.execute`` directly.  ``execute`` is called in a fixed
+    order:
+
+      1. (optional) phase-1 title/filename id-set
+      2. (optional) phase-2 entity-label id-set
+      3. count(*) over the assembled WHERE clause
+      4. SELECT _DRAFT_COLUMNS over the same WHERE clause + LIMIT/OFFSET
+
+    The mock cursor's ``fetchall``/``fetchone`` return values are
+    dispatched in that order via ``side_effect``.
+    """
+
+    def _make_conn(
+        self,
+        *,
+        phase1_ids: list[str] | None = None,
+        phase2_ids: list[str] | None = None,
+        count: int = 0,
+        rows: list[tuple] | None = None,
+    ) -> MagicMock:
+        """Build a mock connection that yields predictable cursor results."""
+        from unittest.mock import MagicMock
+
+        conn = MagicMock()
+        cursors: list[MagicMock] = []
+
+        if phase1_ids is not None:
+            c = MagicMock()
+            c.fetchall.return_value = [(i,) for i in phase1_ids]
+            cursors.append(c)
+        if phase2_ids is not None:
+            c = MagicMock()
+            c.fetchall.return_value = [(i,) for i in phase2_ids]
+            cursors.append(c)
+
+        # COUNT(*) cursor
+        count_cursor = MagicMock()
+        count_cursor.fetchone.return_value = (count,)
+        cursors.append(count_cursor)
+
+        # SELECT cursor
+        select_cursor = MagicMock()
+        select_cursor.fetchall.return_value = rows or []
+        cursors.append(select_cursor)
+
+        conn.execute.side_effect = cursors
+        return conn
+
+    @patch("app.docs.draft_model._connect")
+    def test_no_filters_short_circuits_phase_1_and_2(self, mock_connect):
+        from app.docs.draft_model import list_drafts_for_org_filtered
+
+        conn = self._make_conn(count=0)
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        drafts, total = list_drafts_for_org_filtered(_ORG_ID)
+
+        assert drafts == []
+        assert total == 0
+        # Only count + (skipped) select since count==0 short-circuits.
+        # Verify phase-1 / phase-2 sub-queries did NOT run by checking
+        # that the first SQL we emitted is the COUNT clause.
+        first_sql = conn.execute.call_args_list[0].args[0]
+        assert "count(*)" in first_sql
+
+    @patch("app.docs.draft_model._connect")
+    def test_q_runs_phase_1_then_phase_2_then_count_then_select(self, mock_connect):
+        """When q is provided, the helper must run both candidate-id
+        sub-queries before assembling the final WHERE clause."""
+        from app.docs.draft_model import list_drafts_for_org_filtered
+
+        candidate_id = "55555555-5555-5555-5555-555555555555"
+        conn = self._make_conn(
+            phase1_ids=[candidate_id],
+            phase2_ids=[],
+            count=1,
+            rows=[
+                _make_raw_row(draft_id=uuid.UUID(candidate_id), title="Maanteeseadus"),
+            ],
+        )
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        drafts, total = list_drafts_for_org_filtered(_ORG_ID, q="maantee")
+
+        assert total == 1
+        assert len(drafts) == 1
+        assert drafts[0].title == "Maanteeseadus"
+
+        # Inspect the four SQL statements in order.
+        sqls = [c.args[0] for c in conn.execute.call_args_list]
+        assert "title ilike" in sqls[0]
+        assert "draft_entities" in sqls[1]
+        assert "count(*)" in sqls[2]
+        assert "limit %s offset %s" in sqls[3]
+
+        # Phase 1 must use the org_id + the wrapped %q% pattern.
+        phase1_params = conn.execute.call_args_list[0].args[1]
+        assert phase1_params[0] == str(_ORG_ID)
+        assert phase1_params[1] == "%maantee%"
+
+    @patch("app.docs.draft_model._connect")
+    def test_entity_label_match_returns_draft(self, mock_connect):
+        """A draft whose entity-label matches must be returned even when
+        the title doesn't match the search term."""
+        from app.docs.draft_model import list_drafts_for_org_filtered
+
+        candidate_id = "66666666-6666-6666-6666-666666666666"
+        conn = self._make_conn(
+            phase1_ids=[],
+            phase2_ids=[candidate_id],
+            count=1,
+            rows=[
+                _make_raw_row(draft_id=uuid.UUID(candidate_id), title="Random eelnõu"),
+            ],
+        )
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        drafts, total = list_drafts_for_org_filtered(_ORG_ID, q="121")
+
+        assert total == 1
+        assert drafts[0].id == uuid.UUID(candidate_id)
+        # Phase-2 must scope its sub-select to the caller's org so a
+        # cross-org draft_entities row can never leak.
+        phase2_sql = conn.execute.call_args_list[1].args[0]
+        assert "from drafts where org_id" in phase2_sql.lower()
+
+    @patch("app.docs.draft_model._connect")
+    def test_q_with_no_matches_short_circuits_to_empty(self, mock_connect):
+        """When neither phase finds any candidate IDs the helper must
+        not run the COUNT/SELECT pair at all."""
+        from app.docs.draft_model import list_drafts_for_org_filtered
+
+        conn = self._make_conn(phase1_ids=[], phase2_ids=[], count=0, rows=[])
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        drafts, total = list_drafts_for_org_filtered(_ORG_ID, q="nothing")
+
+        assert drafts == []
+        assert total == 0
+        # Only phase-1 + phase-2 ran; COUNT/SELECT were short-circuited.
+        assert conn.execute.call_count == 2
+
+    @patch("app.docs.draft_model._connect")
+    def test_combined_filters_compose_into_where_clause(self, mock_connect):
+        """status + doc_type + uploader filters must all land in the
+        final WHERE clause, regardless of whether q is set."""
+        from app.docs.draft_model import list_drafts_for_org_filtered
+
+        conn = self._make_conn(count=0)
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        list_drafts_for_org_filtered(
+            _ORG_ID,
+            doc_types={"eelnou"},
+            statuses={"ready"},
+            uploader_id=_USER_ID,
+        )
+
+        count_sql = conn.execute.call_args_list[0].args[0]
+        count_params = conn.execute.call_args_list[0].args[1]
+        assert "doc_type = any" in count_sql
+        assert "status = any" in count_sql
+        assert "user_id = %s" in count_sql
+        # Params include the org, sorted doc_type list, sorted status
+        # list, and the user id.
+        assert str(_ORG_ID) in count_params
+        assert ["eelnou"] in [list(p) if isinstance(p, list) else p for p in count_params]
+        assert str(_USER_ID) in count_params
+
+    @patch("app.docs.draft_model._connect")
+    def test_date_range_uses_inclusive_upper_bound(self, mock_connect):
+        """date_to must be rendered as ``< date_to + 1 day`` so a
+        single-day range catches everything on that calendar day."""
+        from datetime import date
+
+        from app.docs.draft_model import list_drafts_for_org_filtered
+
+        conn = self._make_conn(count=0)
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        list_drafts_for_org_filtered(
+            _ORG_ID,
+            date_from=date(2026, 4, 1),
+            date_to=date(2026, 4, 1),
+        )
+
+        count_sql = conn.execute.call_args_list[0].args[0]
+        count_params = conn.execute.call_args_list[0].args[1]
+        assert "created_at >= %s" in count_sql
+        assert "created_at < %s" in count_sql
+        # The upper bound must be 1 day later than what we passed in.
+        assert date(2026, 4, 2) in count_params
+        assert date(2026, 4, 1) in count_params
+
+    @patch("app.docs.draft_model._connect")
+    def test_sort_default_is_created_desc(self, mock_connect):
+        from app.docs.draft_model import list_drafts_for_org_filtered
+
+        conn = self._make_conn(count=1, rows=[_make_raw_row()])
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        list_drafts_for_org_filtered(_ORG_ID)
+
+        select_sql = conn.execute.call_args_list[1].args[0]
+        assert "order by created_at desc" in select_sql
+
+    @patch("app.docs.draft_model._connect")
+    def test_sort_title_asc_renders_correct_order_by(self, mock_connect):
+        from app.docs.draft_model import list_drafts_for_org_filtered
+
+        conn = self._make_conn(count=1, rows=[_make_raw_row()])
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        list_drafts_for_org_filtered(_ORG_ID, sort="title_asc")
+
+        select_sql = conn.execute.call_args_list[1].args[0]
+        assert "order by title asc" in select_sql
+
+    @patch("app.docs.draft_model._connect")
+    def test_sort_status_falls_back_to_created_at_desc(self, mock_connect):
+        from app.docs.draft_model import list_drafts_for_org_filtered
+
+        conn = self._make_conn(count=1, rows=[_make_raw_row()])
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        list_drafts_for_org_filtered(_ORG_ID, sort="status")
+
+        select_sql = conn.execute.call_args_list[1].args[0]
+        assert "order by status asc, created_at desc" in select_sql
+
+    @patch("app.docs.draft_model._connect")
+    def test_unknown_sort_falls_back_to_default(self, mock_connect):
+        from app.docs.draft_model import list_drafts_for_org_filtered
+
+        conn = self._make_conn(count=1, rows=[_make_raw_row()])
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        list_drafts_for_org_filtered(_ORG_ID, sort="not-a-real-sort")
+
+        select_sql = conn.execute.call_args_list[1].args[0]
+        assert "order by created_at desc" in select_sql
+
+    @patch("app.docs.draft_model._connect")
+    def test_pagination_uses_limit_offset(self, mock_connect):
+        from app.docs.draft_model import list_drafts_for_org_filtered
+
+        conn = self._make_conn(count=100, rows=[_make_raw_row() for _ in range(25)])
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        drafts, total = list_drafts_for_org_filtered(_ORG_ID, limit=25, offset=50)
+
+        assert total == 100
+        assert len(drafts) == 25
+        select_params = conn.execute.call_args_list[1].args[1]
+        # The last two positional params are limit + offset.
+        assert select_params[-2:] == (25, 50)
+
+    @patch("app.docs.draft_model._connect")
+    def test_candidate_cap_truncates_phase_union(self, mock_connect):
+        """When phase 1 returns 500 IDs and phase 2 returns more, the
+        merged set must stop at the 500-id cap."""
+        from app.docs.draft_model import _CANDIDATE_CAP, list_drafts_for_org_filtered
+
+        # Generate 500 unique IDs for phase 1.
+        ids = [str(uuid.UUID(int=i)) for i in range(_CANDIDATE_CAP)]
+        # Phase 2 returns ids + 50 extras that must NOT be considered.
+        extra = [str(uuid.UUID(int=i + _CANDIDATE_CAP)) for i in range(50)]
+        conn = self._make_conn(
+            phase1_ids=ids,
+            phase2_ids=extra,
+            count=_CANDIDATE_CAP,
+            rows=[_make_raw_row() for _ in range(25)],
+        )
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        list_drafts_for_org_filtered(_ORG_ID, q="ka")
+
+        # The COUNT params include the merged ID list -- it must be
+        # exactly _CANDIDATE_CAP items.
+        count_params = conn.execute.call_args_list[2].args[1]
+        merged = next(p for p in count_params if isinstance(p, list))
+        assert len(merged) == _CANDIDATE_CAP
+        # No phase-2 extras should appear.
+        assert not any(extra_id in merged for extra_id in extra)
+
+    @patch("app.docs.draft_model._connect")
+    def test_db_error_returns_empty(self, mock_connect):
+        from app.docs.draft_model import list_drafts_for_org_filtered
+
+        conn = MagicMock()
+        conn.execute.side_effect = RuntimeError("boom")
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        drafts, total = list_drafts_for_org_filtered(_ORG_ID, q="anything")
+
+        assert drafts == []
+        assert total == 0
+
+    @patch("app.docs.draft_model._connect")
+    def test_zero_limit_short_circuits(self, mock_connect):
+        from app.docs.draft_model import list_drafts_for_org_filtered
+
+        drafts, total = list_drafts_for_org_filtered(_ORG_ID, limit=0)
+
+        assert drafts == []
+        assert total == 0
+        mock_connect.assert_not_called()
