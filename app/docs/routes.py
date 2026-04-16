@@ -32,7 +32,7 @@ from starlette.responses import HTMLResponse, RedirectResponse, Response
 from app.auth.audit import log_action
 from app.auth.helpers import require_auth as _require_auth
 from app.auth.policy import can_delete_draft, can_edit_draft, can_view_draft
-from app.auth.users import list_users
+from app.auth.users import get_user, list_users
 from app.db import get_connection as _connect
 from app.docs.audit import (
     log_draft_delete,
@@ -45,6 +45,7 @@ from app.docs.draft_model import (
     delete_draft,
     fetch_draft,
     list_drafts_for_org_filtered,
+    list_eelnous_for_vtk,
     list_vtks_for_org,
     touch_draft_access,
     touch_draft_access_conn,
@@ -454,6 +455,7 @@ def _draft_rows(drafts: list[Draft]) -> list[dict[str, Any]]:
         rows.append(
             {
                 "id": str(draft.id),
+                "doc_type_raw": draft.doc_type,
                 "title": draft.title,
                 "filename": draft.filename,
                 "status_raw": draft.status,
@@ -461,6 +463,16 @@ def _draft_rows(drafts: list[Draft]) -> list[dict[str, Any]]:
             }
         )
     return rows
+
+
+# #643: badge variant per doc_type for the Tüüp column on the drafts
+# list. Eelnõu = subtle "default" pill (it's the dominant case, no
+# need to draw attention); VTK = "primary" so it stands out at a
+# glance — VTKs are rarer and operationally distinct.
+_DOC_TYPE_BADGE: dict[str, tuple[str, BadgeVariant]] = {
+    "eelnou": ("Eelnõu", "default"),
+    "vtk": ("VTK", "primary"),
+}
 
 
 def _draft_list_columns() -> list[Column]:
@@ -483,7 +495,12 @@ def _draft_list_columns() -> list[Column]:
             cls="btn btn-secondary btn-sm",
         )
 
+    def _doc_type_cell(row: dict[str, Any]):
+        label, variant = _DOC_TYPE_BADGE.get(row["doc_type_raw"], ("Eelnõu", "default"))
+        return Badge(label, variant=variant, cls=f"doc-type doc-type-{row['doc_type_raw']}")
+
     return [
+        Column(key="doc_type", label="Tüüp", sortable=False, render=_doc_type_cell),
         Column(key="title", label="Pealkiri", sortable=False, render=_title_cell),
         Column(key="filename", label="Failinimi", sortable=False),
         Column(
@@ -1740,6 +1757,64 @@ def _link_vtk_modal(
     ]
 
 
+def _vtk_children_card(vtk: Draft, *, children: list[Draft]) -> Any:
+    """#643: render the "Sellest VTKst tulenevad eelnõud" card on VTK detail.
+
+    Lists eelnõud whose ``parent_vtk_id`` equals this VTK, newest-first.
+    Each row links to the child eelnõu's detail page and shows status
+    badge, uploader name (best-effort lookup), and upload date. Empty
+    state surfaces the EmptyState primitive so the card matches the
+    rest of the design system.
+    """
+    if not children:
+        body: Any = EmptyState(
+            "VTKga pole veel eelnõusid seotud.",
+            message=(
+                "Kui sellele VTK-le järgneb eelnõu, valige üleslaadimisel "
+                "'Seotud VTK' väljas see VTK — siia tekib siis vastav rida."
+            ),
+            icon="📄",
+        )
+    else:
+        rows: list[Any] = []
+        for child in children:
+            uploader = get_user(str(child.user_id)) if child.user_id else None
+            uploader_label = (
+                str(uploader.get("full_name") or uploader.get("email") or "—") if uploader else "—"
+            )
+            rows.append(
+                Tr(  # noqa: F405
+                    Td(  # noqa: F405
+                        A(  # noqa: F405
+                            child.title,
+                            href=f"/drafts/{child.id}",
+                            cls="data-table-link",
+                        ),
+                        data_label="Pealkiri",
+                    ),
+                    Td(_status_badge(child.status), data_label="Staatus"),  # noqa: F405
+                    Td(uploader_label, data_label="Üleslaadija"),  # noqa: F405
+                    Td(_format_timestamp(child.created_at), data_label="Üles laaditud"),  # noqa: F405
+                )
+            )
+        body = Table(  # noqa: F405
+            Thead(  # noqa: F405
+                Tr(  # noqa: F405
+                    Th("Pealkiri"),  # noqa: F405
+                    Th("Staatus"),  # noqa: F405
+                    Th("Üleslaadija"),  # noqa: F405
+                    Th("Üles laaditud"),  # noqa: F405
+                )
+            ),
+            Tbody(*rows),  # noqa: F405
+            cls="data-table vtk-children-table",
+        )
+    return Card(
+        CardHeader(H3("Sellest VTKst tulenevad eelnõud", cls="card-title")),  # noqa: F405
+        CardBody(body),
+    )
+
+
 def _draft_detail_body(
     draft: Draft,
     auth: Mapping[str, Any] | None = None,
@@ -1933,6 +2008,20 @@ def draft_detail_page(req: Request, draft_id: str):
     if can_edit_draft(auth, draft) and draft.doc_type == "eelnou":
         org_vtks = list_vtks_for_org(draft.org_id)
 
+    # #643: VTK detail surfaces a "Sellest VTKst tulenevad eelnõud" card.
+    # The query is org-scoped indirectly through parent_vtk_id (VTK already
+    # in the caller's org), but we still defensively filter on org_id to
+    # rule out cross-org leakage if an eelnõu in another org somehow
+    # references this VTK (shouldn't happen — A2 validates same-org on
+    # link — but defence in depth costs us nothing).
+    vtk_children: list[Draft] = []
+    if draft.doc_type == "vtk":
+        vtk_children = [
+            child
+            for child in list_eelnous_for_vtk(draft.id)
+            if str(child.org_id) == str(draft.org_id)
+        ]
+
     detail_body = _draft_detail_body(
         draft,
         auth=auth,
@@ -1970,6 +2059,10 @@ def draft_detail_page(req: Request, draft_id: str):
             # user-facing detail page omits it.
             CardBody(*detail_body),
         ),
+        # #643: VTK-only card listing follow-on eelnõud. Skipped on
+        # eelnõu detail since VTKs are the only doc_type that can have
+        # children in our model.
+        _vtk_children_card(draft, children=vtk_children) if draft.doc_type == "vtk" else "",
         title=draft.title,
         user=auth,
         theme=theme,
