@@ -280,6 +280,43 @@ class TestNotificationItemRendering:
         assert "redirect=" in html
         assert "%2Fdrafts%2Fabc" in html or "/drafts/abc" in html
 
+    def test_unread_non_link_wrapper_has_stable_id_and_button_targets_wrapper(self):
+        """Review fix (PR #645): the unread non-link row renders as a
+        wrapper containing the inner row + a "Loe" button. The button
+        must target the WRAPPER (not the inner row) with ``outerHTML``
+        so the mark-read response can replace the whole wrapper -
+        otherwise the stale "Loe" button would remain in the DOM after
+        mark-read completes."""
+        notif = _make_notification(read=False, link=None)
+
+        html = to_xml(NotificationItem(notif))
+
+        # Wrapper must carry a stable ID so the button can target it.
+        assert f'id="notification-wrapper-{_NOTIF_ID}"' in html
+        # "Loe" button must target the wrapper, not the inner item.
+        assert f'hx-target="#notification-wrapper-{_NOTIF_ID}"' in html
+        assert f'hx-target="#notification-{_NOTIF_ID}"' not in html
+        # Button must still request outerHTML swap.
+        assert 'hx-swap="outerHTML"' in html
+        # Sanity: the button is present in the unread state.
+        assert "Loe" in html
+
+    def test_read_non_link_item_has_no_loe_button_and_is_wrapper_rooted(self):
+        """Review fix (PR #645): after mark-read, the response markup
+        must (a) be rooted at an element carrying the wrapper ID so
+        HTMX's ``outerHTML`` swap against the wrapper lands cleanly,
+        and (b) contain no stale "Loe" button."""
+        notif = _make_notification(read=True, link=None)
+
+        html = to_xml(NotificationItem(notif))
+
+        # The response root must carry the wrapper ID so the outerHTML
+        # swap against #notification-wrapper-{id} has a matching target.
+        assert f'id="notification-wrapper-{_NOTIF_ID}"' in html
+        # No stale "Loe" button must remain.
+        assert "Loe" not in html
+        assert "notification-mark-btn" not in html
+
 
 # ---------------------------------------------------------------------------
 # Tests: POST /notifications/read-all

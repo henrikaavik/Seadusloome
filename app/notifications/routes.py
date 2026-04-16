@@ -109,19 +109,31 @@ def NotificationItem(notif: Any, *, compact: bool = False):  # noqa: ANN201, N80
         )
     if notif.link:
         return A(content, href=notif.link, cls="notification-link")  # noqa: F405
+    # Non-link notifications always render inside a wrapper with a stable
+    # ID. The unread variant has a "Loe" button; the read variant does
+    # not. The button (and the mark-read response) target this wrapper so
+    # HTMX's ``outerHTML`` swap replaces the entire wrapper - if we only
+    # swapped the inner ``#notification-{id}`` row the stale "Loe" button
+    # would remain in the DOM after mark-read. See PR #645 review.
+    wrapper_id = f"notification-wrapper-{notif.id}"
     if not notif.read:
         return Div(  # noqa: F405
             content,
             Button(  # noqa: F405
                 "Loe",
                 hx_post=f"/notifications/{notif.id}/read",
-                hx_target=f"#notification-{notif.id}",
+                hx_target=f"#{wrapper_id}",
                 hx_swap="outerHTML",
                 cls="notification-mark-btn btn-sm",
             ),
             cls="notification-item-wrapper",
+            id=wrapper_id,
         )
-    return content
+    return Div(  # noqa: F405
+        content,
+        cls="notification-item-wrapper",
+        id=wrapper_id,
+    )
 
 
 def NotificationList(notifications: list[Any], *, compact: bool = False):  # noqa: ANN201, N802
@@ -220,10 +232,11 @@ def mark_single_read(req: Request, id: str):
        return an empty 200 with an ``HX-Redirect`` header so the browser
        navigates after the POST.
     2. Unread non-link notifications render a "Loe" button whose target
-       is ``#notification-{id}`` with ``hx-swap="outerHTML"``. For these
-       we re-render the full notification row in its read state so the
-       row visibly flips from unread-style to read-style (previously the
-       row collapsed into a bare dot).
+       is ``#notification-wrapper-{id}`` with ``hx-swap="outerHTML"``.
+       For these we re-render the full wrapper in its read state so the
+       row visibly flips from unread-style to read-style AND the stale
+       "Loe" button is removed from the DOM (previously the swap hit the
+       inner row only, leaving the button behind; see PR #645 review).
     """
     auth_or_redirect = _require_auth(req)
     if isinstance(auth_or_redirect, Response):
@@ -264,15 +277,21 @@ def mark_single_read(req: Request, id: str):
         fresh = None
 
     if fresh is None:
-        # DB error or notification vanished — fall back to a minimal but
-        # non-collapsing read-state row so the UI doesn't break.
+        # DB error or notification vanished - fall back to a minimal but
+        # non-collapsing read-state wrapper so the UI doesn't break and
+        # the outerHTML swap against #notification-wrapper-{id} lands on
+        # matching markup.
         return Div(  # noqa: F405
             Div(  # noqa: F405
-                Span("", cls="notification-title"),  # noqa: F405
-                cls="notification-header",
+                Div(  # noqa: F405
+                    Span("", cls="notification-title"),  # noqa: F405
+                    cls="notification-header",
+                ),
+                cls="notification-item notification-item--read",
+                id=f"notification-{id}",
             ),
-            cls="notification-item notification-item--read",
-            id=f"notification-{id}",
+            cls="notification-item-wrapper",
+            id=f"notification-wrapper-{id}",
         )
 
     return NotificationItem(fresh)
