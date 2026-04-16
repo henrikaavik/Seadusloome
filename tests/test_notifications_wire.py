@@ -32,10 +32,16 @@ _REPLY_ID = uuid.UUID("66666666-6666-6666-6666-666666666666")
 _SESSION_ID = uuid.UUID("77777777-7777-7777-7777-777777777777")
 
 
-def _make_annotation(user_id: uuid.UUID = _USER_A) -> MagicMock:
+def _make_annotation(
+    user_id: uuid.UUID = _USER_A,
+    target_type: str = "draft",
+    target_id: str | None = None,
+) -> MagicMock:
     ann = MagicMock()
     ann.id = _ANN_ID
     ann.user_id = user_id
+    ann.target_type = target_type
+    ann.target_id = target_id or str(_DRAFT_ID)
     return ann
 
 
@@ -89,6 +95,43 @@ class TestNotifyAnnotationReply:
         notify_annotation_reply(ann, reply)
 
         mock_notify.assert_not_called()
+
+    @patch("app.notifications.wire.notify")
+    def test_link_points_at_real_get_page_for_draft_target(self, mock_notify):
+        """Bug 3: `link=f"/annotations/{id}"` is a dead route.
+
+        When the annotation is on a draft, the notification link must
+        navigate to the draft's detail page (a 200 GET), not a
+        non-existent ``/annotations/{id}`` URL.
+        """
+        ann = _make_annotation(_USER_A, target_type="draft", target_id=str(_DRAFT_ID))
+        reply = _make_reply(_USER_B)
+
+        notify_annotation_reply(ann, reply)
+
+        call_kwargs = mock_notify.call_args[1]
+        link = call_kwargs.get("link") or ""
+        # Must not use the dead /annotations/{id} route.
+        assert not link.startswith("/annotations/")
+        # Must point at the draft detail page for a draft-target annotation.
+        assert str(_DRAFT_ID) in link
+        assert link.startswith("/drafts/")
+
+    @patch("app.notifications.wire.notify")
+    def test_link_points_at_chat_for_conversation_target(self, mock_notify):
+        ann = _make_annotation(
+            _USER_A,
+            target_type="conversation",
+            target_id="11111111-2222-3333-4444-555555555555",
+        )
+        reply = _make_reply(_USER_B)
+
+        notify_annotation_reply(ann, reply)
+
+        call_kwargs = mock_notify.call_args[1]
+        link = call_kwargs.get("link") or ""
+        assert not link.startswith("/annotations/")
+        assert link.startswith("/chat/")
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +204,30 @@ class TestNotifySyncFailed:
         user_ids = [call[1]["user_id"] for call in mock_notify.call_args_list]
         assert admin1 in user_ids
         assert admin2 in user_ids
+
+    @patch("app.notifications.wire.notify")
+    @patch("app.db.get_connection")
+    def test_link_points_at_real_get_page(self, mock_connect, mock_notify):
+        """Bug 4: `/admin/sync` is a POST-only route — sending admins
+        there yields a 405. The link must target a real GET page.
+        """
+        admin1 = uuid.uuid4()
+        conn = MagicMock()
+        conn.execute.return_value.fetchall.return_value = [(admin1,)]
+        mock_connect.return_value = _ConnectCM(conn)
+
+        notify_sync_failed("Connection refused")
+
+        call_kwargs = mock_notify.call_args[1]
+        link = call_kwargs.get("link") or ""
+        # Must not be the POST-only /admin/sync route.
+        assert link != "/admin/sync"
+        # Must resolve to a real GET admin page. The admin dashboard
+        # (/admin) exposes a sync-card section we can anchor to.
+        assert link.startswith("/admin")
+        # Must not be any other POST-only admin route either.
+        assert not link.startswith("/admin/sync?")
+        assert not link == "/admin/sync/"
 
 
 # ---------------------------------------------------------------------------

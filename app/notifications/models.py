@@ -170,6 +170,34 @@ def list_notifications_for_user(
     return [_row_to_notification(row) for row in rows]
 
 
+def get_notification(
+    conn: Any,
+    notification_id: uuid.UUID | str,
+    user_id: uuid.UUID | str | None = None,
+) -> Notification | None:
+    """Return a single notification by id, or ``None``.
+
+    When *user_id* is provided, the SELECT also filters on ownership so
+    that one user cannot fetch another user's notification.
+    """
+    try:
+        if user_id is not None:
+            row = conn.execute(
+                f"SELECT {_NOTIFICATION_COLUMNS} FROM notifications "
+                "WHERE id = %s AND user_id = %s",
+                (str(notification_id), str(user_id)),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                f"SELECT {_NOTIFICATION_COLUMNS} FROM notifications WHERE id = %s",
+                (str(notification_id),),
+            ).fetchone()
+    except Exception:
+        logger.exception("Failed to fetch notification id=%s", notification_id)
+        return None
+    return _row_to_notification(row) if row else None
+
+
 def count_unread(conn: Any, user_id: uuid.UUID | str) -> int:
     """Return the number of unread notifications for a user."""
     try:

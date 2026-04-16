@@ -19,6 +19,7 @@ from starlette.responses import RedirectResponse, Response
 
 from app.notifications.models import Notification
 from app.notifications.routes import (
+    NotificationItem,
     api_notifications_partial,
     api_unread_count,
     mark_all_read_handler,
@@ -170,6 +171,114 @@ class TestMarkSingleRead:
         result = mark_single_read(req, str(_NOTIF_ID))
 
         assert isinstance(result, RedirectResponse)
+
+    @patch("app.notifications.routes._require_auth")
+    @patch("app.notifications.routes._connect")
+    def test_returns_hx_redirect_when_redirect_query_param_present(self, mock_connect, mock_auth):
+        """Bug 1: clicking an unread linked notification must navigate.
+
+        The `<a href>` click is swallowed by HTMX's POST and the native
+        navigation is suppressed. The handler must emit ``HX-Redirect``
+        so the browser navigates after the mark-read POST.
+        """
+        mock_auth.return_value = _AUTH
+        conn = MagicMock()
+        mock_connect.return_value = _ConnectCM(conn)
+
+        with patch("app.notifications.routes.mark_read"):
+            req = _make_request(
+                path=f"/notifications/{_NOTIF_ID}/read",
+                method="POST",
+                query_string=b"redirect=/drafts/abc",
+            )
+            result = mark_single_read(req, str(_NOTIF_ID))
+
+        assert isinstance(result, Response)
+        assert result.headers.get("HX-Redirect") == "/drafts/abc"
+
+    @patch("app.notifications.routes._require_auth")
+    @patch("app.notifications.routes._connect")
+    def test_rejects_external_redirect_target(self, mock_connect, mock_auth):
+        """The redirect target must stay same-origin."""
+        mock_auth.return_value = _AUTH
+        conn = MagicMock()
+        mock_connect.return_value = _ConnectCM(conn)
+
+        fresh_notif = _make_notification(read=True)
+        with (
+            patch("app.notifications.routes.mark_read"),
+            patch(
+                "app.notifications.routes.get_notification",
+                return_value=fresh_notif,
+            ),
+        ):
+            req = _make_request(
+                path=f"/notifications/{_NOTIF_ID}/read",
+                method="POST",
+                query_string=b"redirect=https%3A%2F%2Fevil.example%2Fpwn",
+            )
+            result = mark_single_read(req, str(_NOTIF_ID))
+
+        # Must NOT forward an off-site redirect. Either the result is
+        # not a Response (it's the re-rendered item) or its HX-Redirect
+        # header is absent.
+        if isinstance(result, Response):
+            assert result.headers.get("HX-Redirect") is None
+        else:
+            html = to_xml(result)
+            assert "evil.example" not in html
+
+    @patch("app.notifications.routes._require_auth")
+    @patch("app.notifications.routes._connect")
+    def test_returns_rendered_read_state_item_when_no_redirect(self, mock_connect, mock_auth):
+        """Bug 2: marking a non-link notification must return a re-rendered
+        read-state notification item — not a bare Span that collapses the
+        HTMX ``outerHTML`` swap target into a single dot."""
+        mock_auth.return_value = _AUTH
+        conn = MagicMock()
+        mock_connect.return_value = _ConnectCM(conn)
+
+        fresh_notif = _make_notification(read=True, link=None)
+
+        with (
+            patch("app.notifications.routes.mark_read"),
+            patch(
+                "app.notifications.routes.get_notification",
+                return_value=fresh_notif,
+            ),
+        ):
+            req = _make_request(
+                path=f"/notifications/{_NOTIF_ID}/read",
+                method="POST",
+            )
+            result = mark_single_read(req, str(_NOTIF_ID))
+
+        html = to_xml(result)
+        # Must render a full notification item wrapper, not just a dot.
+        assert f'id="notification-{_NOTIF_ID}"' in html
+        assert "notification-item--read" in html
+        # It must not be the bare standalone dot.
+        assert not html.strip().startswith("<span")
+
+
+# ---------------------------------------------------------------------------
+# Tests: NotificationItem rendering
+# ---------------------------------------------------------------------------
+
+
+class TestNotificationItemRendering:
+    def test_unread_linked_item_embeds_redirect_query_param(self):
+        """Bug 1 (rendering side): the hx_post URL must carry the
+        destination in a ``redirect`` query param so the handler can
+        issue ``HX-Redirect`` and navigate after marking read."""
+        notif = _make_notification(read=False, link="/drafts/abc")
+
+        html = to_xml(NotificationItem(notif))
+
+        # The hx-post endpoint must encode the target link in the URL.
+        assert "hx-post=" in html
+        assert "redirect=" in html
+        assert "%2Fdrafts%2Fabc" in html or "/drafts/abc" in html
 
 
 # ---------------------------------------------------------------------------

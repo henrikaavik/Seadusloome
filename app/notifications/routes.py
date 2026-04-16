@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+from urllib.parse import quote, urlparse
 
 from fasthtml.common import *  # noqa: F403
 from starlette.requests import Request
@@ -25,6 +26,7 @@ from app.auth.provider import UserDict
 from app.db import get_connection as _connect
 from app.notifications.models import (
     count_unread,
+    get_notification,
     list_notifications_for_user,
     mark_all_read,
     mark_read,
@@ -93,11 +95,15 @@ def NotificationItem(notif: Any, *, compact: bool = False):  # noqa: ANN201, N80
     )
 
     if notif.link and not notif.read:
-        # Wrap in a link and mark as read on click
+        # Wrap in a link and mark as read on click. The raw <a href> is
+        # swallowed by HTMX's hx-post, so we pipe the destination through
+        # a ``?redirect=`` query param — the handler validates same-origin
+        # and returns HX-Redirect so the browser navigates after the POST.
+        redirect_qp = quote(notif.link, safe="")
         return A(  # noqa: F405
             content,
             href=notif.link,
-            hx_post=f"/notifications/{notif.id}/read",
+            hx_post=f"/notifications/{notif.id}/read?redirect={redirect_qp}",
             hx_swap="none",
             cls="notification-link",
         )
@@ -184,8 +190,41 @@ def notifications_page(req: Request):
     )
 
 
+def _is_safe_redirect(target: str) -> bool:
+    """Return True if *target* is a safe, same-origin path to redirect to.
+
+    We only allow relative paths beginning with a single ``/`` so the
+    browser cannot be sent to an attacker-controlled host. ``//host`` is
+    a protocol-relative URL and must be rejected.
+    """
+    if not target or not target.startswith("/"):
+        return False
+    if target.startswith("//"):
+        return False
+    parsed = urlparse(target)
+    # urlparse of a relative path should yield empty scheme and netloc.
+    if parsed.scheme or parsed.netloc:
+        return False
+    return True
+
+
 def mark_single_read(req: Request, id: str):
-    """POST /notifications/{id}/read -- mark one notification as read (HTMX)."""
+    """POST /notifications/{id}/read -- mark one notification as read (HTMX).
+
+    Two call sites:
+
+    1. Unread linked notifications render as ``<a href hx-post=...>``. The
+       click is consumed by HTMX's POST and the native ``<a>`` navigation
+       is suppressed. For these, the caller encodes the destination as a
+       ``?redirect=<link>`` query param; when present and same-origin we
+       return an empty 200 with an ``HX-Redirect`` header so the browser
+       navigates after the POST.
+    2. Unread non-link notifications render a "Loe" button whose target
+       is ``#notification-{id}`` with ``hx-swap="outerHTML"``. For these
+       we re-render the full notification row in its read state so the
+       row visibly flips from unread-style to read-style (previously the
+       row collapsed into a bare dot).
+    """
     auth_or_redirect = _require_auth(req)
     if isinstance(auth_or_redirect, Response):
         return auth_or_redirect
@@ -205,9 +244,38 @@ def mark_single_read(req: Request, id: str):
     except Exception:
         logger.exception("Failed to mark notification %s as read", id)
 
-    # Return an empty response -- the HTMX swap will handle UI update.
-    # If hx_target was the item itself, return a minimal read-state item.
-    return Span(cls="notification-dot--read")  # noqa: F405
+    # Path 1: linked notification -> HX-Redirect after the POST.
+    redirect_target = req.query_params.get("redirect")
+    if redirect_target and _is_safe_redirect(redirect_target):
+        return Response(
+            content="",
+            status_code=200,
+            headers={"HX-Redirect": redirect_target},
+        )
+
+    # Path 2: non-link notification -> re-render the whole row in its
+    # read state so HTMX's ``outerHTML`` swap against ``#notification-{id}``
+    # replaces the item with a properly rendered read-state row.
+    try:
+        with _connect() as conn:
+            fresh = get_notification(conn, notif_id, user_id=auth["id"])
+    except Exception:
+        logger.exception("Failed to refetch notification %s after mark-read", id)
+        fresh = None
+
+    if fresh is None:
+        # DB error or notification vanished — fall back to a minimal but
+        # non-collapsing read-state row so the UI doesn't break.
+        return Div(  # noqa: F405
+            Div(  # noqa: F405
+                Span("", cls="notification-title"),  # noqa: F405
+                cls="notification-header",
+            ),
+            cls="notification-item notification-item--read",
+            id=f"notification-{id}",
+        )
+
+    return NotificationItem(fresh)
 
 
 def mark_all_read_handler(req: Request):
