@@ -296,7 +296,12 @@ def _bool_from_form(raw: str | None, default: bool) -> bool:
 
 
 async def pin_conversation_handler(req: Request, conv_id: str):
-    """POST /chat/{conv_id}/pin — toggle the conversation's is_pinned flag."""
+    """POST /chat/{conv_id}/pin — toggle the conversation's is_pinned flag.
+
+    Bug #654: returns the refreshed ``<tr>`` fragment so the row swaps in
+    place (``hx-target=\"closest tr\"``) instead of leaving the user with
+    no feedback. Non-HTMX callers still get the same 204 as before.
+    """
     auth_or_redirect = _require_auth(req)
     if isinstance(auth_or_redirect, Response):
         return auth_or_redirect
@@ -319,6 +324,7 @@ async def pin_conversation_handler(req: Request, conv_id: str):
         with _connect() as conn:
             _set_conversation_pinned(conn, parsed, new_pinned)
             conn.commit()
+            refreshed = get_conversation(conn, parsed)
     except Exception:
         logger.exception("Failed to set pinned=%s on conversation %s", new_pinned, conv_id)
         return Response(status_code=500)
@@ -328,11 +334,24 @@ async def pin_conversation_handler(req: Request, conv_id: str):
         "chat.conversation.pin",
         {"conversation_id": str(parsed), "pinned": new_pinned},
     )
+
+    if _is_htmx(req) and refreshed is not None:
+        # Lazy import avoids the routes <-> handlers circular dependency.
+        from app.chat.routes import _render_conversation_row
+
+        return _render_conversation_row(refreshed, auth)
     return _hx_trigger_response("chat:conversation-updated")
 
 
 async def archive_conversation_handler(req: Request, conv_id: str):
-    """POST /chat/{conv_id}/archive — toggle is_archived."""
+    """POST /chat/{conv_id}/archive — toggle is_archived.
+
+    Bug #654: archive and un-archive both remove the row from the current
+    view (the default list hides archived conversations; the archived
+    filter hides active ones). Returning an empty 200 lets htmx swap the
+    ``<tr>`` out of the DOM — the user sees the action succeed without a
+    full reload. Non-HTMX callers keep the 303 back to ``/chat``.
+    """
     auth_or_redirect = _require_auth(req)
     if isinstance(auth_or_redirect, Response):
         return auth_or_redirect
@@ -365,12 +384,23 @@ async def archive_conversation_handler(req: Request, conv_id: str):
     )
 
     if _is_htmx(req):
-        return _hx_trigger_response("chat:conversation-updated")
+        # Empty body + 200 collapses the row out of the list. We trigger
+        # ``chat:conversation-updated`` so any sidebar counters listening
+        # for the event can still refresh.
+        return Response(
+            "",
+            status_code=200,
+            headers={"HX-Trigger": "chat:conversation-updated"},
+        )
     return RedirectResponse(url="/chat", status_code=303)
 
 
 async def rename_conversation_handler(req: Request, conv_id: str):
-    """POST /chat/{conv_id}/rename — set a user-chosen title."""
+    """POST /chat/{conv_id}/rename — set a user-chosen title.
+
+    Bug #654: returns the refreshed ``<tr>`` so the list row updates in
+    place with the new title. Non-HTMX callers still get the 204.
+    """
     auth_or_redirect = _require_auth(req)
     if isinstance(auth_or_redirect, Response):
         return auth_or_redirect
@@ -395,6 +425,7 @@ async def rename_conversation_handler(req: Request, conv_id: str):
         with _connect() as conn:
             _update_conversation_title(conn, parsed, title)
             conn.commit()
+            refreshed = get_conversation(conn, parsed)
     except Exception:
         logger.exception("Failed to rename conversation %s", conv_id)
         return Response(status_code=500)
@@ -404,6 +435,11 @@ async def rename_conversation_handler(req: Request, conv_id: str):
         "chat.conversation.rename",
         {"conversation_id": str(parsed), "title": title},
     )
+
+    if _is_htmx(req) and refreshed is not None:
+        from app.chat.routes import _render_conversation_row
+
+        return _render_conversation_row(refreshed, auth)
     return _hx_trigger_response("chat:conversation-updated")
 
 

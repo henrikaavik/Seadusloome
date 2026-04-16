@@ -1143,11 +1143,13 @@
       paletteEl.appendChild(li);
     }
 
+    paletteEl.classList.add('is-open');
     paletteEl.hidden = false;
   }
 
   function hidePalette() {
     if (!paletteEl) return;
+    paletteEl.classList.remove('is-open');
     paletteEl.hidden = true;
     paletteIndex = -1;
   }

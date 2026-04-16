@@ -1055,7 +1055,7 @@
    =========================================================================== */
 
 .chat-slash-palette {
-  display: none; /* shown by JS on "/" keypress */
+  display: none; /* shown by JS on "/" keypress via .is-open */
   position: absolute;
   bottom: 100%; /* anchors just above the input bar */
   left: var(--space-4);
@@ -1068,8 +1068,12 @@
   max-height: 260px;
   overflow-y: auto;
   padding: var(--space-1) 0;
-  /* Subtle slide-up entry when JS sets display:block */
+  /* Subtle slide-up entry when JS adds .is-open */
   animation: chat-palette-in 0.14s ease both;
+}
+
+.chat-slash-palette.is-open {
+  display: block;
 }
 
 @keyframes chat-palette-in {

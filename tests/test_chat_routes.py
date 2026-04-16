@@ -410,6 +410,36 @@ class TestChatDelete:
             assert resp.status_code == 303
             assert resp.headers["location"] == "/chat"
 
+    @patch("app.chat.routes.log_chat_conversation_delete")
+    @patch("app.chat.routes.delete_conversation")
+    @patch("app.chat.routes._connect")
+    @patch("app.auth.middleware._get_provider")
+    def test_delete_from_list_returns_empty_row_swap(
+        self, mock_provider, mock_connect, mock_delete, mock_audit
+    ):
+        """Bug #654: the ``/chat`` list delete form posts ``from_list=1``
+        so htmx can swap the row out in place (empty 200 body, no
+        HX-Redirect).
+        """
+        mock_provider.return_value = _stub_provider()
+        conn = MagicMock()
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        conv = _make_conversation()
+        with patch("app.chat.routes.get_conversation", return_value=conv):
+            client = _authed_client()
+            resp = client.post(
+                f"/chat/{_CONV_ID}/delete",
+                headers={"HX-Request": "true"},
+                data={"from_list": "1"},
+            )
+            assert resp.status_code == 200
+            assert resp.text == ""
+            # No HX-Redirect — row just disappears from the list.
+            assert "HX-Redirect" not in resp.headers
+        mock_delete.assert_called_once()
+
     @patch("app.chat.routes._connect")
     @patch("app.auth.middleware._get_provider")
     def test_delete_non_owner_returns_not_found(self, mock_provider, mock_connect):

@@ -87,6 +87,14 @@ _MAX_HISTORY_MESSAGES = 50
 _WS_SEND_TIMEOUT_SECONDS = 5.0
 _FOLLOW_UPS_MAX_TOKENS = 180
 
+# #652 — per-call deadlines to prevent hung turns.
+# RAG retrieval is bounded because an unresponsive Voyage AI embedding call
+# would otherwise hang the whole orchestrator. The LLM streaming loop is
+# wrapped in a turn-level deadline so a stuck upstream never leaves the
+# client staring at an infinite spinner.
+_RAG_RETRIEVE_TIMEOUT_SECONDS = 15.0
+_TURN_DEADLINE_SECONDS = 120.0
+
 # Module-level registry of fire-and-forget background tasks (e.g. the
 # auto-title job). Holding a strong reference prevents asyncio from
 # GC'ing the task mid-flight and logging the noisy "Task was destroyed
@@ -524,9 +532,9 @@ class ChatOrchestrator:
         org_id = auth.get("org_id")
 
         # 0. Per-user message rate limit (cheap pre-check, fail-open on DB
-        # error). The per-org cost budget is checked later in step 3 inside
-        # the same transaction that persists the user message so the
-        # advisory lock covers the read-then-insert window (see below).
+        # error). The per-org cost budget is checked in step 3 inside the
+        # same transaction that persists the user message so the advisory
+        # lock covers the read-then-insert window (see below).
         try:
             if user_id:
                 check_message_rate(user_id)
@@ -592,12 +600,42 @@ class ChatOrchestrator:
             impact_summary=impact_summary,
         )
 
-        # 2b. RAG retrieval
-        # Tenant scoping landed in #576: retriever now filters by caller's
-        # org_id (public NULL-scoped rows + caller's own private rows).
+        # 3. Budget check + persist user message BEFORE RAG retrieval (#652).
+        # RAG and the LLM can stall for minutes; if we wait until after them
+        # to persist, a timeout means the user's message is silently lost
+        # and they can't see it after a reload. The advisory lock taken in
+        # ``check_org_cost_budget`` still covers the read-then-insert window
+        # because it runs in the same transaction as ``create_message``.
+        try:
+            with get_connection() as conn:
+                if org_id:
+                    check_org_cost_budget(org_id, conn=conn)
+                create_message(conn, conversation_id, "user", user_message)
+                conn.commit()
+        except CostBudgetExceededError as exc:
+            try:
+                await _safe_send(send, {"type": "error", "message": str(exc)})
+            except WebSocketSendTimeout:
+                pass
+            return
+        except Exception:
+            logger.exception("Failed to persist user message")
+            try:
+                await _safe_send(
+                    send, {"type": "error", "message": "Sonum salvestamine ebaonnestus."}
+                )
+            except WebSocketSendTimeout:
+                pass
+            return
+
+        # 3b. RAG retrieval — now that the user message is safely persisted,
+        # we can afford to have RAG fail or time out without losing data.
+        # Tenant scoping landed in #576: retriever filters by caller's org_id
+        # (public NULL-scoped rows + caller's own private rows).
         rag_chunks: list[Any] = []
         rag_context_json: list[dict[str, Any]] | None = None
         retrieval_attempted = False
+        rag_timed_out = False
 
         if Retriever is not None:
             retriever = self._get_retriever()
@@ -607,13 +645,30 @@ class ChatOrchestrator:
                     await _safe_send(send, {"type": "retrieval_started"})
                     # #576: pass the caller's org_id so private chunks from
                     # other tenants are never retrieved.
-                    rag_chunks = await retriever.retrieve(
-                        user_message,
-                        k=10,
-                        org_id=str(org_id) if org_id else None,
+                    # #652: bound the retrieval call so an unresponsive
+                    # Voyage AI embedding endpoint can't hang the turn.
+                    rag_chunks = await asyncio.wait_for(
+                        retriever.retrieve(
+                            user_message,
+                            k=10,
+                            org_id=str(org_id) if org_id else None,
+                        ),
+                        timeout=_RAG_RETRIEVE_TIMEOUT_SECONDS,
                     )
                 except WebSocketSendTimeout:
                     return
+                except TimeoutError:
+                    # #652: don't let a stalled retriever escalate to a hung
+                    # turn. Log, continue without RAG — downstream code
+                    # already handles an empty chunk list.
+                    logger.warning(
+                        "RAG retrieval timed out after %.1fs for conversation %s; "
+                        "proceeding without context",
+                        _RAG_RETRIEVE_TIMEOUT_SECONDS,
+                        conversation_id,
+                    )
+                    rag_chunks = []
+                    rag_timed_out = True
                 except Exception:
                     logger.warning(
                         "RAG retrieval failed for conversation %s; proceeding without",
@@ -642,46 +697,47 @@ class ChatOrchestrator:
             except WebSocketSendTimeout:
                 return
 
-        # 3. Budget check + persist user message in a single transaction so
-        # the ``pg_advisory_xact_lock`` taken inside ``check_org_cost_budget``
-        # serialises concurrent reads-then-inserts for the same org, closing
-        # the TOCTOU window that allowed two racing requests to both pass a
-        # near-limit budget check.
-        try:
-            with get_connection() as conn:
-                if org_id:
-                    check_org_cost_budget(org_id, conn=conn)
-                create_message(conn, conversation_id, "user", user_message)
-                conn.commit()
-        except CostBudgetExceededError as exc:
-            try:
-                await _safe_send(send, {"type": "error", "message": str(exc)})
-            except WebSocketSendTimeout:
-                pass
-            return
-        except Exception:
-            logger.exception("Failed to persist user message")
-            try:
-                await _safe_send(
-                    send, {"type": "error", "message": "Sonum salvestamine ebaonnestus."}
-                )
-            except WebSocketSendTimeout:
-                pass
-            return
+            # #652: surface a soft hint when retrieval timed out so the UI
+            # can show "konteksti ei leitud" instead of silently pretending
+            # everything is fine.
+            if rag_timed_out:
+                try:
+                    await _safe_send(
+                        send,
+                        {
+                            "type": "warning",
+                            "message": (
+                                "Konteksti otsing aegus — vastus antakse ilma "
+                                "täiendava kontekstita."
+                            ),
+                        },
+                    )
+                except WebSocketSendTimeout:
+                    return
 
         # 4-6. LLM streaming with tool use
-        full_content = ""
-        tokens_in = 0
-        tokens_out = 0
-        tool_rounds = 0
-        completed = False
+        # Mutable state captured by the inner streaming coroutine so that
+        # timeout / cancel paths can still see whatever partial content
+        # was streamed before the deadline fired.
+        stream_state: dict[str, Any] = {
+            "full_content": "",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "tool_rounds": 0,
+            "completed": False,
+        }
         cancelled = False
 
         # Build conversation messages for the LLM
         messages = _build_llm_messages(history, user_message)
 
-        try:
-            while tool_rounds <= MAX_TOOL_ROUNDS:
+        async def _run_stream_loop() -> None:
+            """Run the LLM streaming + tool-use loop.
+
+            Writes progress into ``stream_state`` so the outer handler can
+            recover partial content on timeout / cancel / error.
+            """
+            while stream_state["tool_rounds"] <= MAX_TOOL_ROUNDS:
                 event: StreamEvent
                 # #636 review: a single Claude turn can contain multiple
                 # ``tool_use`` blocks. We MUST execute every one and feed
@@ -710,7 +766,7 @@ class ChatOrchestrator:
                 async with aclosing(stream) as managed_stream:  # type: ignore[type-var]
                     async for event in managed_stream:
                         if event.type == "content":
-                            full_content += event.delta or ""
+                            stream_state["full_content"] += event.delta or ""
                             await _safe_send(
                                 send,
                                 {
@@ -742,13 +798,13 @@ class ChatOrchestrator:
 
                 # If no tool use requested, we're done
                 if not pending_tools:
-                    completed = True
+                    stream_state["completed"] = True
                     break
 
                 # Execute every tool in this turn. A turn that asks for N
                 # tools still counts as ONE round against MAX_TOOL_ROUNDS
                 # — the budget bounds *assistant turns*, not tool fan-out.
-                tool_rounds += 1
+                stream_state["tool_rounds"] += 1
                 tool_call_segments: list[str] = []
                 for pending in pending_tools:
                     tool_name = pending["name"]
@@ -804,8 +860,10 @@ class ChatOrchestrator:
                 # tool_result blocks.
                 messages.append("\n".join(tool_call_segments))
 
-                if tool_rounds >= MAX_TOOL_ROUNDS:
-                    full_content += "\n\n(Tööriistade kasutamise limiit saavutatud.)"
+                if stream_state["tool_rounds"] >= MAX_TOOL_ROUNDS:
+                    stream_state["full_content"] += (
+                        "\n\n(Tööriistade kasutamise limiit saavutatud.)"
+                    )
                     await _safe_send(
                         send,
                         {
@@ -813,9 +871,46 @@ class ChatOrchestrator:
                             "delta": "\n\n(Tööriistade kasutamise limiit saavutatud.)",
                         },
                     )
-                    completed = True
+                    stream_state["completed"] = True
                     break
 
+        try:
+            # #652: bound the whole streaming loop so a stuck upstream LLM
+            # call can never leave the user staring at a spinner forever.
+            # ``asyncio.wait_for`` cancels the inner coroutine on timeout,
+            # which surfaces as ``TimeoutError`` here (not CancelledError in
+            # the outer task) so we can distinguish a deadline-hit from a
+            # user-initiated Stop.
+            await asyncio.wait_for(_run_stream_loop(), timeout=_TURN_DEADLINE_SECONDS)
+        except TimeoutError:
+            # #652: turn deadline exceeded. Persist whatever partial
+            # content was streamed so the user isn't left with a dangling
+            # spinner, then emit an error with a friendly Estonian message.
+            logger.warning(
+                "Chat turn deadline (%ss) exceeded for conversation %s",
+                _TURN_DEADLINE_SECONDS,
+                conversation_id,
+            )
+            if stream_state["full_content"]:
+                _persist_partial_assistant(
+                    conversation_id,
+                    stream_state["full_content"],
+                    getattr(self.llm, "_model", None),
+                    rag_context_json,
+                    is_truncated=True,
+                    error_suffix=" [Viga: serveri vastus võttis liiga kaua aega]",
+                )
+            try:
+                await _safe_send(
+                    send,
+                    {
+                        "type": "error",
+                        "message": "Serveri vastus võttis liiga kaua aega. Palun proovi uuesti.",
+                    },
+                )
+            except WebSocketSendTimeout:
+                pass
+            return
         except asyncio.CancelledError:
             # Client asked us to stop — persist partial content flagged
             # as truncated, emit a stopped event, then re-raise so the
@@ -823,7 +918,7 @@ class ChatOrchestrator:
             cancelled = True
             assistant_msg_id = _persist_partial_assistant(
                 conversation_id,
-                full_content,
+                stream_state["full_content"],
                 getattr(self.llm, "_model", None),
                 rag_context_json,
                 is_truncated=True,
@@ -844,7 +939,7 @@ class ChatOrchestrator:
             # bail without sending further events.
             _persist_partial_assistant(
                 conversation_id,
-                full_content,
+                stream_state["full_content"],
                 getattr(self.llm, "_model", None),
                 rag_context_json,
                 is_truncated=True,
@@ -853,10 +948,10 @@ class ChatOrchestrator:
         except Exception:
             logger.exception("LLM streaming failed for conversation %s", conversation_id)
             # M1: persist partial content with error suffix when streaming fails
-            if full_content:
+            if stream_state["full_content"]:
                 _persist_partial_assistant(
                     conversation_id,
-                    full_content,
+                    stream_state["full_content"],
                     getattr(self.llm, "_model", None),
                     rag_context_json,
                     is_truncated=True,
@@ -869,6 +964,12 @@ class ChatOrchestrator:
             except WebSocketSendTimeout:
                 pass
             return
+
+        # Unpack stream_state back into locals for the rest of the method.
+        full_content = stream_state["full_content"]
+        tokens_in = stream_state["tokens_in"]
+        tokens_out = stream_state["tokens_out"]
+        completed = stream_state["completed"]
 
         if cancelled:
             # Belt-and-suspenders — CancelledError should have re-raised.

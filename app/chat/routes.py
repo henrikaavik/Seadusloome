@@ -125,25 +125,66 @@ def _get_last_message_at(conv_id: uuid.UUID) -> datetime | None:
 # ---------------------------------------------------------------------------
 
 
+def _conversation_row_dict(conv: Conversation) -> dict[str, Any]:
+    """Shape a single :class:`Conversation` into the DataTable row dict.
+
+    Extracted so both the list renderer and the per-row mutation handlers
+    (pin / archive / rename) can produce an identical ``<tr>`` payload.
+    """
+    msg_count = _get_message_count(conv.id)
+    last_msg = _get_last_message_at(conv.id)
+    return {
+        "id": str(conv.id),
+        "title": conv.title,
+        "message_count": msg_count,
+        "last_message_at": _format_timestamp(last_msg),
+        "context_draft_id": str(conv.context_draft_id) if conv.context_draft_id else None,
+        "created_at": _format_timestamp(conv.created_at),
+        "is_pinned": bool(getattr(conv, "is_pinned", False)),
+        "is_archived": bool(getattr(conv, "is_archived", False)),
+    }
+
+
 def _conversation_rows(conversations: list[Conversation]) -> list[dict[str, Any]]:
     """Shape Conversation objects into dict rows for DataTable."""
-    rows: list[dict[str, Any]] = []
-    for c in conversations:
-        msg_count = _get_message_count(c.id)
-        last_msg = _get_last_message_at(c.id)
-        rows.append(
-            {
-                "id": str(c.id),
-                "title": c.title,
-                "message_count": msg_count,
-                "last_message_at": _format_timestamp(last_msg),
-                "context_draft_id": str(c.context_draft_id) if c.context_draft_id else None,
-                "created_at": _format_timestamp(c.created_at),
-                "is_pinned": bool(getattr(c, "is_pinned", False)),
-                "is_archived": bool(getattr(c, "is_archived", False)),
-            }
-        )
-    return rows
+    return [_conversation_row_dict(c) for c in conversations]
+
+
+def _row_dom_id(conv_id: str) -> str:
+    """Return the stable DOM id for a single conversation row."""
+    return f"chat-row-{conv_id}"
+
+
+def _render_conversation_row(conv: Conversation, auth: Any | None = None):
+    """Render the single ``<tr>`` fragment for a conversation.
+
+    Used by the list page (indirectly, via :func:`DataTable`) and returned
+    directly from the pin / archive / rename handlers so the row swaps in
+    place without triggering a full-body reload.
+
+    The ``auth`` argument is accepted for future role-based rendering
+    (e.g. hiding action buttons for reviewers) but is currently unused —
+    keeping it in the signature avoids touching every call site later.
+    """
+    del auth  # reserved for future RBAC hooks
+    row = _conversation_row_dict(conv)
+    columns = _conversation_list_columns()
+    return Tr(  # noqa: F405
+        *[_row_cell(col, row) for col in columns],
+        id=_row_dom_id(row["id"]),
+    )
+
+
+def _row_cell(col: Column, row: dict[str, Any]):
+    """Build a single ``<td>`` — mirrors :func:`app.ui.data.data_table._cell`.
+
+    We can't import the private helper without tripping ruff's ``F401``
+    and the cross-module coupling is trivial, so inline it here.
+    """
+    content = col.render(row) if col.render is not None else str(row.get(col.key, ""))
+    align_cls = f"text-{col.align}" if col.align != "left" else ""
+    classes = f"data-table-td {align_cls}".strip()
+    return Td(content, cls=classes, data_label=col.label)  # noqa: F405
 
 
 def _conversation_list_columns() -> list[Column]:
@@ -174,12 +215,15 @@ def _conversation_list_columns() -> list[Column]:
         conv_id = row["id"]
         pin_label = "Eemalda kinnitus" if row["is_pinned"] else "Kinnita"
         archive_label = "Taasta" if row["is_archived"] else "Arhiveeri"
+        # Row-targeted swaps (bug #654): each mutation returns a replacement
+        # <tr> (pin / rename) or an empty fragment (archive / delete) so the
+        # list updates in place instead of reloading the whole page.
         pin_form = Form(  # noqa: F405
             Button(pin_label, variant="secondary", size="sm", type="submit"),
             method="post",
             action=f"/chat/{conv_id}/pin",
             hx_post=f"/chat/{conv_id}/pin",
-            hx_target="body",
+            hx_target="closest tr",
             hx_swap="outerHTML",
             cls="chat-list-action-form",
         )
@@ -188,7 +232,7 @@ def _conversation_list_columns() -> list[Column]:
             method="post",
             action=f"/chat/{conv_id}/archive",
             hx_post=f"/chat/{conv_id}/archive",
-            hx_target="body",
+            hx_target="closest tr",
             hx_swap="outerHTML",
             cls="chat-list-action-form",
         )
@@ -204,17 +248,22 @@ def _conversation_list_columns() -> list[Column]:
             method="post",
             action=f"/chat/{conv_id}/rename",
             hx_post=f"/chat/{conv_id}/rename",
-            hx_target="body",
+            hx_target="closest tr",
             hx_swap="outerHTML",
             cls="chat-list-action-form chat-list-rename-form",
         )
         delete_form = Form(  # noqa: F405
+            # Hidden marker so :func:`delete_conversation_handler` can tell
+            # a row-level delete (which should collapse the <tr> in place)
+            # apart from the detail-page delete (which still needs
+            # HX-Redirect back to /chat).
+            Input(type="hidden", name="from_list", value="1"),  # noqa: F405
             Button("Kustuta", variant="danger", size="sm", type="submit"),
             method="post",
             action=f"/chat/{conv_id}/delete",
             hx_post=f"/chat/{conv_id}/delete",
             hx_confirm="Kas olete kindel, et soovite vestluse kustutada?",
-            hx_target="body",
+            hx_target="closest tr",
             hx_swap="outerHTML",
             cls="chat-list-action-form",
         )
@@ -1013,7 +1062,7 @@ def conversation_view_page(req: Request, conv_id: str):
 # ---------------------------------------------------------------------------
 
 
-def delete_conversation_handler(req: Request, conv_id: str):
+async def delete_conversation_handler(req: Request, conv_id: str):
     """POST /chat/{conv_id}/delete -- delete a conversation."""
     auth_or_redirect = _require_auth(req)
     if isinstance(auth_or_redirect, Response):
@@ -1039,6 +1088,17 @@ def delete_conversation_handler(req: Request, conv_id: str):
     if not can_access_conversation(auth, conversation):
         return _not_found_page(req)
 
+    # Bug #654: the /chat list posts with ``from_list=1`` so we can return
+    # an empty fragment that swaps the row out in place. The detail-page
+    # delete form omits the flag and keeps the legacy HX-Redirect pattern
+    # (see Phase 2 draft delete for the same shape).
+    from_list = False
+    try:
+        form = await req.form()
+        from_list = (form.get("from_list") or "") == "1"
+    except Exception:
+        logger.exception("Failed to read delete form for %s", conv_id)
+
     # Delete
     try:
         with _connect() as conn:
@@ -1050,8 +1110,12 @@ def delete_conversation_handler(req: Request, conv_id: str):
 
     log_chat_conversation_delete(auth.get("id"), parsed)
 
-    # HX-Redirect pattern (same as Phase 2 draft delete)
-    if req.headers.get("HX-Request") == "true":
+    is_htmx = req.headers.get("HX-Request") == "true"
+    if is_htmx and from_list:
+        # Empty body + 200 — htmx replaces the <tr> with nothing, so the
+        # row vanishes from the list without touching pagination.
+        return Response("", status_code=200)
+    if is_htmx:
         return Response(
             status_code=204,
             headers={"HX-Redirect": "/chat"},

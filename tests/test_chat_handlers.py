@@ -211,6 +211,37 @@ class TestPinConversation:
             resp = client.post(f"/chat/{_CONV_ID}/pin")
             assert resp.status_code == 404
 
+    def test_pin_htmx_returns_row_fragment(self, provider_patch, mock_conn):
+        """Bug #654: htmx pin returns a refreshed ``<tr>`` for in-place swap.
+
+        The initial ``get_conversation`` call loads the pre-mutation row
+        for the access check; the second call (after the DB write) reads
+        the fresh state so the returned fragment reflects the new
+        ``is_pinned`` value (★ indicator).
+        """
+        conv_before = _make_conversation()
+        conv_after = _make_conversation()
+        conv_after.is_pinned = True
+        with (
+            patch(
+                "app.chat.handlers.get_conversation",
+                side_effect=[conv_before, conv_after],
+            ),
+            patch("app.chat.handlers._set_conversation_pinned"),
+        ):
+            client = _authed_client()
+            resp = client.post(
+                f"/chat/{_CONV_ID}/pin",
+                headers={"HX-Request": "true"},
+                data={"pinned": "1"},
+            )
+            assert resp.status_code == 200
+            # Row fragment must contain the conversation id (as a DOM id
+            # and inside the links) and the pin star for the pinned state.
+            assert "<tr" in resp.text
+            assert str(_CONV_ID) in resp.text
+            assert "\u2605" in resp.text  # pin star indicator
+
 
 # ---------------------------------------------------------------------------
 # Archive conversation
@@ -218,7 +249,12 @@ class TestPinConversation:
 
 
 class TestArchiveConversation:
-    def test_archive_htmx_returns_204(self, provider_patch, mock_conn):
+    def test_archive_htmx_returns_empty_row_swap(self, provider_patch, mock_conn):
+        """Bug #654: htmx archive removes the row in place (empty 200).
+
+        The HX-Trigger event is preserved so sidebar counters listening
+        for ``chat:conversation-updated`` still refresh.
+        """
         conv = _make_conversation()
         with (
             patch("app.chat.handlers.get_conversation", return_value=conv),
@@ -230,7 +266,8 @@ class TestArchiveConversation:
                 headers={"HX-Request": "true"},
                 data={"archived": "1"},
             )
-            assert resp.status_code == 204
+            assert resp.status_code == 200
+            assert resp.text == ""
             assert resp.headers.get("HX-Trigger") == "chat:conversation-updated"
             mock_set.assert_called_once()
 
@@ -305,6 +342,30 @@ class TestRenameConversation:
             client = _authed_client()
             resp = client.post(f"/chat/{_CONV_ID}/rename", data={"title": "X"})
             assert resp.status_code == 404
+
+    def test_rename_htmx_returns_row_fragment_with_new_title(self, provider_patch, mock_conn):
+        """Bug #654: htmx rename returns the refreshed ``<tr>`` with the
+        new title, so the list row updates in place.
+        """
+        conv_before = _make_conversation(title="Vana pealkiri")
+        conv_after = _make_conversation(title="Uus pealkiri")
+        with (
+            patch(
+                "app.chat.handlers.get_conversation",
+                side_effect=[conv_before, conv_after],
+            ),
+            patch("app.chat.handlers._update_conversation_title"),
+        ):
+            client = _authed_client()
+            resp = client.post(
+                f"/chat/{_CONV_ID}/rename",
+                headers={"HX-Request": "true"},
+                data={"title": "Uus pealkiri"},
+            )
+            assert resp.status_code == 200
+            assert "<tr" in resp.text
+            assert str(_CONV_ID) in resp.text
+            assert "Uus pealkiri" in resp.text
 
 
 # ---------------------------------------------------------------------------

@@ -24,34 +24,34 @@
   --danger: #B91C1C;
   --info: #0062F5;
 
-  /* ---- Semantic tokens (light theme) ---- */
-  --color-background: var(--pahkla);
-  --color-surface: var(--ehakivi);
-  --color-surface-raised: var(--ehakivi);
-  --color-text: var(--mustkivi);
-  --color-text-muted: var(--kabelikivi);
-  --color-text-inverted: var(--ehakivi);
-  --color-border: var(--hellamaa);
+  /* ---- Semantic tokens (dark, default & only theme) ---- */
+  --color-background: var(--mustkivi);
+  --color-surface: #1e293b;
+  --color-surface-raised: #293548;
+  --color-text: var(--ehakivi);
+  --color-text-muted: var(--hellamaa);
+  --color-text-inverted: var(--mustkivi);
+  --color-border: var(--majakivi);
   --color-border-strong: var(--kabelikivi);
 
-  --color-primary: var(--estonian-blue);
-  --color-primary-hover: var(--liivi);
-  --color-primary-text: var(--ehakivi);
-  --color-primary-subtle: var(--parnu);
+  --color-primary: var(--narva);
+  --color-primary-hover: var(--paldiski);
+  --color-primary-text: var(--mustkivi);
+  --color-primary-subtle: rgba(0, 195, 255, 0.15);
 
   --color-accent: var(--narva);
 
   --color-success: var(--success);
-  --color-success-bg: #DCFCE7;
+  --color-success-bg: rgba(21, 128, 61, 0.15);
   --color-warning: var(--warning);
-  --color-warning-bg: var(--haapsalu);
+  --color-warning-bg: rgba(202, 138, 4, 0.15);
   --color-danger: var(--danger);
-  --color-danger-bg: #FEE2E2;
+  --color-danger-bg: rgba(185, 28, 28, 0.15);
   --color-info: var(--info);
-  --color-info-bg: var(--parnu);
+  --color-info-bg: rgba(0, 98, 245, 0.15);
 
   /* Focus ring for accessibility */
-  --color-focus-ring: var(--estonian-blue);
+  --color-focus-ring: var(--narva);
 
   /* ---- Typography ---- */
   --font-family: 'Aino', Verdana, -apple-system, BlinkMacSystemFont,
@@ -96,9 +96,9 @@
   --radius-full: 9999px;
 
   /* ---- Shadows ---- */
-  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.05);
-  --shadow: 0 4px 6px -1px rgba(15, 23, 42, 0.08);
-  --shadow-lg: 0 10px 25px -5px rgba(15, 23, 42, 0.12);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 10px 25px -5px rgba(0, 0, 0, 0.5);
 
   /* ---- Z-index layers ---- */
   --z-base: 1;
@@ -123,60 +123,9 @@
   --topbar-height: 64px;
 }
 
-/* ===========================================================================
-   Dark theme overrides
-   =========================================================================== */
-
-[data-theme="dark"] {
-  --color-background: var(--mustkivi);
-  --color-surface: #1e293b;
-  --color-surface-raised: #293548;
-  --color-text: var(--ehakivi);
-  --color-text-muted: var(--hellamaa);
-  --color-text-inverted: var(--mustkivi);
-  --color-border: var(--majakivi);
-  --color-border-strong: var(--kabelikivi);
-
-  --color-primary: var(--narva);
-  --color-primary-hover: var(--paldiski);
-  --color-primary-text: var(--mustkivi);
-  --color-primary-subtle: rgba(0, 195, 255, 0.15);
-
-  --color-accent: var(--narva);
-
-  --color-success-bg: rgba(21, 128, 61, 0.15);
-  --color-warning-bg: rgba(202, 138, 4, 0.15);
-  --color-danger-bg: rgba(185, 28, 28, 0.15);
-  --color-info-bg: rgba(0, 98, 245, 0.15);
-
-  --color-focus-ring: var(--narva);
-
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
-  --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.4);
-  --shadow-lg: 0 10px 25px -5px rgba(0, 0, 0, 0.5);
-}
-
-/* Respect system preference when no explicit theme is set */
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme]) {
-    --color-background: var(--mustkivi);
-    --color-surface: #1e293b;
-    --color-surface-raised: #293548;
-    --color-text: var(--ehakivi);
-    --color-text-muted: var(--hellamaa);
-    --color-text-inverted: var(--mustkivi);
-    --color-border: var(--majakivi);
-    --color-primary: var(--narva);
-    --color-primary-hover: var(--paldiski);
-    --color-primary-text: var(--mustkivi);
-    --color-primary-subtle: rgba(0, 195, 255, 0.15);
-    --color-success-bg: rgba(21, 128, 61, 0.15);
-    --color-warning-bg: rgba(202, 138, 4, 0.15);
-    --color-danger-bg: rgba(185, 28, 28, 0.15);
-    --color-info-bg: rgba(0, 98, 245, 0.15);
-    --color-focus-ring: var(--narva);
-  }
-}
+/* The app is dark-only; the [data-theme="dark"] block and the
+   prefers-color-scheme override were removed when the theme toggle was
+   retired (the `:root` block above already carries the dark palette). */
 
 /* ===========================================================================
    Base reset + body defaults

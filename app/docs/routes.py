@@ -224,10 +224,63 @@ def _elapsed_seconds(draft: Draft) -> int | None:
         return None
 
 
+def _processing_duration_seconds(draft: Draft) -> int | None:
+    """Total wall-clock processing duration for a terminal draft (#657).
+
+    Computed as ``updated_at - created_at`` so it reflects the time
+    between upload and the final state transition (to ``ready`` or
+    ``failed``). Returns ``None`` when either timestamp is missing.
+
+    This is a proxy — the pipeline doesn't currently record per-stage
+    timings on ``drafts`` itself — but the two timestamps bracket the
+    entire pipeline run, which is exactly the duration the user cares
+    about on the completion label.
+    """
+    if draft.updated_at is None or draft.created_at is None:
+        return None
+    try:
+        return max(0, int((draft.updated_at - draft.created_at).total_seconds()))
+    except (TypeError, ValueError):
+        return None
+
+
 def _format_elapsed(seconds: int) -> str:
-    """Render seconds as ``M:SS möödas`` for the active-stage timer."""
-    minutes, secs = divmod(max(0, int(seconds)), 60)
+    """Render seconds as ``M:SS möödas`` / ``H:MM:SS möödas``.
+
+    #657: the original ``M:SS`` output wrapped past 60 minutes into
+    three-digit minute counts like "8835:14" for drafts whose pipeline
+    had been running (or in the UI bug's case, appeared to be running)
+    for hours. The ticker now switches to ``H:MM:SS`` once the raw
+    seconds value clears the one-hour mark so the label stays legible
+    for genuinely long pipelines.
+    """
+    total = max(0, int(seconds))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours}:{minutes:02d}:{secs:02d} möödas"
     return f"{minutes}:{secs:02d} möödas"
+
+
+def _format_elapsed_final(seconds: int) -> str:
+    """Render a FROZEN elapsed label for terminal drafts (#657).
+
+    Used when the draft is in ``ready`` or ``failed`` — the label is
+    computed once server-side and NOT wrapped in the
+    ``.draft-stage-elapsed`` class so the client-side ticker skips
+    over it. Format mirrors ``_format_elapsed`` for consistency but
+    swaps the "möödas" suffix for "Analüüsitud" prefix so the user
+    reads the label as a completion marker rather than a running
+    timer.
+    """
+    total = max(0, int(seconds))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours > 0:
+        return f"Analüüsitud {hours} h {minutes} min {secs} s"
+    if minutes > 0:
+        return f"Analüüsitud {minutes} min {secs} s"
+    return f"Analüüsitud {secs} s"
 
 
 def _status_tracker(draft: Draft):
@@ -266,8 +319,14 @@ def _status_tracker(draft: Draft):
         # stage. The elapsed value is bumped client-side by a small
         # inline interval so the user sees a live ticker without any
         # extra HTMX polls.
+        # #657: the live ticker is ONLY attached when the draft is in
+        # a non-terminal state. For ``ready`` we render a frozen
+        # "Analüüsitud N min" label without the ``.draft-stage-elapsed``
+        # class so the client-side tick loop skips it. ``failed`` falls
+        # through to the idle branch above — no ticker is ever attached
+        # to a failed draft because no stage is marked active.
         extras: list = []
-        if is_active and elapsed is not None:
+        if is_active and elapsed is not None and draft.status not in _TERMINAL_STATUSES:
             extras.append(
                 Span(  # noqa: F405
                     _format_elapsed(elapsed),
@@ -289,6 +348,20 @@ def _status_tracker(draft: Draft):
                     Span(  # noqa: F405
                         range_text,
                         cls="draft-stage-typical muted-text",
+                    )
+                )
+        elif is_active and draft.status == "ready":
+            # #657: render a frozen "Analüüsitud" label on the "Valmis"
+            # stage. Deliberately NOT ``.draft-stage-elapsed`` so the
+            # client-side ticker leaves it alone. The displayed
+            # duration is the total pipeline time (upload -> ready),
+            # not "time since completion".
+            duration = _processing_duration_seconds(draft)
+            if duration is not None:
+                extras.append(
+                    Span(  # noqa: F405
+                        _format_elapsed_final(duration),
+                        cls="draft-stage-done-label muted-text",
                     )
                 )
 
@@ -328,9 +401,35 @@ def _status_tracker(draft: Draft):
 
     children: list = [header, tracker]
     if draft.status == "failed" and draft.error_message:
+        # #656: surface a "Proovi uuesti" retry button alongside the
+        # red error banner so the user never has to re-upload the
+        # original file just to re-run the pipeline. The button posts
+        # to /drafts/{id}/retry which resets the draft back to
+        # ``uploaded`` and re-enqueues parse_draft. HTMX drives the
+        # submit so the action stays on the page; an HX-Redirect
+        # bounces the browser back to the detail page once the reset
+        # commits.
         children.append(
             Alert(
-                draft.error_message,
+                Div(
+                    P(draft.error_message, cls="draft-failed-message"),  # noqa: F405
+                    Form(  # noqa: F405
+                        Button(
+                            "Proovi uuesti",
+                            type="submit",
+                            variant="primary",
+                            size="md",
+                        ),
+                        method="post",
+                        action=f"/drafts/{draft.id}/retry",
+                        enctype="application/x-www-form-urlencoded",
+                        hx_post=f"/drafts/{draft.id}/retry",
+                        hx_target="body",
+                        hx_swap="outerHTML",
+                        cls="inline-form draft-retry-form",
+                    ),
+                    cls="draft-failed-body",
+                ),
                 variant="danger",
                 title="Töötlemine ebaõnnestus",
             )
@@ -373,22 +472,46 @@ def _status_tracker(draft: Draft):
     # because HTMX executes inline scripts inside swapped fragments.
     # The window-level interval id is reused across swaps to avoid
     # stacking multiple timers.
+    #
+    # #657: two bug-fixes applied here.
+    #   1. Format: past 60 minutes the old ``M:SS`` template emitted
+    #      unreadable three-digit minute counts ("8835:14"). Switch to
+    #      ``H:MM:SS möödas`` once the raw counter clears one hour.
+    #   2. Stop condition: when no ``.draft-stage-elapsed`` nodes
+    #      remain (terminal swap — the ``ready``/``failed`` status
+    #      fragment no longer renders one), clearInterval so the
+    #      timer is not left dangling on the window.
     if any("draft-stage-elapsed" in str(child) for child in children):
         children.append(
             Script(  # noqa: F405
                 "(function () {\n"
                 "  if (window.__draftElapsedTimer) "
                 "clearInterval(window.__draftElapsedTimer);\n"
+                "  function pad(n) { return n < 10 ? '0' + n : '' + n; }\n"
+                "  function format(raw) {\n"
+                "    if (raw >= 3600) {\n"
+                "      var h = Math.floor(raw / 3600);\n"
+                "      var m = Math.floor((raw % 3600) / 60);\n"
+                "      var s = raw % 60;\n"
+                "      return h + ':' + pad(m) + ':' + pad(s) + ' möödas';\n"
+                "    }\n"
+                "    var mm = Math.floor(raw / 60);\n"
+                "    var ss = raw % 60;\n"
+                "    return mm + ':' + pad(ss) + ' möödas';\n"
+                "  }\n"
                 "  function tick() {\n"
                 "    var nodes = document.querySelectorAll('.draft-stage-elapsed');\n"
+                "    if (nodes.length === 0) {\n"
+                "      clearInterval(window.__draftElapsedTimer);\n"
+                "      window.__draftElapsedTimer = null;\n"
+                "      return;\n"
+                "    }\n"
                 "    nodes.forEach(function (el) {\n"
                 "      var raw = parseInt(el.getAttribute('data-elapsed-seconds'), 10);\n"
                 "      if (isNaN(raw)) return;\n"
                 "      raw += 1;\n"
                 "      el.setAttribute('data-elapsed-seconds', raw);\n"
-                "      var m = Math.floor(raw / 60);\n"
-                "      var s = raw % 60;\n"
-                "      el.textContent = m + ':' + (s < 10 ? '0' + s : s) + ' möödas';\n"
+                "      el.textContent = format(raw);\n"
                 "    });\n"
                 "  }\n"
                 "  window.__draftElapsedTimer = setInterval(tick, 1000);\n"
@@ -2494,3 +2617,7 @@ def register_draft_routes(rt) -> None:  # type: ignore[no-untyped-def]
     rt("/drafts/{draft_id}/keep", methods=["POST"])(keep_draft_handler)
     rt("/drafts/{draft_id}/delete", methods=["POST"])(delete_draft_handler)
     rt("/drafts/{draft_id}/link-vtk", methods=["POST"])(link_vtk_handler)
+    # #656: retry a failed draft's pipeline from the parse stage.
+    from app.docs.retry_handler import retry_draft_handler
+
+    rt("/drafts/{draft_id}/retry", methods=["POST"])(retry_draft_handler)

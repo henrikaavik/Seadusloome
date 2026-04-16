@@ -1596,3 +1596,188 @@ class TestSendTimeoutMidStream:
         # After the timeout we must NOT see a ``done`` event on the
         # wedged socket — the orchestrator should bail silently.
         assert not any(e.get("type") == "done" for e in received)
+
+
+# ---------------------------------------------------------------------------
+# Bug #652 tests — RAG timeout, user-message ordering, turn deadline.
+# ---------------------------------------------------------------------------
+
+
+class _HangingRetriever:
+    """Retriever whose ``retrieve`` never resolves — mimics a stuck Voyage AI call."""
+
+    async def retrieve(
+        self,
+        query: str,
+        k: int = 10,
+        source_type: str | None = None,
+        org_id: str | None = None,
+    ) -> list[Any]:
+        # Sleep much longer than the orchestrator's RAG timeout so
+        # ``asyncio.wait_for`` fires reliably in tests.
+        await asyncio.sleep(60)
+        return []
+
+
+class _RaisingRetriever:
+    """Retriever whose ``retrieve`` always raises."""
+
+    async def retrieve(
+        self,
+        query: str,
+        k: int = 10,
+        source_type: str | None = None,
+        org_id: str | None = None,
+    ) -> list[Any]:
+        raise RuntimeError("Voyage AI exploded")
+
+
+class TestRagTimeout:
+    """#652: RAG retrieval must time out and fall back to empty chunks."""
+
+    @patch("app.chat.orchestrator._RAG_RETRIEVE_TIMEOUT_SECONDS", 0.05)
+    @patch("app.chat.orchestrator.check_org_cost_budget")
+    @patch("app.chat.orchestrator.check_message_rate")
+    @patch("app.chat.orchestrator.get_connection")
+    def test_rag_timeout_continues_without_context(self, mock_get_conn, mock_rate, mock_cost):
+        """A stuck retriever must NOT hang the turn — it should fall back to no-RAG."""
+        _setup_orchestrator_conn(mock_get_conn)
+
+        collector = _Collector()
+        orchestrator = ChatOrchestrator(FakeLLM(), FakeSparql(), retriever=_HangingRetriever())
+        asyncio.run(orchestrator.handle_message(_CONV_ID, "Tere", _auth(), collector))
+
+        # retrieval_done must still fire with chunk_count=0 so the UI exits
+        # its "Otsin konteksti..." state.
+        done_events = [e for e in collector.events if e.get("type") == "retrieval_done"]
+        assert len(done_events) == 1
+        assert done_events[0]["chunk_count"] == 0
+
+        # A soft warning event should surface the timeout so the user gets
+        # a hint instead of silent best-effort.
+        warning_events = [e for e in collector.events if e.get("type") == "warning"]
+        assert len(warning_events) == 1
+        assert "aegus" in warning_events[0]["message"].lower()
+
+        # The LLM turn still completes — the timeout does not escalate.
+        assert any(e.get("type") == "done" for e in collector.events)
+
+    @patch("app.chat.orchestrator._RAG_RETRIEVE_TIMEOUT_SECONDS", 0.05)
+    @patch("app.chat.orchestrator.check_org_cost_budget")
+    @patch("app.chat.orchestrator.check_message_rate")
+    @patch("app.chat.orchestrator.get_connection")
+    def test_rag_timeout_persists_user_message_first(self, mock_get_conn, mock_rate, mock_cost):
+        """#652 regression: even when RAG hangs, the user message must be saved.
+
+        Before the fix, ``create_message(role='user')`` ran AFTER RAG. A
+        stuck retriever therefore silently dropped the user message and
+        a reload showed no trace of it.
+        """
+        conn = _setup_orchestrator_conn(mock_get_conn)
+
+        collector = _Collector()
+        orchestrator = ChatOrchestrator(FakeLLM(), FakeSparql(), retriever=_HangingRetriever())
+        asyncio.run(orchestrator.handle_message(_CONV_ID, "Kadunud sonum", _auth(), collector))
+
+        # Walk the execute history and confirm the user message INSERT
+        # happened at least once. MagicMock captures every call.
+        execute_calls = conn.execute.call_args_list
+        user_insert_found = any(
+            call.args and isinstance(call.args[0], str) and "INSERT INTO messages" in call.args[0]
+            for call in execute_calls
+        )
+        assert user_insert_found, (
+            "User message was not persisted before RAG — data-loss regression."
+        )
+
+
+class TestUserMessagePersistedBeforeRag:
+    """#652: user message must be saved even if RAG raises an exception."""
+
+    @patch("app.chat.orchestrator.check_org_cost_budget")
+    @patch("app.chat.orchestrator.check_message_rate")
+    @patch("app.chat.orchestrator.get_connection")
+    def test_user_message_saved_when_rag_raises(self, mock_get_conn, mock_rate, mock_cost):
+        conn = _setup_orchestrator_conn(mock_get_conn)
+
+        collector = _Collector()
+        orchestrator = ChatOrchestrator(FakeLLM(), FakeSparql(), retriever=_RaisingRetriever())
+        asyncio.run(orchestrator.handle_message(_CONV_ID, "Kindel sonum", _auth(), collector))
+
+        # User message must still be persisted.
+        execute_calls = conn.execute.call_args_list
+        user_insert_found = any(
+            call.args and isinstance(call.args[0], str) and "INSERT INTO messages" in call.args[0]
+            for call in execute_calls
+        )
+        assert user_insert_found
+
+
+class TestTurnDeadline:
+    """#652: the LLM streaming loop must honour a turn-level deadline."""
+
+    @patch("app.chat.orchestrator._TURN_DEADLINE_SECONDS", 0.1)
+    @patch("app.chat.orchestrator.check_org_cost_budget")
+    @patch("app.chat.orchestrator.check_message_rate")
+    @patch("app.chat.orchestrator.get_connection")
+    def test_hung_llm_triggers_error_and_persists_partial(
+        self, mock_get_conn, mock_rate, mock_cost
+    ):
+        """When the LLM streams some content then hangs, the deadline fires.
+
+        The orchestrator must:
+          - emit an error event with a friendly Estonian message
+          - persist whatever content was streamed before the deadline
+          - NOT hang indefinitely
+        """
+        conn = _setup_orchestrator_conn(mock_get_conn)
+
+        class HangingLLM(FakeLLM):
+            async def astream(self, prompt: str, **kwargs: Any):
+                yield StreamEvent(type="content", delta="Alustasin... ")
+                await asyncio.sleep(10)  # simulates a wedged upstream
+                yield StreamEvent(type="stop")
+
+        collector = _Collector()
+        orchestrator = ChatOrchestrator(HangingLLM(), FakeSparql())
+        asyncio.run(orchestrator.handle_message(_CONV_ID, "Tere", _auth(), collector))
+
+        # Error event with Estonian message.
+        error_events = [e for e in collector.events if e.get("type") == "error"]
+        assert len(error_events) == 1
+        assert "liiga kaua" in error_events[0]["message"].lower()
+
+        # Partial content should have been persisted with is_truncated.
+        sql_calls = [
+            call.args[0]
+            for call in conn.execute.call_args_list
+            if call.args and isinstance(call.args[0], str)
+        ]
+        assert any("is_truncated = TRUE" in sql for sql in sql_calls), (
+            "Partial assistant turn should be flagged is_truncated on deadline."
+        )
+
+    @patch("app.chat.orchestrator._TURN_DEADLINE_SECONDS", 0.1)
+    @patch("app.chat.orchestrator.check_org_cost_budget")
+    @patch("app.chat.orchestrator.check_message_rate")
+    @patch("app.chat.orchestrator.get_connection")
+    def test_deadline_does_not_emit_stopped(self, mock_get_conn, mock_rate, mock_cost):
+        """A deadline hit must emit ``error``, not ``stopped``.
+
+        ``stopped`` is reserved for user-initiated cancels so the UI can
+        differentiate between "you stopped this" and "the server gave up".
+        """
+        _setup_orchestrator_conn(mock_get_conn)
+
+        class HangingLLM(FakeLLM):
+            async def astream(self, prompt: str, **kwargs: Any):
+                await asyncio.sleep(10)
+                yield StreamEvent(type="stop")
+
+        collector = _Collector()
+        orchestrator = ChatOrchestrator(HangingLLM(), FakeSparql())
+        asyncio.run(orchestrator.handle_message(_CONV_ID, "Tere", _auth(), collector))
+
+        # No stopped event — only error.
+        assert not any(e.get("type") == "stopped" for e in collector.events)
+        assert any(e.get("type") == "error" for e in collector.events)

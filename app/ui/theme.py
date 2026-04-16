@@ -1,11 +1,13 @@
-"""Theme detection and cookie helpers for light/dark mode.
+"""Theme shim — the UI is dark-only.
 
-Design:
-- User preference stored in 'theme' cookie (values: 'light', 'dark', 'system').
-- Default: 'system' — respects prefers-color-scheme media query.
-- Theme is applied via data-theme attribute on <html>.
-- An inline script in <head> reads the cookie and sets data-theme before
-  first paint to prevent FOUC.
+The original design exposed a light/dark/system toggle. It was removed in
+favour of a single permanent dark theme for a cleaner visual identity.
+
+This module is kept as a thin shim so existing callers
+(``get_theme_from_request(req)``) continue to type-check and return a
+stable value instead of being ripped out across a dozen route files.
+The value is only passed through to ``TopBar(theme=...)`` which now
+ignores it.
 """
 
 from typing import Literal
@@ -13,45 +15,28 @@ from typing import Literal
 from starlette.requests import Request
 from starlette.responses import Response
 
-ThemeChoice = Literal["light", "dark", "system"]
-VALID_THEMES: set[ThemeChoice] = {"light", "dark", "system"}
-DEFAULT_THEME: ThemeChoice = "system"
-COOKIE_NAME = "theme"
-COOKIE_MAX_AGE = 60 * 60 * 24 * 365  # 1 year
+ThemeChoice = Literal["dark"]
+DEFAULT_THEME: ThemeChoice = "dark"
+COOKIE_NAME = "theme"  # retained for existing cookies; the app never reads them
 
 
-def get_theme_from_request(request: Request) -> ThemeChoice:
-    """Return the user's theme preference from the cookie, defaulting to 'system'."""
-    value = request.cookies.get(COOKIE_NAME, DEFAULT_THEME)
-    if value in VALID_THEMES:
-        return value  # type: ignore[return-value]
+def get_theme_from_request(request: Request) -> ThemeChoice:  # noqa: ARG001
+    """Return ``"dark"`` unconditionally — the UI is dark-only."""
     return DEFAULT_THEME
 
 
-def set_theme_cookie(response: Response, theme: ThemeChoice) -> None:
-    """Write the theme preference cookie on the response."""
-    if theme not in VALID_THEMES:
-        theme = DEFAULT_THEME
-    response.set_cookie(
-        key=COOKIE_NAME,
-        value=theme,
-        max_age=COOKIE_MAX_AGE,
-        path="/",
-        samesite="lax",
-        httponly=False,  # readable by JS for instant toggle
-    )
+def set_theme_cookie(response: Response, theme: ThemeChoice) -> None:  # noqa: ARG001
+    """No-op; the toggle was removed. Signature kept for back-compat."""
+    return
 
 
-# Inline script injected into <head> to apply theme before first paint.
-# Reads the cookie synchronously, sets data-theme attribute, prevents FOUC.
+# Inline script injected into <head> to apply the dark theme before first
+# paint. Hardcoded to ``dark`` so there is never a flash of light mode
+# even though ``:root`` in tokens.css already defaults to the dark palette.
 THEME_INIT_SCRIPT = """
 (function() {
   try {
-    var match = document.cookie.match(/(?:^|;\\s*)theme=([^;]+)/);
-    var theme = match ? match[1] : 'system';
-    if (theme === 'light' || theme === 'dark') {
-      document.documentElement.setAttribute('data-theme', theme);
-    }
+    document.documentElement.setAttribute('data-theme', 'dark');
   } catch (e) {}
 })();
 """

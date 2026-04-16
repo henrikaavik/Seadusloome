@@ -106,26 +106,6 @@
   gap: var(--space-3);
 }
 
-.theme-toggle {
-  background: transparent;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius);
-  width: 36px;
-  height: 36px;
-  padding: 0;
-  cursor: pointer;
-  color: var(--color-text);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  transition: background-color var(--transition-fast), border-color var(--transition-fast);
-}
-.theme-toggle:hover {
-  background-color: var(--color-primary-subtle);
-  border-color: var(--color-primary);
-}
-.theme-toggle-icon { font-size: 16px; line-height: 1; }
-
 .notification-bell {
   position: relative;
   text-decoration: none;
@@ -674,17 +654,13 @@
   max-height: calc(100vh - var(--space-8));
   display: flex;
   flex-direction: column;
-  background-color: var(--color-surface);
+  background-color: var(--color-surface-raised);
   color: var(--color-text);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-lg);
   animation: modal-fade-in var(--transition) ease-out;
   outline: none;
-}
-
-[data-theme="dark"] .modal {
-  background-color: var(--color-surface-raised);
 }
 
 .modal-sm { max-width: 400px; }
@@ -758,7 +734,7 @@
   font-size: var(--text-base);
   line-height: var(--leading-normal);
   color: var(--color-text);
-  background-color: var(--color-surface);
+  background-color: var(--color-surface-raised);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   padding: var(--space-2) var(--space-3);
@@ -861,25 +837,9 @@
   line-height: var(--leading-normal);
 }
 
-/* ---- Dark mode: lift input surfaces above background ---- */
-
-[data-theme="dark"] .input {
-  background-color: var(--color-surface-raised);
-}
-
-[data-theme="dark"] .input:disabled,
-[data-theme="dark"] .input[readonly] {
+.input:disabled,
+.input[readonly] {
   background-color: var(--color-surface);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme]) .input {
-    background-color: var(--color-surface-raised);
-  }
-  :root:not([data-theme]) .input:disabled,
-  :root:not([data-theme]) .input[readonly] {
-    background-color: var(--color-surface);
-  }
 }
 
 /* ===========================================================================

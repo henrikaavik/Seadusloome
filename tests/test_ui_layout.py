@@ -164,9 +164,11 @@ def test_topbar_with_user_renders_initials():
     assert "JT" in html
 
 
-def test_topbar_theme_toggle_present():
+def test_topbar_has_no_theme_toggle():
+    """The theme toggle was removed (#658); the UI is dark-only now."""
     html = to_xml(TopBar(user=None, theme="dark"))
-    assert "theme-toggle" in html
+    assert "theme-toggle" not in html
+    assert "Teema:" not in html
 
 
 # ---------------------------------------------------------------------------
