@@ -1069,6 +1069,183 @@ class TestToolCallIdPairing:
         }
 
 
+class TestOrchestratorMultipleToolsPerTurn:
+    """#636 review: Claude may emit multiple tool_use blocks in one assistant turn.
+
+    Every block must be executed, every result emitted/persisted, and the
+    next-turn user message must contain a ``tool_result`` block for every
+    ``tool_use_id`` in the original Claude order. Anthropic's API rejects
+    a follow-up turn that omits any tool_use_id from the prior assistant
+    turn, so silently dropping all but the last tool_use is a correctness
+    bug, not just a missed feature.
+    """
+
+    @patch("app.chat.orchestrator.execute_tool")
+    @patch("app.chat.orchestrator.check_org_cost_budget")
+    @patch("app.chat.orchestrator.check_message_rate")
+    @patch("app.chat.orchestrator.get_connection")
+    def test_two_tool_blocks_in_one_turn_both_execute(
+        self, mock_get_conn, mock_rate, mock_cost, mock_exec_tool
+    ):
+        _setup_orchestrator_conn(mock_get_conn)
+
+        executed: list[tuple[str, dict[str, Any]]] = []
+
+        async def fake_exec_tool(name, inp, sparql, auth=None):
+            executed.append((name, inp))
+            if name == "query_ontology":
+                return {"results": [{"uri": "estleg:A"}]}
+            if name == "search_provisions":
+                return {"results": [{"uri": "estleg:B"}, {"uri": "estleg:C"}]}
+            return {"results": []}
+
+        mock_exec_tool.side_effect = fake_exec_tool
+
+        # First astream() call: TWO tool_use blocks (with provider tool_use_ids),
+        # then stop. Second call: a normal text reply.
+        events_seq = [
+            [
+                StreamEvent(
+                    type="tool_use",
+                    tool_name="query_ontology",
+                    tool_input={"query": "SELECT ?s WHERE {?s ?p ?o}"},
+                    tool_use_id="toolu_01_query",
+                ),
+                StreamEvent(
+                    type="tool_use",
+                    tool_name="search_provisions",
+                    tool_input={"keywords": "võlaõigus"},
+                    tool_use_id="toolu_02_search",
+                ),
+                StreamEvent(type="stop"),
+            ],
+            [
+                StreamEvent(type="content", delta="Mõlemad tööriistad andsid tulemusi."),
+                StreamEvent(type="stop"),
+            ],
+        ]
+
+        # Capture the prompts the orchestrator hands the LLM so we can
+        # assert the second turn contains BOTH tool_result blocks.
+        captured_prompts: list[str] = []
+
+        class CaptureLLM(FakeLLM):
+            async def astream(self, prompt: str, **kwargs: Any):
+                captured_prompts.append(prompt)
+                async for ev in super().astream(prompt, **kwargs):
+                    yield ev
+
+        collector = _Collector()
+        orchestrator = ChatOrchestrator(CaptureLLM(events_seq), FakeSparql())
+        asyncio.run(orchestrator.handle_message(_CONV_ID, "Otsi norme", _auth(), collector))
+
+        # Both tools executed exactly once, in Claude's emission order.
+        assert mock_exec_tool.call_count == 2
+        assert [name for name, _ in executed] == ["query_ontology", "search_provisions"]
+        assert executed[0][1] == {"query": "SELECT ?s WHERE {?s ?p ?o}"}
+        assert executed[1][1] == {"keywords": "võlaõigus"}
+
+        # Two tool_use events sent to the client, both with tool_call_ids.
+        use_events = [e for e in collector.events if e.get("type") == "tool_use"]
+        assert len(use_events) == 2
+        assert use_events[0]["tool"] == "query_ontology"
+        assert use_events[1]["tool"] == "search_provisions"
+        assert use_events[0]["tool_call_id"]
+        assert use_events[1]["tool_call_id"]
+        assert use_events[0]["tool_call_id"] != use_events[1]["tool_call_id"]
+
+        # Two tool_result events sent, paired by tool_call_id with the use events.
+        result_events = [e for e in collector.events if e.get("type") == "tool_result"]
+        assert len(result_events) == 2
+        assert result_events[0]["tool_call_id"] == use_events[0]["tool_call_id"]
+        assert result_events[1]["tool_call_id"] == use_events[1]["tool_call_id"]
+        assert result_events[0]["result"] == {"results": [{"uri": "estleg:A"}]}
+        assert result_events[1]["result"] == {
+            "results": [{"uri": "estleg:B"}, {"uri": "estleg:C"}]
+        }
+
+        # The follow-up turn (second astream call) must include BOTH
+        # tool_use_ids in the same prompt, in the order Claude emitted them.
+        # Anthropic's API requires every tool_use to be answered with a
+        # matching tool_result in the next user message; missing one is
+        # a 400 from the API.
+        assert len(captured_prompts) == 2
+        followup = captured_prompts[1]
+        assert "query_ontology" in followup
+        assert "search_provisions" in followup
+        assert "toolu_01_query" in followup
+        assert "toolu_02_search" in followup
+        # Order must be preserved — Anthropic matches by id but humans
+        # debugging the prompt expect the same order Claude returned.
+        assert followup.index("toolu_01_query") < followup.index("toolu_02_search")
+
+        # Both tool messages were persisted to the DB (one create_message
+        # per tool result, role="tool"). We can't easily inspect the
+        # encrypted payloads via the MagicMock, but we can assert that
+        # create_message was invoked with role="tool" twice — see #636.
+        # The mock conn's execute() captures every INSERT.
+        # Find INSERTs into messages with role 'tool'.
+        # We assert via a broader proxy: there must be at least 2 commits
+        # after the first user-message commit (one per tool result).
+        assert mock_get_conn.return_value.__enter__.return_value.commit.call_count >= 3
+
+    @patch("app.chat.orchestrator.execute_tool")
+    @patch("app.chat.orchestrator.check_org_cost_budget")
+    @patch("app.chat.orchestrator.check_message_rate")
+    @patch("app.chat.orchestrator.get_connection")
+    def test_two_tools_count_as_one_round_against_max_tool_rounds(
+        self, mock_get_conn, mock_rate, mock_cost, mock_exec_tool
+    ):
+        """Multiple tools in one assistant turn = one round, not N rounds.
+
+        The orchestrator caps tool rounds at MAX_TOOL_ROUNDS to bound LLM
+        cost. A turn that asks for two tools is still one assistant turn,
+        so it consumes one round of the budget.
+        """
+        _setup_orchestrator_conn(mock_get_conn)
+
+        async def fake_exec_tool(name, inp, sparql, auth=None):
+            return {"results": []}
+
+        mock_exec_tool.side_effect = fake_exec_tool
+
+        # Each round contains 2 tool_use blocks. We send MAX_TOOL_ROUNDS
+        # such rounds, then a final text reply. Total tool calls expected:
+        # 2 * MAX_TOOL_ROUNDS.
+        events_seq = []
+        for i in range(MAX_TOOL_ROUNDS):
+            events_seq.append(
+                [
+                    StreamEvent(
+                        type="tool_use",
+                        tool_name="query_ontology",
+                        tool_input={"q": f"a{i}"},
+                        tool_use_id=f"toolu_a_{i}",
+                    ),
+                    StreamEvent(
+                        type="tool_use",
+                        tool_name="search_provisions",
+                        tool_input={"q": f"b{i}"},
+                        tool_use_id=f"toolu_b_{i}",
+                    ),
+                    StreamEvent(type="stop"),
+                ]
+            )
+        events_seq.append(
+            [
+                StreamEvent(type="content", delta="Lõpp."),
+                StreamEvent(type="stop"),
+            ]
+        )
+
+        collector = _Collector()
+        orchestrator = ChatOrchestrator(FakeLLM(events_seq), FakeSparql())
+        asyncio.run(orchestrator.handle_message(_CONV_ID, "Otsi", _auth(), collector))
+
+        # 2 tool_use blocks per round * MAX_TOOL_ROUNDS rounds.
+        assert mock_exec_tool.call_count == 2 * MAX_TOOL_ROUNDS
+
+
 class TestSourcesEvent:
     @patch("app.chat.orchestrator.check_org_cost_budget")
     @patch("app.chat.orchestrator.check_message_rate")

@@ -23,12 +23,18 @@ class StreamEvent:
         delta: Text delta for ``"content"`` events; ``None`` otherwise.
         tool_name: Tool name for ``"tool_use"`` events; ``None`` otherwise.
         tool_input: Tool input dict for ``"tool_use"`` events; ``None`` otherwise.
+        tool_use_id: Provider-supplied tool-use id for ``"tool_use"`` events
+            (e.g. Anthropic's ``toolu_…`` identifier); ``None`` otherwise.
+            Forward-compatibility hook so orchestrators can echo the id
+            back in a follow-up ``tool_result`` message; the current
+            orchestrator still mints its own opaque ``tool_call_id``.
     """
 
     type: str  # "content", "tool_use", "stop"
     delta: str | None = None
     tool_name: str | None = None
     tool_input: dict | None = field(default=None)
+    tool_use_id: str | None = None
 
 
 class LLMProvider(ABC):
@@ -134,6 +140,7 @@ class LLMProvider(ABC):
         user_id: UUID | str | None = None,
         org_id: UUID | str | None = None,
         allow_raw: bool = False,
+        tools: list[dict] | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Async streaming completion that yields :class:`StreamEvent` objects.
 
@@ -149,6 +156,11 @@ class LLMProvider(ABC):
             feature: Cost-tracking feature label.
             user_id: Optional user id for cost tracking attribution.
             org_id: Optional org id for cost tracking attribution.
+            tools: Optional list of provider-specific tool schemas. When
+                supplied (and the backend supports it), the model may
+                emit ``StreamEvent(type="tool_use", ...)`` events that
+                the caller is expected to execute and feed back in a
+                follow-up turn.
         """
         # yield is needed to make this an async generator at the type level
         yield  # type: ignore[misc]  # pragma: no cover

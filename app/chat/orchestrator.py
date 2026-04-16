@@ -67,7 +67,7 @@ from app.chat.rate_limiter import (
     check_org_cost_budget,
 )
 from app.chat.system_prompt import build_system_prompt
-from app.chat.tools import execute_tool
+from app.chat.tools import CHAT_TOOLS, execute_tool
 from app.db import get_connection
 from app.llm.provider import LLMProvider, StreamEvent
 from app.ontology.sparql_client import SparqlClient
@@ -683,8 +683,14 @@ class ChatOrchestrator:
         try:
             while tool_rounds <= MAX_TOOL_ROUNDS:
                 event: StreamEvent
-                pending_tool: dict[str, Any] | None = None
-                pending_tool_call_id: str | None = None
+                # #636 review: a single Claude turn can contain multiple
+                # ``tool_use`` blocks. We MUST execute every one and feed
+                # back a ``tool_result`` for every ``tool_use_id`` in the
+                # next user message, otherwise Anthropic's API rejects the
+                # follow-up turn (and the model loses context for the
+                # tools it asked for). Tracking only the latest pending
+                # tool_use silently drops the earlier calls.
+                pending_tools: list[dict[str, Any]] = []
 
                 stream = self.llm.astream(
                     prompt=_messages_to_prompt(messages),
@@ -694,6 +700,7 @@ class ChatOrchestrator:
                     feature="chat",
                     user_id=user_id,
                     org_id=org_id,
+                    tools=CHAT_TOOLS,
                 )
                 # ``aclosing`` guarantees the upstream HTTP connection is
                 # released on every exit path (timeout, cancel, exception).
@@ -712,69 +719,90 @@ class ChatOrchestrator:
                                 },
                             )
                         elif event.type == "tool_use":
-                            pending_tool_call_id = uuid.uuid4().hex[:12]
-                            pending_tool = {
-                                "name": event.tool_name,
-                                "input": event.tool_input or {},
-                                "id": pending_tool_call_id,
-                            }
+                            tool_call_id = uuid.uuid4().hex[:12]
+                            pending_tools.append(
+                                {
+                                    "name": event.tool_name,
+                                    "input": event.tool_input or {},
+                                    "id": tool_call_id,
+                                    "tool_use_id": event.tool_use_id,
+                                }
+                            )
                             await _safe_send(
                                 send,
                                 {
                                     "type": "tool_use",
                                     "tool": event.tool_name,
                                     "input": event.tool_input or {},
-                                    "tool_call_id": pending_tool_call_id,
+                                    "tool_call_id": tool_call_id,
                                 },
                             )
                         elif event.type == "stop":
                             pass  # handled after loop
 
                 # If no tool use requested, we're done
-                if pending_tool is None:
+                if not pending_tools:
                     completed = True
                     break
 
-                # Execute tool
+                # Execute every tool in this turn. A turn that asks for N
+                # tools still counts as ONE round against MAX_TOOL_ROUNDS
+                # — the budget bounds *assistant turns*, not tool fan-out.
                 tool_rounds += 1
-                tool_name = pending_tool["name"]
-                tool_input = pending_tool["input"]
-                tool_call_id = pending_tool["id"]
+                tool_call_segments: list[str] = []
+                for pending in pending_tools:
+                    tool_name = pending["name"]
+                    tool_input = pending["input"]
+                    tool_call_id = pending["id"]
+                    tool_use_id = pending["tool_use_id"]
 
-                tool_result = await execute_tool(tool_name, tool_input, self.sparql, auth=auth)
+                    tool_result = await execute_tool(tool_name, tool_input, self.sparql, auth=auth)
 
-                await _safe_send(
-                    send,
-                    {
-                        "type": "tool_result",
-                        "tool": tool_name,
-                        "result_count": _tool_result_count(tool_result),
-                        "result": tool_result,
-                        "tool_call_id": tool_call_id,
-                    },
-                )
+                    await _safe_send(
+                        send,
+                        {
+                            "type": "tool_result",
+                            "tool": tool_name,
+                            "result_count": _tool_result_count(tool_result),
+                            "result": tool_result,
+                            "tool_call_id": tool_call_id,
+                        },
+                    )
 
-                # Persist tool message
-                try:
-                    with get_connection() as conn:
-                        create_message(
-                            conn,
-                            conversation_id,
-                            "tool",
-                            json.dumps(tool_result),
-                            tool_name=tool_name,
-                            tool_input=tool_input,
-                            tool_output=tool_result,
-                        )
-                        conn.commit()
-                except Exception:
-                    logger.exception("Failed to persist tool message")
+                    # Persist tool message
+                    try:
+                        with get_connection() as conn:
+                            create_message(
+                                conn,
+                                conversation_id,
+                                "tool",
+                                json.dumps(tool_result),
+                                tool_name=tool_name,
+                                tool_input=tool_input,
+                                tool_output=tool_result,
+                            )
+                            conn.commit()
+                    except Exception:
+                        logger.exception("Failed to persist tool message")
 
-                # Append tool interaction and continue
-                messages.append(
-                    f"[Tool call: {tool_name}({json.dumps(tool_input)})]\n"
-                    f"[Tool result: {json.dumps(tool_result)}]"
-                )
+                    # Build a ``tool_result`` block tagged with the
+                    # provider's ``tool_use_id`` so the next-turn prompt
+                    # carries one block per tool_use, in order. Anthropic
+                    # matches results to calls by id; preserving the id
+                    # is what makes a multi-tool turn legal.
+                    tool_call_segments.append(
+                        f"[Tool call id={tool_use_id or tool_call_id} "
+                        f"name={tool_name}]({json.dumps(tool_input)})\n"
+                        f"[Tool result for id={tool_use_id or tool_call_id}]"
+                        f"({json.dumps(tool_result)})"
+                    )
+
+                # Append ALL tool interactions from this turn as a single
+                # follow-up "user" segment. This mirrors Anthropic's API
+                # contract: one assistant message containing N tool_use
+                # blocks is answered by one user message containing N
+                # tool_result blocks.
+                messages.append("\n".join(tool_call_segments))
 
                 if tool_rounds >= MAX_TOOL_ROUNDS:
                     full_content += "\n\n(Tööriistade kasutamise limiit saavutatud.)"

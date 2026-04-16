@@ -384,12 +384,22 @@ class ClaudeProvider(LLMProvider):
         user_id: Any = None,
         org_id: Any = None,
         allow_raw: bool = False,
+        tools: list[dict] | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Async streaming completion yielding :class:`StreamEvent` objects.
 
         Stub mode yields a few canned events then ``StreamEvent(type="stop")``.
         Real mode wraps ``AsyncAnthropic.messages.stream()``. See
         :meth:`complete` for the ``allow_raw`` contract.
+
+        When *tools* is a non-empty list, it is forwarded to the Anthropic
+        Messages API as the ``tools=`` parameter (with ``tool_choice`` set
+        to ``auto``). Anthropic's streaming tool-use block shape —
+        ``content_block_start`` (``type="tool_use"``) → one or more
+        ``content_block_delta`` events carrying ``input_json_delta``
+        fragments → ``content_block_stop`` — is translated into a single
+        :class:`StreamEvent` with ``type="tool_use"``, ``tool_name``,
+        ``tool_input`` and ``tool_use_id``.
         """
         if self._stubbed:
             yield StreamEvent(type="content", delta="[STUB] ")
@@ -414,28 +424,89 @@ class ClaudeProvider(LLMProvider):
         }
         if scrubbed_system:
             create_kwargs["system"] = scrubbed_system
+        if tools:
+            # Gate on truthiness so an explicit empty list is treated as
+            # "no tools" — matches the abstract contract.
+            create_kwargs["tools"] = tools
+            create_kwargs["tool_choice"] = {"type": "auto"}
 
         tokens_input = 0
         tokens_output = 0
 
+        # Per-block accumulator state for streaming tool_use blocks. Anthropic
+        # emits ``content_block_start`` (type="tool_use") followed by one or
+        # more ``content_block_delta`` (type="input_json_delta") carrying a
+        # ``partial_json`` string, terminated by ``content_block_stop``. We
+        # key by the event ``index`` so interleaved blocks don't collide.
+        tool_blocks: dict[int, dict[str, Any]] = {}
+
         async with client.messages.stream(**create_kwargs) as stream:
             async for event in stream:
-                if hasattr(event, "type"):
-                    if event.type == "content_block_delta":
-                        delta_obj = event.delta
-                        if hasattr(delta_obj, "text"):
-                            yield StreamEvent(type="content", delta=delta_obj.text)
-                    elif event.type == "message_delta":
-                        # End of message — capture final usage
-                        usage = getattr(event, "usage", None)
+                event_type = getattr(event, "type", None)
+                if event_type is None:
+                    continue
+
+                if event_type == "content_block_start":
+                    content_block = getattr(event, "content_block", None)
+                    if content_block is None:
+                        continue
+                    if getattr(content_block, "type", None) == "tool_use":
+                        idx = getattr(event, "index", len(tool_blocks))
+                        tool_blocks[idx] = {
+                            "id": getattr(content_block, "id", ""),
+                            "name": getattr(content_block, "name", ""),
+                            "json_buf": "",
+                        }
+                elif event_type == "content_block_delta":
+                    delta_obj = getattr(event, "delta", None)
+                    if delta_obj is None:
+                        continue
+                    delta_type = getattr(delta_obj, "type", None)
+                    if delta_type == "input_json_delta":
+                        idx = getattr(event, "index", None)
+                        block = tool_blocks.get(idx) if idx is not None else None
+                        if block is not None:
+                            block["json_buf"] += getattr(delta_obj, "partial_json", "") or ""
+                    elif hasattr(delta_obj, "text"):
+                        # Plain text delta (text_delta for SSE, or legacy
+                        # shape where .text is set directly).
+                        text = delta_obj.text
+                        if text:
+                            yield StreamEvent(type="content", delta=text)
+                elif event_type == "content_block_stop":
+                    idx = getattr(event, "index", None)
+                    block = tool_blocks.pop(idx, None) if idx is not None else None
+                    if block is None:
+                        continue
+                    buf = block["json_buf"]
+                    try:
+                        parsed_input: dict = json.loads(buf) if buf else {}
+                    except json.JSONDecodeError:
+                        logger.warning(
+                            "ClaudeProvider.astream: failed to parse tool_use "
+                            "input JSON for tool=%s (buf length=%d); emitting empty dict",
+                            block["name"],
+                            len(buf),
+                        )
+                        parsed_input = {}
+                    if not isinstance(parsed_input, dict):
+                        parsed_input = {}
+                    yield StreamEvent(
+                        type="tool_use",
+                        tool_name=block["name"],
+                        tool_input=parsed_input,
+                        tool_use_id=block["id"] or None,
+                    )
+                elif event_type == "message_delta":
+                    usage = getattr(event, "usage", None)
+                    if usage:
+                        tokens_output = getattr(usage, "output_tokens", 0)
+                elif event_type == "message_start":
+                    msg = getattr(event, "message", None)
+                    if msg:
+                        usage = getattr(msg, "usage", None)
                         if usage:
-                            tokens_output = getattr(usage, "output_tokens", 0)
-                    elif event.type == "message_start":
-                        msg = getattr(event, "message", None)
-                        if msg:
-                            usage = getattr(msg, "usage", None)
-                            if usage:
-                                tokens_input = getattr(usage, "input_tokens", 0)
+                            tokens_input = getattr(usage, "input_tokens", 0)
 
         self._log_cost(
             feature=feature,
