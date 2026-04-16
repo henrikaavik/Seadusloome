@@ -37,10 +37,10 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from app.db import get_connection
-from app.docs.draft_model import get_draft
+from app.docs.draft_model import fetch_draft, get_draft
 from app.docs.entity_extractor import ExtractedRef
 from app.docs.error_mapping import map_failure_to_user_message
-from app.docs.graph_builder import build_draft_graph
+from app.docs.graph_builder import build_draft_graph, write_doc_lineage
 from app.docs.impact import ImpactAnalyzer, calculate_impact_score
 from app.docs.reference_resolver import ResolvedRef
 from app.jobs.worker import register_handler
@@ -110,6 +110,18 @@ def analyze_impact(
         loaded = put_named_graph(draft.graph_uri, turtle)
         if not loaded:
             raise RuntimeError(f"Failed to load draft graph into Jena: {draft.graph_uri}")
+
+        # #641 — A3 ontology lineage.  Runs right after the Turtle PUT
+        # so the optional ``estleg:basedOn`` edge is visible to the
+        # ImpactAnalyzer below (and to any B-series SPARQL consumers
+        # that come later).  The class assertion is already part of
+        # the Turtle PUT above (``build_draft_graph`` picks the right
+        # class from ``doc_type``); this helper re-asserts it as a
+        # no-op on re-runs and writes / clears the ``basedOn`` edge
+        # atomically via SPARQL UPDATE.  Lineage write failures bubble
+        # up through the existing retry/fail machinery.
+        parent_vtk = fetch_draft(draft.parent_vtk_id) if draft.parent_vtk_id else None
+        write_doc_lineage(draft, parent_vtk)
 
         analyzer = ImpactAnalyzer()
         findings = analyzer.analyze(draft.graph_uri)

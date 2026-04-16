@@ -137,6 +137,14 @@ class TestAnalyzeImpactHappyPath:
                 return_value=True,
             ) as mock_put,
             patch(
+                "app.docs.analyze_handler.write_doc_lineage",
+                return_value=None,
+            ),
+            patch(
+                "app.docs.analyze_handler.fetch_draft",
+                return_value=None,
+            ),
+            patch(
                 "app.docs.analyze_handler.ImpactAnalyzer",
                 return_value=mock_analyzer,
             ),
@@ -195,6 +203,14 @@ class TestAnalyzeImpactHappyPath:
                 return_value=True,
             ),
             patch(
+                "app.docs.analyze_handler.write_doc_lineage",
+                return_value=None,
+            ),
+            patch(
+                "app.docs.analyze_handler.fetch_draft",
+                return_value=None,
+            ),
+            patch(
                 "app.docs.analyze_handler.ImpactAnalyzer",
                 return_value=mock_analyzer,
             ),
@@ -241,6 +257,14 @@ class TestAnalyzeImpactHappyPath:
             patch(
                 "app.docs.analyze_handler.put_named_graph",
                 return_value=True,
+            ),
+            patch(
+                "app.docs.analyze_handler.write_doc_lineage",
+                return_value=None,
+            ),
+            patch(
+                "app.docs.analyze_handler.fetch_draft",
+                return_value=None,
             ),
             patch(
                 "app.docs.analyze_handler.ImpactAnalyzer",
@@ -363,6 +387,14 @@ class TestAnalyzeImpactFailurePaths:
                 return_value=True,
             ),
             patch(
+                "app.docs.analyze_handler.write_doc_lineage",
+                return_value=None,
+            ),
+            patch(
+                "app.docs.analyze_handler.fetch_draft",
+                return_value=None,
+            ),
+            patch(
                 "app.docs.analyze_handler.ImpactAnalyzer",
                 return_value=analyzer_mock,
             ),
@@ -391,3 +423,162 @@ class TestRegistration:
         from app.jobs.worker import _HANDLERS
 
         assert _HANDLERS["analyze_impact"] is real_handler
+
+
+class TestAnalyzeImpactLineageHook:
+    """#641 — the analyze pipeline must call ``write_doc_lineage`` after
+    the Turtle PUT so the doc_type class + optional ``estleg:basedOn``
+    edge land on the named graph before the ImpactAnalyzer runs.
+    """
+
+    def _run_with_draft(self, draft: Draft) -> tuple[MagicMock, MagicMock]:
+        """Execute ``analyze_impact`` with all externals mocked and
+        return ``(mock_write_doc_lineage, mock_fetch_draft)`` for
+        assertion in the calling test.
+        """
+        load_conn = _make_load_conn(entity_rows=[])
+        insert_conn = _make_insert_conn()
+        sync_conn = _make_sync_conn((datetime(2026, 4, 9, 12, 0, tzinfo=UTC), 1))
+
+        mock_analyzer = MagicMock()
+        mock_analyzer.analyze.return_value = _findings(affected=0)
+
+        with (
+            patch("app.docs.analyze_handler.get_connection") as mock_get_conn,
+            patch("app.docs.analyze_handler.get_draft", return_value=draft),
+            patch("app.docs.analyze_handler.build_draft_graph", return_value="# t"),
+            patch("app.docs.analyze_handler.put_named_graph", return_value=True),
+            patch(
+                "app.docs.analyze_handler.write_doc_lineage",
+                return_value=None,
+            ) as mock_write_lineage,
+            patch(
+                "app.docs.analyze_handler.fetch_draft",
+                return_value=None,
+            ) as mock_fetch_draft,
+            patch(
+                "app.docs.analyze_handler.ImpactAnalyzer",
+                return_value=mock_analyzer,
+            ),
+            patch(
+                "app.docs.analyze_handler.calculate_impact_score",
+                return_value=0,
+            ),
+        ):
+            mock_get_conn.side_effect = [
+                _ConnectCM(load_conn),
+                _ConnectCM(sync_conn),
+                _ConnectCM(insert_conn),
+            ]
+            analyze_impact({"draft_id": str(_DRAFT_ID)})
+
+        return mock_write_lineage, mock_fetch_draft
+
+    def test_lineage_called_with_none_when_no_parent_vtk(self):
+        draft = _make_draft()  # parent_vtk_id = None by default
+        mock_write_lineage, mock_fetch_draft = self._run_with_draft(draft)
+
+        mock_fetch_draft.assert_not_called()
+        mock_write_lineage.assert_called_once()
+        args = mock_write_lineage.call_args.args
+        assert args[0] is draft
+        assert args[1] is None
+
+    def test_lineage_called_with_fetched_parent_when_parent_vtk_id_set(self):
+        vtk_id = uuid.UUID("88888888-8888-8888-8888-888888888888")
+        draft = _make_draft()
+        draft.parent_vtk_id = vtk_id
+
+        load_conn = _make_load_conn(entity_rows=[])
+        insert_conn = _make_insert_conn()
+        sync_conn = _make_sync_conn((datetime(2026, 4, 9, 12, 0, tzinfo=UTC), 1))
+        vtk_draft = _make_draft()
+        vtk_draft.id = vtk_id
+
+        mock_analyzer = MagicMock()
+        mock_analyzer.analyze.return_value = _findings(affected=0)
+
+        with (
+            patch("app.docs.analyze_handler.get_connection") as mock_get_conn,
+            patch("app.docs.analyze_handler.get_draft", return_value=draft),
+            patch("app.docs.analyze_handler.build_draft_graph", return_value="# t"),
+            patch("app.docs.analyze_handler.put_named_graph", return_value=True),
+            patch(
+                "app.docs.analyze_handler.write_doc_lineage",
+                return_value=None,
+            ) as mock_write_lineage,
+            patch(
+                "app.docs.analyze_handler.fetch_draft",
+                return_value=vtk_draft,
+            ) as mock_fetch_draft,
+            patch(
+                "app.docs.analyze_handler.ImpactAnalyzer",
+                return_value=mock_analyzer,
+            ),
+            patch(
+                "app.docs.analyze_handler.calculate_impact_score",
+                return_value=0,
+            ),
+        ):
+            mock_get_conn.side_effect = [
+                _ConnectCM(load_conn),
+                _ConnectCM(sync_conn),
+                _ConnectCM(insert_conn),
+            ]
+            analyze_impact({"draft_id": str(_DRAFT_ID)})
+
+        mock_fetch_draft.assert_called_once_with(vtk_id)
+        mock_write_lineage.assert_called_once_with(draft, vtk_draft)
+
+    def test_lineage_runs_before_analyzer(self):
+        """The ImpactAnalyzer must see the lineage triples, so
+        ``write_doc_lineage`` must fire before ``ImpactAnalyzer.analyze``.
+        """
+        draft = _make_draft()
+        load_conn = _make_load_conn(entity_rows=[])
+        insert_conn = _make_insert_conn()
+        sync_conn = _make_sync_conn(None)
+
+        call_order: list[str] = []
+
+        def _lineage_side_effect(*_args: Any, **_kwargs: Any) -> None:
+            call_order.append("lineage")
+
+        mock_analyzer = MagicMock()
+
+        def _analyzer_side_effect(*_args: Any, **_kwargs: Any) -> Any:
+            call_order.append("analyze")
+            return _findings(affected=0)
+
+        mock_analyzer.analyze.side_effect = _analyzer_side_effect
+
+        with (
+            patch("app.docs.analyze_handler.get_connection") as mock_get_conn,
+            patch("app.docs.analyze_handler.get_draft", return_value=draft),
+            patch("app.docs.analyze_handler.build_draft_graph", return_value="# t"),
+            patch("app.docs.analyze_handler.put_named_graph", return_value=True),
+            patch(
+                "app.docs.analyze_handler.write_doc_lineage",
+                side_effect=_lineage_side_effect,
+            ),
+            patch(
+                "app.docs.analyze_handler.fetch_draft",
+                return_value=None,
+            ),
+            patch(
+                "app.docs.analyze_handler.ImpactAnalyzer",
+                return_value=mock_analyzer,
+            ),
+            patch(
+                "app.docs.analyze_handler.calculate_impact_score",
+                return_value=0,
+            ),
+        ):
+            mock_get_conn.side_effect = [
+                _ConnectCM(load_conn),
+                _ConnectCM(sync_conn),
+                _ConnectCM(insert_conn),
+            ]
+            analyze_impact({"draft_id": str(_DRAFT_ID)})
+
+        assert call_order == ["lineage", "analyze"]

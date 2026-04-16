@@ -435,6 +435,14 @@ class TestDocsPipelineE2E:
             patch("app.docs.analyze_handler.build_draft_graph", return_value="# turtle"),
             patch("app.docs.analyze_handler.put_named_graph", return_value=True) as mock_put,
             patch(
+                "app.docs.analyze_handler.write_doc_lineage",
+                return_value=None,
+            ),
+            patch(
+                "app.docs.analyze_handler.fetch_draft",
+                return_value=None,
+            ),
+            patch(
                 "app.docs.analyze_handler.ImpactAnalyzer",
                 return_value=fake_analyzer_instance,
             ),
