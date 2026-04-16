@@ -30,7 +30,7 @@
 --      Hot path for "child eelnoud of this VTK" on the VTK detail page.
 --
 --   6. pg_trgm extension + trigram indexes on title, filename, and
---      draft_entities.label to power ILIKE %q% search without seqscans.
+--      draft_entities.ref_text to power ILIKE %q% search without seqscans.
 -- =============================================================================
 
 -- ---------------------------------------------------------------------------
@@ -72,7 +72,7 @@ CREATE INDEX idx_drafts_parent_vtk
 -- ---------------------------------------------------------------------------
 -- pg_trgm is a stable in-tree PostgreSQL extension; safe to add without
 -- downtime. The three GIN indexes below make ILIKE '%q%' index-supported
--- on title, filename, and draft_entities.label respectively.
+-- on title, filename, and draft_entities.ref_text respectively.
 
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
@@ -82,5 +82,5 @@ CREATE INDEX idx_drafts_title_trgm
 CREATE INDEX idx_drafts_filename_trgm
     ON drafts USING gin (filename gin_trgm_ops);
 
-CREATE INDEX idx_draft_entities_label_trgm
-    ON draft_entities USING gin (label gin_trgm_ops);
+CREATE INDEX idx_draft_entities_ref_text_trgm
+    ON draft_entities USING gin (ref_text gin_trgm_ops);
