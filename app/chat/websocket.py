@@ -296,15 +296,27 @@ def register_chat_ws_routes(app: Any) -> None:
     _per_send_tasks: dict[int, dict[str, asyncio.Task[Any]]] = {}
 
     async def _ws_handler(msg: str, send: Any, scope: dict[str, Any] | None = None) -> None:
-        """Extract JWT from WS handshake cookies and pass auth scope to ws_chat."""
+        """Extract JWT from WS handshake cookies and pass auth scope to ws_chat.
+
+        Mirrors the HTTP middleware's silent-refresh contract (#637): if
+        the ``access_token`` cookie is missing or invalid but a valid
+        ``refresh_token`` is present, verify the refresh token, mint a
+        new pair, and proceed with the authenticated user. The new
+        cookies cannot be set on the WS upgrade response here (we only
+        have the ASGI send callable), so the next HTTP request the
+        client makes will go through the Beforeware which will do the
+        same rotation and persist the cookies. This keeps long-lived
+        chat sessions alive past the 60-minute access-token expiry.
+        """
         auth_scope: dict[str, Any] = {}
 
         if scope is not None:
             # Try to extract the access_token from handshake headers.
             raw_headers: list[tuple[bytes, bytes]] = scope.get("headers", [])
             access_token = _extract_cookie_from_headers(raw_headers, "access_token")
+            refresh_token = _extract_cookie_from_headers(raw_headers, "refresh_token")
 
-            if access_token:
+            if access_token or refresh_token:
                 provider = _get_jwt_provider()
                 if provider is None:
                     # Fail-closed: we cannot verify tokens, so reject
@@ -313,9 +325,25 @@ def register_chat_ws_routes(app: Any) -> None:
                     await _ws_close(send, 1011, "auth provider unavailable")
                     return
 
-                user = provider.get_current_user(access_token)
+                user: dict[str, Any] | None = None
+                if access_token:
+                    verified = provider.get_current_user(access_token)
+                    if verified is not None:
+                        user = dict(verified)
+
+                if user is None and refresh_token:
+                    # #637 — silent refresh for long-lived chat sessions.
+                    # Import here so the chat module has no side-effect-y
+                    # dependency on the HTTP middleware at import time.
+                    from app.auth.middleware import try_refresh_access_token
+
+                    rotated = try_refresh_access_token(refresh_token, provider=provider)
+                    if rotated is not None:
+                        _new_access, _new_refresh, refreshed_user = rotated
+                        user = refreshed_user
+
                 if user is not None:
-                    auth_scope["auth"] = dict(user)
+                    auth_scope["auth"] = user
 
         key = id(send)
         tasks = _per_send_tasks.setdefault(key, {})

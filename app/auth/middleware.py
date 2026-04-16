@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from starlette.requests import Request
 from starlette.responses import RedirectResponse, Response
@@ -53,6 +53,35 @@ SKIP_PATHS: list[str] = [
 ]
 
 
+def try_refresh_access_token(
+    refresh_token: str,
+    provider: JWTAuthProvider | None = None,
+) -> tuple[str, str, dict[str, Any]] | None:
+    """Rotate a refresh token and mint a fresh access/refresh pair.
+
+    Returns ``(new_access, new_refresh, user_dict)`` on success,
+    ``None`` when the refresh token is absent, expired, or the user
+    has been deactivated. The old refresh session is removed from the
+    DB so it cannot be replayed.
+
+    Factored out of :func:`auth_before` (#637) so non-HTTP transports
+    — notably the ``/ws/chat`` WebSocket handshake — can mirror the
+    HTTP silent-refresh contract without re-implementing it.
+    """
+    if not refresh_token:
+        return None
+
+    provider = provider or _get_provider()
+    user = provider.verify_refresh_token(refresh_token)
+    if user is None:
+        return None
+
+    # Rotate: invalidate the old refresh session, mint a fresh pair.
+    provider.delete_refresh_token(refresh_token)
+    new_access, new_refresh = provider.create_tokens(user)
+    return new_access, new_refresh, dict(user)
+
+
 def auth_before(req: Request) -> Response | None:
     """Beforeware: authenticate via JWT cookies, redirect to login if needed.
 
@@ -77,11 +106,9 @@ def auth_before(req: Request) -> Response | None:
 
     # Access token missing or invalid -- attempt silent refresh.
     if refresh_token:
-        user = provider.verify_refresh_token(refresh_token)
-        if user is not None:
-            # Rotate tokens: delete old refresh session, create new pair.
-            provider.delete_refresh_token(refresh_token)
-            new_access, new_refresh = provider.create_tokens(user)
+        rotated = try_refresh_access_token(refresh_token, provider=provider)
+        if rotated is not None:
+            new_access, new_refresh, _user = rotated
 
             # We cannot simply set cookies on the current response because the
             # Beforeware runs *before* the handler and the response object does
