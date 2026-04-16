@@ -23,7 +23,7 @@ import logging
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from app.db import get_connection as _connect
 from app.db_utils import coerce_uuid
@@ -49,6 +49,11 @@ class Draft:
     callers can pass them back into queries without string round-trips.
     Optional columns (``parsed_text_encrypted``, ``entity_count``, ``error_message``)
     are ``None`` until the background pipeline populates them.
+
+    ``doc_type`` discriminates regular eelnoud (``'eelnou'``) from VTKd
+    (``'vtk'``).  ``parent_vtk_id`` links an eelnou back to the VTK it
+    originates from; both fields default to safe values so existing callers
+    need no changes (migration 019).
     """
 
     id: uuid.UUID
@@ -67,6 +72,8 @@ class Draft:
     created_at: datetime
     updated_at: datetime
     last_accessed_at: datetime | None = None
+    doc_type: Literal["eelnou", "vtk"] = "eelnou"
+    parent_vtk_id: uuid.UUID | None = None
 
 
 # Column order used by every SELECT in this module. Kept in sync with
@@ -74,7 +81,8 @@ class Draft:
 _DRAFT_COLUMNS = (
     "id, user_id, org_id, title, filename, content_type, file_size, "
     "storage_path, graph_uri, status, parsed_text_encrypted, entity_count, "
-    "error_message, created_at, updated_at, last_accessed_at"
+    "error_message, created_at, updated_at, last_accessed_at, "
+    "doc_type, parent_vtk_id"
 )
 
 
@@ -97,6 +105,8 @@ def _row_to_draft(row: tuple[Any, ...]) -> Draft:
         created_at,
         updated_at,
         last_accessed_at,
+        doc_type,
+        parent_vtk_id,
     ) = row
     return Draft(
         id=coerce_uuid(draft_id),
@@ -115,6 +125,8 @@ def _row_to_draft(row: tuple[Any, ...]) -> Draft:
         created_at=created_at,
         updated_at=updated_at,
         last_accessed_at=last_accessed_at,
+        doc_type=doc_type,
+        parent_vtk_id=coerce_uuid(parent_vtk_id) if parent_vtk_id else None,
     )
 
 
@@ -135,6 +147,8 @@ def create_draft(
     storage_path: str,
     graph_uri: str,
     status: str = "uploaded",
+    doc_type: Literal["eelnou", "vtk"] = "eelnou",
+    parent_vtk_id: uuid.UUID | str | None = None,
 ) -> Draft:
     """Insert a new ``drafts`` row and return the created ``Draft``.
 
@@ -143,8 +157,11 @@ def create_draft(
     (file cleanup on failure, audit logging, etc). The caller is
     responsible for committing the transaction.
 
-    Raises on SQL failure — ``handle_upload`` relies on the exception
+    Raises on SQL failure -- ``handle_upload`` relies on the exception
     to trigger encrypted-file cleanup.
+
+    ``doc_type`` defaults to ``'eelnou'`` so existing callers need no
+    changes.  ``parent_vtk_id`` is ``None`` by default (no VTK link).
     """
     if status not in VALID_STATUSES:
         raise ValueError(f"Invalid draft status: {status!r}")
@@ -153,8 +170,9 @@ def create_draft(
         f"""
         insert into drafts (
             user_id, org_id, title, filename, content_type,
-            file_size, storage_path, graph_uri, status
-        ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            file_size, storage_path, graph_uri, status,
+            doc_type, parent_vtk_id
+        ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         returning {_DRAFT_COLUMNS}
         """,
         (
@@ -167,6 +185,8 @@ def create_draft(
             storage_path,
             graph_uri,
             status,
+            doc_type,
+            str(parent_vtk_id) if parent_vtk_id else None,
         ),
     ).fetchone()
     if row is None:
@@ -230,7 +250,7 @@ def touch_draft_access(conn: Any, draft_id: uuid.UUID | str) -> bool:
     Called from every route that surfaces a draft to an end user so the
     90-day auto-archive warning stays correctly timed. The caller is
     responsible for committing the transaction; errors are logged but
-    never raised — an audit-style touch failure must never break the
+    never raised -- an audit-style touch failure must never break the
     primary read path.
 
     Returns ``True`` when a row was actually updated.

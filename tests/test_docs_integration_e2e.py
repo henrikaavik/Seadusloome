@@ -152,9 +152,10 @@ def _make_conn_factory(state: _State):
         if "insert into drafts" in sql_lower and "returning" in sql_lower:
             # create_draft inserts and returns the row. The INSERT
             # columns are: user_id, org_id, title, filename,
-            # content_type, file_size, storage_path, graph_uri, status
-            # — 9 params. RETURNING reconstructs all 16 columns (the
-            # 16th is last_accessed_at, added by migration 015 / #572).
+            # content_type, file_size, storage_path, graph_uri, status,
+            # doc_type, parent_vtk_id -- 11 params. RETURNING reconstructs
+            # all 18 columns (18th is parent_vtk_id, migration 019 / #639;
+            # 16th is last_accessed_at, migration 015 / #572).
             assert params is not None
             (
                 user_id,
@@ -167,6 +168,8 @@ def _make_conn_factory(state: _State):
                 graph_uri,
                 _status,
             ) = params[:9]
+            doc_type = params[9] if len(params) > 9 else "eelnou"
+            parent_vtk_id = params[10] if len(params) > 10 else None
             new_id = state.draft_id or uuid.uuid4()
             state.draft_id = new_id
             now = datetime.now(UTC)
@@ -187,6 +190,8 @@ def _make_conn_factory(state: _State):
                 now,
                 now,
                 now,  # last_accessed_at (#572)
+                doc_type,  # doc_type (#639)
+                parent_vtk_id,  # parent_vtk_id (#639)
             )
             state.draft_row = row
             cursor.fetchone.return_value = row
@@ -588,6 +593,8 @@ class TestDocsPipelineE2E:
             now,
             now,
             now,  # last_accessed_at (#572)
+            "eelnou",  # doc_type (#639)
+            None,  # parent_vtk_id (#639)
         )
         conn_factory = _make_conn_factory(state)
 

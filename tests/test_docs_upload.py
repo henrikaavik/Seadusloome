@@ -140,6 +140,8 @@ class TestHandleUploadHappyPath:
             now,
             now,
             now,  # last_accessed_at (#572)
+            "eelnou",  # doc_type (#639)
+            None,  # parent_vtk_id (#639)
         )
         mock_conn.execute.return_value.fetchone.return_value = insert_row
 
@@ -262,6 +264,8 @@ class TestHandleUploadValidation:
             now,
             now,
             now,  # last_accessed_at (#572)
+            "eelnou",  # doc_type (#639)
+            None,  # parent_vtk_id (#639)
         )
         import asyncio
 
@@ -379,6 +383,8 @@ class TestHandleUploadRollback:
             now,
             now,
             now,  # last_accessed_at (#572)
+            "eelnou",  # doc_type (#639)
+            None,  # parent_vtk_id (#639)
         )
 
         stored = MagicMock(
