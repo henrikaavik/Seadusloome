@@ -421,7 +421,7 @@ def list_drafts_for_org_filtered(
     * ``q`` (title/filename/entity-label) runs a two-phase candidate
       lookup powered by ``pg_trgm`` GIN indexes from migration 019.
       Phase 1 scans ``drafts`` for title + filename matches.  Phase 2
-      pulls distinct draft IDs whose ``draft_entities.label`` matches.
+      pulls distinct draft IDs whose ``draft_entities.ref_text`` matches.
       The union is capped at :data:`_CANDIDATE_CAP` IDs before the
       final ``id = any(...)`` filter runs.
     * ``doc_types`` / ``statuses`` default to "all" when ``None`` or
@@ -472,15 +472,15 @@ def list_drafts_for_org_filtered(
                     (org_str, pattern, pattern, _CANDIDATE_CAP),
                 ).fetchall()
 
-                # Phase 2 -- entity-label trigram match, scoped to the
-                # caller's org via a sub-select.  Scoping at the SQL
+                # Phase 2 -- entity-ref_text trigram match, scoped to
+                # the caller's org via a sub-select.  Scoping at the SQL
                 # level means a stray draft_id leak is impossible even
                 # if pg_trgm surfaces an unexpected row.
                 phase2 = conn.execute(
                     """
                     select distinct draft_id
                       from draft_entities
-                     where label ilike %s
+                     where ref_text ilike %s
                        and draft_id in (
                            select id from drafts where org_id = %s
                        )

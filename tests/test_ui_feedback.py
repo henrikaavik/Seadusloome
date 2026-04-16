@@ -1,9 +1,11 @@
 """Smoke tests for feedback components: Toast, Spinner, Skeleton, EmptyState."""
 
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from fasthtml.common import Button, to_xml
+from starlette.requests import Request
 
 from app.ui.feedback import (
     EmptyState,
@@ -110,13 +112,14 @@ def test_empty_state_with_action():
 # ---- Flash messages (#598) ------------------------------------------------
 
 
-def _fake_request_with_session() -> SimpleNamespace:
+def _fake_request_with_session() -> Request:
     """Build a stand-in Request object exposing a ``.session`` dict.
 
     ``push_flash`` / ``pop_flashes`` only touch ``request.session``, so
     any object with that attribute is sufficient for unit testing.
+    The cast keeps pyright quiet at the call sites.
     """
-    return SimpleNamespace(session={})
+    return cast(Request, SimpleNamespace(session={}))
 
 
 def test_push_flash_queues_entry():
