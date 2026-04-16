@@ -169,6 +169,8 @@ async def handle_upload(
     title: str,
     upload: _UploadLike,
     *,
+    doc_type: str = "eelnou",
+    parent_vtk_id: Any = None,
     job_queue: JobQueue | None = None,
     conn_factory: Any = None,
 ) -> Draft:
@@ -179,6 +181,15 @@ async def handle_upload(
         title: Draft title supplied by the uploader (1-200 chars).
         upload: Starlette ``UploadFile`` (or any object matching
             :class:`_UploadLike`) pointing at the multipart stream.
+        doc_type: Document classification — ``'eelnou'`` (default) or
+            ``'vtk'``.  The route handler is responsible for validating
+            the value against the legal set BEFORE calling
+            :func:`handle_upload`; we just pass it through to
+            :func:`create_draft`.
+        parent_vtk_id: Optional foreign-key link to a preceding VTK in
+            the same org. The route handler validates FK existence and
+            same-org ownership; this function persists whatever is
+            passed in.
         job_queue: Optional ``JobQueue`` to enqueue the parse job.
             Defaults to a fresh :class:`app.jobs.JobQueue` instance —
             tests pass a stub to avoid hitting Postgres.
@@ -233,6 +244,8 @@ async def handle_upload(
                 # based on the storage_path (which is already unique) then
                 # patch the real URI immediately afterwards.
                 graph_uri=f"{_GRAPH_URI_PREFIX}pending-{stored.storage_path}",
+                doc_type=doc_type,  # type: ignore[arg-type]
+                parent_vtk_id=parent_vtk_id,
             )
             final_graph_uri = f"{_GRAPH_URI_PREFIX}{draft.id}"
             conn.execute(

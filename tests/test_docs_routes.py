@@ -55,6 +55,8 @@ def _make_draft(
     error_message: str | None = None,
     created_at: datetime | None = None,
     updated_at: datetime | None = None,
+    doc_type: str = "eelnou",
+    parent_vtk_id: uuid.UUID | None = None,
 ) -> Draft:
     now = datetime.now(UTC)
     resolved_id = draft_id or uuid.UUID("44444444-4444-4444-4444-444444444444")
@@ -74,6 +76,8 @@ def _make_draft(
         error_message=error_message,
         created_at=created_at or now,
         updated_at=updated_at or now,
+        doc_type=doc_type,  # type: ignore[arg-type]
+        parent_vtk_id=parent_vtk_id,
     )
 
 
@@ -1188,3 +1192,318 @@ class TestStatusAriaLive:
         # transitions as the polled fragment swaps.
         assert f'id="draft-status-{draft.id}"' in resp.text
         assert 'aria-live="polite"' in resp.text
+
+
+# ---------------------------------------------------------------------------
+# #640: VTK linking on upload + dedicated link-vtk route
+# ---------------------------------------------------------------------------
+
+
+_VTK_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+_OTHER_VTK_ID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
+
+def _make_vtk(
+    *,
+    vtk_id: str = _VTK_ID,
+    org_id: str = _ORG_ID,
+    title: str = "Maantee VTK",
+    status: str = "ready",
+) -> Draft:
+    return _make_draft(
+        draft_id=uuid.UUID(vtk_id),
+        org_id=org_id,
+        status=status,
+        title=title,
+        doc_type="vtk",
+    )
+
+
+class TestUploadWithVtkLinking:
+    @patch("app.docs.routes.log_draft_upload")
+    @patch("app.docs.routes.handle_upload")
+    @patch("app.docs.routes.list_vtks_for_org")
+    @patch("app.auth.middleware._get_provider")
+    def test_vtk_upload_persists_doc_type(
+        self,
+        mock_get_provider: MagicMock,
+        mock_list_vtks: MagicMock,
+        mock_handle: MagicMock,
+        mock_log: MagicMock,
+    ):
+        """VTK upload forwards doc_type='vtk' with no parent link."""
+        mock_get_provider.return_value = _stub_provider()
+        mock_list_vtks.return_value = []
+        draft = _make_draft(doc_type="vtk")
+
+        async def _fake_handle(*_a: Any, **kw: Any) -> Draft:
+            _fake_handle.kwargs = kw  # type: ignore[attr-defined]
+            return draft
+
+        mock_handle.side_effect = _fake_handle
+
+        client = _authed_client()
+        resp = client.post(
+            "/drafts",
+            data={"title": "VTK A", "doc_type": "vtk"},
+            files={"file": ("vtk.docx", b"x", "application/octet-stream")},
+        )
+
+        assert resp.status_code == 303
+        kw = _fake_handle.kwargs  # type: ignore[attr-defined]
+        assert kw["doc_type"] == "vtk"
+        assert kw["parent_vtk_id"] is None
+
+    @patch("app.docs.routes.log_draft_upload")
+    @patch("app.docs.routes.handle_upload")
+    @patch("app.docs.routes._connect")
+    @patch("app.docs.routes.list_vtks_for_org")
+    @patch("app.auth.middleware._get_provider")
+    def test_eelnou_upload_with_vtk_link_persists_both(
+        self,
+        mock_get_provider: MagicMock,
+        mock_list_vtks: MagicMock,
+        mock_connect: MagicMock,
+        mock_handle: MagicMock,
+        mock_log: MagicMock,
+    ):
+        """Eelnõu upload with parent_vtk_id sends both fields to handle_upload."""
+        mock_get_provider.return_value = _stub_provider()
+        mock_list_vtks.return_value = []
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = ("vtk",)
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        async def _fake_handle(*_a: Any, **kw: Any) -> Draft:
+            _fake_handle.kwargs = kw  # type: ignore[attr-defined]
+            return _make_draft()
+
+        mock_handle.side_effect = _fake_handle
+
+        client = _authed_client()
+        resp = client.post(
+            "/drafts",
+            data={
+                "title": "Eelnõu",
+                "doc_type": "eelnou",
+                "parent_vtk_id": _VTK_ID,
+            },
+            files={"file": ("eelnou.docx", b"x", "application/octet-stream")},
+        )
+
+        assert resp.status_code == 303
+        kw = _fake_handle.kwargs  # type: ignore[attr-defined]
+        assert kw["doc_type"] == "eelnou"
+        assert str(kw["parent_vtk_id"]) == _VTK_ID
+
+    @patch("app.docs.routes.list_vtks_for_org")
+    @patch("app.docs.routes._connect")
+    @patch("app.auth.middleware._get_provider")
+    def test_cross_org_vtk_fk_rejected(
+        self,
+        mock_get_provider: MagicMock,
+        mock_connect: MagicMock,
+        mock_list_vtks: MagicMock,
+    ):
+        """A parent_vtk_id pointing at another org's VTK is rejected with
+        a 400 + Estonian error. The FK validation query scopes to the
+        caller's org so the row simply does not match."""
+        mock_get_provider.return_value = _stub_provider()
+        mock_list_vtks.return_value = []
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = None
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        client = _authed_client()
+        resp = client.post(
+            "/drafts",
+            data={
+                "title": "Eelnõu",
+                "doc_type": "eelnou",
+                "parent_vtk_id": _OTHER_VTK_ID,
+            },
+            files={"file": ("x.docx", b"x", "application/octet-stream")},
+        )
+
+        assert resp.status_code == 400
+        assert "Valitud VTK ei ole kättesaadav." in resp.text
+
+    @patch("app.docs.routes.list_vtks_for_org")
+    @patch("app.docs.routes._connect")
+    @patch("app.auth.middleware._get_provider")
+    def test_parent_pointing_at_eelnou_rejected(
+        self,
+        mock_get_provider: MagicMock,
+        mock_connect: MagicMock,
+        mock_list_vtks: MagicMock,
+    ):
+        """parent_vtk_id must point at a doc_type='vtk' row."""
+        mock_get_provider.return_value = _stub_provider()
+        mock_list_vtks.return_value = []
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = ("eelnou",)
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        client = _authed_client()
+        resp = client.post(
+            "/drafts",
+            data={
+                "title": "Eelnõu",
+                "doc_type": "eelnou",
+                "parent_vtk_id": _VTK_ID,
+            },
+            files={"file": ("x.docx", b"x", "application/octet-stream")},
+        )
+
+        assert resp.status_code == 400
+        assert "Valitud VTK ei ole kättesaadav." in resp.text
+
+    @patch("app.docs.routes.list_vtks_for_org")
+    @patch("app.auth.middleware._get_provider")
+    def test_vtk_upload_with_parent_rejected(
+        self,
+        mock_get_provider: MagicMock,
+        mock_list_vtks: MagicMock,
+    ):
+        """A VTK cannot be linked to another VTK — mirrors the DB CHECK."""
+        mock_get_provider.return_value = _stub_provider()
+        mock_list_vtks.return_value = []
+
+        client = _authed_client()
+        resp = client.post(
+            "/drafts",
+            data={
+                "title": "VTK",
+                "doc_type": "vtk",
+                "parent_vtk_id": _VTK_ID,
+            },
+            files={"file": ("vtk.docx", b"x", "application/octet-stream")},
+        )
+
+        assert resp.status_code == 400
+        assert "VTK ei saa olla seotud teise VTKga." in resp.text
+
+
+class TestLinkVtkHandler:
+    @patch("app.docs.routes.write_doc_lineage")
+    @patch("app.docs.routes.log_action")
+    @patch("app.docs.routes.update_draft_parent_vtk")
+    @patch("app.docs.routes._connect")
+    @patch("app.docs.routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_link_vtk_happy_path_returns_metadata_fragment(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_connect: MagicMock,
+        mock_update: MagicMock,
+        mock_log: MagicMock,
+        mock_write_lineage: MagicMock,
+    ):
+        mock_get_provider.return_value = _stub_provider()
+        draft = _make_draft()
+        vtk = _make_vtk()
+
+        # fetch_draft is called multiple times: the auth check, the
+        # post-update refresh, and the parent-vtk lookup. Provide a
+        # side_effect that keeps returning the right shape.
+        mock_fetch.side_effect = [draft, draft, vtk]
+
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = ("vtk",)
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        client = _authed_client()
+        resp = client.post(
+            f"/drafts/{draft.id}/link-vtk",
+            data={"parent_vtk_id": _VTK_ID},
+        )
+
+        assert resp.status_code == 200
+        mock_update.assert_called_once()
+        args = mock_update.call_args.args
+        assert str(args[2]) == _VTK_ID
+        mock_write_lineage.assert_called_once()
+        assert 'id="draft-metadata"' in resp.text
+
+    @patch("app.docs.routes._connect")
+    @patch("app.docs.routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_link_vtk_cross_org_rejected(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_connect: MagicMock,
+    ):
+        """URL-tampered cross-org FK surfaces as a 400 — the FK
+        validation query scopes to the draft's own org so the foreign
+        VTK appears to simply not exist."""
+        mock_get_provider.return_value = _stub_provider()
+        draft = _make_draft()
+        mock_fetch.return_value = draft
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = None
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        client = _authed_client()
+        resp = client.post(
+            f"/drafts/{draft.id}/link-vtk",
+            data={"parent_vtk_id": _OTHER_VTK_ID},
+        )
+
+        assert resp.status_code == 400
+        assert "Valitud VTK ei ole kättesaadav." in resp.text
+
+    @patch("app.docs.routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_link_vtk_non_owner_returns_not_found(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+    ):
+        """Non-owner same-org drafter cannot link/unlink someone else's draft."""
+        mock_get_provider.return_value = _stub_provider()
+        other_user = "99999999-9999-9999-9999-999999999999"
+        mock_fetch.return_value = _make_draft(user_id=other_user)
+
+        client = _authed_client()
+        resp = client.post(
+            "/drafts/44444444-4444-4444-4444-444444444444/link-vtk",
+            data={"parent_vtk_id": _VTK_ID},
+        )
+
+        assert resp.status_code == 200
+        assert "Eelnõu ei leitud" in resp.text
+
+
+class TestLinkVtkModalOnDetailPage:
+    @patch("app.docs.routes.list_vtks_for_org")
+    @patch("app.docs.routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_detail_page_renders_link_vtk_modal_for_owner(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_list_vtks: MagicMock,
+    ):
+        """Owner viewing an unlinked eelnõu sees the "Seo VTKga" button
+        + link-vtk modal with the picker populated."""
+        mock_get_provider.return_value = _stub_provider()
+        mock_fetch.return_value = _make_draft(status="ready")
+        mock_list_vtks.return_value = [_make_vtk(title="Maantee VTK")]
+
+        client = _authed_client()
+        resp = client.get("/drafts/44444444-4444-4444-4444-444444444444")
+
+        assert resp.status_code == 200
+        assert 'id="draft-metadata"' in resp.text
+        assert "Seotud VTK" in resp.text
+        assert "Seo VTKga" in resp.text
+        assert 'id="link-vtk-modal"' in resp.text
+        assert "Maantee VTK" in resp.text
+        assert 'hx-post="/drafts/44444444-4444-4444-4444-444444444444/link-vtk"' in resp.text

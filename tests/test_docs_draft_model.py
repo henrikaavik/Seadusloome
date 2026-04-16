@@ -32,6 +32,8 @@ from app.docs.draft_model import (
     fetch_draft,
     get_draft,
     list_drafts_for_org,
+    list_vtks_for_org,
+    update_draft_parent_vtk,
 )
 
 # ---------------------------------------------------------------------------
@@ -422,3 +424,125 @@ class TestListDraftsForOrg:
         conn.execute.side_effect = RuntimeError("boom")
         drafts = list_drafts_for_org(conn, _ORG_ID)
         assert drafts == []
+
+
+# ---------------------------------------------------------------------------
+# list_vtks_for_org -- VTK picker helper (#640)
+# ---------------------------------------------------------------------------
+
+
+class TestListVtksForOrg:
+    @patch("app.docs.draft_model._connect")
+    def test_returns_only_vtks_in_default_statuses(self, mock_connect):
+        """Helper SQL must filter on doc_type='vtk' AND ready/analyzing."""
+        conn = MagicMock()
+        conn.execute.return_value.fetchall.return_value = [
+            _make_raw_row(
+                draft_id=uuid.uuid4(),
+                doc_type="vtk",
+                status="ready",
+                title="VTK A",
+            ),
+            _make_raw_row(
+                draft_id=uuid.uuid4(),
+                doc_type="vtk",
+                status="analyzing",
+                title="VTK B",
+            ),
+        ]
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        vtks = list_vtks_for_org(_ORG_ID)
+
+        assert len(vtks) == 2
+        assert all(v.doc_type == "vtk" for v in vtks)
+        # Verify SQL: doc_type = 'vtk' and status = any(%s)
+        call_args = conn.execute.call_args
+        sql: str = call_args.args[0]
+        params: tuple = call_args.args[1]
+        assert "doc_type = 'vtk'" in sql
+        assert "status = any" in sql
+        # Second param is the list of statuses.
+        assert params[0] == str(_ORG_ID)
+        assert list(params[1]) == ["ready", "analyzing"]
+
+    @patch("app.docs.draft_model._connect")
+    def test_custom_statuses_passed_through(self, mock_connect):
+        conn = MagicMock()
+        conn.execute.return_value.fetchall.return_value = []
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        list_vtks_for_org(_ORG_ID, statuses=("ready",))
+
+        params = conn.execute.call_args.args[1]
+        assert list(params[1]) == ["ready"]
+
+    @patch("app.docs.draft_model._connect")
+    def test_empty_statuses_short_circuits(self, mock_connect):
+        vtks = list_vtks_for_org(_ORG_ID, statuses=())
+        assert vtks == []
+        mock_connect.assert_not_called()
+
+    @patch("app.docs.draft_model._connect")
+    def test_db_error_returns_empty_list(self, mock_connect):
+        conn = MagicMock()
+        conn.execute.side_effect = RuntimeError("boom")
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        assert list_vtks_for_org(_ORG_ID) == []
+
+    @patch("app.docs.draft_model._connect")
+    def test_results_propagate_doc_type_and_title(self, mock_connect):
+        conn = MagicMock()
+        conn.execute.return_value.fetchall.return_value = [
+            _make_raw_row(
+                draft_id=_VTK_ID,
+                doc_type="vtk",
+                status="ready",
+                title="Maanteeseaduse VTK",
+            ),
+        ]
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        vtks = list_vtks_for_org(_ORG_ID)
+        assert len(vtks) == 1
+        assert vtks[0].title == "Maanteeseaduse VTK"
+        assert vtks[0].id == _VTK_ID
+
+
+# ---------------------------------------------------------------------------
+# update_draft_parent_vtk -- set/clear FK (#640)
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateDraftParentVtk:
+    def test_sets_uuid_parent(self):
+        conn = MagicMock()
+        conn.execute.return_value.rowcount = 1
+
+        updated = update_draft_parent_vtk(conn, _DRAFT_ID, _VTK_ID)
+
+        assert updated is True
+        sql, params = conn.execute.call_args.args
+        assert "set parent_vtk_id" in sql.lower()
+        assert params == (str(_VTK_ID), str(_DRAFT_ID))
+
+    def test_clears_parent_on_none(self):
+        conn = MagicMock()
+        conn.execute.return_value.rowcount = 1
+
+        updated = update_draft_parent_vtk(conn, _DRAFT_ID, None)
+
+        assert updated is True
+        params = conn.execute.call_args.args[1]
+        assert params == (None, str(_DRAFT_ID))
+
+    def test_returns_false_when_no_row_updated(self):
+        conn = MagicMock()
+        conn.execute.return_value.rowcount = 0
+
+        assert update_draft_parent_vtk(conn, _DRAFT_ID, None) is False

@@ -222,6 +222,31 @@ def update_draft_status(
     return (result.rowcount or 0) > 0
 
 
+def update_draft_parent_vtk(
+    conn: Any,
+    draft_id: uuid.UUID | str,
+    parent_vtk_id: uuid.UUID | str | None,
+) -> bool:
+    """Set (or clear) ``parent_vtk_id`` on *draft_id* (#640).
+
+    Returns ``True`` when a row was updated.  Takes an explicit
+    connection so the caller can batch the update with other
+    operations (audit logging, ontology writes).  The caller commits
+    the transaction.
+    """
+    fk_param = str(parent_vtk_id) if parent_vtk_id else None
+    result = conn.execute(
+        """
+        update drafts
+        set parent_vtk_id = %s,
+            updated_at = now()
+        where id = %s
+        """,
+        (fk_param, str(draft_id)),
+    )
+    return (result.rowcount or 0) > 0
+
+
 def delete_draft(conn: Any, draft_id: uuid.UUID | str) -> str | None:
     """Delete a draft row and return its ``storage_path`` for file cleanup.
 
@@ -345,6 +370,45 @@ def count_drafts_for_org(conn: Any, org_id: uuid.UUID | str) -> int:
         logger.exception("Failed to count drafts for org=%s", org_id)
         return 0
     return int(row[0]) if row else 0
+
+
+def list_vtks_for_org(
+    org_id: uuid.UUID | str,
+    *,
+    statuses: tuple[str, ...] = ("ready", "analyzing"),
+) -> list[Draft]:
+    """Return VTK drafts for *org_id* suitable for the link picker (#640).
+
+    Filters on ``doc_type='vtk'`` and restricts to the supplied pipeline
+    ``statuses``.  The default set (``ready``, ``analyzing``) mirrors
+    the spec — a VTK is link-worthy as soon as it has finished being
+    extracted into an impact-analyzable shape, and finished VTKs remain
+    selectable.  Ordered newest-first so the most recent uploads surface
+    at the top of the dropdown.
+
+    The helper opens its own connection so routes don't have to wire
+    up a ``_connect()`` block just to populate a form. On DB error it
+    logs and returns ``[]`` (consistent with the rest of this module).
+    """
+    if not statuses:
+        return []
+    try:
+        with _connect() as conn:
+            rows = conn.execute(
+                f"""
+                select {_DRAFT_COLUMNS}
+                from drafts
+                where org_id = %s
+                  and doc_type = 'vtk'
+                  and status = any(%s)
+                order by created_at desc
+                """,
+                (str(org_id), list(statuses)),
+            ).fetchall()
+    except Exception:
+        logger.exception("Failed to list VTKs for org=%s", org_id)
+        return []
+    return [_row_to_draft(row) for row in rows]
 
 
 # ---------------------------------------------------------------------------

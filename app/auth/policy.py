@@ -118,6 +118,19 @@ def can_delete_draft(auth: Mapping[str, Any] | None, draft: Any) -> bool:
     return _auth_id(auth) == _resource_owner(draft)
 
 
+def can_edit_draft(auth: Mapping[str, Any] | None, draft: Any) -> bool:
+    """Owner-only mutation policy for draft-scoped edits.
+
+    Used by endpoints that mutate a draft's own metadata (e.g. linking
+    an eelnõu to its preceding VTK — #640) without removing the draft
+    itself. The rule is identical to :func:`can_delete_draft`: the row
+    owner or a system admin, and nobody else. Same-org reviewers and
+    org admins can read a draft but must not re-link it on the owner's
+    behalf — that's a governance action tied to the document's author.
+    """
+    return can_delete_draft(auth, draft)
+
+
 # ---------------------------------------------------------------------------
 # Chat conversation policy
 # ---------------------------------------------------------------------------

@@ -31,7 +31,7 @@ from starlette.responses import HTMLResponse, RedirectResponse, Response
 
 from app.auth.audit import log_action
 from app.auth.helpers import require_auth as _require_auth
-from app.auth.policy import can_delete_draft, can_view_draft
+from app.auth.policy import can_delete_draft, can_edit_draft, can_view_draft
 from app.db import get_connection as _connect
 from app.docs.audit import (
     log_draft_delete,
@@ -44,9 +44,12 @@ from app.docs.draft_model import (
     delete_draft,
     fetch_draft,
     fetch_drafts_for_org,
+    list_vtks_for_org,
     touch_draft_access,
     touch_draft_access_conn,
+    update_draft_parent_vtk,
 )
+from app.docs.graph_builder import write_doc_lineage
 from app.docs.upload import DraftUploadError, handle_upload
 from app.jobs.queue import JobQueue
 from app.rag.retriever import delete_chunks_for_draft
@@ -61,7 +64,7 @@ from app.ui.primitives.button import Button
 from app.ui.surfaces.alert import Alert
 from app.ui.surfaces.card import Card, CardBody, CardHeader
 from app.ui.surfaces.info_box import InfoBox
-from app.ui.surfaces.modal import ConfirmModal, ModalScript
+from app.ui.surfaces.modal import ConfirmModal, Modal, ModalBody, ModalFooter, ModalScript
 from app.ui.theme import get_theme_from_request
 from app.ui.time import format_tallinn
 
@@ -643,15 +646,144 @@ _FILE_PICKER_SCRIPT = (
 )
 
 
-def _upload_form(*, title_value: str = "", error: str | None = None):
+# #640: inline toggle that disables the "Seotud VTK" picker when the
+# "VTK" radio is selected.  A VTK cannot have a parent VTK (enforced by
+# the DB CHECK constraint in migration 019) so the control is purely
+# UX polish; server-side validation in ``create_draft_handler`` is the
+# authoritative guard.
+_DOC_TYPE_TOGGLE_SCRIPT = (
+    "(function () {\n"
+    "  var picker = document.getElementById('field-parent-vtk');\n"
+    "  if (!picker) return;\n"
+    "  var radios = document.querySelectorAll('input[name=\"doc_type\"]');\n"
+    "  function sync() {\n"
+    "    var chosen = document.querySelector('input[name=\"doc_type\"]:checked');\n"
+    "    var isVtk = chosen && chosen.value === 'vtk';\n"
+    "    picker.disabled = !!isVtk;\n"
+    "    if (isVtk) picker.value = '';\n"
+    "  }\n"
+    "  radios.forEach(function (r) { r.addEventListener('change', sync); });\n"
+    "  sync();\n"
+    "})();\n"
+)
+
+
+def _doc_type_radio(*, selected: str = "eelnou"):
+    """Render the "Dokumendi tüüp" radio group (#640).
+
+    Two options — "Eelnõu" (default) and "VTK" — rendered as native
+    radio inputs so the form gracefully degrades without JS. The
+    server-side validation in ``create_draft_handler`` is the
+    authoritative check; the client-side toggle below just hides the
+    VTK picker when "VTK" is selected.
+    """
+    normalised = selected if selected in {"eelnou", "vtk"} else "eelnou"
+    return Div(  # noqa: F405
+        Label(  # noqa: F405
+            "Dokumendi tüüp",
+            Span(" *", cls="form-field-required", aria_hidden="true"),  # noqa: F405
+            cls="form-field-label",
+        ),
+        Div(  # noqa: F405
+            Label(  # noqa: F405
+                Input(  # noqa: F405
+                    type="radio",
+                    name="doc_type",
+                    value="eelnou",
+                    id="doc-type-eelnou",
+                    checked=(normalised == "eelnou"),
+                ),
+                Span("Eelnõu"),  # noqa: F405
+                fr="doc-type-eelnou",
+                cls="form-radio-option",
+            ),
+            Label(  # noqa: F405
+                Input(  # noqa: F405
+                    type="radio",
+                    name="doc_type",
+                    value="vtk",
+                    id="doc-type-vtk",
+                    checked=(normalised == "vtk"),
+                ),
+                Span("VTK"),  # noqa: F405
+                fr="doc-type-vtk",
+                cls="form-radio-option",
+            ),
+            cls="form-radio-group",
+            role="radiogroup",
+            aria_label="Dokumendi tüüp",
+        ),
+        cls="form-field",
+    )
+
+
+def _vtk_picker(
+    vtks: list[Draft],
+    *,
+    selected: uuid.UUID | str | None = None,
+    disabled: bool = False,
+    field_id: str = "field-parent-vtk",
+    name: str = "parent_vtk_id",
+    label: str = "Seotud VTK",
+):
+    """Render the VTK ``<select>`` picker used on upload + link-vtk (#640).
+
+    Populated server-side with the caller's org's VTKs (no cross-org
+    leak possible). First option is an empty "— vali —" sentinel so
+    "no link" round-trips through the form.  Renders as a ``<select>``
+    element so the control works without JS.
+    """
+    selected_str = str(selected) if selected else ""
+    options: list = [Option("— vali —", value="", selected=(selected_str == ""))]  # noqa: F405
+    for vtk in vtks:
+        vtk_id = str(vtk.id)
+        options.append(
+            Option(  # noqa: F405
+                vtk.title,
+                value=vtk_id,
+                selected=(vtk_id == selected_str),
+            )
+        )
+    select_kwargs: dict[str, Any] = {
+        "name": name,
+        "id": field_id,
+        "cls": "input input-select",
+    }
+    if disabled:
+        select_kwargs["disabled"] = True
+    return Div(  # noqa: F405
+        Label(label, fr=field_id, cls="form-field-label"),  # noqa: F405
+        Select(*options, **select_kwargs),  # noqa: F405
+        Small(  # noqa: F405
+            "Valikuline — seoge eelnõu selle VTKga, millest see tuleneb.",
+            cls="form-field-help",
+        ),
+        cls="form-field",
+    )
+
+
+def _upload_form(
+    *,
+    title_value: str = "",
+    error: str | None = None,
+    vtks: list[Draft] | None = None,
+    doc_type_value: str = "eelnou",
+    parent_vtk_id_value: str | None = None,
+):
     """Render the multipart upload form.
 
     IMPORTANT: this form uses the raw ``Form`` primitive from
     ``fasthtml.common`` rather than :class:`AppForm` because file uploads
     **must** use ``enctype="multipart/form-data"``. AppForm defaults to
     ``application/x-www-form-urlencoded`` and would silently drop the file.
+
+    #640: adds a "Dokumendi tüüp" radio group and a "Seotud VTK"
+    ``<select>`` populated with the caller's org's VTKs. Validation of
+    both fields happens server-side in ``create_draft_handler``.
     """
     error_alert = Alert(error, variant="danger") if error else None
+    picker_disabled = doc_type_value == "vtk"
+    vtk_list = vtks or []
 
     return Form(  # noqa: F405
         Div(
@@ -675,6 +807,12 @@ def _upload_form(*, title_value: str = "", error: str | None = None):
                 cls="form-field-help",
             ),
             cls="form-field",
+        ),
+        _doc_type_radio(selected=doc_type_value),
+        _vtk_picker(
+            vtk_list,
+            selected=parent_vtk_id_value,
+            disabled=picker_disabled,
         ),
         Div(
             Label(  # noqa: F405
@@ -725,6 +863,7 @@ def _upload_form(*, title_value: str = "", error: str | None = None):
             cls="form-actions",
         ),
         Script(_FILE_PICKER_SCRIPT),  # noqa: F405
+        Script(_DOC_TYPE_TOGGLE_SCRIPT),  # noqa: F405
         method="post",
         action="/drafts",
         enctype="multipart/form-data",
@@ -758,7 +897,13 @@ def new_draft_page(req: Request):
             request=req,
         )
 
-    form, error_alert = _upload_form()
+    # #640: populate the "Seotud VTK" picker at render time with the
+    # caller's org's VTKs. Cross-org leaks are impossible because the
+    # helper scopes the query to ``auth['org_id']``. The ``org_id``
+    # check at the top of the handler guarantees a non-None value here.
+    org_id_str = str(auth["org_id"])
+    vtks = list_vtks_for_org(org_id_str)
+    form, error_alert = _upload_form(vtks=vtks)
     card_children: list = []
     if error_alert is not None:
         card_children.append(error_alert)
@@ -790,8 +935,45 @@ def new_draft_page(req: Request):
 # ---------------------------------------------------------------------------
 
 
+_VALID_DOC_TYPES: frozenset[str] = frozenset({"eelnou", "vtk"})
+
+
+def _validate_parent_vtk_fk(
+    conn: Any,
+    parent_vtk_id: uuid.UUID,
+    org_id: str,
+) -> str | None:
+    """Return an Estonian error message if *parent_vtk_id* is not a usable
+    VTK for the current org, or ``None`` when the FK is valid.
+
+    Scopes the lookup to ``org_id`` so a cross-org FK (URL-tampered by a
+    malicious client) looks exactly like a missing row — we never
+    confirm the existence of another org's draft in an error message.
+    """
+    row = conn.execute(
+        "select doc_type from drafts where id = %s and org_id = %s",
+        (str(parent_vtk_id), str(org_id)),
+    ).fetchone()
+    if row is None:
+        return "Valitud VTK ei ole kättesaadav."
+    if row[0] != "vtk":
+        return "Valitud VTK ei ole kättesaadav."
+    return None
+
+
 async def create_draft_handler(req: Request):
-    """POST /drafts — accept a multipart upload and create a draft row."""
+    """POST /drafts — accept a multipart upload and create a draft row.
+
+    #640: validates ``doc_type`` and ``parent_vtk_id`` from the upload
+    form. Both fields are optional server-side (``doc_type`` defaults
+    to ``eelnou``, ``parent_vtk_id`` defaults to unset) but any value
+    present must pass the full validation gauntlet:
+
+    * ``doc_type`` must be one of ``{'eelnou', 'vtk'}``.
+    * A VTK upload cannot carry a ``parent_vtk_id`` (DB CHECK mirror).
+    * A ``parent_vtk_id`` must exist, belong to the caller's org, and
+      have ``doc_type = 'vtk'``.
+    """
     auth_or_redirect = _require_auth(req)
     if isinstance(auth_or_redirect, Response):
         return auth_or_redirect
@@ -803,35 +985,96 @@ async def create_draft_handler(req: Request):
     upload = form.get("file")
     title_value = str(title_raw) if title_raw is not None else ""
 
-    if upload is None or not hasattr(upload, "read"):
-        error_message = "Palun valige üleslaaditav fail."
-    else:
-        try:
-            draft = await handle_upload(auth, title_value, upload)  # type: ignore[arg-type]
-        except DraftUploadError as exc:
-            error_message = str(exc)
+    # #640: new upload fields. Empty / missing values default to the
+    # "plain eelnõu with no VTK link" shape so legacy clients and
+    # forms that predate the picker keep working.
+    doc_type_raw = form.get("doc_type", "eelnou")
+    doc_type_value = str(doc_type_raw) if doc_type_raw else "eelnou"
+    parent_vtk_raw = form.get("parent_vtk_id", "")
+    parent_vtk_str = str(parent_vtk_raw).strip() if parent_vtk_raw else ""
+    parent_vtk_uuid = _parse_uuid(parent_vtk_str) if parent_vtk_str else None
+
+    error_message: str | None = None
+    status_code = 200
+
+    if doc_type_value not in _VALID_DOC_TYPES:
+        error_message = "Vigane dokumendi tüüp."
+        status_code = 400
+    elif parent_vtk_str and parent_vtk_uuid is None:
+        # The user submitted something in the picker but it wasn't a UUID.
+        error_message = "Valitud VTK ei ole kättesaadav."
+        status_code = 400
+    elif parent_vtk_uuid is not None and doc_type_value == "vtk":
+        # A VTK cannot have a parent VTK — same rule as the DB CHECK.
+        error_message = "VTK ei saa olla seotud teise VTKga."
+        status_code = 400
+    elif parent_vtk_uuid is not None:
+        # FK target must exist, be in the same org, and be a VTK.
+        org_id = auth.get("org_id")
+        if not org_id:
+            error_message = "Valitud VTK ei ole kättesaadav."
+            status_code = 400
         else:
-            log_draft_upload(
-                auth.get("id"),
-                draft.id,
-                filename=draft.filename,
-                content_type=draft.content_type,
-                file_size=draft.file_size,
-            )
-            # #598: queue a success toast for the detail page.
-            push_flash(
-                req,
-                "Eelnõu üles laaditud, analüüs algas.",
-                kind="success",
-            )
-            return RedirectResponse(url=f"/drafts/{draft.id}", status_code=303)
+            try:
+                with _connect() as conn:
+                    fk_error = _validate_parent_vtk_fk(conn, parent_vtk_uuid, str(org_id))
+            except Exception:
+                logger.exception(
+                    "Failed to validate parent_vtk_id=%s for org=%s",
+                    parent_vtk_uuid,
+                    org_id,
+                )
+                fk_error = "Valitud VTK ei ole kättesaadav."
+            if fk_error is not None:
+                error_message = fk_error
+                status_code = 400
+
+    if error_message is None:
+        if upload is None or not hasattr(upload, "read"):
+            error_message = "Palun valige üleslaaditav fail."
+        else:
+            try:
+                draft = await handle_upload(
+                    auth,
+                    title_value,
+                    upload,  # type: ignore[arg-type]
+                    doc_type=doc_type_value,
+                    parent_vtk_id=parent_vtk_uuid,
+                )
+            except DraftUploadError as exc:
+                error_message = str(exc)
+            else:
+                log_draft_upload(
+                    auth.get("id"),
+                    draft.id,
+                    filename=draft.filename,
+                    content_type=draft.content_type,
+                    file_size=draft.file_size,
+                )
+                # #598: queue a success toast for the detail page.
+                push_flash(
+                    req,
+                    "Eelnõu üles laaditud, analüüs algas.",
+                    kind="success",
+                )
+                return RedirectResponse(url=f"/drafts/{draft.id}", status_code=303)
+
+    # At this point we definitely have an error_message.
+    assert error_message is not None  # narrows for type-checkers
 
     # #598: also surface the validation error as a danger toast so the
     # banner + toast pattern is consistent with the happy-path redirect.
     push_flash(req, error_message, kind="danger")
 
-    form_el, _ = _upload_form(title_value=title_value, error=error_message)
-    return PageShell(
+    vtks = list_vtks_for_org(str(auth["org_id"])) if auth.get("org_id") else []
+    form_el, _ = _upload_form(
+        title_value=title_value,
+        error=error_message,
+        vtks=vtks,
+        doc_type_value=doc_type_value if doc_type_value in _VALID_DOC_TYPES else "eelnou",
+        parent_vtk_id_value=parent_vtk_str or None,
+    )
+    page = PageShell(
         H1("Uus eelnõu", cls="page-title"),  # noqa: F405
         Alert(error_message, variant="danger"),
         Card(CardBody(form_el)),
@@ -842,6 +1085,11 @@ async def create_draft_handler(req: Request):
         active_nav="/drafts",
         request=req,
     )
+    if status_code == 400:
+        # Render the page as the 400 body so the browser sees the right
+        # status code but the user still gets the form + error banner.
+        return HTMLResponse(to_xml(page), status_code=400)
+    return page
 
 
 # ---------------------------------------------------------------------------
@@ -852,6 +1100,35 @@ async def create_draft_handler(req: Request):
 _DELETE_MODAL_ID = "delete-draft-modal"
 _DELETE_TRIGGER_ID = "delete-draft-trigger"
 _DELETE_FORM_ID = "delete-draft-form"
+
+# #640: identifiers for the "Seo VTKga" modal + its embedded form.
+_LINK_VTK_MODAL_ID = "link-vtk-modal"
+_LINK_VTK_TRIGGER_ID = "link-vtk-trigger"
+_LINK_VTK_FORM_ID = "link-vtk-form"
+_DRAFT_METADATA_ID = "draft-metadata"
+
+# #640: wire the "Seo VTKga" trigger button to the Modal primitive.
+# The modal contains a form that HTMX-POSTs to ``/drafts/{id}/link-vtk``
+# and targets ``#draft-metadata`` with ``outerHTML`` so the new
+# "Seotud VTK" row replaces the old one in place.
+_LINK_VTK_MODAL_SCRIPT = (
+    "(function () {\n"
+    f"  var trigger = document.getElementById('{_LINK_VTK_TRIGGER_ID}');\n"
+    "  if (!trigger || !window.Modal) return;\n"
+    "  trigger.addEventListener('click', function (evt) {\n"
+    "    evt.preventDefault();\n"
+    f"    window.Modal.open('{_LINK_VTK_MODAL_ID}');\n"
+    "  });\n"
+    f"  var form = document.getElementById('{_LINK_VTK_FORM_ID}');\n"
+    "  if (form && window.htmx) {\n"
+    "    form.addEventListener('htmx:afterRequest', function (evt) {\n"
+    "      if (evt.detail && evt.detail.successful) {\n"
+    f"        window.Modal.close('{_LINK_VTK_MODAL_ID}');\n"
+    "      }\n"
+    "    });\n"
+    "  }\n"
+    "})();\n"
+)
 
 # #601: bridge modal confirm click to the HTMX delete form. The modal
 # primitive exposes ``window.Modal.open(id)`` / ``.close(id)`` from
@@ -881,16 +1158,83 @@ _DELETE_MODAL_SCRIPT = (
 )
 
 
-def _draft_detail_body(draft: Draft, auth: Mapping[str, Any] | None = None) -> list[Any]:
-    """Build the metadata + actions body of the draft detail page.
+def _seotud_vtk_row(
+    draft: Draft,
+    *,
+    parent_vtk: Draft | None,
+    can_edit: bool,
+) -> list[Any]:
+    """Build the ``<dt>``/``<dd>`` pair for the "Seotud VTK" metadata row (#640).
 
-    The delete form is only rendered when ``auth`` is allowed to delete
-    per ``app.auth.policy.can_delete_draft`` (issue #568). Before this
-    check the button was shown to every same-org viewer, which made the
-    route handler's stricter owner-only check surprising for reviewers
-    and org admins who could click and get a 404.
+    Only rendered for eelnõud — a VTK cannot itself be linked to a
+    parent VTK. The body varies by state:
+
+    * Linked — hyperlink to the VTK + an "Eemalda" unlink control
+      (owner-only).
+    * Unlinked + editor — "—" placeholder + a "Seo VTKga" button that
+      opens the link modal.
+    * Unlinked + viewer — just "—".
     """
-    metadata = Dl(  # noqa: F405
+    if draft.doc_type != "eelnou":
+        return []
+    children: list[Any] = [Dt("Seotud VTK")]  # noqa: F405
+    if parent_vtk is not None:
+        link = A(  # noqa: F405
+            parent_vtk.title,
+            href=f"/drafts/{parent_vtk.id}",
+            cls="data-table-link",
+        )
+        if can_edit:
+            unlink_form = Form(  # noqa: F405
+                Input(type="hidden", name="parent_vtk_id", value=""),  # noqa: F405
+                Button(
+                    "Eemalda",
+                    type="submit",
+                    variant="ghost",
+                    size="sm",
+                ),
+                method="post",
+                action=f"/drafts/{draft.id}/link-vtk",
+                enctype="application/x-www-form-urlencoded",
+                hx_post=f"/drafts/{draft.id}/link-vtk",
+                hx_target=f"#{_DRAFT_METADATA_ID}",
+                hx_swap="outerHTML",
+                cls="inline-form unlink-vtk-form",
+            )
+            children.append(Dd(link, " ", unlink_form))  # noqa: F405
+        else:
+            children.append(Dd(link))  # noqa: F405
+    else:
+        if can_edit:
+            trigger = Button(
+                "Seo VTKga",
+                type="button",
+                variant="secondary",
+                size="sm",
+                id=_LINK_VTK_TRIGGER_ID,
+                aria_haspopup="dialog",
+                aria_controls=_LINK_VTK_MODAL_ID,
+            )
+            children.append(Dd("\u2014 ", trigger))  # noqa: F405
+        else:
+            children.append(Dd("\u2014"))  # noqa: F405
+    return children
+
+
+def _draft_metadata_block(
+    draft: Draft,
+    *,
+    parent_vtk: Draft | None,
+    can_edit: bool,
+) -> Any:
+    """Render the metadata ``<dl>`` with a stable id for HTMX swap (#640).
+
+    Wrapped in a ``<div id="draft-metadata">`` so the link-vtk handler
+    can target it with ``hx-target="#draft-metadata"`` +
+    ``hx-swap="outerHTML"`` and replace the entire block in place.
+    """
+    seotud_rows = _seotud_vtk_row(draft, parent_vtk=parent_vtk, can_edit=can_edit)
+    dl = Dl(  # noqa: F405
         Dt("Pealkiri"),  # noqa: F405
         Dd(draft.title),  # noqa: F405
         Dt("Failinimi"),  # noqa: F405
@@ -901,8 +1245,82 @@ def _draft_detail_body(draft: Draft, auth: Mapping[str, Any] | None = None) -> l
         Dd(draft.content_type),  # noqa: F405
         Dt("Üles laaditud"),  # noqa: F405
         Dd(_format_timestamp(draft.created_at)),  # noqa: F405
+        *seotud_rows,
         cls="info-list",
     )
+    return Div(dl, id=_DRAFT_METADATA_ID)  # noqa: F405
+
+
+def _link_vtk_modal(
+    draft: Draft,
+    *,
+    vtks: list[Draft],
+    selected_vtk_id: uuid.UUID | None,
+) -> list[Any]:
+    """Build the "Seo VTKga" modal + its companion script (#640).
+
+    Rendered as a sibling of the metadata block. The modal's form
+    HTMX-POSTs to ``/drafts/{id}/link-vtk`` and swaps ``#draft-metadata``
+    with the response fragment. ``_LINK_VTK_MODAL_SCRIPT`` handles the
+    open-on-trigger-click wiring and auto-close on successful submit.
+    """
+    picker = _vtk_picker(
+        vtks,
+        selected=selected_vtk_id,
+        field_id="link-vtk-select",
+        name="parent_vtk_id",
+        label="Seotud VTK",
+    )
+    modal_form = Form(  # noqa: F405
+        picker,
+        ModalFooter(
+            Button("Tühista", type="button", variant="secondary", data_modal_close=""),
+            Button("Salvesta", type="submit", variant="primary"),
+        ),
+        id=_LINK_VTK_FORM_ID,
+        method="post",
+        action=f"/drafts/{draft.id}/link-vtk",
+        enctype="application/x-www-form-urlencoded",
+        hx_post=f"/drafts/{draft.id}/link-vtk",
+        hx_target=f"#{_DRAFT_METADATA_ID}",
+        hx_swap="outerHTML",
+        cls="link-vtk-form",
+    )
+    return [
+        Modal(
+            ModalBody(modal_form),
+            title="Seo VTKga",
+            id=_LINK_VTK_MODAL_ID,
+            size="md",
+        ),
+        ModalScript(),
+        Script(_LINK_VTK_MODAL_SCRIPT),  # noqa: F405
+    ]
+
+
+def _draft_detail_body(
+    draft: Draft,
+    auth: Mapping[str, Any] | None = None,
+    *,
+    parent_vtk: Draft | None = None,
+    org_vtks: list[Draft] | None = None,
+) -> list[Any]:
+    """Build the metadata + actions body of the draft detail page.
+
+    The delete form is only rendered when ``auth`` is allowed to delete
+    per ``app.auth.policy.can_delete_draft`` (issue #568). Before this
+    check the button was shown to every same-org viewer, which made the
+    route handler's stricter owner-only check surprising for reviewers
+    and org admins who could click and get a 404.
+
+    #640: ``parent_vtk`` + ``org_vtks`` are optional extras used to
+    render the "Seotud VTK" metadata row and the link-vtk modal. They
+    default to ``None``/``[]`` so callers that don't care (e.g. the
+    actions-only HTMX fragment endpoint) can keep their current call
+    shape.
+    """
+    can_edit = can_edit_draft(auth, draft)
+    metadata = _draft_metadata_block(draft, parent_vtk=parent_vtk, can_edit=can_edit)
 
     actions: list = []
     # #600: the CTA block is rendered here but the wrapping container
@@ -1014,7 +1432,20 @@ def _draft_detail_body(draft: Draft, auth: Mapping[str, Any] | None = None) -> l
         hx_trigger="draft-ready from:body",
         hx_swap="outerHTML",
     )
-    return [metadata, actions_container]
+
+    body: list[Any] = [metadata, actions_container]
+    # #640: only eelnõud get the link-vtk modal, and only when the
+    # caller may edit the draft. VTKs can't have parents (DB CHECK) and
+    # viewers shouldn't see the form.
+    if can_edit and draft.doc_type == "eelnou":
+        body.extend(
+            _link_vtk_modal(
+                draft,
+                vtks=org_vtks or [],
+                selected_vtk_id=draft.parent_vtk_id,
+            )
+        )
+    return body
 
 
 def draft_detail_page(req: Request, draft_id: str):
@@ -1041,7 +1472,31 @@ def draft_detail_page(req: Request, draft_id: str):
     # #572: surface-to-user counts as access; reset the archive clock.
     touch_draft_access_conn(draft.id)
 
-    detail_body = _draft_detail_body(draft, auth=auth)
+    # #640: resolve the parent VTK (if any) and fetch the org's VTK
+    # catalogue for the link-vtk picker. Both queries are scoped to
+    # the caller's org so cross-org leaks are impossible.
+    parent_vtk: Draft | None = None
+    if draft.parent_vtk_id is not None:
+        candidate = fetch_draft(draft.parent_vtk_id)
+        # Defensive: only surface the parent if it's still in the same
+        # org and really is a VTK. A schema drift or a delete race
+        # must not leak another org's draft title into this page.
+        if (
+            candidate is not None
+            and str(candidate.org_id) == str(draft.org_id)
+            and candidate.doc_type == "vtk"
+        ):
+            parent_vtk = candidate
+    org_vtks: list[Draft] = []
+    if can_edit_draft(auth, draft) and draft.doc_type == "eelnou":
+        org_vtks = list_vtks_for_org(draft.org_id)
+
+    detail_body = _draft_detail_body(
+        draft,
+        auth=auth,
+        parent_vtk=parent_vtk,
+        org_vtks=org_vtks,
+    )
     tracker = _status_tracker(draft)
 
     return PageShell(
@@ -1157,9 +1612,12 @@ def draft_actions_fragment(req: Request, draft_id: str):
         return Div(id=f"draft-actions-{draft_id}", cls="draft-actions")  # noqa: F405
 
     body = _draft_detail_body(draft, auth=auth)
-    # ``_draft_detail_body`` returns ``[metadata_dl, actions_container]``;
-    # we only swap the actions container here.
-    return body[-1]
+    # ``_draft_detail_body`` returns ``[metadata_block, actions_container,
+    # ...maybe_link_vtk_modal_bits]``; index 1 is the actions container
+    # we want to swap. (Before #640 the list was exactly two elements
+    # and ``body[-1]`` worked; adding the link-vtk modal trailing items
+    # made the negative index unsafe.)
+    return body[1]
 
 
 # ---------------------------------------------------------------------------
@@ -1350,6 +1808,130 @@ def keep_draft_handler(req: Request, draft_id: str):
 
 
 # ---------------------------------------------------------------------------
+# POST /drafts/{draft_id}/link-vtk — set or clear parent_vtk_id (#640)
+# ---------------------------------------------------------------------------
+
+
+async def link_vtk_handler(req: Request, draft_id: str):
+    """POST /drafts/{draft_id}/link-vtk — set or clear ``parent_vtk_id``.
+
+    Spec §3.3 — owner-only mutation. The body is a single
+    ``parent_vtk_id`` field. An empty value unlinks; a valid UUID
+    links (subject to the same FK validation as the upload flow).
+
+    On success the handler writes the new lineage triple to Jena via
+    :func:`write_doc_lineage` and returns the refreshed metadata
+    fragment so the detail page can HTMX-swap ``#draft-metadata``
+    in place.
+    """
+    auth_or_redirect = _require_auth(req)
+    if isinstance(auth_or_redirect, Response):
+        return auth_or_redirect
+    auth = auth_or_redirect
+
+    parsed = _parse_uuid(draft_id)
+    if parsed is None:
+        return _not_found_page(req)
+
+    draft = fetch_draft(parsed)
+    if draft is None:
+        return _not_found_page(req)
+    if not can_edit_draft(auth, draft):
+        # 404 rather than 403 so we don't leak existence to cross-org
+        # or non-owner callers (matches delete_draft_handler).
+        return _not_found_page(req)
+
+    form = await req.form()
+    parent_vtk_raw = form.get("parent_vtk_id", "")
+    parent_vtk_str = str(parent_vtk_raw).strip() if parent_vtk_raw else ""
+    parent_vtk_uuid = _parse_uuid(parent_vtk_str) if parent_vtk_str else None
+
+    # Validate: VTK docs cannot themselves carry a parent.
+    if parent_vtk_uuid is not None and draft.doc_type == "vtk":
+        return HTMLResponse(
+            to_xml(Alert("VTK ei saa olla seotud teise VTKga.", variant="danger")),
+            status_code=400,
+        )
+    if parent_vtk_str and parent_vtk_uuid is None:
+        return HTMLResponse(
+            to_xml(Alert("Valitud VTK ei ole kättesaadav.", variant="danger")),
+            status_code=400,
+        )
+
+    # FK target must exist, be in the same org, and be a VTK.
+    if parent_vtk_uuid is not None:
+        try:
+            with _connect() as conn:
+                fk_error = _validate_parent_vtk_fk(conn, parent_vtk_uuid, str(draft.org_id))
+        except Exception:
+            logger.exception(
+                "Failed to validate parent_vtk_id=%s for draft=%s",
+                parent_vtk_uuid,
+                parsed,
+            )
+            fk_error = "Valitud VTK ei ole kättesaadav."
+        if fk_error is not None:
+            return HTMLResponse(
+                to_xml(Alert(fk_error, variant="danger")),
+                status_code=400,
+            )
+
+    # Persist the new value.
+    try:
+        with _connect() as conn:
+            update_draft_parent_vtk(conn, parsed, parent_vtk_uuid)
+            conn.commit()
+    except Exception:
+        logger.exception("Failed to update parent_vtk_id for draft=%s", parsed)
+        return HTMLResponse(
+            to_xml(Alert("Seose salvestamine ebaõnnestus.", variant="danger")),
+            status_code=500,
+        )
+
+    # Refresh the Draft snapshot so the metadata block renders the
+    # post-update value.
+    refreshed = fetch_draft(parsed) or draft
+    parent_vtk: Draft | None = None
+    if parent_vtk_uuid is not None:
+        parent_vtk = fetch_draft(parent_vtk_uuid)
+        if (
+            parent_vtk is None
+            or str(parent_vtk.org_id) != str(draft.org_id)
+            or parent_vtk.doc_type != "vtk"
+        ):
+            parent_vtk = None
+
+    # Write the lineage triple (idempotent; relink/unlink both handled).
+    # Failure here is logged but not user-visible — the DB is already
+    # authoritative and a later analyze run will reconcile.
+    try:
+        write_doc_lineage(refreshed, parent_vtk)
+    except Exception:
+        logger.exception(
+            "write_doc_lineage failed for draft=%s parent_vtk=%s",
+            parsed,
+            parent_vtk_uuid,
+        )
+
+    log_action(
+        auth.get("id"),
+        "draft.link_vtk",
+        {
+            "draft_id": str(parsed),
+            "parent_vtk_id": str(parent_vtk_uuid) if parent_vtk_uuid else None,
+        },
+    )
+
+    # Return the refreshed metadata fragment so HTMX can swap
+    # #draft-metadata in place.
+    return _draft_metadata_block(
+        refreshed,
+        parent_vtk=parent_vtk,
+        can_edit=True,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Route registration
 # ---------------------------------------------------------------------------
 
@@ -1368,3 +1950,4 @@ def register_draft_routes(rt) -> None:  # type: ignore[no-untyped-def]
     rt("/drafts/{draft_id}/actions", methods=["GET"])(draft_actions_fragment)
     rt("/drafts/{draft_id}/keep", methods=["POST"])(keep_draft_handler)
     rt("/drafts/{draft_id}/delete", methods=["POST"])(delete_draft_handler)
+    rt("/drafts/{draft_id}/link-vtk", methods=["POST"])(link_vtk_handler)
