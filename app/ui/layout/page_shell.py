@@ -54,7 +54,7 @@ def PageShell(  # noqa: ANN201
     *content,
     title: str,
     user: UserDict | None = None,
-    theme: str = "system",
+    theme: str = "dark",
     active_nav: str | None = None,
     unread_count: int = 0,
     container_size: ContainerSize = "lg",
@@ -66,7 +66,12 @@ def PageShell(  # noqa: ANN201
     layout and accessibility landmarks. Pass ``request=req`` so any pending
     session-flashed toast messages are drained and rendered into
     ``#toast-container`` (see :mod:`app.ui.feedback.flash`).
+
+    The ``theme`` parameter is retained for caller back-compat after the
+    2026-04-16 dark-only migration but is no longer consumed internally —
+    TopBar ignores its ``theme`` kwarg too, so we don't forward it.
     """
+    del theme  # dark-only UI; accepted for back-compat with existing callers
     flash_toasts = render_flash_toasts(request) if request is not None else []
     return (
         *_head_tags(title),
@@ -76,7 +81,7 @@ def PageShell(  # noqa: ANN201
             cls="skip-to-content",
         ),
         Div(  # noqa: F405
-            TopBar(user=user, theme=theme, unread_count=unread_count),
+            TopBar(user=user, unread_count=unread_count),
             Div(  # noqa: F405
                 Sidebar(user=user, active=active_nav),
                 Main(  # noqa: F405

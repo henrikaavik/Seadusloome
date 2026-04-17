@@ -324,6 +324,7 @@ async def pin_conversation_handler(req: Request, conv_id: str):
         with _connect() as conn:
             _set_conversation_pinned(conn, parsed, new_pinned)
             conn.commit()
+            # Read-your-writes on the just-committed conn; revisit on read-replica split.
             refreshed = get_conversation(conn, parsed)
     except Exception:
         logger.exception("Failed to set pinned=%s on conversation %s", new_pinned, conv_id)
@@ -425,6 +426,7 @@ async def rename_conversation_handler(req: Request, conv_id: str):
         with _connect() as conn:
             _update_conversation_title(conn, parsed, title)
             conn.commit()
+            # Read-your-writes on the just-committed conn; revisit on read-replica split.
             refreshed = get_conversation(conn, parsed)
     except Exception:
         logger.exception("Failed to rename conversation %s", conv_id)

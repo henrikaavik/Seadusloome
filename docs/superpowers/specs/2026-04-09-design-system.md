@@ -124,6 +124,10 @@ All colors referenced through semantic tokens, not raw color names. This lets da
   --color-info-bg: var(--parnu);
 }
 
+/* Dark-only palette — applied via the `data-theme="dark"` attribute that
+   the bootstrap script sets unconditionally on <html>. The block is kept
+   so the attribute selector still matches, but the UI no longer switches
+   to a light palette. */
 [data-theme="dark"] {
   --color-background: var(--mustkivi);
   --color-surface: #1e293b;
@@ -136,16 +140,23 @@ All colors referenced through semantic tokens, not raw color names. This lets da
 }
 ```
 
-### 3.2 Theme toggle
+### 3.2 Theme (dark-only)
 
-- Cookie `theme` stores user preference (`light` | `dark` | `system`)
-- Default `system` — respects `prefers-color-scheme` via `@media (prefers-color-scheme: dark)`
-- Toggle button in `TopBar` uses a small inline JS handler that writes the cookie and sets `data-theme` on `<html>` directly — no server round-trip, no page reload (rationale: CSRF-safe and preserves in-progress form state). See `app/ui/layout/top_bar.py` `_THEME_CYCLE_JS`.
-- Server sets cookie, client inline script applies `data-theme` attribute to `<html>` immediately (no FOUC)
+> **2026-04-16:** migrated to dark-only; theme toggle removed.
+
+- The light / dark / system toggle was removed. `app/ui/theme.py` is a thin
+  shim: `get_theme_from_request()` always returns `"dark"` and
+  `set_theme_cookie()` is a no-op so stale cookies cannot flip the palette.
+- `TopBar` no longer renders a `ThemeToggle(...)`; the bootstrap script in
+  `<head>` sets `data-theme="dark"` on `<html>` before first paint to avoid
+  FOUC.
+- The `<meta name="color-scheme">` tag is set to `"dark"` so UA-painted
+  controls (scrollbars, form autofill) match the palette.
 
 ### 3.3 Explorer exception
 
-The D3 Explorer keeps its existing dark-only theme. It opts out of the toggle by hardcoding its background and ignoring `data-theme`. This is a deliberate design choice — it's a specialized visualization view that works best in dark.
+The D3 Explorer shares the same dark palette as the rest of the UI. Since
+the whole app is dark-only now, there is no toggle for it to opt out of.
 
 ---
 

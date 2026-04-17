@@ -43,6 +43,7 @@ from app.auth.audit import log_action
 from app.auth.helpers import require_auth as _require_auth
 from app.auth.policy import can_edit_draft
 from app.db import get_connection as _connect
+from app.docs._helpers import _not_found_page, _parse_uuid
 from app.docs.draft_model import fetch_draft
 from app.jobs.queue import JobQueue
 
@@ -61,6 +62,12 @@ def _reset_draft_for_retry(draft_id: str) -> bool:
 
     The WHERE clause guards against double-resetting a draft whose
     pipeline is already running.
+
+    In the same transaction we also purge any ``pending`` or ``running``
+    jobs that still reference this draft (#668). Stale queue entries
+    from the previous attempt would otherwise race the freshly-enqueued
+    ``parse_draft`` job. Completed and failed jobs are preserved so the
+    audit trail of prior runs stays intact.
     """
     with _connect() as conn:
         result = conn.execute(
@@ -75,8 +82,28 @@ def _reset_draft_for_retry(draft_id: str) -> bool:
             """,
             (draft_id,),
         )
+        updated = (result.rowcount or 0) > 0
+        if updated:
+            # Only clean up the queue when we actually flipped the row.
+            # If the UPDATE matched zero rows, something else is driving
+            # this draft and we must not delete its jobs from under it.
+            #
+            # ``draft_id`` lives inside the job's ``payload`` JSONB
+            # (see migration 005). ``claimed`` is the transient state
+            # between ``pending`` and ``running`` for this queue so we
+            # sweep all three in-flight states. Completed (``success``)
+            # and permanently-failed (``failed``) jobs are preserved so
+            # the audit trail of prior attempts stays intact.
+            conn.execute(
+                """
+                delete from background_jobs
+                where payload ->> 'draft_id' = %s
+                  and status in ('pending', 'claimed', 'running')
+                """,
+                (draft_id,),
+            )
         conn.commit()
-        return (result.rowcount or 0) > 0
+        return updated
 
 
 def retry_draft_handler(req: Request, draft_id: str):
@@ -87,15 +114,12 @@ def retry_draft_handler(req: Request, draft_id: str):
     defensive and revalidates that condition server-side so a stale
     open tab cannot re-enqueue a pipeline that's already running.
 
-    Authorization: same-org editor per :func:`can_edit_draft`. We
-    cannot use ``can_view_draft`` because retry is a state-mutating
-    action that should be gated on the edit policy, not the read one.
+    Authorization: draft owner or system admin per
+    :func:`can_edit_draft`. Retry is a state-mutating action so it is
+    deliberately gated on the (narrower) edit policy rather than the
+    view policy — same-org viewers can see a failed run but cannot
+    restart it.
     """
-    # Local imports avoid an import cycle at module-load time:
-    # ``app.docs.routes`` registers this handler and we need the
-    # helpers it defines without pulling them at import time.
-    from app.docs.routes import _not_found_page, _parse_uuid
-
     auth_or_redirect = _require_auth(req)
     if isinstance(auth_or_redirect, Response):
         return auth_or_redirect
@@ -128,6 +152,12 @@ def retry_draft_handler(req: Request, draft_id: str):
                 headers={"HX-Redirect": f"/drafts/{parsed}"},
             )
         return RedirectResponse(url=f"/drafts/{parsed}", status_code=303)
+
+    # Capture the prior error text BEFORE the reset clears it so the
+    # audit log preserves what we were retrying (#669). Cap at 200 chars
+    # to keep the audit payload bounded; the full text is already in
+    # ``drafts.error_debug`` (and masked upstream per migration 021/022).
+    prior_error = draft.error_message[:200] if draft.error_message else None
 
     # Reset the error columns in the same UPDATE as the status flip
     # so HTMX polls never observe ``status='uploaded'`` with a stale
@@ -170,7 +200,11 @@ def retry_draft_handler(req: Request, draft_id: str):
     log_action(
         auth.get("id"),
         "draft.retry",
-        {"draft_id": str(parsed), "job_id": job_id},
+        {
+            "draft_id": str(parsed),
+            "job_id": job_id,
+            "prior_error": prior_error,
+        },
     )
     logger.info(
         "Retry pipeline enqueued draft=%s job_id=%s user=%s",

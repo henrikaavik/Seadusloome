@@ -71,7 +71,6 @@ from app.ui.primitives.button import Button
 from app.ui.surfaces.alert import Alert
 from app.ui.surfaces.card import Card, CardBody, CardHeader
 from app.ui.surfaces.info_box import InfoBox
-from app.ui.theme import get_theme_from_request
 from app.ui.time import format_tallinn
 
 logger = logging.getLogger(__name__)
@@ -157,7 +156,6 @@ def _parse_uuid(raw: str) -> uuid.UUID | None:
 def _not_found_page(req: Request):
     """Render the 404 page for missing or cross-org sessions."""
     auth = req.scope.get("auth")
-    theme = get_theme_from_request(req)
     return PageShell(
         H1("Koostamissessioon ei leitud", cls="page-title"),  # noqa: F405
         Alert(
@@ -167,7 +165,6 @@ def _not_found_page(req: Request):
         P(A("< Tagasi koostaja nimekirja", href="/drafter"), cls="back-link"),  # noqa: F405
         title="Sessioon ei leitud",
         user=auth,
-        theme=theme,
         active_nav="/drafter",
     )
 
@@ -237,7 +234,6 @@ def drafter_list_page(req: Request):
     if isinstance(auth_or_redirect, Response):
         return auth_or_redirect
     auth = auth_or_redirect
-    theme = get_theme_from_request(req)
     org_id = auth.get("org_id")
     user_id = auth.get("id")
 
@@ -324,7 +320,6 @@ def drafter_list_page(req: Request):
         ),
         title="AI koostaja",
         user=auth,
-        theme=theme,
         active_nav="/drafter",
     )
 
@@ -391,7 +386,6 @@ def new_session_page(req: Request):
     if isinstance(auth_or_redirect, Response):
         return auth_or_redirect
     auth = auth_or_redirect
-    theme = get_theme_from_request(req)
 
     if not auth.get("org_id"):
         return PageShell(
@@ -402,7 +396,6 @@ def new_session_page(req: Request):
             ),
             title="Uus koostamine",
             user=auth,
-            theme=theme,
             active_nav="/drafter",
         )
 
@@ -427,7 +420,6 @@ def new_session_page(req: Request):
         P(A("\u2190 Tagasi koostaja nimekirja", href="/drafter"), cls="back-link"),  # noqa: F405
         title="Uus koostamine",
         user=auth,
-        theme=theme,
         active_nav="/drafter",
     )
 
@@ -443,7 +435,6 @@ async def create_session_handler(req: Request):
     if isinstance(auth_or_redirect, Response):
         return auth_or_redirect
     auth = auth_or_redirect
-    theme = get_theme_from_request(req)
     org_id = auth.get("org_id")
     user_id = auth.get("id")
 
@@ -453,7 +444,6 @@ async def create_session_handler(req: Request):
             Alert("Te ei kuulu uhtegi organisatsiooni.", variant="warning"),
             title="Uus koostamine",
             user=auth,
-            theme=theme,
             active_nav="/drafter",
         )
 
@@ -469,7 +459,6 @@ async def create_session_handler(req: Request):
             P(A("< Tagasi koostaja nimekirja", href="/drafter"), cls="back-link"),  # noqa: F405
             title="Uus koostamine",
             user=auth,
-            theme=theme,
             active_nav="/drafter",
         )
 
@@ -491,7 +480,6 @@ async def create_session_handler(req: Request):
             Card(CardBody(form)),
             title="Uus koostamine",
             user=auth,
-            theme=theme,
             active_nav="/drafter",
         )
 
@@ -543,15 +531,14 @@ def session_redirect(req: Request, session_id: str):
 # ---------------------------------------------------------------------------
 
 
-def _step_1_page(session: DraftingSession, auth: UserDict, theme: str):
+def _step_1_page(session: DraftingSession, auth: UserDict):
     """Render Step 1: Intent Capture form."""
-    return _step_1_content(session, auth, theme)
+    return _step_1_content(session, auth)
 
 
 def _step_1_content(
     session: DraftingSession,
     auth: UserDict,
-    theme: str,
     *,
     error: str | None = None,
     intent_value: str | None = None,
@@ -621,7 +608,6 @@ def _step_1_content(
         P(A("\u2190 Tagasi koostaja nimekirja", href="/drafter"), cls="back-link"),  # noqa: F405
         title="Kavatsus",
         user=auth,
-        theme=theme,
         active_nav="/drafter",
     )
 
@@ -685,7 +671,7 @@ def _find_latest_job(
 # ---------------------------------------------------------------------------
 
 
-def _step_2_page(session: DraftingSession, auth: UserDict, theme: str):
+def _step_2_page(session: DraftingSession, auth: UserDict):
     """Render Step 2: Clarification Q&A."""
     clarifications = session.clarifications or []
 
@@ -694,17 +680,16 @@ def _step_2_page(session: DraftingSession, auth: UserDict, theme: str):
         job = _find_latest_job(session.id, "drafter_clarify")
         if job is None:
             # No job enqueued yet — shouldn't happen, but show a waiting state
-            return _step_waiting_page(session, 2, auth, theme, "Kusimuste genereerimine...")
+            return _step_waiting_page(session, 2, auth, "Kusimuste genereerimine...")
 
         if job["status"] in ("pending", "claimed", "running"):
-            return _step_waiting_page(session, 2, auth, theme, "Kusimuste genereerimine...")
+            return _step_waiting_page(session, 2, auth, "Kusimuste genereerimine...")
 
         if job["status"] == "failed":
             return _step_error_page(
                 session,
                 2,
                 auth,
-                theme,
                 job.get("error_message") or "Kusimuste genereerimine ebaonnestus.",
             )
 
@@ -809,7 +794,6 @@ def _step_2_page(session: DraftingSession, auth: UserDict, theme: str):
         P(A("\u2190 Tagasi koostaja nimekirja", href="/drafter"), cls="back-link"),  # noqa: F405
         title="Tapsustamine",
         user=auth,
-        theme=theme,
         active_nav="/drafter",
     )
 
@@ -819,19 +803,18 @@ def _step_2_page(session: DraftingSession, auth: UserDict, theme: str):
 # ---------------------------------------------------------------------------
 
 
-def _step_3_page(session: DraftingSession, auth: UserDict, theme: str):
+def _step_3_page(session: DraftingSession, auth: UserDict):
     """Render Step 3: Ontology Research results."""
     if session.research_data_encrypted is None:
         # Check job status
         job = _find_latest_job(session.id, "drafter_research")
         if job is None or job["status"] in ("pending", "claimed", "running"):
-            return _step_waiting_page(session, 3, auth, theme, "Ontoloogia uurimine...")
+            return _step_waiting_page(session, 3, auth, "Ontoloogia uurimine...")
         if job["status"] == "failed":
             return _step_error_page(
                 session,
                 3,
                 auth,
-                theme,
                 job.get("error_message") or "Uurimine ebaonnestus.",
             )
 
@@ -885,7 +868,6 @@ def _step_3_page(session: DraftingSession, auth: UserDict, theme: str):
         P(A("\u2190 Tagasi koostaja nimekirja", href="/drafter"), cls="back-link"),  # noqa: F405
         title="Uurimine",
         user=auth,
-        theme=theme,
         active_nav="/drafter",
     )
 
@@ -917,19 +899,18 @@ def _research_category_card(title: str, items: list[dict[str, str]], category: s
 # ---------------------------------------------------------------------------
 
 
-def _step_4_page(session: DraftingSession, auth: UserDict, theme: str):
+def _step_4_page(session: DraftingSession, auth: UserDict):
     """Render Step 4: Structure Generation / Editing."""
     if session.proposed_structure is None:
         # Check job status
         job = _find_latest_job(session.id, "drafter_structure")
         if job is None or job["status"] in ("pending", "claimed", "running"):
-            return _step_waiting_page(session, 4, auth, theme, "Struktuuri genereerimine...")
+            return _step_waiting_page(session, 4, auth, "Struktuuri genereerimine...")
         if job["status"] == "failed":
             return _step_error_page(
                 session,
                 4,
                 auth,
-                theme,
                 job.get("error_message") or "Struktuuri genereerimine ebaonnestus.",
             )
 
@@ -1031,7 +1012,6 @@ def _step_4_page(session: DraftingSession, auth: UserDict, theme: str):
         P(A("\u2190 Tagasi koostaja nimekirja", href="/drafter"), cls="back-link"),  # noqa: F405
         title="Struktuur",
         user=auth,
-        theme=theme,
         active_nav="/drafter",
     )
 
@@ -1041,18 +1021,17 @@ def _step_4_page(session: DraftingSession, auth: UserDict, theme: str):
 # ---------------------------------------------------------------------------
 
 
-def _step_5_page(session: DraftingSession, auth: UserDict, theme: str):
+def _step_5_page(session: DraftingSession, auth: UserDict):
     """Render Step 5: Drafted clauses with inline editing."""
     if session.draft_content_encrypted is None:
         job = _find_latest_job(session.id, "drafter_draft")
         if job is None or job["status"] in ("pending", "claimed", "running"):
-            return _step_waiting_page(session, 5, auth, theme, "Seaduseteksti koostamine...")
+            return _step_waiting_page(session, 5, auth, "Seaduseteksti koostamine...")
         if job["status"] == "failed":
             return _step_error_page(
                 session,
                 5,
                 auth,
-                theme,
                 job.get("error_message") or "Koostamine ebaonnestus.",
             )
 
@@ -1155,7 +1134,6 @@ def _step_5_page(session: DraftingSession, auth: UserDict, theme: str):
         P(A("\u2190 Tagasi koostaja nimekirja", href="/drafter"), cls="back-link"),  # noqa: F405
         title="Koostamine",
         user=auth,
-        theme=theme,
         active_nav="/drafter",
     )
 
@@ -1165,7 +1143,7 @@ def _step_5_page(session: DraftingSession, auth: UserDict, theme: str):
 # ---------------------------------------------------------------------------
 
 
-def _step_6_page(session: DraftingSession, auth: UserDict, theme: str):
+def _step_6_page(session: DraftingSession, auth: UserDict):
     """Render Step 6: Integrated Review with impact analysis."""
     if session.integrated_draft_id is None:
         # Not yet triggered — show the trigger button
@@ -1200,7 +1178,6 @@ def _step_6_page(session: DraftingSession, auth: UserDict, theme: str):
             P(A("\u2190 Tagasi koostaja nimekirja", href="/drafter"), cls="back-link"),  # noqa: F405
             title="Ulevaade",
             user=auth,
-            theme=theme,
             active_nav="/drafter",
         )
 
@@ -1250,7 +1227,6 @@ def _step_6_page(session: DraftingSession, auth: UserDict, theme: str):
         P(A("< Tagasi koostaja nimekirja", href="/drafter"), cls="back-link"),  # noqa: F405
         title="Ulevaade",
         user=auth,
-        theme=theme,
         active_nav="/drafter",
     )
 
@@ -1260,7 +1236,7 @@ def _step_6_page(session: DraftingSession, auth: UserDict, theme: str):
 # ---------------------------------------------------------------------------
 
 
-def _step_7_page(session: DraftingSession, auth: UserDict, theme: str):
+def _step_7_page(session: DraftingSession, auth: UserDict):
     """Render Step 7: Export .docx."""
     return PageShell(
         H1("Eksport", cls="page-title"),  # noqa: F405
@@ -1298,7 +1274,6 @@ def _step_7_page(session: DraftingSession, auth: UserDict, theme: str):
         P(A("< Tagasi koostaja nimekirja", href="/drafter"), cls="back-link"),  # noqa: F405
         title="Eksport",
         user=auth,
-        theme=theme,
         active_nav="/drafter",
     )
 
@@ -1312,7 +1287,6 @@ def _step_waiting_page(
     session: DraftingSession,
     step_num: int,
     auth: UserDict,
-    theme: str,
     message: str,
 ):
     """Render a polling spinner page while a background job runs."""
@@ -1337,7 +1311,6 @@ def _step_waiting_page(
         P(A("< Tagasi koostaja nimekirja", href="/drafter"), cls="back-link"),  # noqa: F405
         title=label,
         user=auth,
-        theme=theme,
         active_nav="/drafter",
     )
 
@@ -1346,7 +1319,6 @@ def _step_error_page(
     session: DraftingSession,
     step_num: int,
     auth: UserDict,
-    theme: str,
     error_message: str,
 ):
     """Render an error page for a failed background job."""
@@ -1367,7 +1339,6 @@ def _step_error_page(
         ),
         title=label,
         user=auth,
-        theme=theme,
         active_nav="/drafter",
     )
 
@@ -1378,7 +1349,6 @@ def step_page(req: Request, session_id: str, n: str):
     if isinstance(auth_or_redirect, Response):
         return auth_or_redirect
     auth = auth_or_redirect
-    theme = get_theme_from_request(req)
 
     parsed = _parse_uuid(session_id)
     if parsed is None:
@@ -1402,19 +1372,19 @@ def step_page(req: Request, session_id: str, n: str):
         return RedirectResponse(f"/drafter/{session_id}/step/{session.current_step}", 303)
 
     if step_num == 1:
-        return _step_1_content(session, auth, theme)
+        return _step_1_content(session, auth)
     elif step_num == 2:
-        return _step_2_page(session, auth, theme)
+        return _step_2_page(session, auth)
     elif step_num == 3:
-        return _step_3_page(session, auth, theme)
+        return _step_3_page(session, auth)
     elif step_num == 4:
-        return _step_4_page(session, auth, theme)
+        return _step_4_page(session, auth)
     elif step_num == 5:
-        return _step_5_page(session, auth, theme)
+        return _step_5_page(session, auth)
     elif step_num == 6:
-        return _step_6_page(session, auth, theme)
+        return _step_6_page(session, auth)
     elif step_num == 7:
-        return _step_7_page(session, auth, theme)
+        return _step_7_page(session, auth)
     else:
         return _not_found_page(req)
 
@@ -1430,7 +1400,6 @@ async def submit_intent(req: Request, session_id: str):
     if isinstance(auth_or_redirect, Response):
         return auth_or_redirect
     auth = auth_or_redirect
-    theme = get_theme_from_request(req)
 
     parsed = _parse_uuid(session_id)
     if parsed is None:
@@ -1450,7 +1419,6 @@ async def submit_intent(req: Request, session_id: str):
         return _step_1_content(
             session,
             auth,
-            theme,
             error="Kavatsuse kirjeldus on kohustuslik.",
             intent_value="",
         )
@@ -1459,7 +1427,6 @@ async def submit_intent(req: Request, session_id: str):
         return _step_1_content(
             session,
             auth,
-            theme,
             error=(
                 f"Kavatsuse kirjeldus on liiga pikk "
                 f"(maksimaalselt {_INTENT_MAX_LENGTH} tahemarki)."
@@ -1481,7 +1448,6 @@ async def submit_intent(req: Request, session_id: str):
         return _step_1_content(
             session,
             auth,
-            theme,
             error=str(exc),
             intent_value=intent,
         )
@@ -1490,7 +1456,6 @@ async def submit_intent(req: Request, session_id: str):
         return _step_1_content(
             session,
             auth,
-            theme,
             error="Kavatsuse salvestamine ebaonnestus. Palun proovige uuesti.",
             intent_value=intent,
         )
@@ -1599,7 +1564,6 @@ async def submit_clarification(req: Request, session_id: str):
     if isinstance(auth_or_redirect, Response):
         return auth_or_redirect
     auth = auth_or_redirect
-    theme = get_theme_from_request(req)
 
     parsed = _parse_uuid(session_id)
     if parsed is None:
@@ -1624,10 +1588,10 @@ async def submit_clarification(req: Request, session_id: str):
                 advance_step(updated, conn)
                 conn.commit()
         except StepTransitionError:
-            return _step_2_page(session, auth, theme)
+            return _step_2_page(session, auth)
         except Exception:
             logger.exception("Failed to advance from step 2 for session %s", session_id)
-            return _step_2_page(session, auth, theme)
+            return _step_2_page(session, auth)
 
         log_drafter_step_advance(auth.get("id"), session.id, 2, 3)
 
@@ -1652,16 +1616,16 @@ async def submit_clarification(req: Request, session_id: str):
     question_index_raw = str(form_data.get("question_index", ""))
 
     if not answer:
-        return _step_2_page(session, auth, theme)
+        return _step_2_page(session, auth)
 
     try:
         question_index = int(question_index_raw)
     except (ValueError, TypeError):
-        return _step_2_page(session, auth, theme)
+        return _step_2_page(session, auth)
 
     clarifications = list(session.clarifications or [])
     if question_index < 0 or question_index >= len(clarifications):
-        return _step_2_page(session, auth, theme)
+        return _step_2_page(session, auth)
 
     clarifications[question_index]["answer"] = answer
 
@@ -1674,7 +1638,7 @@ async def submit_clarification(req: Request, session_id: str):
 
     # Re-fetch and re-render
     session = fetch_session(parsed) or session
-    return _step_2_page(session, auth, theme)
+    return _step_2_page(session, auth)
 
 
 # ---------------------------------------------------------------------------
@@ -1688,7 +1652,6 @@ async def advance_from_research(req: Request, session_id: str):
     if isinstance(auth_or_redirect, Response):
         return auth_or_redirect
     auth = auth_or_redirect
-    theme = get_theme_from_request(req)
 
     parsed = _parse_uuid(session_id)
     if parsed is None:
@@ -1708,10 +1671,10 @@ async def advance_from_research(req: Request, session_id: str):
             advance_step(updated, conn)
             conn.commit()
     except StepTransitionError:
-        return _step_3_page(session, auth, theme)
+        return _step_3_page(session, auth)
     except Exception:
         logger.exception("Failed to advance from step 3 for session %s", session_id)
-        return _step_3_page(session, auth, theme)
+        return _step_3_page(session, auth)
 
     log_drafter_step_advance(auth.get("id"), session.id, 3, 4)
 
@@ -1743,7 +1706,6 @@ async def submit_structure(req: Request, session_id: str):
     if isinstance(auth_or_redirect, Response):
         return auth_or_redirect
     auth = auth_or_redirect
-    theme = get_theme_from_request(req)
 
     parsed = _parse_uuid(session_id)
     if parsed is None:
@@ -1809,11 +1771,11 @@ async def submit_structure(req: Request, session_id: str):
     except StepTransitionError as exc:
         logger.warning("Cannot advance from step 4: %s", exc)
         session = fetch_session(parsed) or session
-        return _step_4_page(session, auth, theme)
+        return _step_4_page(session, auth)
     except Exception:
         logger.exception("Failed to save structure for session %s", session_id)
         session = fetch_session(parsed) or session
-        return _step_4_page(session, auth, theme)
+        return _step_4_page(session, auth)
 
     log_drafter_step_advance(auth.get("id"), session.id, 4, 5)
 
@@ -1845,7 +1807,6 @@ async def submit_draft_advance(req: Request, session_id: str):
     if isinstance(auth_or_redirect, Response):
         return auth_or_redirect
     auth = auth_or_redirect
-    theme = get_theme_from_request(req)
 
     parsed = _parse_uuid(session_id)
     if parsed is None:
@@ -1870,10 +1831,10 @@ async def submit_draft_advance(req: Request, session_id: str):
                 conn.commit()
         except StepTransitionError as exc:
             logger.warning("Cannot advance from step 5: %s", exc)
-            return _step_5_page(session, auth, theme)
+            return _step_5_page(session, auth)
         except Exception:
             logger.exception("Failed to advance from step 5 for session %s", session_id)
-            return _step_5_page(session, auth, theme)
+            return _step_5_page(session, auth)
 
         log_drafter_step_advance(auth.get("id"), session.id, 5, 6)
 
@@ -1882,7 +1843,7 @@ async def submit_draft_advance(req: Request, session_id: str):
             status_code=303,
         )
 
-    return _step_5_page(session, auth, theme)
+    return _step_5_page(session, auth)
 
 
 # ---------------------------------------------------------------------------
@@ -1896,7 +1857,6 @@ async def submit_review(req: Request, session_id: str):
     if isinstance(auth_or_redirect, Response):
         return auth_or_redirect
     auth = auth_or_redirect
-    theme = get_theme_from_request(req)
 
     parsed = _parse_uuid(session_id)
     if parsed is None:
@@ -1922,10 +1882,10 @@ async def submit_review(req: Request, session_id: str):
                 conn.commit()
         except StepTransitionError as exc:
             logger.warning("Cannot advance from step 6: %s", exc)
-            return _step_6_page(session, auth, theme)
+            return _step_6_page(session, auth)
         except Exception:
             logger.exception("Failed to advance from step 6 for session %s", session_id)
-            return _step_6_page(session, auth, theme)
+            return _step_6_page(session, auth)
 
         log_drafter_step_advance(auth.get("id"), session.id, 6, 7)
 
@@ -1937,7 +1897,7 @@ async def submit_review(req: Request, session_id: str):
     # Trigger integrated review: assemble draft, call Phase 2 upload
     if session.integrated_draft_id is not None:
         # Already done — show the page
-        return _step_6_page(session, auth, theme)
+        return _step_6_page(session, auth)
 
     try:
         draft_id = _trigger_integrated_review(session, auth)
@@ -1959,13 +1919,12 @@ async def submit_review(req: Request, session_id: str):
             ),
             title="Ulevaade",
             user=auth,
-            theme=theme,
             active_nav="/drafter",
         )
 
     # Re-fetch session and show
     session = fetch_session(parsed) or session
-    return _step_6_page(session, auth, theme)
+    return _step_6_page(session, auth)
 
 
 def _trigger_integrated_review(session: DraftingSession, auth: UserDict) -> uuid.UUID:

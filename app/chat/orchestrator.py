@@ -657,6 +657,24 @@ class ChatOrchestrator:
                     )
                 except WebSocketSendTimeout:
                     return
+                except asyncio.CancelledError:
+                    # #659: client cancelled while we were awaiting RAG.
+                    # Emit ``retrieval_done`` (shielded so the cancel can't
+                    # abort the send) so the UI still exits its "Otsin
+                    # konteksti…" state, then re-raise so the outer
+                    # CancelledError handler can persist partial state.
+                    try:
+                        await asyncio.shield(
+                            _safe_send(
+                                send,
+                                {"type": "retrieval_done", "chunk_count": 0},
+                            )
+                        )
+                    except (WebSocketSendTimeout, asyncio.CancelledError, Exception):
+                        # Best-effort: a second cancel or a wedged socket
+                        # must not mask the original CancelledError.
+                        pass
+                    raise
                 except TimeoutError:
                     # #652: don't let a stalled retriever escalate to a hung
                     # turn. Log, continue without RAG — downstream code
@@ -923,15 +941,24 @@ class ChatOrchestrator:
                 rag_context_json,
                 is_truncated=True,
             )
+            # #661: shield the stopped-event send from a second cancel so
+            # the UI still receives the stop acknowledgement even if the
+            # task is cancelled again while we're flushing the frame.
             try:
-                await _safe_send(
-                    send,
-                    {
-                        "type": "stopped",
-                        "message_id": str(assistant_msg_id) if assistant_msg_id else None,
-                    },
+                await asyncio.shield(
+                    _safe_send(
+                        send,
+                        {
+                            "type": "stopped",
+                            "message_id": str(assistant_msg_id) if assistant_msg_id else None,
+                        },
+                    )
                 )
             except WebSocketSendTimeout:
+                pass
+            except asyncio.CancelledError:
+                # A second cancel arrived mid-send. Swallow it so the
+                # original CancelledError below is the one that propagates.
                 pass
             raise
         except WebSocketSendTimeout:

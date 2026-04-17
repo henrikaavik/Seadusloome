@@ -127,7 +127,7 @@ async def lifespan(_app):  # type: ignore[no-untyped-def]
 # tags are invalid HTML5).
 _HDRS = (
     Script(THEME_INIT_SCRIPT),
-    Meta(name="color-scheme", content="light dark"),
+    Meta(name="color-scheme", content="dark"),
     Link(rel="stylesheet", href="/static/css/fonts.css"),
     Link(rel="stylesheet", href="/static/css/tokens.css"),
     Link(rel="stylesheet", href="/static/css/ui.css"),

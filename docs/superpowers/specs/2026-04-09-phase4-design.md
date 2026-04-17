@@ -234,12 +234,14 @@ async def notify(user_id: UUID, notification: Notification):
 ### 4.4 TopBar integration
 
 ```python
-def TopBar(user: UserDict, theme: str, unread_count: int = 0) -> FT:
+# 2026-04-16: migrated to dark-only; ThemeToggle was removed.
+# The `theme` kwarg is retained on TopBar solely for back-compat with
+# existing callers and is discarded inside the function body.
+def TopBar(user: UserDict, unread_count: int = 0) -> FT:
     return Div(
         Logo(),
         Nav(...),
         NotificationBell(unread_count),
-        ThemeToggle(theme),
         UserMenu(user),
         cls="top-bar",
     )

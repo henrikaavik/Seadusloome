@@ -20,7 +20,7 @@ from datetime import datetime
 from typing import Any
 
 from fasthtml.common import *  # noqa: F403
-from starlette.requests import Request
+from starlette.requests import ClientDisconnect, Request
 from starlette.responses import RedirectResponse, Response
 
 from app.auth.helpers import require_auth as _require_auth
@@ -1096,8 +1096,13 @@ async def delete_conversation_handler(req: Request, conv_id: str):
     try:
         form = await req.form()
         from_list = (form.get("from_list") or "") == "1"
+    except ClientDisconnect:
+        # #665: the client hung up before the body arrived. Delete is
+        # idempotent and the row may already be gone for the caller, so
+        # stay silent and proceed — no need to page anyone.
+        pass
     except Exception:
-        logger.exception("Failed to read delete form for %s", conv_id)
+        logger.warning("Failed to read delete form for %s", conv_id, exc_info=True)
 
     # Delete
     try:

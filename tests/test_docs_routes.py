@@ -2064,6 +2064,7 @@ class TestListEelnousForVtkHelper:
 class TestRetryFailedDraft:
     """POST /drafts/{id}/retry resets a failed draft and re-enqueues parse."""
 
+    @patch("app.docs.retry_handler.log_action")
     @patch("app.docs.retry_handler.JobQueue")
     @patch("app.docs.retry_handler._reset_draft_for_retry")
     @patch("app.docs.retry_handler.fetch_draft")
@@ -2074,9 +2075,11 @@ class TestRetryFailedDraft:
         mock_fetch: MagicMock,
         mock_reset: MagicMock,
         mock_queue_cls: MagicMock,
+        mock_log_action: MagicMock,
     ):
         """A failed draft: status resets, error columns clear, parse_draft
-        is enqueued, and HTMX gets a redirect response."""
+        is enqueued, HTMX gets a redirect response, AND the audit log
+        records the retry with the prior_error payload (#669, #678)."""
         mock_get_provider.return_value = _stub_provider()
         draft = _make_draft(
             status="failed",
@@ -2103,6 +2106,52 @@ class TestRetryFailedDraft:
         enqueue_args = mock_queue.enqueue.call_args
         assert enqueue_args.args[0] == "parse_draft"
         assert enqueue_args.args[1] == {"draft_id": str(draft.id)}
+        # Audit log captures the action AND the prior error so we can
+        # answer "what did the user retry?" from the audit trail alone.
+        mock_log_action.assert_called_once()
+        log_args = mock_log_action.call_args
+        # log_action(user_id, action, detail)
+        assert log_args.args[1] == "draft.retry"
+        detail = log_args.args[2]
+        assert detail["draft_id"] == str(draft.id)
+        assert detail["job_id"] == 42
+        assert "prior_error" in detail
+        assert detail["prior_error"] == "Töötlemine ebaõnnestus tehnilisel põhjusel."
+
+    @patch("app.docs.retry_handler.JobQueue")
+    @patch("app.docs.retry_handler._reset_draft_for_retry")
+    @patch("app.docs.retry_handler.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_retry_non_htmx_returns_303(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_reset: MagicMock,
+        mock_queue_cls: MagicMock,
+    ):
+        """POST without ``HX-Request``: happy path still resets + enqueues
+        but responds with a plain 303 redirect so full-page navigations
+        land back on the detail page (#679)."""
+        mock_get_provider.return_value = _stub_provider()
+        draft = _make_draft(
+            status="failed",
+            error_message="Töötlemine ebaõnnestus tehnilisel põhjusel.",
+        )
+        mock_fetch.return_value = draft
+        mock_reset.return_value = True
+        mock_queue = MagicMock()
+        mock_queue.enqueue.return_value = 99
+        mock_queue_cls.return_value = mock_queue
+
+        client = _authed_client()
+        # Deliberately NO HX-Request header.
+        resp = client.post(f"/drafts/{draft.id}/retry")
+
+        assert resp.status_code == 303
+        assert resp.headers["location"] == f"/drafts/{draft.id}"
+        # The pipeline still restarted — only the response shape differs.
+        mock_reset.assert_called_once_with(str(draft.id))
+        mock_queue.enqueue.assert_called_once()
 
     @patch("app.docs.retry_handler.JobQueue")
     @patch("app.docs.retry_handler._reset_draft_for_retry")
@@ -2338,6 +2387,17 @@ class TestMaskLeakedEnvErrorsMigration:
     stub. We do NOT spin up a real PG — that's the integration suite's
     job — but we DO exercise the exact idempotency properties the
     migration claims.
+
+    Real-DB integration harness (#680): as of 2026-04-17 this repo has
+    no conftest-level fixture that spins up a transient postgres /
+    pgvector container for migration testing. ``tests/conftest.py``
+    only sets ``DISABLE_BACKGROUND_WORKER=1`` and ``app.db`` is always
+    mocked in test code (see ``@patch('app.db.get_connection')``
+    elsewhere in this file). A real-DB assertion of migrations 021 +
+    022 would require adding that fixture — tracked separately — so
+    here we limit ourselves to SQL-text assertions that catch drift
+    between the migration files and their spec. Do NOT add a broken
+    integration test in place; it would silently become a no-op.
     """
 
     def test_migration_file_exists_and_references_canonical_message(self):
@@ -2392,6 +2452,67 @@ class TestMaskLeakedEnvErrorsMigration:
         sql = migration_path.read_text().lower()
         # No "drop", "delete from drafts", or "alter table ... drop"
         # statements — the migration only UPDATEs.
+        assert "delete from drafts" not in sql
+        assert "drop table" not in sql
+        assert "drop column" not in sql
+
+    # ------------------------------------------------------------------
+    # Migration 022 — widened leak patterns (#667)
+    # ------------------------------------------------------------------
+
+    def test_migration_022_exists_and_references_canonical_message(self):
+        """Migration 022 widens 021's pattern set and MUST reuse the
+        same MSG_UNKNOWN canonical replacement so the user-facing
+        fallback stays consistent across rewrites."""
+        from pathlib import Path
+
+        from app.docs.error_mapping import MSG_UNKNOWN
+
+        migration_path = (
+            Path(__file__).parent.parent / "migrations" / "022_widen_leaked_error_masking.sql"
+        )
+        assert migration_path.exists(), "Migration 022 must exist"
+        sql = migration_path.read_text()
+        assert MSG_UNKNOWN in sql, "Migration 022 must hardcode MSG_UNKNOWN exactly"
+        # Every widened leak pattern the spec enumerates must be present.
+        for marker in (
+            "DATABASE_URL",
+            "FUSEKI_URL",
+            "JWT_SECRET",
+            "SMTP_HOST",
+            "SMTP_USER",
+            "SMTP_PASSWORD",
+            "Traceback (most recent call last):",
+            'File "/app/',
+        ):
+            assert marker in sql, f"Migration 022 must match {marker!r}"
+        # Length-gated env-var-assignment regex: [A-Z_]{6,}= over 200 chars.
+        assert "[A-Z_]{6,}=" in sql
+        assert "char_length(error_message) > 200" in sql
+
+    def test_migration_022_is_idempotent_and_non_clobbering(self):
+        """022 must mirror 021's idempotency guards: error_debug is
+        only filled when NULL, and error_message is only rewritten when
+        it is not already the canonical Estonian fallback."""
+        from pathlib import Path
+
+        migration_path = (
+            Path(__file__).parent.parent / "migrations" / "022_widen_leaked_error_masking.sql"
+        )
+        sql = migration_path.read_text()
+        # "copy but don't clobber" guard for error_debug.
+        assert "error_debug IS NULL" in sql
+        # Idempotency guard for the user-facing message rewrite.
+        assert "error_message != '" in sql
+
+    def test_migration_022_has_no_destructive_down(self):
+        """022 must be update-only, like 021."""
+        from pathlib import Path
+
+        migration_path = (
+            Path(__file__).parent.parent / "migrations" / "022_widen_leaked_error_masking.sql"
+        )
+        sql = migration_path.read_text().lower()
         assert "delete from drafts" not in sql
         assert "drop table" not in sql
         assert "drop column" not in sql

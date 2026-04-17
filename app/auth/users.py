@@ -21,7 +21,6 @@ from app.ui.primitives.badge import Badge, StatusBadge
 from app.ui.primitives.button import Button
 from app.ui.surfaces.alert import Alert
 from app.ui.surfaces.card import Card, CardBody, CardHeader
-from app.ui.theme import get_theme_from_request
 
 logger = logging.getLogger(__name__)
 
@@ -224,14 +223,12 @@ def deactivate_user(user_id: str) -> bool:
 def _error_page(req: Request, message: str, back_href: str, active_nav: str):
     """Render an error page wrapped in PageShell."""
     auth = req.scope.get("auth")
-    theme = get_theme_from_request(req)
     return PageShell(
         H1("Viga", cls="page-title"),
         Alert(message, variant="danger"),
         P(A("← Tagasi", href=back_href), cls="back-link"),
         title="Viga",
         user=auth,
-        theme=theme,
         active_nav=active_nav,
     )
 
@@ -324,7 +321,6 @@ def _user_table(users: list[dict], *, show_org: bool, base_path: str):  # type: 
 def admin_user_list(req: Request):
     """GET /admin/users — list all users (system admin)."""
     auth = req.scope.get("auth")
-    theme = get_theme_from_request(req)
     users = list_users()
 
     content = (
@@ -347,7 +343,6 @@ def admin_user_list(req: Request):
         *content,
         title="Kasutajad",
         user=auth,
-        theme=theme,
         active_nav="/admin",
     )
 
@@ -355,7 +350,6 @@ def admin_user_list(req: Request):
 def admin_user_new_form(req: Request):
     """GET /admin/users/new — create user form (system admin)."""
     auth = req.scope.get("auth")
-    theme = get_theme_from_request(req)
 
     orgs = list_orgs()
     org_options: list = [("", "— Ei kuulu —")] + [(o["id"], o["name"]) for o in orgs]
@@ -381,7 +375,6 @@ def admin_user_new_form(req: Request):
         Card(CardBody(form)),
         title="Uus kasutaja",
         user=auth,
-        theme=theme,
         active_nav="/admin",
     )
 
@@ -419,7 +412,6 @@ def admin_user_create(
 def admin_user_role_form(req: Request, user_id: str):
     """GET /admin/users/{user_id}/role — change role form (system admin)."""
     auth = req.scope.get("auth")
-    theme = get_theme_from_request(req)
 
     user = get_user(user_id)
     if user is None:
@@ -451,7 +443,6 @@ def admin_user_role_form(req: Request, user_id: str):
         ),
         title="Muuda rolli",
         user=auth,
-        theme=theme,
         active_nav="/admin",
     )
 
@@ -510,7 +501,6 @@ def admin_user_deactivate(req: Request, user_id: str):
 def org_user_list(req: Request):
     """GET /org/users — list own org users (org admin)."""
     auth = req.scope.get("auth", {})
-    theme = get_theme_from_request(req)
     org_id = auth.get("org_id")
     if not org_id:
         return _error_page(req, "Te ei kuulu ühtegi organisatsiooni.", "/", "/org/users")
@@ -536,7 +526,6 @@ def org_user_list(req: Request):
         *content,
         title="Organisatsiooni kasutajad",
         user=auth or None,
-        theme=theme,
         active_nav="/org/users",
     )
 
@@ -544,7 +533,6 @@ def org_user_list(req: Request):
 def org_user_new_form(req: Request):
     """GET /org/users/new — invite/create user form (org admin)."""
     auth = req.scope.get("auth")
-    theme = get_theme_from_request(req)
 
     role_options = [(r, _ROLE_LABELS.get(r, r)) for r in ORG_ASSIGNABLE_ROLES]
 
@@ -567,7 +555,6 @@ def org_user_new_form(req: Request):
         Card(CardBody(form)),
         title="Uus kasutaja",
         user=auth,
-        theme=theme,
         active_nav="/org/users",
     )
 
@@ -616,7 +603,6 @@ def org_user_role_form(req: Request, user_id: str):
     so the UI never exposes a way to mutate their role (#634).
     """
     auth = req.scope.get("auth", {})
-    theme = get_theme_from_request(req)
     org_id = auth.get("org_id")
 
     user = get_user(user_id)
@@ -649,7 +635,6 @@ def org_user_role_form(req: Request, user_id: str):
             ),
             title="Muuda rolli",
             user=auth or None,
-            theme=theme,
             active_nav="/org/users",
         )
 
@@ -679,7 +664,6 @@ def org_user_role_form(req: Request, user_id: str):
         ),
         title="Muuda rolli",
         user=auth or None,
-        theme=theme,
         active_nav="/org/users",
     )
 

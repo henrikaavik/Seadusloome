@@ -34,6 +34,7 @@ from app.auth.helpers import require_auth as _require_auth
 from app.auth.policy import can_delete_draft, can_edit_draft, can_view_draft
 from app.auth.users import list_users
 from app.db import get_connection as _connect
+from app.docs._helpers import _not_found_page, _parse_uuid
 from app.docs.audit import (
     log_draft_delete,
     log_draft_upload,
@@ -537,33 +538,9 @@ def _status_tracker(draft: Draft):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _parse_uuid(raw: str) -> uuid.UUID | None:
-    """Return a ``UUID`` parsed from *raw*, or ``None`` if invalid."""
-    try:
-        return uuid.UUID(raw)
-    except (ValueError, TypeError):
-        return None
-
-
-def _not_found_page(req: Request):
-    """Render the 404 page used whenever a draft is missing or out of scope."""
-    auth = req.scope.get("auth")
-    theme = get_theme_from_request(req)
-    return PageShell(
-        H1("Eelnõu ei leitud", cls="page-title"),  # noqa: F405
-        Alert(
-            "Otsitud eelnõu ei ole olemas või Te ei oma selle vaatamise õigust.",
-            variant="warning",
-        ),
-        P(A("← Tagasi eelnõude nimekirja", href="/drafts"), cls="back-link"),  # noqa: F405
-        title="Eelnõu ei leitud",
-        user=auth,
-        theme=theme,
-        active_nav="/drafts",
-        request=req,
-    )
+# ``_parse_uuid`` and ``_not_found_page`` now live in
+# :mod:`app.docs._helpers` so :mod:`app.docs.retry_handler` can import
+# them without triggering an import cycle with this module (#671).
 
 
 # ---------------------------------------------------------------------------

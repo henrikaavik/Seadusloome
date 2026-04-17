@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -1394,6 +1395,67 @@ class TestStopGenerationCancel:
         ]
         assert any("is_truncated = TRUE" in sql for sql in sql_calls)
 
+    @patch("app.chat.orchestrator.check_org_cost_budget")
+    @patch("app.chat.orchestrator.check_message_rate")
+    @patch("app.chat.orchestrator.get_connection")
+    def test_cancel_during_hung_rag_emits_retrieval_done(
+        self, mock_get_conn, mock_rate, mock_cost
+    ):
+        """#676 / #659: cancelling while RAG is mid-await must still emit
+        ``retrieval_done`` (so the UI leaves its "Otsin konteksti…" state)
+        and must propagate CancelledError cleanly.
+        """
+        _setup_orchestrator_conn(mock_get_conn)
+
+        # Signal from the retriever back to the test: "I'm parked in the
+        # sleep now — go ahead and cancel me."
+        started = asyncio.Event()
+
+        class _HangOnRetrieve:
+            async def retrieve(
+                self,
+                query: str,
+                k: int = 10,
+                source_type: str | None = None,
+                org_id: str | None = None,
+            ) -> list[Any]:
+                started.set()
+                await asyncio.sleep(60)
+                return []
+
+        collector = _Collector()
+        orchestrator = ChatOrchestrator(FakeLLM(), FakeSparql(), retriever=_HangOnRetrieve())
+
+        async def runner():
+            task = asyncio.create_task(
+                orchestrator.handle_message(_CONV_ID, "Tere", _auth(), collector)
+            )
+            # Wait until retrieve() is actually being awaited before
+            # cancelling, so we exercise the RAG-cancel path specifically.
+            await asyncio.wait_for(started.wait(), timeout=2.0)
+            task.cancel()
+            raised: BaseException | None = None
+            try:
+                await task
+            except asyncio.CancelledError as exc:
+                raised = exc
+            return raised
+
+        raised = asyncio.run(runner())
+
+        # Task raised CancelledError cleanly.
+        assert isinstance(raised, asyncio.CancelledError), (
+            f"Expected CancelledError to propagate, got {raised!r}"
+        )
+
+        # #659: retrieval_done was emitted even though cancel interrupted
+        # the retrieval.
+        done_events = [e for e in collector.events if e.get("type") == "retrieval_done"]
+        assert len(done_events) >= 1, (
+            "retrieval_done must still fire when cancel hits mid-RAG "
+            f"(events: {[e.get('type') for e in collector.events]})"
+        )
+
 
 class TestMaxToolRoundsCapVerified:
     """Explicitly verify MAX_TOOL_ROUNDS=5 is enforced (issue #594.10)."""
@@ -1604,7 +1666,19 @@ class TestSendTimeoutMidStream:
 
 
 class _HangingRetriever:
-    """Retriever whose ``retrieve`` never resolves — mimics a stuck Voyage AI call."""
+    """Retriever whose ``retrieve`` never resolves — mimics a stuck Voyage AI call.
+
+    #677: records ``retrieve_started_at`` (monotonic counter of DB
+    ``execute`` calls observed before retrieve was awaited) so tests can
+    assert the user-message INSERT happened BEFORE the retriever was
+    entered.
+    """
+
+    def __init__(self) -> None:
+        self.retrieve_started_at: int | None = None
+        # Mutable hook set by the test to snapshot the execute-call count
+        # the moment ``retrieve`` is awaited.
+        self._on_start: Callable[[], int] | None = None
 
     async def retrieve(
         self,
@@ -1613,6 +1687,12 @@ class _HangingRetriever:
         source_type: str | None = None,
         org_id: str | None = None,
     ) -> list[Any]:
+        if self._on_start is not None:
+            self.retrieve_started_at = self._on_start()
+        else:
+            # Fallback sentinel so tests that don't wire ``_on_start``
+            # can still distinguish "retrieve was entered" from "never".
+            self.retrieve_started_at = -1
         # Sleep much longer than the orchestrator's RAG timeout so
         # ``asyncio.wait_for`` fires reliably in tests.
         await asyncio.sleep(60)
@@ -1620,7 +1700,16 @@ class _HangingRetriever:
 
 
 class _RaisingRetriever:
-    """Retriever whose ``retrieve`` always raises."""
+    """Retriever whose ``retrieve`` always raises.
+
+    #677: mirrors ``_HangingRetriever``'s ``retrieve_started_at`` hook so
+    tests can confirm the user message was INSERTed BEFORE the retriever
+    was entered, even on the explode path.
+    """
+
+    def __init__(self) -> None:
+        self.retrieve_started_at: int | None = None
+        self._on_start: Callable[[], int] | None = None
 
     async def retrieve(
         self,
@@ -1629,6 +1718,10 @@ class _RaisingRetriever:
         source_type: str | None = None,
         org_id: str | None = None,
     ) -> list[Any]:
+        if self._on_start is not None:
+            self.retrieve_started_at = self._on_start()
+        else:
+            self.retrieve_started_at = -1
         raise RuntimeError("Voyage AI exploded")
 
 
@@ -1654,10 +1747,14 @@ class TestRagTimeout:
         assert done_events[0]["chunk_count"] == 0
 
         # A soft warning event should surface the timeout so the user gets
-        # a hint instead of silent best-effort.
+        # a hint instead of silent best-effort. #681: assert on the
+        # semantic shape of the warning rather than an exact count so
+        # future tweaks (e.g. adding a secondary "ilma kontekstita" hint)
+        # don't require touching this test.
         warning_events = [e for e in collector.events if e.get("type") == "warning"]
-        assert len(warning_events) == 1
-        assert "aegus" in warning_events[0]["message"].lower()
+        assert any("aegus" in (e.get("message") or "").lower() for e in warning_events), (
+            f"Expected a timeout warning event, got: {warning_events}"
+        )
 
         # The LLM turn still completes — the timeout does not escalate.
         assert any(e.get("type") == "done" for e in collector.events)
@@ -1675,8 +1772,27 @@ class TestRagTimeout:
         """
         conn = _setup_orchestrator_conn(mock_get_conn)
 
+        # #677: snapshot the number of "INSERT INTO messages" calls
+        # observed at the moment retrieve() is entered. If the user
+        # INSERT landed first the snapshot will be >= 1; if the
+        # ordering regressed it would be 0.
+        retriever = _HangingRetriever()
+
+        def _snap() -> int:
+            seen = 0
+            for call in conn.execute.call_args_list:
+                if (
+                    call.args
+                    and isinstance(call.args[0], str)
+                    and "INSERT INTO messages" in call.args[0]
+                ):
+                    seen += 1
+            return seen
+
+        retriever._on_start = _snap
+
         collector = _Collector()
-        orchestrator = ChatOrchestrator(FakeLLM(), FakeSparql(), retriever=_HangingRetriever())
+        orchestrator = ChatOrchestrator(FakeLLM(), FakeSparql(), retriever=retriever)
         asyncio.run(orchestrator.handle_message(_CONV_ID, "Kadunud sonum", _auth(), collector))
 
         # Walk the execute history and confirm the user message INSERT
@@ -1690,6 +1806,16 @@ class TestRagTimeout:
             "User message was not persisted before RAG — data-loss regression."
         )
 
+        # #677: the ordering guarantee — user INSERT must be observed
+        # BEFORE retrieve() was entered.
+        assert retriever.retrieve_started_at is not None, (
+            "Retriever was never entered; cannot prove ordering."
+        )
+        assert retriever.retrieve_started_at >= 1, (
+            "User-message INSERT did not run before RAG retrieve() was awaited "
+            f"(saw {retriever.retrieve_started_at} INSERTs at retrieve-start)."
+        )
+
 
 class TestUserMessagePersistedBeforeRag:
     """#652: user message must be saved even if RAG raises an exception."""
@@ -1700,8 +1826,23 @@ class TestUserMessagePersistedBeforeRag:
     def test_user_message_saved_when_rag_raises(self, mock_get_conn, mock_rate, mock_cost):
         conn = _setup_orchestrator_conn(mock_get_conn)
 
+        retriever = _RaisingRetriever()
+
+        def _snap() -> int:
+            seen = 0
+            for call in conn.execute.call_args_list:
+                if (
+                    call.args
+                    and isinstance(call.args[0], str)
+                    and "INSERT INTO messages" in call.args[0]
+                ):
+                    seen += 1
+            return seen
+
+        retriever._on_start = _snap
+
         collector = _Collector()
-        orchestrator = ChatOrchestrator(FakeLLM(), FakeSparql(), retriever=_RaisingRetriever())
+        orchestrator = ChatOrchestrator(FakeLLM(), FakeSparql(), retriever=retriever)
         asyncio.run(orchestrator.handle_message(_CONV_ID, "Kindel sonum", _auth(), collector))
 
         # User message must still be persisted.
@@ -1711,6 +1852,16 @@ class TestUserMessagePersistedBeforeRag:
             for call in execute_calls
         )
         assert user_insert_found
+
+        # #677: the ordering guarantee — user INSERT must be observed
+        # BEFORE retrieve() was entered (and thus before it raised).
+        assert retriever.retrieve_started_at is not None, (
+            "Retriever was never entered; cannot prove ordering."
+        )
+        assert retriever.retrieve_started_at >= 1, (
+            "User-message INSERT did not run before RAG retrieve() was awaited "
+            f"(saw {retriever.retrieve_started_at} INSERTs at retrieve-start)."
+        )
 
 
 class TestTurnDeadline:
