@@ -74,6 +74,11 @@ class Draft:
     last_accessed_at: datetime | None = None
     doc_type: Literal["eelnou", "vtk"] = "eelnou"
     parent_vtk_id: uuid.UUID | None = None
+    # #670: frozen completion timestamp -- written once per terminal
+    # transition (``ready`` / ``failed``), cleared on retry. Decoupled
+    # from ``updated_at`` so later edits do not inflate the final
+    # "Analüüsitud" duration label.
+    processing_completed_at: datetime | None = None
 
 
 # Column order used by every SELECT in this module. Kept in sync with
@@ -82,7 +87,7 @@ _DRAFT_COLUMNS = (
     "id, user_id, org_id, title, filename, content_type, file_size, "
     "storage_path, graph_uri, status, parsed_text_encrypted, entity_count, "
     "error_message, created_at, updated_at, last_accessed_at, "
-    "doc_type, parent_vtk_id"
+    "doc_type, parent_vtk_id, processing_completed_at"
 )
 
 
@@ -107,6 +112,7 @@ def _row_to_draft(row: tuple[Any, ...]) -> Draft:
         last_accessed_at,
         doc_type,
         parent_vtk_id,
+        processing_completed_at,
     ) = row
     return Draft(
         id=coerce_uuid(draft_id),
@@ -127,6 +133,7 @@ def _row_to_draft(row: tuple[Any, ...]) -> Draft:
         last_accessed_at=last_accessed_at,
         doc_type=doc_type,
         parent_vtk_id=coerce_uuid(parent_vtk_id) if parent_vtk_id else None,
+        processing_completed_at=processing_completed_at,
     )
 
 
@@ -194,6 +201,9 @@ def create_draft(
     return _row_to_draft(row)
 
 
+_TERMINAL_STATUSES = frozenset({"ready", "failed"})
+
+
 def update_draft_status(
     conn: Any,
     draft_id: uuid.UUID | str,
@@ -205,16 +215,24 @@ def update_draft_status(
     Returns ``True`` when a row was updated. Unlike the read helpers this
     one takes an explicit connection so the worker can batch the update
     with other state transitions in a single transaction.
+
+    #670: terminal transitions (``ready``, ``failed``) also stamp
+    ``processing_completed_at = now()``; non-terminal transitions clear
+    it back to NULL so a retry (``failed`` → ``uploaded``) starts with
+    a clean completion clock. Most handlers use raw SQL rather than this
+    helper, but they apply the same rule directly.
     """
     if status not in VALID_STATUSES:
         raise ValueError(f"Invalid draft status: {status!r}")
 
+    completion_clause = "now()" if status in _TERMINAL_STATUSES else "null"
     result = conn.execute(
-        """
+        f"""
         update drafts
         set status = %s,
             error_message = %s,
-            updated_at = now()
+            updated_at = now(),
+            processing_completed_at = {completion_clause}
         where id = %s
         """,
         (status, error_message, str(draft_id)),

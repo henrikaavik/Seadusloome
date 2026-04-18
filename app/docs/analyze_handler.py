@@ -156,7 +156,8 @@ def analyze_impact(
                 set status = 'ready',
                     error_message = null,
                     error_debug = null,
-                    updated_at = now()
+                    updated_at = now(),
+                    processing_completed_at = now()
                 where id = %s
                 """,
                 (str(draft_id),),
@@ -308,7 +309,8 @@ def _mark_draft_failed(draft_id: UUID, exc: BaseException) -> None:
                 set status = 'failed',
                     error_message = %s,
                     error_debug = %s,
-                    updated_at = now()
+                    updated_at = now(),
+                    processing_completed_at = now()
                 where id = %s
                 """,
                 (user_msg[:500], debug_detail, str(draft_id)),

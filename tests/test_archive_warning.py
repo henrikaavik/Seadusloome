@@ -122,6 +122,7 @@ def _row_from_draft(draft: Draft) -> tuple:
         draft.last_accessed_at,
         draft.doc_type,  # (#639)
         str(draft.parent_vtk_id) if draft.parent_vtk_id else None,  # (#639)
+        draft.processing_completed_at,  # (#670)
     )
 
 

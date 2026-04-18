@@ -76,7 +76,8 @@ def _reset_draft_for_retry(draft_id: str) -> bool:
             set status = 'uploaded',
                 error_message = null,
                 error_debug = null,
-                updated_at = now()
+                updated_at = now(),
+                processing_completed_at = null
             where id = %s
               and status = 'failed'
             """,

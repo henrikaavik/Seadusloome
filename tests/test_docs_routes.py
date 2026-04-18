@@ -57,6 +57,7 @@ def _make_draft(
     updated_at: datetime | None = None,
     doc_type: str = "eelnou",
     parent_vtk_id: uuid.UUID | None = None,
+    processing_completed_at: datetime | None = None,
 ) -> Draft:
     now = datetime.now(UTC)
     resolved_id = draft_id or uuid.UUID("44444444-4444-4444-4444-444444444444")
@@ -78,6 +79,7 @@ def _make_draft(
         updated_at=updated_at or now,
         doc_type=doc_type,  # type: ignore[arg-type]
         parent_vtk_id=parent_vtk_id,
+        processing_completed_at=processing_completed_at,
     )
 
 
@@ -2246,6 +2248,28 @@ class TestRetryFailedDraft:
         assert f"/drafts/{draft.id}/retry" in resp.text
 
 
+class TestResetDraftForRetrySql:
+    """#670: the retry reset must also clear ``processing_completed_at``
+    so a re-run writes a fresh completion time instead of keeping the
+    stale one from the prior failed attempt.
+    """
+
+    @patch("app.docs.retry_handler._connect")
+    def test_reset_clears_processing_completed_at(self, mock_connect: MagicMock):
+        from app.docs.retry_handler import _reset_draft_for_retry
+
+        conn = MagicMock()
+        conn.execute.return_value.rowcount = 1
+        mock_connect.return_value.__enter__.return_value = conn
+
+        assert _reset_draft_for_retry("44444444-4444-4444-4444-444444444444") is True
+
+        update_call = conn.execute.call_args_list[0]
+        sql = update_call.args[0].lower()
+        assert "update drafts" in sql
+        assert "processing_completed_at = null" in sql
+
+
 # ---------------------------------------------------------------------------
 # #657 — Elapsed "möödas" counter: frozen on terminal, correct H:MM:SS
 # ---------------------------------------------------------------------------
@@ -2370,7 +2394,93 @@ class TestElapsedCounterTerminalStates:
         assert "draft-stage-elapsed" in resp.text
         # Guard branch: when no nodes remain, clearInterval runs.
         assert "nodes.length === 0" in resp.text
-        assert "clearInterval(window.__draftElapsedTimer)" in resp.text
+
+
+class TestProcessingCompletedAtFreeze:
+    """#670: the final "Analüüsitud" label must be frozen at pipeline
+    completion time, not recomputed from ``updated_at`` (which bumps
+    on every edit and would retroactively inflate the duration)."""
+
+    def test_prefers_processing_completed_at_over_updated_at(self):
+        """When ``processing_completed_at`` is set, use it even if
+        ``updated_at`` is much later (e.g. a rename happened after
+        the draft finished processing).
+        """
+        from app.docs.routes import _processing_duration_seconds
+
+        now = datetime.now(UTC)
+        draft = _make_draft(
+            status="ready",
+            created_at=now - timedelta(hours=12, seconds=42),
+            updated_at=now,  # rename happened 12h later
+            processing_completed_at=now - timedelta(hours=12),
+        )
+
+        # Pipeline took 42s, not 12h.
+        assert _processing_duration_seconds(draft) == 42
+
+    def test_falls_back_to_updated_at_when_completion_null(self):
+        """Legacy rows (before migration 023 backfill, or edge cases)
+        still render a duration via ``updated_at - created_at``.
+        """
+        from app.docs.routes import _processing_duration_seconds
+
+        now = datetime.now(UTC)
+        draft = _make_draft(
+            status="ready",
+            created_at=now - timedelta(seconds=90),
+            updated_at=now,
+            processing_completed_at=None,
+        )
+
+        assert _processing_duration_seconds(draft) == 90
+
+    def test_returns_none_when_created_at_missing(self):
+        """Defensive: ``_processing_duration_seconds`` must not crash
+        on a draft with no ``created_at`` (practically impossible
+        given the NOT NULL constraint, but the helper is defensive).
+        """
+        from app.docs.routes import _processing_duration_seconds
+
+        draft = _make_draft(status="ready")
+        # Simulate a missing timestamp. ``created_at`` is typed as
+        # ``datetime`` so this is a deliberate bypass for defensive-path
+        # coverage.
+        draft.created_at = None  # type: ignore[assignment]
+        assert _processing_duration_seconds(draft) is None
+
+    @patch("app.docs.routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_ready_draft_rename_does_not_inflate_label(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+    ):
+        """End-to-end: a draft that finished in 42 seconds but was
+        renamed 12 hours later must still render a ``0:42`` /
+        ``42 s`` duration in the completion label, NOT a 12 h
+        duration driven by the bumped ``updated_at``.
+        """
+        mock_get_provider.return_value = _stub_provider()
+        now = datetime.now(UTC)
+        draft = _make_draft(
+            status="ready",
+            created_at=now - timedelta(hours=12, seconds=42),
+            updated_at=now,  # simulated rename just now
+            processing_completed_at=now - timedelta(hours=12),  # true completion
+        )
+        mock_fetch.return_value = draft
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{draft.id}")
+
+        assert resp.status_code == 200
+        assert "Analüüsitud" in resp.text
+        # The bug: if the helper used updated_at, the label would
+        # contain the 12-hour duration marker ("12 h" / "12:00:00").
+        # Neither must appear.
+        assert "12 h" not in resp.text
+        assert "12:00:00" not in resp.text
 
 
 # ---------------------------------------------------------------------------

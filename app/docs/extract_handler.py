@@ -188,7 +188,8 @@ def extract_entities(
                         set status = 'failed',
                             error_message = %s,
                             error_debug = %s,
-                            updated_at = now()
+                            updated_at = now(),
+                            processing_completed_at = now()
                         where id = %s
                         """,
                         (user_msg[:500], debug_detail, str(draft_id)),

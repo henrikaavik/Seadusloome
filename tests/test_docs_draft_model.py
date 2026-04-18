@@ -35,6 +35,7 @@ from app.docs.draft_model import (
     list_eelnous_for_vtk,
     list_vtks_for_org,
     update_draft_parent_vtk,
+    update_draft_status,
 )
 
 # ---------------------------------------------------------------------------
@@ -69,6 +70,7 @@ def _make_raw_row(
     last_accessed_at: datetime | None = None,
     doc_type: str = "eelnou",
     parent_vtk_id: uuid.UUID | str | None = None,
+    processing_completed_at: datetime | None = None,
 ) -> tuple[Any, ...]:
     """Return a raw DB row tuple matching the column order in ``_DRAFT_COLUMNS``."""
     return (
@@ -90,6 +92,7 @@ def _make_raw_row(
         last_accessed_at,
         doc_type,
         str(parent_vtk_id) if parent_vtk_id else None,
+        processing_completed_at,
     )
 
 
@@ -161,6 +164,9 @@ class TestDraftColumns:
 
     def test_parent_vtk_id_in_columns(self):
         assert "parent_vtk_id" in _DRAFT_COLUMNS
+
+    def test_processing_completed_at_in_columns(self):
+        assert "processing_completed_at" in _DRAFT_COLUMNS
 
 
 # ---------------------------------------------------------------------------
@@ -547,6 +553,59 @@ class TestUpdateDraftParentVtk:
         conn.execute.return_value.rowcount = 0
 
         assert update_draft_parent_vtk(conn, _DRAFT_ID, None) is False
+
+
+# ---------------------------------------------------------------------------
+# update_draft_status -- processing_completed_at stamping (#670)
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateDraftStatusCompletionStamp:
+    """``update_draft_status`` must stamp ``processing_completed_at =
+    now()`` whenever the draft enters a terminal state (``ready`` or
+    ``failed``) and clear it back to NULL on any other transition so
+    a retry (``failed`` → ``uploaded``) doesn't carry stale completion
+    time into the next run.
+    """
+
+    def test_ready_transition_stamps_completion(self):
+        conn = MagicMock()
+        conn.execute.return_value.rowcount = 1
+
+        update_draft_status(conn, _DRAFT_ID, "ready")
+
+        sql = conn.execute.call_args.args[0].lower()
+        assert "processing_completed_at = now()" in sql
+
+    def test_failed_transition_stamps_completion(self):
+        conn = MagicMock()
+        conn.execute.return_value.rowcount = 1
+
+        update_draft_status(conn, _DRAFT_ID, "failed", "Boom")
+
+        sql = conn.execute.call_args.args[0].lower()
+        assert "processing_completed_at = now()" in sql
+
+    def test_non_terminal_transition_clears_completion(self):
+        """``uploaded`` / ``parsing`` / ``extracting`` / ``analyzing``
+        transitions must write NULL so a restart starts with a clean
+        completion clock.
+        """
+        conn = MagicMock()
+        conn.execute.return_value.rowcount = 1
+
+        update_draft_status(conn, _DRAFT_ID, "parsing")
+
+        sql = conn.execute.call_args.args[0].lower()
+        assert "processing_completed_at = null" in sql
+
+    def test_invalid_status_still_raises(self):
+        """Pre-existing invariant; verifies the completion-stamp change
+        didn't regress argument validation.
+        """
+        conn = MagicMock()
+        with pytest.raises(ValueError):
+            update_draft_status(conn, _DRAFT_ID, "bogus")
 
 
 # ---------------------------------------------------------------------------

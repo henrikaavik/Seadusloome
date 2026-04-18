@@ -226,21 +226,26 @@ def _elapsed_seconds(draft: Draft) -> int | None:
 
 
 def _processing_duration_seconds(draft: Draft) -> int | None:
-    """Total wall-clock processing duration for a terminal draft (#657).
+    """Total wall-clock processing duration for a terminal draft (#657, #670).
 
-    Computed as ``updated_at - created_at`` so it reflects the time
-    between upload and the final state transition (to ``ready`` or
-    ``failed``). Returns ``None`` when either timestamp is missing.
+    Prefers ``processing_completed_at - created_at`` — ``processing_completed_at``
+    is frozen at the moment the pipeline flips into ``ready`` / ``failed``
+    (migration 023), so later edits (rename, VTK link, re-tag) no longer
+    inflate the label on an already-finished draft.
 
-    This is a proxy — the pipeline doesn't currently record per-stage
-    timings on ``drafts`` itself — but the two timestamps bracket the
-    entire pipeline run, which is exactly the duration the user cares
-    about on the completion label.
+    Falls back to ``updated_at - created_at`` for legacy rows where the
+    backfill left ``processing_completed_at`` NULL, so the label keeps
+    rendering for drafts that finished before migration 023 ran.
+
+    Returns ``None`` when neither timestamp pair is available.
     """
-    if draft.updated_at is None or draft.created_at is None:
+    if draft.created_at is None:
+        return None
+    completion = draft.processing_completed_at or draft.updated_at
+    if completion is None:
         return None
     try:
-        return max(0, int((draft.updated_at - draft.created_at).total_seconds()))
+        return max(0, int((completion - draft.created_at).total_seconds()))
     except (TypeError, ValueError):
         return None
 

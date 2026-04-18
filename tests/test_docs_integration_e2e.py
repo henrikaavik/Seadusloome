@@ -154,7 +154,8 @@ def _make_conn_factory(state: _State):
             # columns are: user_id, org_id, title, filename,
             # content_type, file_size, storage_path, graph_uri, status,
             # doc_type, parent_vtk_id -- 11 params. RETURNING reconstructs
-            # all 18 columns (18th is parent_vtk_id, migration 019 / #639;
+            # all 19 columns (19th is processing_completed_at, migration
+            # 023 / #670; 18th is parent_vtk_id, migration 019 / #639;
             # 16th is last_accessed_at, migration 015 / #572).
             assert params is not None
             (
@@ -192,6 +193,7 @@ def _make_conn_factory(state: _State):
                 now,  # last_accessed_at (#572)
                 doc_type,  # doc_type (#639)
                 parent_vtk_id,  # parent_vtk_id (#639)
+                None,  # processing_completed_at (#670)
             )
             state.draft_row = row
             cursor.fetchone.return_value = row
@@ -603,6 +605,7 @@ class TestDocsPipelineE2E:
             now,  # last_accessed_at (#572)
             "eelnou",  # doc_type (#639)
             None,  # parent_vtk_id (#639)
+            None,  # processing_completed_at (#670)
         )
         conn_factory = _make_conn_factory(state)
 
