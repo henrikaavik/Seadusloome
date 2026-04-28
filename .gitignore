@@ -47,3 +47,6 @@ docker/data/
 # Local Claude Code tooling
 .claude/scheduled_tasks.lock
 .superpowers/
+
+# Worktrees (subagent-driven development)
+.worktrees/

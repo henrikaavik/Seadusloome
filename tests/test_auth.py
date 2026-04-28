@@ -62,14 +62,15 @@ class TestPasswordHashing:
 # ---------------------------------------------------------------------------
 
 
-def _make_user(**overrides: str | None) -> UserDict:
+def _make_user(**overrides: str | bool | None) -> UserDict:
     """Helper to build a UserDict with sensible defaults."""
-    defaults: dict[str, str | None] = {
+    defaults: dict[str, str | bool | None] = {
         "id": "550e8400-e29b-41d4-a716-446655440000",
         "email": "test@seadusloome.ee",
         "full_name": "Test User",
         "role": "drafter",
         "org_id": None,
+        "must_change_password": False,
     }
     defaults.update(overrides)
     return UserDict(**defaults)  # type: ignore[arg-type]
@@ -191,7 +192,7 @@ class TestGetCurrentUser:
         token = jwt.encode(payload, SECRET_KEY, algorithm=JWT_ALGORITHM)
 
         conn = MagicMock()
-        conn.execute.return_value.fetchone.return_value = (0, True, "drafter", None)
+        conn.execute.return_value.fetchone.return_value = (0, True, "drafter", None, False)
         ctx = MagicMock()
         ctx.__enter__ = MagicMock(return_value=conn)
         ctx.__exit__ = MagicMock(return_value=False)

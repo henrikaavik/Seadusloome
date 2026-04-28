@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 
 import bcrypt
 from fasthtml.common import *
@@ -11,8 +12,15 @@ from starlette.responses import RedirectResponse
 
 from app.auth.audit import log_action
 from app.auth.organizations import list_orgs
+from app.auth.password import (
+    change_password,
+    issue_reset_token,
+    validate_password,  # noqa: F401 — re-export for callers
+)
 from app.auth.roles import require_role
 from app.db import get_connection as _connect
+from app.email.service import get_email_provider
+from app.email.templates import password_reset_admin
 from app.ui.data.data_table import Column, DataTable
 from app.ui.forms.app_form import AppForm
 from app.ui.forms.form_field import FormField, FormSelectField
@@ -38,17 +46,6 @@ _ROLE_LABELS = {
 def _hash_password(password: str) -> str:
     """Hash *password* with bcrypt."""
     return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-
-
-def validate_password(password: str) -> str | None:
-    """Return an error message if *password* is too weak, or ``None`` if valid."""
-    if len(password) < 8:
-        return "Parool peab olema vähemalt 8 tähemärki pikk"
-    if not any(c.isupper() for c in password):
-        return "Parool peab sisaldama vähemalt ühte suurtähte"
-    if not any(c.isdigit() for c in password):
-        return "Parool peab sisaldama vähemalt ühte numbrit"
-    return None
 
 
 def count_admins() -> int:
@@ -261,8 +258,20 @@ def _user_table(users: list[dict], *, show_org: bool, base_path: str):  # type: 
                 "Muuda rolli",
                 href=f"{base_path}/{row['id']}/role",
                 cls="btn btn-secondary btn-sm",
-            )
+            ),
         ]
+        # Reset password link — gated by active status and (for org admin) role.
+        show_reset = base_path == "/admin/users" or (
+            base_path == "/org/users" and row["role"] in ORG_ASSIGNABLE_ROLES
+        )
+        if row["_is_active"] and show_reset:
+            actions.append(
+                A(
+                    "Lähtesta parool",
+                    href=f"{base_path}/{row['id']}/reset",
+                    cls="btn btn-secondary btn-sm",
+                )
+            )
         if row["_is_active"]:
             actions.append(
                 AppForm(
@@ -758,6 +767,184 @@ def org_user_deactivate(req: Request, user_id: str):
 
 
 # ---------------------------------------------------------------------------
+# Admin password reset — shared helpers and handlers
+# ---------------------------------------------------------------------------
+
+
+def _admin_reset_page(req: Request, user_id: str, *, base_path: str, active_nav: str):
+    """GET /admin/users/{id}/reset (or /org/users/{id}/reset)."""
+    auth = req.scope.get("auth", {})
+    user = get_user(user_id)
+    if user is None:
+        return _error_page(req, "Kasutajat ei leitud.", base_path, active_nav)
+
+    if base_path == "/org/users":
+        org_id = auth.get("org_id")
+        if user.get("org_id") != org_id or user["role"] not in ORG_ASSIGNABLE_ROLES:
+            return _error_page(
+                req,
+                "Selle kasutaja parooli ei saa lähtestada.",
+                base_path,
+                active_nav,
+            )
+
+    flash = req.query_params.get("temp")  # one-time temp-pw reveal
+
+    return PageShell(
+        H1("Lähtesta parool", cls="page-title"),
+        Card(
+            CardHeader(P(f"Kasutaja: {user['full_name']} ({user['email']})", cls="card-subtitle")),
+            CardBody(
+                Alert(
+                    f"Ajutine parool on määratud. Edasta see kasutajale turvaliselt: {flash}",
+                    variant="success",
+                )
+                if flash
+                else None,
+                AppForm(
+                    Button("Saada e-postiga", type="submit", variant="primary"),
+                    method="post",
+                    action=f"{base_path}/{user_id}/reset_email",
+                ),
+                Hr(),
+                AppForm(
+                    FormField(
+                        name="new_password",
+                        label="Ajutine parool",
+                        type="password",
+                        required=True,
+                    ),
+                    Button("Määra ajutine parool", type="submit", variant="secondary"),
+                    method="post",
+                    action=f"{base_path}/{user_id}/reset_temp",
+                ),
+                Div(
+                    A("Tühista", href=base_path, cls="btn btn-ghost btn-md"),
+                    cls="form-actions",
+                ),
+            ),
+        ),
+        title="Lähtesta parool",
+        user=auth or None,
+        active_nav=active_nav,
+    )
+
+
+def _admin_reset_email(req: Request, user_id: str, *, base_path: str, active_nav: str):
+    """POST /…/reset_email — issue token + send email."""
+    auth = req.scope.get("auth", {})
+    user = get_user(user_id)
+    if user is None:
+        return _error_page(req, "Kasutajat ei leitud.", base_path, active_nav)
+
+    if base_path == "/org/users":
+        if user.get("org_id") != auth.get("org_id") or user["role"] not in ORG_ASSIGNABLE_ROLES:
+            return _error_page(
+                req,
+                "Selle kasutaja parooli ei saa lähtestada.",
+                base_path,
+                active_nav,
+            )
+
+    with _connect() as conn:
+        raw = issue_reset_token(user_id=user_id, created_by=auth.get("id"), conn=conn)
+        conn.commit()
+
+    base = os.environ.get("APP_BASE_URL", "http://localhost:8000").rstrip("/")
+    reset_url = f"{base}/auth/reset/{raw}"
+    subject, html, text = password_reset_admin(
+        full_name=user["full_name"],
+        reset_url=reset_url,
+        admin_name=auth.get("full_name", "Administraator"),
+    )
+    try:
+        get_email_provider().send(to=user["email"], subject=subject, html=html, text=text)
+    except Exception:
+        logger.exception("admin password reset email failed to send")
+
+    log_action(
+        auth.get("id"),
+        "user.password_reset_initiated",
+        {"target_user_id": user_id, "mode": "email"},
+    )
+    return RedirectResponse(url=base_path, status_code=303)
+
+
+def _admin_reset_temp(
+    req: Request, user_id: str, new_password: str, *, base_path: str, active_nav: str
+):
+    """POST /…/reset_temp — set temp password and force change on next login."""
+    auth = req.scope.get("auth", {})
+    user = get_user(user_id)
+    if user is None:
+        return _error_page(req, "Kasutajat ei leitud.", base_path, active_nav)
+
+    if base_path == "/org/users":
+        if user.get("org_id") != auth.get("org_id") or user["role"] not in ORG_ASSIGNABLE_ROLES:
+            return _error_page(
+                req,
+                "Selle kasutaja parooli ei saa lähtestada.",
+                base_path,
+                active_nav,
+            )
+
+    pw_error = validate_password(new_password, email=user["email"])
+    if pw_error:
+        return _error_page(req, pw_error, f"{base_path}/{user_id}/reset", active_nav)
+
+    with _connect() as conn:
+        change_password(user_id, new_password, conn=conn, must_change=True)
+        conn.commit()
+
+    log_action(
+        auth.get("id"),
+        "user.password_reset_initiated",
+        {"target_user_id": user_id, "mode": "temp"},
+    )
+
+    return RedirectResponse(
+        url=f"{base_path}/{user_id}/reset?temp={new_password}",
+        status_code=303,
+    )
+
+
+def admin_user_reset_page(req: Request, user_id: str):
+    return _admin_reset_page(req, user_id, base_path="/admin/users", active_nav="/admin")
+
+
+def admin_user_reset_email(req: Request, user_id: str):
+    return _admin_reset_email(req, user_id, base_path="/admin/users", active_nav="/admin")
+
+
+def admin_user_reset_temp(req: Request, user_id: str, new_password: str):
+    return _admin_reset_temp(
+        req,
+        user_id,
+        new_password,
+        base_path="/admin/users",
+        active_nav="/admin",
+    )
+
+
+def org_user_reset_page(req: Request, user_id: str):
+    return _admin_reset_page(req, user_id, base_path="/org/users", active_nav="/org/users")
+
+
+def org_user_reset_email(req: Request, user_id: str):
+    return _admin_reset_email(req, user_id, base_path="/org/users", active_nav="/org/users")
+
+
+def org_user_reset_temp(req: Request, user_id: str, new_password: str):
+    return _admin_reset_temp(
+        req,
+        user_id,
+        new_password,
+        base_path="/org/users",
+        active_nav="/org/users",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Route registration
 # ---------------------------------------------------------------------------
 
@@ -777,6 +964,16 @@ _org_user_role_form = require_role("org_admin", "admin")(org_user_role_form)
 _org_user_role_update = require_role("org_admin", "admin")(org_user_role_update)
 _org_user_deactivate = require_role("org_admin", "admin")(org_user_deactivate)
 
+# Password reset routes — system admin
+_admin_user_reset_page = require_role("admin")(admin_user_reset_page)
+_admin_user_reset_email = require_role("admin")(admin_user_reset_email)
+_admin_user_reset_temp = require_role("admin")(admin_user_reset_temp)
+
+# Password reset routes — org admin
+_org_user_reset_page = require_role("org_admin", "admin")(org_user_reset_page)
+_org_user_reset_email = require_role("org_admin", "admin")(org_user_reset_email)
+_org_user_reset_temp = require_role("org_admin", "admin")(org_user_reset_temp)
+
 
 def register_user_routes(rt) -> None:  # type: ignore[no-untyped-def]
     """Register user management routes on the FastHTML route decorator *rt*."""
@@ -787,6 +984,9 @@ def register_user_routes(rt) -> None:  # type: ignore[no-untyped-def]
     rt("/admin/users/{user_id}/role", methods=["GET"])(_admin_user_role_form)
     rt("/admin/users/{user_id}/role", methods=["POST"])(_admin_user_role_update)
     rt("/admin/users/{user_id}/deactivate", methods=["POST"])(_admin_user_deactivate)
+    rt("/admin/users/{user_id}/reset", methods=["GET"])(_admin_user_reset_page)
+    rt("/admin/users/{user_id}/reset_email", methods=["POST"])(_admin_user_reset_email)
+    rt("/admin/users/{user_id}/reset_temp", methods=["POST"])(_admin_user_reset_temp)
 
     # Org admin routes
     rt("/org/users", methods=["GET"])(_org_user_list)
@@ -795,3 +995,6 @@ def register_user_routes(rt) -> None:  # type: ignore[no-untyped-def]
     rt("/org/users/{user_id}/role", methods=["GET"])(_org_user_role_form)
     rt("/org/users/{user_id}/role", methods=["POST"])(_org_user_role_update)
     rt("/org/users/{user_id}/deactivate", methods=["POST"])(_org_user_deactivate)
+    rt("/org/users/{user_id}/reset", methods=["GET"])(_org_user_reset_page)
+    rt("/org/users/{user_id}/reset_email", methods=["POST"])(_org_user_reset_email)
+    rt("/org/users/{user_id}/reset_temp", methods=["POST"])(_org_user_reset_temp)
