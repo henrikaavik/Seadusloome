@@ -224,11 +224,12 @@ The reset-link landing page is its own route (`/auth/reset/<token>`), shared onl
 
 ### 7.5 Admin user list — both `/admin/users` and `/org/users`
 
-- New `Lähtesta parool` action button on each user row that opens a small popover with two choices:
-  - **`Saada e-postiga`** → POST to `…/reset_email`
-  - **`Määra ajutine parool`** → opens form with one password field
-- For org admin, the action is only rendered for users where `_is_active and role in ORG_ASSIGNABLE_ROLES`.
-- After temp-password set, the redirect target shows the temp password in a copy-friendly card (one-time view; refresh removes it).
+- New `Lähtesta parool` link in the existing `Tegevused` cell on each user row, navigating to a dedicated reset page (matches the existing `/admin/users/{user_id}/role` pattern — no popovers, just a focused page).
+- `GET /admin/users/{user_id}/reset` (or `/org/users/...`) renders a `Card` with:
+  - Inline `AppForm` (single button `Saada e-postiga`) → POSTs to `…/reset_email` (no other fields).
+  - Below it, a second `AppForm` with one password field + button `Määra ajutine parool` → POSTs to `…/reset_temp`.
+- For org admin, the `Lähtesta parool` link is only rendered for users where `_is_active and role in ORG_ASSIGNABLE_ROLES`.
+- After temp-password set, the redirect target (back at the reset page) shows the temp password in a copy-friendly `Alert(variant="success")` card (one-time view; refresh or navigation removes it).
 
 ## 8. Estonian copy
 
