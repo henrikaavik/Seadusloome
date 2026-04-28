@@ -10,6 +10,7 @@ from starlette.responses import RedirectResponse, Response
 
 from app.auth.cookies import set_auth_cookie
 from app.auth.jwt_provider import JWTAuthProvider
+from app.auth.provider import UserDict
 
 if TYPE_CHECKING:
     pass
@@ -43,6 +44,8 @@ def _get_provider() -> JWTAuthProvider:
 # that ontology data queries are not publicly accessible.
 SKIP_PATHS: list[str] = [
     r"/auth/login",
+    r"/auth/forgot",
+    r"/auth/reset/.*",
     r"/static/.*",
     r"/favicon\.ico",
     r"/api/health",
@@ -126,6 +129,24 @@ def try_refresh_access_token(
     return new_access, new_refresh, dict(user)
 
 
+_MUST_CHANGE_ALLOWED_PATHS = (
+    "/profile/password",
+    "/auth/logout",
+)
+
+
+def _redirect_if_must_change(req: Request, user: UserDict) -> Response | None:
+    """Force users with must_change_password=True onto /profile/password."""
+    if not user.get("must_change_password"):
+        return None
+    path = req.url.path
+    if path in _MUST_CHANGE_ALLOWED_PATHS:
+        return None
+    if path.startswith("/static/") or path.startswith("/api/health"):
+        return None
+    return RedirectResponse(url="/profile/password", status_code=303)
+
+
 def auth_before(req: Request) -> Response | None:
     """Beforeware: authenticate via JWT cookies, redirect to login if needed.
 
@@ -146,7 +167,7 @@ def auth_before(req: Request) -> Response | None:
         user = provider.get_current_user(access_token)
         if user is not None:
             req.scope["auth"] = user
-            return None
+            return _redirect_if_must_change(req, user)
 
     # Access token missing or invalid -- attempt silent refresh.
     if refresh_token:
