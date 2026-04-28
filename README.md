@@ -340,7 +340,30 @@ Bind mounts point to a host directory that you manage separately —
 use bind mounts only if you need to share the files with another
 service or back them up externally.
 
-**Step 5 — (Optional) Set ANTHROPIC_API_KEY for real Claude extraction.**
+**Step 5 — Configure transactional email (Postmark).**
+
+The forgot-password and admin-reset flows send transactional email
+through Postmark. In `APP_ENV=production`, the application refuses to
+start sending without `POSTMARK_API_TOKEN` (no silent fallback to the
+stub provider).
+
+On `seadusloome-app` set:
+
+- `POSTMARK_API_TOKEN` (required) — Server API token for the
+  "Seadusloome" Postmark server.
+- `EMAIL_FROM` (optional, default `Seadusloome <noreply@sixtyfour.ee>`)
+  — From-address for transactional email. The sender domain must be
+  verified in Postmark; `sixtyfour.ee` was verified via DKIM at
+  Hostinger DNS during the initial setup.
+- `APP_BASE_URL` (required) — Public base URL used to build reset
+  links in email bodies, e.g. `https://seadusloome.sixtyfour.ee`. No
+  trailing slash.
+
+In dev/test/CI (`APP_ENV != production`), all three are optional —
+the email module falls back to a stub provider that logs the email
+body to stdout instead of hitting Postmark.
+
+**Step 6 — (Optional) Set ANTHROPIC_API_KEY for real Claude extraction.**
 
 Phase 2 entity extraction runs in stub mode when `ANTHROPIC_API_KEY` is
 unset. Set it in Coolify to enable real LLM-powered extraction. Phase 3
