@@ -421,8 +421,10 @@ All of these go into Coolify env config; they remain absent in `.env.example` (w
 
 ## 12. Open questions
 
-1. **CSRF posture (§4.9):** Confirm shipping these flows under the existing `SameSite=Lax`-only posture is acceptable for now, with CSRF middleware tracked as a separate, codebase-wide work item. Alternative is to wire `starlette-csrf` (or equivalent) into all mutating routes as part of this spec — wider scope, larger blast radius, but eliminates the gap on admin reset POSTs in particular.
-2. **Temp-password fallback retention (§5.4):** The `must_change_password` flag mitigates the "admin knows the user's password" risk, but the admin still knows the temp password during the window between reset and first login. If even that window is undesirable, the fallback can be cut and admins routed exclusively through the email-link path. Confirm the temp-password fallback is still wanted.
+Both resolved during review (2026-04-28):
+
+1. **CSRF posture (§4.9) — RESOLVED, ship.** These flows ship under the existing `SameSite=Lax` posture. A codebase-wide CSRF middleware is tracked as a separate future work item, not part of this spec.
+2. **Temp-password fallback (§5.4) — RESOLVED, keep.** The fallback stays, with `must_change_password` mitigation forcing the target user to change the password on first login.
 
 ## 13. Appendix — Postmark setup snapshot
 
