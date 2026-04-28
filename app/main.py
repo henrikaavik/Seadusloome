@@ -13,6 +13,7 @@ from app.admin import register_admin_routes
 from app.annotations.routes import register_annotation_routes
 from app.auth.middleware import SKIP_PATHS, auth_before
 from app.auth.organizations import register_org_routes
+from app.auth.profile import register_profile_routes
 from app.auth.routes import register_auth_routes
 from app.auth.users import register_user_routes
 from app.chat.routes import register_chat_routes
@@ -203,6 +204,7 @@ app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 register_auth_routes(rt)
 register_org_routes(rt)
 register_user_routes(rt)
+register_profile_routes(rt)
 register_explorer_routes(rt)
 register_explorer_pages(rt)
 register_ws_routes(app)
