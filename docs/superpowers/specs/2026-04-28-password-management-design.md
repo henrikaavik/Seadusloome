@@ -62,14 +62,18 @@ Uses the same provider-abstraction pattern as `app/llm/` (Claude/Voyage):
 
 - **`EmailProvider`** ABC — `send(to: str, subject: str, html: str, text: str, message_stream: str | None = None) -> None`.
 - **`PostmarkProvider`** — uses `postmarker.core.PostmarkClient`. Lazy-initialised singleton with thread-safe lock; SDK is only imported on first real send so dev environments without `postmarker` installed still work.
-- **`StubProvider`** — logs the rendered subject + body to `logger.info`, returns. Used unconditionally when `is_stub_allowed()` is true OR when `POSTMARK_API_TOKEN` is empty.
-- **`get_email_provider()`** — single source of truth for which provider is active. Gated by `APP_ENV` and presence of `POSTMARK_API_TOKEN`, mirroring the LLM gate pattern.
+- **`StubProvider`** — logs the rendered subject + body to `logger.info`, returns.
+- **`get_email_provider()`** — single source of truth for which provider is active. Gating rule (mirrors `app/llm/claude.py`):
+  - If `is_stub_allowed()` is true (any env except `APP_ENV=production`) AND `POSTMARK_API_TOKEN` is missing → return `StubProvider`.
+  - If `is_stub_allowed()` is true AND `POSTMARK_API_TOKEN` is set → return `PostmarkProvider` (lets dev/staging exercise the real path when desired).
+  - If `is_stub_allowed()` is false (production) AND `POSTMARK_API_TOKEN` is missing → raise `RuntimeError` at first call so deployment fails loudly. Production never falls back to stubs.
 
 Templates live as Python module-level functions returning `(subject, html, text)` tuples (no Jinja, matches the pattern used elsewhere in the project for short messages).
 
-### 4.3 Database schema — `password_reset_tokens`
+### 4.3 Database schema — `password_reset_tokens`, `password_reset_attempts`, `users.must_change_password`, `users.password_changed_at`
 
 ```sql
+-- One-time reset tokens (self-service or admin-initiated)
 CREATE TABLE password_reset_tokens (
     id            UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     user_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -82,36 +86,136 @@ CREATE TABLE password_reset_tokens (
 
 CREATE INDEX idx_pwreset_user_id ON password_reset_tokens(user_id);
 CREATE INDEX idx_pwreset_expires_at ON password_reset_tokens(expires_at);
+CREATE INDEX idx_pwreset_created_by ON password_reset_tokens(created_by) WHERE created_by IS NOT NULL;
+
+-- Per-(email, IP) probe tracking for rate-limiting BEFORE user lookup,
+-- so unknown emails are throttled identically to known ones (preserves
+-- email enumeration resistance).
+CREATE TABLE password_reset_attempts (
+    id            UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    email_hash    TEXT NOT NULL,               -- SHA-256 of lowercased email
+    ip            TEXT NOT NULL,
+    attempted_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_pwreset_attempts_email_hash_time ON password_reset_attempts(email_hash, attempted_at);
+CREATE INDEX idx_pwreset_attempts_ip_time ON password_reset_attempts(ip, attempted_at);
+
+-- Forced-change flag for the admin temp-password fallback (§5.4).
+ALTER TABLE users ADD COLUMN must_change_password BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- For audit / future password-rotation policies.
+ALTER TABLE users ADD COLUMN password_changed_at TIMESTAMPTZ;
 ```
 
+**Token rules:**
 - Raw token = 64-char hex (32 random bytes, `secrets.token_hex(32)`). Stored only as SHA-256 hex — same pattern as `sessions.token_hash`.
-- Single-use: `used_at` flips to `now()` on consumption inside the same transaction that updates the password.
+- Single-use: claimed atomically (see §4.6).
 - TTL 1 hour (`expires_at = now() + 1 hour`).
-- Issuing a new token does NOT invalidate prior unused tokens — they expire on their own. (Acceptable: each is single-use and short-lived.)
-- A periodic cleanup is unnecessary at the 5-50 user scale; if needed later, a `DELETE FROM password_reset_tokens WHERE expires_at < now() - interval '7 days'` cron will do.
+- **Prior unused tokens for the same user are invalidated when a new token is issued** (`UPDATE password_reset_tokens SET used_at = now() WHERE user_id = %s AND used_at IS NULL`). Single-current-token policy; simpler operational mental model than letting them expire on their own.
+- Periodic cleanup is unnecessary at the 5-50 user scale; if needed later, a `DELETE FROM password_reset_tokens WHERE expires_at < now() - interval '7 days'` cron will do. Same for `password_reset_attempts` with a tighter window (e.g. `attempted_at < now() - interval '24 hours'`).
 
 ### 4.4 Shared password-change core (`app/auth/password.py`)
 
 ```python
-def change_password(user_id: UUID, new_password: str, *, conn: Connection) -> None:
-    """Update password_hash, bump token_version, delete sessions. Atomic."""
+def change_password(
+    user_id: UUID,
+    new_password: str,
+    *,
+    conn: Connection,
+    must_change: bool = False,
+) -> None:
+    """Update password_hash, bump token_version, delete sessions. Atomic.
+
+    Caller passes ``must_change=True`` only for the admin temp-password
+    flow (§5.4); all other paths (self-service forgot, /profile/password,
+    admin email-link) set it to FALSE so the user is not forced to
+    change again.
+    """
     pw_hash = bcrypt.hashpw(new_password.encode(), bcrypt.gensalt()).decode()
     with conn.transaction():
         conn.execute(
-            "UPDATE users SET password_hash = %s, token_version = token_version + 1 "
+            "UPDATE users SET "
+            "  password_hash = %s, "
+            "  token_version = token_version + 1, "
+            "  must_change_password = %s, "
+            "  password_changed_at = now() "
             "WHERE id = %s",
-            (pw_hash, user_id),
+            (pw_hash, must_change, user_id),
         )
         conn.execute("DELETE FROM sessions WHERE user_id = %s", (user_id,))
 ```
 
-Used by all three flows. Caller is responsible for validation, audit logging, and consuming the reset token (when applicable).
+Used by all three flows. Caller is responsible for validation, audit logging, and consuming the reset token (when applicable). The caller's HTTP handler is also responsible for clearing the browser's `access_token` and `refresh_token` cookies on the redirect — see §4.7.
 
 ### 4.5 Password validation (extended)
 
 `validate_password(password: str, *, email: str | None = None) -> str | None`:
 - Existing: ≥8 chars, ≥1 uppercase, ≥1 digit.
 - New: if `email` given, the local-part (before `@`) lowercased must not appear as a substring in the lowercased password. Estonian error: `"Parool ei tohi sisaldada teie e-posti aadressi"`.
+
+### 4.6 Atomic reset-token consumption
+
+Pre-check + later update creates a race where two concurrent submissions of the same token can both pass validation and apply two password changes. The implementation MUST claim the token in a single SQL statement:
+
+```sql
+UPDATE password_reset_tokens
+   SET used_at = now()
+ WHERE token_hash = %s
+   AND used_at IS NULL
+   AND expires_at > now()
+RETURNING user_id, created_by;
+```
+
+The handler:
+1. Runs the UPDATE inside the same transaction as `change_password()`.
+2. If `RETURNING` produces zero rows → token is missing/expired/already used → render the invalid-token page.
+3. If `RETURNING` produces a row → use the returned `user_id` to call `change_password()`, then commit.
+4. Same transaction; PostgreSQL serializes concurrent UPDATEs of the same row, so only one writer claims the token.
+
+### 4.7 Authenticated middleware skip paths and cookie clearing
+
+The forgot/reset routes are public — the user is by definition not logged in. They MUST be added to `app/auth/middleware.py::SKIP_PATHS`:
+
+```python
+SKIP_PATHS: list[str] = [
+    r"/auth/login",
+    r"/auth/forgot",          # NEW
+    r"/auth/reset/.*",        # NEW
+    r"/static/.*",
+    ...  # unchanged
+]
+```
+
+Without this, an unauthenticated user clicking the reset link would be 303-redirected to `/auth/login` before the reset handler runs.
+
+After every successful password change (all three flows), the redirect response MUST clear the browser's auth cookies via `clear_auth_cookie(resp, "access_token")` and `clear_auth_cookie(resp, "refresh_token")`. Otherwise:
+- Old cookies remain in the browser.
+- The next request hits `auth_before`, which finds the now-stale access token, fails `tv` check (since `change_password()` bumped `token_version`), tries silent refresh, fails (sessions deleted), redirects to `/auth/login` anyway.
+- This works, but it makes the post-change UX one extra round-trip and leaves the dead refresh cookie around. Clearing them explicitly is cleaner and avoids any "stale cookie" confusion in logs.
+
+### 4.8 `must_change_password` enforcement
+
+`auth_before` middleware: after authenticating, if `req.scope['auth']['must_change_password']` is `True` AND `req.url.path` is not `/profile/password`, `/auth/logout`, or under `/static/.*` / `/api/health`, return a `RedirectResponse('/profile/password', 303)`.
+
+The `must_change_password` flag is fetched in the same DB read as `token_version` / `is_active` (already happening in `JWTAuthProvider.get_current_user`). Adding it to the existing SELECT keeps middleware overhead at one indexed read per request.
+
+`change_password(..., must_change=False)` clears the flag automatically in its UPDATE, so completing `/profile/password` releases the user.
+
+### 4.9 CSRF posture
+
+The project does not currently install a CSRF middleware (verified at `app/chat/handlers.py:31-36` and `app/auth/middleware.py`). Existing protection is `SameSite=Lax` on the auth cookies (verified at `app/auth/cookies.py:22`), which prevents most cross-origin cookie-bearing POSTs in modern browsers.
+
+For the new password flows, the inherent protections per flow are:
+
+| Flow | CSRF mitigation in addition to SameSite=Lax |
+|---|---|
+| `/auth/forgot` (POST) | Pre-auth, no session to hijack. Worst-case attacker triggers a reset email to a known user (annoying, but the recipient must still click the link to act). Rate-limited. |
+| `/auth/reset/<token>` (POST) | The token in the URL is a per-request secret an attacker cannot guess. Functions as the CSRF token. |
+| `/profile/password` (POST) | Requires `current_password` in the body — an attacker cannot supply this without already knowing it. |
+| `/admin/users/{id}/reset_email` and `/reset_temp` | Most exposed. Currently relies on SameSite=Lax + admin-only authorization. |
+
+**Decision for this spec:** these flows ship with the project's existing SameSite-Lax-only posture. A CSRF middleware (e.g. `starlette-csrf`) is a separate, codebase-wide enhancement that should be evaluated as its own work item — wiring it in only for the four new admin-reset POSTs would create an inconsistent posture and miss the rest of the admin surface (role change, deactivate, etc.) which is equally exposed. **Open question:** confirm the SameSite-only posture is acceptable before this spec is approved (see §12).
 
 ## 5. Flows
 
@@ -123,23 +227,28 @@ Used by all three flows. Caller is responsible for validation, audit logging, an
 GET  /auth/forgot                    → form (email field only)
 POST /auth/forgot  (email)
   ├─ validate email format
-  ├─ rate-limit check (see §6)
+  ├─ INSERT row into password_reset_attempts (email_hash, ip)  (always — known and unknown emails alike)
+  ├─ COUNT recent rows from password_reset_attempts:
+  │   ├─ if >3 within last hour for this email_hash → render generic success page (do not send)
+  │   └─ if >10 within last hour for this ip        → render generic success page (do not send)
   ├─ look up active user with that email
-  │   ├─ user found     → generate token, store hash, send Postmark email with /auth/reset/<token>
-  │   └─ user not found → no-op (BUT same response)
-  └─ render: "Kui see e-post on registreeritud, saatsime parooli lähtestamise lingi"
+  │   ├─ user found     → invalidate prior unused tokens for user, generate new token, send Postmark email with /auth/reset/<token>
+  │   └─ user not found → no-op
+  └─ render: "Kui see e-post on registreeritud, saatsime parooli lähtestamise lingi" (always the same response)
 
 [User opens email] → clicks link → GET /auth/reset/<token>
-  ├─ token row missing / expired / used → "Link on aegunud või vigane" page
-  └─ valid                              → form (new password + confirm)
+  ├─ pre-check token row (read-only, used for rendering): missing / expired / used → "Link on aegunud või vigane" page
+  └─ valid                                                                          → form (new password + confirm)
 
 POST /auth/reset/<token>  (new_password, new_password_confirm)
-  ├─ token re-check (expired/used race-safe)
   ├─ validate password (incl. email substring check)
   ├─ confirm matches
-  ├─ TX: change_password() + mark token used_at
+  ├─ TX:
+  │   ├─ atomic UPDATE password_reset_tokens SET used_at = now() WHERE token_hash = % AND used_at IS NULL AND expires_at > now() RETURNING user_id  (§4.6)
+  │   ├─ if zero rows returned → render invalid-token page; do NOT change password
+  │   └─ change_password(user_id, new_password, must_change=False)
   ├─ audit log: user.password_reset (self)
-  └─ redirect /auth/login with success flash
+  └─ redirect /auth/login with cleared auth cookies + success flash
 ```
 
 ### 5.2 Change password while logged-in
@@ -171,11 +280,13 @@ Flow:
 
 ### 5.4 Admin reset (path A — temporary password, fallback)
 
-UI: secondary action "Määra ajutine parool" on the same admin user-row, opens a small form (admin types a new password).
+UI: secondary action "Määra ajutine parool" on the same admin reset page (§7.5), opens a focused form (admin types a new password). Used only when the target user has no email access.
 
 - `POST /admin/users/{user_id}/reset_temp` (system) / `POST /org/users/{user_id}/reset_temp` (org).
 - Validate password (admin's input must satisfy `validate_password(pw, email=target_email)`).
-- TX: `change_password()`. Audit log: `user.password_reset_initiated` with `{target_user_id, mode: "temp"}`.
+- TX: `change_password(target_user_id, new_password, must_change=True)`. The `must_change=True` flag forces the target user to change the password on their next login (§4.8) — admins must not retain knowledge of the long-term password.
+- Audit log: `user.password_reset_initiated` with `{target_user_id, mode: "temp"}`.
+- Audit log on completion: `user.password_change` with `{forced: true}` is automatically written by the `/profile/password` POST handler since `must_change_password` was true at that point. This gives admins a clean audit trail confirming the user picked their own password and the temp window closed.
 - Show the temp password ONCE on the redirect target page (flash + a one-time reveal block) so the admin can copy it. Do NOT email the temp password.
 
 ### 5.5 Self-service "Set new password" (used by §5.1 reset)
@@ -186,19 +297,22 @@ The reset-link landing page is its own route (`/auth/reset/<token>`), shared onl
 
 | Control | Implementation |
 |---|---|
-| Token confidentiality | 32 random bytes hex, SHA-256-stored, never logged in plaintext |
-| Single-use | `used_at` flipped in same TX as password update |
+| Token confidentiality | 32 random bytes hex (`secrets.token_hex(32)`), SHA-256-stored, never logged in plaintext |
+| Atomic single-use | `UPDATE … SET used_at = now() WHERE used_at IS NULL AND expires_at > now() RETURNING user_id` (§4.6) — concurrent submissions of the same token cannot both succeed |
 | Short TTL | 1 hour |
-| Email enumeration safe | Same response on found/not-found in `/auth/forgot` |
-| Rate limit forgot | 3 requests / email / hour (DB-backed counter on `password_reset_tokens` rows) AND 10 / IP / hour (in-memory leaky bucket; small scale acceptable) |
-| Rate limit reset | 5 / token / hour (defensive — token is single-use anyway) |
+| Single-current-token | Issuing a new token marks all prior unused tokens for that user as used (§4.3) — simpler operational mental model |
+| Email enumeration safe | Same response on found/not-found in `/auth/forgot`; rate limit applied BEFORE user lookup (per-email-hash and per-IP) so unknown emails are throttled identically to known ones |
+| Rate limit forgot | 3 requests / `email_hash` / hour AND 10 / IP / hour, both DB-backed via `password_reset_attempts` (§4.3); rows recorded for every attempt regardless of whether the email is in `users` |
+| Rate limit reset | Token is single-use; no separate counter needed — the atomic UPDATE caps usage at one |
 | Bcrypt cost | Default `bcrypt.gensalt()` (12 rounds) |
-| Session revocation | All flows: bump `token_version` + delete `sessions` rows |
-| Admin reset CSRF | Existing CSRF protection on POST forms (already in `app/ui/forms/app_form.py`) |
+| Session revocation | All flows: `change_password()` bumps `token_version` + deletes `sessions` rows + sets `password_changed_at`; HTTP handlers additionally clear `access_token` / `refresh_token` cookies on the redirect (§4.7) |
+| Forced re-change for temp pw | `users.must_change_password = TRUE` is set by the admin temp-password flow (§5.4); middleware redirects every authenticated request to `/profile/password` until the user picks their own password (§4.8) |
+| CSRF posture | Inherits the project's existing `SameSite=Lax` cookie posture (`app/auth/cookies.py:22`); per-flow analysis in §4.9. CSRF middleware is a separate, codebase-wide enhancement — open question §12 |
 | Authorization for admin reset | Reuses `require_role` decorator + #634 scope checks (`role in ORG_ASSIGNABLE_ROLES`) |
-| Audit logging | `user.password_reset_initiated` (admin) and `user.password_change` / `user.password_reset` (self), with `created_by` and target user IDs |
+| Audit logging | `user.password_reset_initiated` (admin, with `mode` ∈ `{email, temp}`), `user.password_change` (self, with optional `forced: true`), `user.password_reset` (self via reset link); all entries include `created_by` and target user IDs |
+| Public-route auth | `/auth/forgot` and `/auth/reset/.*` added to `SKIP_PATHS` in `app/auth/middleware.py` (§4.7) |
 | Secret in URL | The reset token IS in the URL — necessary for password-reset UX. Mitigated by short TTL, single use, hash storage, and the fact that the email-mailbox owner is implicitly trusted |
-| Stub-mode safety | `StubProvider` is automatic when `APP_ENV != production`; production deploy that's missing `POSTMARK_API_TOKEN` fails loudly at startup (mirrors LLM pattern) |
+| Stub-mode safety | `StubProvider` is used in dev/test/CI; production (`APP_ENV=production`) without `POSTMARK_API_TOKEN` raises at first call so deployment fails loudly. Production never silently falls back to the stub (§4.2) |
 
 ## 7. UI/UX changes
 
@@ -248,6 +362,7 @@ The reset-link landing page is its own route (`/auth/reset/<token>`), shared onl
 | New pw label | `Uus parool` |
 | Confirm pw label | `Korda uut parooli` |
 | Wrong current pw | `Praegune parool on vale.` |
+| Forced-change banner (when `must_change_password` is true) | `Administraator on lähtestanud teie parooli. Palun määrake uus parool jätkamiseks.` |
 | Pw mismatch | `Paroolid ei kattu.` |
 | Pw contains email | `Parool ei tohi sisaldada teie e-posti aadressi.` |
 | Change success | `Parool on muudetud. Palun logi uuesti sisse.` |
@@ -277,13 +392,14 @@ All of these go into Coolify env config; they remain absent in `.env.example` (w
 
 ### 10.1 Unit / integration tests (pytest)
 
-- `tests/test_password_change.py` — `change_password()` core: bcrypt hash present, `token_version` bumped, sessions deleted, transactional rollback on failure.
-- `tests/test_password_validation.py` — extended `validate_password()` rejects email-substring; ASCII-only check still works.
-- `tests/test_auth_forgot_routes.py` — `/auth/forgot` rate limits, generic response on unknown email, token row created with hash + TTL.
-- `tests/test_auth_reset_routes.py` — `/auth/reset/<token>` invalid/expired/used; success path; race condition (concurrent uses → only one wins).
-- `tests/test_profile_password.py` — wrong current pw rejected; matching new + confirm required; redirect to login on success.
-- `tests/test_admin_password_reset.py` — system admin can reset any user; org admin scope guards (cannot reset admin/org_admin even in same org); audit log entries written.
-- `tests/test_email_provider.py` — `StubProvider` returns without network; `PostmarkProvider` lazy-init mock.
+- `tests/test_password_change.py` — `change_password()` core: bcrypt hash written, `token_version` bumped, sessions deleted, `password_changed_at` set, `must_change_password` set/cleared per `must_change` arg, transactional rollback on failure.
+- `tests/test_password_validation.py` — extended `validate_password()` rejects email-substring; existing ≥8/upper/digit checks still pass.
+- `tests/test_auth_forgot_routes.py` — `/auth/forgot`: identical generic response for known/unknown emails, `password_reset_attempts` row created in BOTH cases, per-email-hash and per-IP rate limits trigger after threshold, prior unused tokens for the user are invalidated when a new one is issued.
+- `tests/test_auth_reset_routes.py` — `/auth/reset/<token>`: invalid/expired/used renders the invalid-token page; success path clears auth cookies; **concurrent submissions** (two threads call POST with the same token) — only one applies a password change (atomic UPDATE … RETURNING locks the row), the other returns the invalid-token page.
+- `tests/test_profile_password.py` — wrong current pw rejected; new+confirm match required; redirect to `/auth/login` clears auth cookies; `must_change_password = TRUE` users are redirected to `/profile/password` from any other authenticated route until they complete the change.
+- `tests/test_admin_password_reset.py` — `/reset_email` and `/reset_temp` for both system and org admin; org admin cannot reset admin/org_admin even in same org (#634); temp-password path sets `must_change_password = TRUE`; audit log entries with correct `mode` field.
+- `tests/test_auth_middleware_skip.py` — `/auth/forgot` and `/auth/reset/<token>` are reachable without an `access_token` cookie (regression guard for SKIP_PATHS).
+- `tests/test_email_provider.py` — `get_email_provider()` selection rule covers all four cases (stub-allowed × token-present grid); production without token raises at first send call; `StubProvider` writes to `logger.info` without importing `postmarker`.
 
 ### 10.2 Manual / browser checks
 
@@ -292,14 +408,21 @@ All of these go into Coolify env config; they remain absent in `.env.example` (w
 
 ## 11. Rollout
 
-- Single migration `024_password_reset_tokens.sql` (additive, zero downtime).
-- New routes are additive; nothing existing is changed except minor UI tweaks (login link, profile dropdown, admin user-row actions).
-- Stub provider means the change is safe to merge before Postmark domain is verified; once DNS verifies, production simply sets `POSTMARK_API_TOKEN` and emails start flowing.
+- Single migration `024_password_reset_tokens.sql` (additive, zero downtime). Includes:
+  - `CREATE TABLE password_reset_tokens` with indexes on `user_id`, `expires_at`, `created_by`.
+  - `CREATE TABLE password_reset_attempts` with indexes on `(email_hash, attempted_at)` and `(ip, attempted_at)`.
+  - `ALTER TABLE users ADD COLUMN must_change_password BOOLEAN NOT NULL DEFAULT FALSE`.
+  - `ALTER TABLE users ADD COLUMN password_changed_at TIMESTAMPTZ`.
+- The `auth_before` middleware change to fetch + redirect on `must_change_password` is a one-liner additive change — old tokens issued before the migration will simply have `False` after the column default kicks in, so the redirect never fires for existing users.
+- New routes are additive; existing UI changes are confined to: login-page link, header avatar dropdown new entry, admin user-row new action.
+- Stub provider means the code change is safe to merge before Postmark domain DNS verification finishes; once DNS verifies, production simply sets `POSTMARK_API_TOKEN` and emails start flowing.
+- `SKIP_PATHS` middleware change must be deployed atomically with the route handlers (otherwise `/auth/forgot` and `/auth/reset/...` would 303 to login). They live in the same PR.
 - No data migration needed.
 
 ## 12. Open questions
 
-None — all decisions made during brainstorming.
+1. **CSRF posture (§4.9):** Confirm shipping these flows under the existing `SameSite=Lax`-only posture is acceptable for now, with CSRF middleware tracked as a separate, codebase-wide work item. Alternative is to wire `starlette-csrf` (or equivalent) into all mutating routes as part of this spec — wider scope, larger blast radius, but eliminates the gap on admin reset POSTs in particular.
+2. **Temp-password fallback retention (§5.4):** The `must_change_password` flag mitigates the "admin knows the user's password" risk, but the admin still knows the temp password during the window between reset and first login. If even that window is undesirable, the fallback can be cut and admins routed exclusively through the email-link path. Confirm the temp-password fallback is still wanted.
 
 ## 13. Appendix — Postmark setup snapshot
 
