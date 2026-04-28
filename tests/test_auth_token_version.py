@@ -74,8 +74,8 @@ class TestTokenVersionVerification:
     @patch("app.auth.jwt_provider.JWTAuthProvider._connect")
     def test_matching_token_version_accepted(self, mock_connect: MagicMock):
         conn = MagicMock()
-        # (token_version, is_active, role, org_id)
-        conn.execute.return_value.fetchone.return_value = (0, True, "drafter", None)
+        # (token_version, is_active, role, org_id, must_change_password)
+        conn.execute.return_value.fetchone.return_value = (0, True, "drafter", None, False)
         mock_connect.return_value = _patch_connect(conn)
 
         provider = self._provider()
@@ -91,7 +91,7 @@ class TestTokenVersionVerification:
         """After role change, tv increments; old token must 401."""
         conn = MagicMock()
         # DB says token_version is now 1 (incremented after role change).
-        conn.execute.return_value.fetchone.return_value = (1, True, "drafter", None)
+        conn.execute.return_value.fetchone.return_value = (1, True, "drafter", None, False)
         mock_connect.return_value = _patch_connect(conn)
 
         provider = self._provider()
@@ -102,7 +102,7 @@ class TestTokenVersionVerification:
     @patch("app.auth.jwt_provider.JWTAuthProvider._connect")
     def test_deactivated_user_rejected_even_with_valid_token(self, mock_connect: MagicMock):
         conn = MagicMock()
-        conn.execute.return_value.fetchone.return_value = (0, False, "drafter", None)
+        conn.execute.return_value.fetchone.return_value = (0, False, "drafter", None, False)
         mock_connect.return_value = _patch_connect(conn)
 
         provider = self._provider()
@@ -124,7 +124,7 @@ class TestTokenVersionVerification:
         """If DB role differs from JWT role the token is stale."""
         conn = MagicMock()
         # DB role is drafter, token still claims admin.
-        conn.execute.return_value.fetchone.return_value = (0, True, "drafter", None)
+        conn.execute.return_value.fetchone.return_value = (0, True, "drafter", None, False)
         mock_connect.return_value = _patch_connect(conn)
 
         provider = self._provider()

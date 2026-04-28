@@ -12,6 +12,7 @@ class UserDict(TypedDict):
     full_name: str
     role: str
     org_id: str | None
+    must_change_password: bool
 
 
 class AuthProvider(ABC):
