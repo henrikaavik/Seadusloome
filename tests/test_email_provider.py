@@ -7,6 +7,7 @@ import pytest
 
 from app.email.service import _reset_provider_for_tests, get_email_provider
 from app.email.stub_provider import StubProvider
+from app.email.templates import password_reset, password_reset_admin
 
 
 def test_stub_provider_logs_subject_and_body(caplog):
@@ -82,3 +83,26 @@ def test_provider_raises_in_production_without_token(monkeypatch):
     monkeypatch.delenv("POSTMARK_API_TOKEN", raising=False)
     with pytest.raises(RuntimeError, match="POSTMARK_API_TOKEN"):
         get_email_provider()
+
+
+def test_password_reset_template_estonian():
+    subject, html, text = password_reset(
+        full_name="Mari Maasikas",
+        reset_url="https://example.com/auth/reset/abc",
+    )
+    assert "Seadusloome" in subject
+    assert "Mari Maasikas" in html
+    assert "https://example.com/auth/reset/abc" in html
+    assert "https://example.com/auth/reset/abc" in text
+    assert "1 tunni" in text  # 1-hour TTL mentioned
+
+
+def test_password_reset_admin_template_estonian():
+    subject, html, text = password_reset_admin(
+        full_name="Mari",
+        reset_url="https://example.com/auth/reset/xyz",
+        admin_name="Henrik Aavik",
+    )
+    assert "Administraator" in subject
+    assert "Henrik Aavik" in html
+    assert "https://example.com/auth/reset/xyz" in text
