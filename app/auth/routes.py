@@ -65,6 +65,7 @@ def _login_form(email: str = "", error: str | None = None):
                     type="password",
                     required=True,
                 ),
+                P(A("Unustasid parooli?", href="/auth/forgot"), cls="forgot-link"),
                 Button("Logi sisse", type="submit", variant="primary"),
                 method="post",
                 action="/auth/login",

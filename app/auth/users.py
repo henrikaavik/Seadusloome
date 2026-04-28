@@ -258,8 +258,20 @@ def _user_table(users: list[dict], *, show_org: bool, base_path: str):  # type: 
                 "Muuda rolli",
                 href=f"{base_path}/{row['id']}/role",
                 cls="btn btn-secondary btn-sm",
-            )
+            ),
         ]
+        # Reset password link — gated by active status and (for org admin) role.
+        show_reset = base_path == "/admin/users" or (
+            base_path == "/org/users" and row["role"] in ORG_ASSIGNABLE_ROLES
+        )
+        if row["_is_active"] and show_reset:
+            actions.append(
+                A(
+                    "Lähtesta parool",
+                    href=f"{base_path}/{row['id']}/reset",
+                    cls="btn btn-secondary btn-sm",
+                )
+            )
         if row["_is_active"]:
             actions.append(
                 AppForm(
