@@ -11,6 +11,7 @@ from starlette.responses import RedirectResponse
 
 from app.auth.audit import log_action
 from app.auth.organizations import list_orgs
+from app.auth.password import validate_password  # noqa: F401 — re-export for callers
 from app.auth.roles import require_role
 from app.db import get_connection as _connect
 from app.ui.data.data_table import Column, DataTable
@@ -38,17 +39,6 @@ _ROLE_LABELS = {
 def _hash_password(password: str) -> str:
     """Hash *password* with bcrypt."""
     return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-
-
-def validate_password(password: str) -> str | None:
-    """Return an error message if *password* is too weak, or ``None`` if valid."""
-    if len(password) < 8:
-        return "Parool peab olema vähemalt 8 tähemärki pikk"
-    if not any(c.isupper() for c in password):
-        return "Parool peab sisaldama vähemalt ühte suurtähte"
-    if not any(c.isdigit() for c in password):
-        return "Parool peab sisaldama vähemalt ühte numbrit"
-    return None
 
 
 def count_admins() -> int:
