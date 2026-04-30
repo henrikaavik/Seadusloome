@@ -9,7 +9,6 @@ import pytest
 from app.db import get_connection
 
 
-@pytest.mark.integration
 def test_password_reset_tokens_table_exists():
     if not os.getenv("DATABASE_URL"):
         pytest.skip("integration test — DATABASE_URL not set")
@@ -30,7 +29,6 @@ def test_password_reset_tokens_table_exists():
     } <= cols
 
 
-@pytest.mark.integration
 def test_password_reset_attempts_table_exists():
     if not os.getenv("DATABASE_URL"):
         pytest.skip("integration test — DATABASE_URL not set")
