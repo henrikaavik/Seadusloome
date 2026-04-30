@@ -26,6 +26,8 @@ def _stub_email(monkeypatch):
 
 @pytest.fixture
 def real_user():
+    if not os.getenv("DATABASE_URL"):
+        pytest.skip("integration test — DATABASE_URL not set")
     user_id = uuid.uuid4()
     email = f"forgot-{user_id}@example.com"
     pw_hash = bcrypt.hashpw(b"Initial1A", bcrypt.gensalt()).decode()

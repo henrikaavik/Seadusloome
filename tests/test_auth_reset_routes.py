@@ -17,6 +17,8 @@ def _connect() -> psycopg.Connection:
 
 @pytest.fixture
 def real_user_with_token():
+    if not os.getenv("DATABASE_URL"):
+        pytest.skip("integration test — DATABASE_URL not set")
     user_id = uuid.uuid4()
     email = f"reset-{user_id}@example.com"
     pw_hash = bcrypt.hashpw(b"Initial1A", bcrypt.gensalt()).decode()
