@@ -102,15 +102,32 @@ def test_change_password_deletes_sessions_for_user():
     assert args == ("user-42",)
 
 
-def test_change_password_commits_on_success():
+def test_change_password_runs_inside_transaction_block():
+    """The UPDATE + DELETE must run inside a single ``conn.transaction()``
+    block so a partial failure rolls back atomically.
+
+    The donor (``app.auth.password``) uses psycopg3's
+    ``with conn.transaction():`` context manager rather than explicit
+    ``conn.commit()`` / ``conn.rollback()`` calls. The contract — atomic
+    rotation — is the same; the implementation idiom is the more modern
+    psycopg3 form.
+    """
     conn = _make_conn()
     change_password("user-1", "NewPassword1", conn=conn, must_change=False)
-    conn.commit.assert_called_once()
-    conn.rollback.assert_not_called()
+    # Entered the transaction context manager exactly once.
+    conn.transaction.assert_called_once()
+    conn.transaction.return_value.__enter__.assert_called_once()
+    conn.transaction.return_value.__exit__.assert_called_once()
 
 
-def test_change_password_rolls_back_on_failure():
-    """If the DELETE fails, the UPDATE must be rolled back atomically."""
+def test_change_password_propagates_failure_for_rollback():
+    """If the DELETE fails, the exception must propagate so the
+    ``with conn.transaction():`` context manager rolls back the UPDATE.
+
+    psycopg3's ``transaction()`` context manager issues BEGIN on enter
+    and either COMMIT on clean exit or ROLLBACK when an exception
+    propagates out of the ``with`` block.
+    """
     conn = _make_conn()
     # First execute (UPDATE) succeeds; second (DELETE) raises.
     conn.execute.side_effect = [MagicMock(), RuntimeError("simulated failure")]
@@ -118,8 +135,11 @@ def test_change_password_rolls_back_on_failure():
     with pytest.raises(RuntimeError, match="simulated failure"):
         change_password("user-1", "NewPassword1", conn=conn, must_change=False)
 
-    conn.rollback.assert_called_once()
-    conn.commit.assert_not_called()
+    # Transaction was entered, then __exit__ was called with the exception
+    # tuple (rollback path) — first positional arg is the exc_type, not None.
+    conn.transaction.return_value.__exit__.assert_called_once()
+    exit_args = conn.transaction.return_value.__exit__.call_args[0]
+    assert exit_args[0] is RuntimeError
 
 
 def test_change_password_targets_correct_user_id():
