@@ -51,6 +51,8 @@ def test_get_reset_page_renders_for_valid_token(client, real_user_with_token):
 
 
 def test_get_reset_page_invalid_token(client):
+    if not os.getenv("DATABASE_URL"):
+        pytest.skip("integration test — DATABASE_URL not set")
     resp = client.get("/auth/reset/notarealtoken")
     assert resp.status_code == 200
     assert "aegunud või vigane" in resp.text

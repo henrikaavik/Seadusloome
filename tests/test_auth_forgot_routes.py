@@ -64,6 +64,8 @@ def test_get_forgot_page_renders(client):
 
 
 def test_post_forgot_unknown_email_renders_generic_success(client):
+    if not os.getenv("DATABASE_URL"):
+        pytest.skip("integration test — DATABASE_URL not set")
     resp = client.post("/auth/forgot", data={"email": "nobody@example.com"})
     assert resp.status_code == 200
     assert "Kui see e-post on registreeritud" in resp.text
@@ -88,6 +90,8 @@ def test_post_forgot_known_email_creates_token_and_logs_email(client, real_user,
 
 def test_post_forgot_records_attempt_for_unknown_email(client):
     """Unknown emails still record an attempt row — used by rate limiter."""
+    if not os.getenv("DATABASE_URL"):
+        pytest.skip("integration test — DATABASE_URL not set")
     resp = client.post("/auth/forgot", data={"email": "rate-limit@example.com"})
     assert resp.status_code == 200
     with _connect() as conn:
