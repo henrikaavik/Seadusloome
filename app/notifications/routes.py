@@ -363,7 +363,7 @@ def api_notifications_partial(req: Request):
 
     return Div(  # noqa: F405
         NotificationList(notifications, compact=True),
-        A("Vaata koiki", href="/notifications", cls="notification-view-all"),  # noqa: F405
+        A("Vaata kõiki", href="/notifications", cls="notification-view-all"),  # noqa: F405
         cls="notification-dropdown-content",
     )
 

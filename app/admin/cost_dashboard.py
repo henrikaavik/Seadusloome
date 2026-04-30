@@ -10,7 +10,6 @@ import os
 from fasthtml.common import *  # noqa: F403
 from starlette.requests import Request
 
-from app.admin._shared import _tooltip
 from app.db import get_connection as _connect
 from app.ui.data.data_table import Column, DataTable
 from app.ui.layout import PageShell
@@ -157,177 +156,208 @@ def _progress_bar(value: float, maximum: float) -> object:
 
 
 def admin_cost_page(req: Request):
-    """GET /admin/costs -- LLM cost dashboard page."""
+    """GET /admin/costs -- LLM cost dashboard page.
+
+    Helpers are imported as locals inside the function body so the page
+    works correctly when rebound by the ``app.templates.admin_dashboard``
+    shim — that shim swaps ``__globals__`` to its own module dict, which
+    means private helpers (``_progress_bar``, ``_FEATURE_LABELS``,
+    ``_tooltip``) cannot be resolved via the function's global namespace.
+    The whole body is wrapped in a try/except so any backend failure
+    renders a styled error banner instead of bubbling up as a raw 500.
+    """
     auth = req.scope.get("auth")
     theme = get_theme_from_request(req)
+    try:
+        from app.admin._shared import _tooltip
+        from app.admin.cost_dashboard import (
+            _FEATURE_LABELS,
+            _get_cost_by_feature,
+            _get_cost_by_model,
+            _get_cost_by_org,
+            _get_monthly_trend,
+            _progress_bar,
+        )
 
-    org_costs = _get_cost_by_org()
-    feature_costs = _get_cost_by_feature()
-    model_costs = _get_cost_by_model()
-    monthly = _get_monthly_trend()
+        org_costs = _get_cost_by_org()
+        feature_costs = _get_cost_by_feature()
+        model_costs = _get_cost_by_model()
+        monthly = _get_monthly_trend()
 
-    # ---- Card 1: Cost by org with progress bars ----
-    if org_costs:
-        org_columns = [
-            Column(key="org_name", label="Organisatsioon", sortable=False),
-            Column(key="cost", label="Kulu (USD)", sortable=False),
-            Column(key="budget", label="Eelarve (USD)", sortable=False),
-            Column(key="progress", label="Kasutus", sortable=False),
-            Column(key="pct", label="Protsent", sortable=False),
-        ]
-        org_rows = []
-        for oc in org_costs:
-            pct = (oc["cost_usd"] / oc["budget_usd"] * 100) if oc["budget_usd"] > 0 else 0
-            variant = "danger" if pct >= 90 else ("warning" if pct >= 70 else "default")
-            org_rows.append(
-                {
-                    "org_name": oc["org_name"],
-                    "cost": f"${oc['cost_usd']:.4f}",
-                    "budget": f"${oc['budget_usd']:.2f}",
-                    "progress": _progress_bar(oc["cost_usd"], oc["budget_usd"]),
-                    "pct": Badge(f"{pct:.0f}%", variant=variant),
-                }
+        # ---- Card 1: Cost by org with progress bars ----
+        if org_costs:
+            org_columns = [
+                Column(key="org_name", label="Organisatsioon", sortable=False),
+                Column(key="cost", label="Kulu (USD)", sortable=False),
+                Column(key="budget", label="Eelarve (USD)", sortable=False),
+                Column(key="progress", label="Kasutus", sortable=False),
+                Column(key="pct", label="Protsent", sortable=False),
+            ]
+            org_rows = []
+            for oc in org_costs:
+                pct = (oc["cost_usd"] / oc["budget_usd"] * 100) if oc["budget_usd"] > 0 else 0
+                variant = "danger" if pct >= 90 else ("warning" if pct >= 70 else "default")
+                org_rows.append(
+                    {
+                        "org_name": oc["org_name"],
+                        "cost": f"${oc['cost_usd']:.4f}",
+                        "budget": f"${oc['budget_usd']:.2f}",
+                        "progress": _progress_bar(oc["cost_usd"], oc["budget_usd"]),
+                        "pct": Badge(f"{pct:.0f}%", variant=variant),
+                    }
+                )
+            org_table: object = DataTable(columns=org_columns, rows=org_rows)
+        else:
+            org_table = P(  # noqa: F405
+                "Organisatsioonide kuluandmed puuduvad.", cls="muted-text"
             )
-        org_table: object = DataTable(columns=org_columns, rows=org_rows)
-    else:
-        org_table = P("Organisatsioonide kuluandmed puuduvad.", cls="muted-text")  # noqa: F405
 
-    org_card = Card(
-        CardHeader(
-            H3(  # noqa: F405
-                "Kulu organisatsioonide kaupa",
-                _tooltip("Jooksva kuu kulu vs eelarve organisatsioonide loikes"),
-                cls="card-title",
-            )
-        ),
-        CardBody(org_table),
-    )
-
-    # ---- Card 2: Cost by feature ----
-    if feature_costs:
-        max_feature_cost = max(f["cost_usd"] for f in feature_costs) or 1
-        feat_columns = [
-            Column(key="feature", label="Funktsioon", sortable=False),
-            Column(key="tokens", label="Tokeneid", sortable=False),
-            Column(key="cost", label="Kulu (USD)", sortable=False),
-            Column(key="bar", label="Osakaal", sortable=False),
-        ]
-        feat_rows = []
-        for fc in feature_costs:
-            label = _FEATURE_LABELS.get(fc["feature"], fc["feature"])
-            total_tokens = fc["tokens_input"] + fc["tokens_output"]
-            feat_rows.append(
-                {
-                    "feature": label,
-                    "tokens": f"{total_tokens:,}",
-                    "cost": f"${fc['cost_usd']:.4f}",
-                    "bar": _progress_bar(fc["cost_usd"], max_feature_cost),
-                }
-            )
-        feat_table: object = DataTable(columns=feat_columns, rows=feat_rows)
-    else:
-        feat_table = P("Funktsiooni kuluandmed puuduvad.", cls="muted-text")  # noqa: F405
-
-    feat_card = Card(
-        CardHeader(
-            H3(  # noqa: F405
-                "Kulu funktsioonide kaupa",
-                _tooltip("Kulu jaotus funktsioonide loikes jooksval kuul"),
-                cls="card-title",
-            )
-        ),
-        CardBody(feat_table),
-    )
-
-    # ---- Card 3: Cost by model ----
-    if model_costs:
-        model_columns = [
-            Column(key="model", label="Mudel", sortable=False),
-            Column(key="tokens_input", label="Sisend-tokenid", sortable=False),
-            Column(key="tokens_output", label="Valjund-tokenid", sortable=False),
-            Column(key="cost", label="Kulu (USD)", sortable=False),
-        ]
-        model_rows = [
-            {
-                "model": mc["model"],
-                "tokens_input": f"{mc['tokens_input']:,}",
-                "tokens_output": f"{mc['tokens_output']:,}",
-                "cost": f"${mc['cost_usd']:.4f}",
-            }
-            for mc in model_costs
-        ]
-        model_table: object = DataTable(columns=model_columns, rows=model_rows)
-    else:
-        model_table = P("Mudeli kuluandmed puuduvad.", cls="muted-text")  # noqa: F405
-
-    model_card = Card(
-        CardHeader(
-            H3(  # noqa: F405
-                "Kulu mudelite kaupa",
-                _tooltip("Sonnet vs Opus vs Haiku tokenid ja kulu"),
-                cls="card-title",
-            )
-        ),
-        CardBody(model_table),
-    )
-
-    # ---- Card 4: Monthly trend ----
-    if monthly:
-        trend_columns = [
-            Column(key="month", label="Kuu", sortable=False),
-            Column(key="tokens_input", label="Sisend-tokenid", sortable=False),
-            Column(key="tokens_output", label="Valjund-tokenid", sortable=False),
-            Column(key="cost", label="Kulu (USD)", sortable=False),
-        ]
-        trend_rows = [
-            {
-                "month": (
-                    m["month"].strftime("%m/%Y")
-                    if hasattr(m["month"], "strftime")
-                    else str(m["month"])
-                ),
-                "tokens_input": f"{m['tokens_input']:,}",
-                "tokens_output": f"{m['tokens_output']:,}",
-                "cost": f"${m['cost_usd']:.4f}",
-            }
-            for m in monthly
-        ]
-        trend_table: object = DataTable(columns=trend_columns, rows=trend_rows)
-    else:
-        trend_table = P("Igakuised andmed puuduvad.", cls="muted-text")  # noqa: F405
-
-    trend_card = Card(
-        CardHeader(
-            H3(  # noqa: F405
-                "Igakuine trend",
-                _tooltip("Viimased 6 kuud kulu ja tokenite kasutus"),
-                cls="card-title",
-            )
-        ),
-        CardBody(trend_table),
-    )
-
-    content = (
-        H1("LLM kulud", cls="page-title"),  # noqa: F405
-        P(A("\u2190 Tagasi adminipaneelile", href="/admin"), cls="back-link"),  # noqa: F405
-        InfoBox(
-            P(  # noqa: F405
-                "LLM kulude ulevaade naitab jooksva kuu kulusid organisatsioonide, "
-                "funktsioonide ja mudelite loikes ning igakuist trendi."
+        org_card = Card(
+            CardHeader(
+                H3(  # noqa: F405
+                    "Kulu organisatsioonide kaupa",
+                    _tooltip("Jooksva kuu kulu vs eelarve organisatsioonide loikes"),
+                    cls="card-title",
+                )
             ),
-            variant="info",
-            dismissible=True,
-        ),
-        org_card,
-        feat_card,
-        model_card,
-        trend_card,
-    )
+            CardBody(org_table),
+        )
 
-    return PageShell(
-        *content,
-        title="LLM kulud",
-        user=auth,
-        theme=theme,
-        active_nav="/admin",
-    )
+        # ---- Card 2: Cost by feature ----
+        if feature_costs:
+            max_feature_cost = max(f["cost_usd"] for f in feature_costs) or 1
+            feat_columns = [
+                Column(key="feature", label="Funktsioon", sortable=False),
+                Column(key="tokens", label="Tokeneid", sortable=False),
+                Column(key="cost", label="Kulu (USD)", sortable=False),
+                Column(key="bar", label="Osakaal", sortable=False),
+            ]
+            feat_rows = []
+            for fc in feature_costs:
+                label = _FEATURE_LABELS.get(fc["feature"], fc["feature"])
+                total_tokens = fc["tokens_input"] + fc["tokens_output"]
+                feat_rows.append(
+                    {
+                        "feature": label,
+                        "tokens": f"{total_tokens:,}",
+                        "cost": f"${fc['cost_usd']:.4f}",
+                        "bar": _progress_bar(fc["cost_usd"], max_feature_cost),
+                    }
+                )
+            feat_table: object = DataTable(columns=feat_columns, rows=feat_rows)
+        else:
+            feat_table = P(  # noqa: F405
+                "Funktsiooni kuluandmed puuduvad.", cls="muted-text"
+            )
+
+        feat_card = Card(
+            CardHeader(
+                H3(  # noqa: F405
+                    "Kulu funktsioonide kaupa",
+                    _tooltip("Kulu jaotus funktsioonide loikes jooksval kuul"),
+                    cls="card-title",
+                )
+            ),
+            CardBody(feat_table),
+        )
+
+        # ---- Card 3: Cost by model ----
+        if model_costs:
+            model_columns = [
+                Column(key="model", label="Mudel", sortable=False),
+                Column(key="tokens_input", label="Sisend-tokenid", sortable=False),
+                Column(key="tokens_output", label="Valjund-tokenid", sortable=False),
+                Column(key="cost", label="Kulu (USD)", sortable=False),
+            ]
+            model_rows = [
+                {
+                    "model": mc["model"],
+                    "tokens_input": f"{mc['tokens_input']:,}",
+                    "tokens_output": f"{mc['tokens_output']:,}",
+                    "cost": f"${mc['cost_usd']:.4f}",
+                }
+                for mc in model_costs
+            ]
+            model_table: object = DataTable(columns=model_columns, rows=model_rows)
+        else:
+            model_table = P("Mudeli kuluandmed puuduvad.", cls="muted-text")  # noqa: F405
+
+        model_card = Card(
+            CardHeader(
+                H3(  # noqa: F405
+                    "Kulu mudelite kaupa",
+                    _tooltip("Sonnet vs Opus vs Haiku tokenid ja kulu"),
+                    cls="card-title",
+                )
+            ),
+            CardBody(model_table),
+        )
+
+        # ---- Card 4: Monthly trend ----
+        if monthly:
+            trend_columns = [
+                Column(key="month", label="Kuu", sortable=False),
+                Column(key="tokens_input", label="Sisend-tokenid", sortable=False),
+                Column(key="tokens_output", label="Valjund-tokenid", sortable=False),
+                Column(key="cost", label="Kulu (USD)", sortable=False),
+            ]
+            trend_rows = [
+                {
+                    "month": (
+                        m["month"].strftime("%m/%Y")
+                        if hasattr(m["month"], "strftime")
+                        else str(m["month"])
+                    ),
+                    "tokens_input": f"{m['tokens_input']:,}",
+                    "tokens_output": f"{m['tokens_output']:,}",
+                    "cost": f"${m['cost_usd']:.4f}",
+                }
+                for m in monthly
+            ]
+            trend_table: object = DataTable(columns=trend_columns, rows=trend_rows)
+        else:
+            trend_table = P("Igakuised andmed puuduvad.", cls="muted-text")  # noqa: F405
+
+        trend_card = Card(
+            CardHeader(
+                H3(  # noqa: F405
+                    "Igakuine trend",
+                    _tooltip("Viimased 6 kuud kulu ja tokenite kasutus"),
+                    cls="card-title",
+                )
+            ),
+            CardBody(trend_table),
+        )
+
+        content = (
+            H1("LLM kulud", cls="page-title"),  # noqa: F405
+            P(  # noqa: F405
+                A("\u2190 Tagasi adminipaneelile", href="/admin"),  # noqa: F405
+                cls="back-link",
+            ),
+            InfoBox(
+                P(  # noqa: F405
+                    "LLM kulude ulevaade naitab jooksva kuu kulusid organisatsioonide, "
+                    "funktsioonide ja mudelite loikes ning igakuist trendi."
+                ),
+                variant="info",
+                dismissible=True,
+            ),
+            org_card,
+            feat_card,
+            model_card,
+            trend_card,
+        )
+
+        return PageShell(
+            *content,
+            title="LLM kulud",
+            user=auth,
+            theme=theme,
+            active_nav="/admin",
+        )
+    except Exception:
+        logger.exception("Failed to render admin cost page")
+        from app.admin._shared import _render_admin_error_page
+
+        return _render_admin_error_page(title="LLM kulud", user=auth, theme=theme)

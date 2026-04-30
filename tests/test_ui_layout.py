@@ -68,6 +68,7 @@ def test_sidebar_drafter_sees_subset():
     assert "Töölaud" in html
     assert "Uurija" in html
     assert "Eelnõud" in html
+    assert "Koostaja" in html
     assert "Vestlus" in html
     # Hidden from drafter
     assert "Kasutajad" not in html
@@ -152,6 +153,7 @@ def test_topbar_with_user_shows_user_menu_and_nav():
     # Top nav links visible
     assert "Uurija" in html
     assert "Eelnõud" in html
+    assert "Koostaja" in html
     assert "Vestlus" in html
     # Notification bell rendered
     assert "notification-bell" in html

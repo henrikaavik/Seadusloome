@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import TYPE_CHECKING, Any
 
 from starlette.requests import Request
@@ -50,6 +51,21 @@ SKIP_PATHS: list[str] = [
     r"/ws/explorer",
     r"/webhooks/github",
     r"/api/validate/.*",
+]
+
+# Paths an authenticated user with ``must_change_password=True`` may
+# still reach without being bounced to ``/profile/password``. Anything
+# else gets a 303 to ``/profile/password``. Matched with ``re.fullmatch``
+# (same semantics as ``SKIP_PATHS``). ``/auth/logout`` lets the user
+# escape the forced-change flow by signing out; ``/profile/password``
+# (GET + POST) is the page that releases the flag; ``/static/.*`` and
+# ``/api/health`` are infrastructure paths that should never be
+# redirected even mid-flow.
+_MUST_CHANGE_ALLOW_PATHS: list[str] = [
+    r"/profile/password",
+    r"/auth/logout",
+    r"/static/.*",
+    r"/api/health",
 ]
 
 
@@ -126,6 +142,30 @@ def try_refresh_access_token(
     return new_access, new_refresh, dict(user)
 
 
+def _must_change_redirect(req: Request, user: dict[str, Any]) -> Response | None:
+    """Return a 303 to ``/profile/password`` when the user must change their pw.
+
+    Returns ``None`` when the user is allowed to proceed: either the
+    flag is not set, or the request targets one of the
+    ``_MUST_CHANGE_ALLOW_PATHS`` (the password-change page itself,
+    logout, static assets, healthchecks).
+
+    Implements §4.8 of the password-management design and the P0
+    mitigation described in
+    ``docs/2026-04-29-ui-review-seadusloome-live.md``: the seeded
+    admin (``admin@seadusloome.ee``) has ``must_change_password=TRUE``
+    set by migration 024 so they cannot do anything else until they
+    pick a real password.
+    """
+    if not user.get("must_change_password"):
+        return None
+    path = req.url.path
+    for pattern in _MUST_CHANGE_ALLOW_PATHS:
+        if re.fullmatch(pattern, path):
+            return None
+    return RedirectResponse(url="/profile/password", status_code=303)
+
+
 def auth_before(req: Request) -> Response | None:
     """Beforeware: authenticate via JWT cookies, redirect to login if needed.
 
@@ -133,6 +173,9 @@ def auth_before(req: Request) -> Response | None:
     - When the access token is expired but a valid ``refresh_token`` cookie exists,
       transparently issues new tokens and attaches Set-Cookie headers to the
       redirect-to-self response so the browser stores the fresh cookies.
+    - When the authenticated user has ``must_change_password=True`` and the
+      request is not for ``/profile/password`` / ``/auth/logout`` / static /
+      healthchecks, redirects to ``/profile/password``.
     - Returns ``None`` when the user is authenticated (lets the request through).
     - Returns a ``RedirectResponse`` to ``/auth/login`` when unauthenticated.
     """
@@ -146,6 +189,9 @@ def auth_before(req: Request) -> Response | None:
         user = provider.get_current_user(access_token)
         if user is not None:
             req.scope["auth"] = user
+            forced = _must_change_redirect(req, dict(user))
+            if forced is not None:
+                return forced
             return None
 
     # Access token missing or invalid -- attempt silent refresh.

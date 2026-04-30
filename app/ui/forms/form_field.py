@@ -30,6 +30,7 @@ def FormField(
     error: str | None = None,
     validator: str | None = None,
     cls: str = "",
+    input_attrs: dict | None = None,
     **kwargs,
 ):
     """Full form row: label + input + help + error, all linked via IDs.
@@ -40,6 +41,10 @@ def FormField(
 
     The wrapper div gets ``.form-field--error`` when ``error`` is passed,
     so you can style the whole row on validation failure.
+
+    ``input_attrs`` is forwarded to the inner ``<input>`` (e.g. for
+    ``autocomplete``, ``inputmode``, ``oninvalid``); ``**kwargs`` continues
+    to apply to the wrapper ``<div>`` (e.g. ``data-*`` row metadata).
     """
     field_id = f"field-{name}"
     error_id = f"{name}-error"
@@ -67,6 +72,8 @@ def FormField(
             "hx_swap": "outerHTML",
         }
 
+    extra_input_attrs = dict(input_attrs) if input_attrs else {}
+
     input_el = Input(
         name=name,
         type=type,
@@ -78,6 +85,7 @@ def FormField(
         error=bool(error),
         aria_describedby=aria_describedby,
         **htmx_attrs,
+        **extra_input_attrs,
     )
 
     wrapper_cls = f"form-field {cls}".strip()
@@ -121,9 +129,14 @@ def FormTextareaField(
     help: str | None = None,  # noqa: A002
     error: str | None = None,
     cls: str = "",
+    input_attrs: dict | None = None,
     **kwargs,
 ):
-    """FormField variant for a Textarea."""
+    """FormField variant for a Textarea.
+
+    ``input_attrs`` is forwarded to the inner ``<textarea>``;
+    ``**kwargs`` continues to apply to the wrapper ``<div>``.
+    """
     field_id = f"field-{name}"
     error_id = f"{name}-error"
     help_id = f"{name}-help"
@@ -133,6 +146,8 @@ def FormTextareaField(
     if error:
         described_by.append(error_id)
     aria_describedby = " ".join(described_by) if described_by else None
+
+    extra_input_attrs = dict(input_attrs) if input_attrs else {}
 
     textarea = Textarea(
         name=name,
@@ -144,6 +159,7 @@ def FormTextareaField(
         disabled=disabled,
         error=bool(error),
         aria_describedby=aria_describedby,
+        **extra_input_attrs,
     )
 
     wrapper_cls = f"form-field {cls}".strip()
@@ -175,9 +191,14 @@ def FormSelectField(
     help: str | None = None,  # noqa: A002
     error: str | None = None,
     cls: str = "",
+    input_attrs: dict | None = None,
     **kwargs,
 ):
-    """FormField variant for a Select."""
+    """FormField variant for a Select.
+
+    ``input_attrs`` is forwarded to the inner ``<select>``;
+    ``**kwargs`` continues to apply to the wrapper ``<div>``.
+    """
     field_id = f"field-{name}"
     error_id = f"{name}-error"
     help_id = f"{name}-help"
@@ -188,6 +209,8 @@ def FormSelectField(
         described_by.append(error_id)
     aria_describedby = " ".join(described_by) if described_by else None
 
+    extra_input_attrs = dict(input_attrs) if input_attrs else {}
+
     select = Select(
         name=name,
         options=options,
@@ -197,6 +220,7 @@ def FormSelectField(
         disabled=disabled,
         error=bool(error),
         aria_describedby=aria_describedby,
+        **extra_input_attrs,
     )
 
     wrapper_cls = f"form-field {cls}".strip()

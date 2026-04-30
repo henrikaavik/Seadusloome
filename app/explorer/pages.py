@@ -189,9 +189,7 @@ def explorer_page(req: Request):
         # script parsers. JSON natively decodes ``<\/`` back to
         # ``</`` so json.loads still works on the rendered payload.
         payload = json.dumps({"uris": overlay_uris})
-        payload = (
-            payload.replace("</", "<\\/").replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
-        )
+        payload = payload.replace("</", "<\\/").replace(" ", "\\u2028").replace(" ", "\\u2029")
         overlay_tags.append(
             Script(
                 payload,
@@ -234,19 +232,19 @@ def explorer_page(req: Request):
     help_banner = Div(
         Div(
             Span(
-                "\u2139\ufe0f",
+                "ℹ️",
                 cls="info-box-icon",
                 aria_hidden="true",
             ),
             Div(
-                "See on Eesti \u00f5iguse ontoloogia uurija. "
-                "Kl\u00f5psake kategooriatele, et uurida seadusi, kohtuotsuseid "
-                "ja EL-i \u00f5igusakte. Kasutage otsingut konkreetsete "
-                "s\u00e4tete leidmiseks.",
+                "See on Eesti õiguse ontoloogia uurija. "
+                "Klõpsake kategooriatele, et uurida seadusi, kohtuotsuseid "
+                "ja EL-i õigusakte. Kasutage otsingut konkreetsete "
+                "sätete leidmiseks.",
                 cls="info-box-content",
             ),
             Button(
-                "\u00d7",
+                "×",
                 type="button",
                 cls="info-box-dismiss",
                 aria_label="Sulge",
@@ -273,12 +271,12 @@ def explorer_page(req: Request):
                     aria_hidden="true",
                 ),
                 Div(
-                    "N\u00e4pun\u00e4ide: lisage ?draft=ID URL-ile, "
-                    "et n\u00e4ha eeln\u00f5u m\u00f5jutatud \u00fcksusi graafikul.",
+                    "Näpunäide: lisage ?draft=ID URL-ile, "
+                    "et näha eelnõu mõjutatud üksusi graafikul.",
                     cls="info-box-content",
                 ),
                 Button(
-                    "\u00d7",
+                    "×",
                     type="button",
                     cls="info-box-dismiss",
                     aria_label="Sulge",
@@ -298,7 +296,7 @@ def explorer_page(req: Request):
         Head(
             Meta(charset="UTF-8"),
             Meta(name="viewport", content="width=device-width, initial-scale=1.0"),
-            Title("Eesti \u00f5iguse ontoloogia \u2014 Explorer"),
+            Title("Eesti õiguse ontoloogia — Explorer"),
             # D3.js v7
             Script(
                 src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js",
@@ -319,227 +317,244 @@ def explorer_page(req: Request):
             # ----- Help banner -----
             help_banner,
             draft_tip if draft_tip else "",
-            # ----- Top bar -----
-            Div(
-                H1("Eesti \u00f5iguse ontoloogia"),
-                Span("Uurija", cls="badge"),
-                Span("D3.js", cls="badge"),
-                # Search box
+            # ----- Top bar (banner landmark) -----
+            Header(
                 Div(
-                    Input(
-                        id="search-input",
-                        type="text",
-                        placeholder="Otsi seadust, eeln\u00f5u, lahendit\u2026",
+                    H1("Eesti õiguse ontoloogia"),
+                    Span("Uurija", cls="badge"),
+                    Span("D3.js", cls="badge"),
+                    # Search box
+                    Div(
+                        Input(
+                            id="search-input",
+                            type="text",
+                            placeholder="Otsi seadust, eelnõu, lahendit…",
+                            aria_label="Otsi seadusi, eelnõusid, lahendeid",
+                        ),
+                        Button(
+                            "Otsi",
+                            id="search-btn",
+                            onclick="explorerSearch()",
+                        ),
+                        id="search-box",
                     ),
-                    Button(
-                        "Otsi",
-                        id="search-btn",
-                        onclick="explorerSearch()",
-                    ),
-                    id="search-box",
+                    id="topbar",
                 ),
-                id="topbar",
+                role="banner",
             ),
-            # ----- Controls -----
-            Div(
-                Button(
-                    "Taask\u00e4ivita simulatsioon",
-                    cls="ctrl-btn",
-                    onclick="explorerReheat()",
-                ),
-                Button(
-                    "L\u00fclita silte",
-                    cls="ctrl-btn",
-                    onclick="explorerToggleLabels()",
-                ),
-                Button(
-                    "R\u00fchm. kategooria j\u00e4rgi",
-                    cls="ctrl-btn",
-                    onclick="explorerGroupByCategory()",
-                ),
-                Button(
-                    "L\u00e4htesta vaade",
-                    cls="ctrl-btn",
-                    onclick="explorerResetView()",
-                ),
-                Button(
-                    "\u00dclevaade",
-                    cls="ctrl-btn",
-                    onclick="explorerCollapseToOverview()",
-                ),
-                # ----- Divider -----
-                Div(cls="ctrl-divider"),
-                # ----- Navigation -----
-                Button(
-                    "Töölaud",
-                    cls="nav-btn",
-                    onclick="location.href='/dashboard'",
-                ),
-                Button(
-                    "Eelnõud",
-                    cls="nav-btn",
-                    onclick="location.href='/drafts'",
-                ),
-                Button(
-                    "Koostaja",
-                    cls="nav-btn",
-                    onclick="location.href='/drafter'",
-                ),
-                Button(
-                    "Vestlus",
-                    cls="nav-btn",
-                    onclick="location.href='/chat'",
-                ),
-                Button(
-                    "Admin",
-                    cls="nav-btn",
-                    onclick="location.href='/admin'",
-                ),
-                id="controls",
-            ),
-            # ----- Breadcrumb -----
-            Div(id="breadcrumb"),
-            # ----- Tooltip -----
-            Div(
-                H3(id="tt-title"),
-                Span(cls="cat", id="tt-cat"),
-                P(id="tt-desc"),
-                Div(id="tt-stat", cls="stat"),
-                id="tooltip",
-            ),
-            # ----- Legend -----
-            Div(
-                H3("Kategooriad"),
-                Div(
-                    Div(cls="legend-dot", style="background:#38bdf8"),
-                    "Kehtiv seadus",
-                    cls="legend-item",
-                ),
-                Div(
-                    Div(cls="legend-dot", style="background:#a78bfa"),
-                    "Eeln\u00f5u",
-                    cls="legend-item",
-                ),
-                Div(
-                    Div(cls="legend-dot", style="background:#fb923c"),
-                    "Kohtulahend",
-                    cls="legend-item",
-                ),
-                Div(
-                    Div(cls="legend-dot", style="background:#34d399"),
-                    "EL \u00f5igusakt",
-                    cls="legend-item",
-                ),
-                Div(
-                    Div(cls="legend-dot", style="background:#f472b6"),
-                    "EL kohtulahend",
-                    cls="legend-item",
-                ),
-                id="legend",
-            ),
-            # ----- Instructions -----
-            Div(
-                "Lohista s\u00f5lmpunkte \u00fcmber \u00b7 Kerige suumimiseks "
-                "\u00b7 Kl\u00f5psa ja lohista tausta panoraamimiseks",
-                Br(),
-                "H\u00f5lju s\u00f5lmpunktil detailide n\u00e4gemiseks "
-                "\u00b7 Kl\u00f5psa kategooriat avamiseks "
-                "\u00b7 Kl\u00f5psa olemit kinnitamiseks",
-                id="instructions",
-            ),
-            # ----- Loading overlay -----
-            Div(
-                Div(cls="spinner"),
-                id="loading-overlay",
-            ),
-            # ----- Timeline slider -----
-            Div(
-                Div(
-                    Span("1990", cls="tl-label"),
-                    Input(
-                        id="timeline-slider",
-                        type="range",
-                        min="1990",
-                        max=str(datetime.now().year + 1),
-                        value=str(datetime.now().year + 1),
-                        step="1",
-                    ),
-                    Span(str(datetime.now().year + 1), cls="tl-label"),
-                    cls="tl-slider-row",
-                ),
-                Div(
-                    Span("Ajafilter: ", cls="tl-prefix"),
-                    Span("Keelatud", id="timeline-value", cls="tl-value"),
-                    Button(
-                        "L\u00e4htesta",
-                        id="timeline-reset",
-                        cls="tl-reset-btn",
-                        onclick="explorerResetTimeline()",
-                    ),
-                    cls="tl-info-row",
-                ),
-                id="timeline-bar",
-            ),
-            # ----- Toast container -----
-            Div(id="toast-container"),
-            # ----- Detail panel (right sidebar) -----
-            Div(
-                Div(
-                    H2(id="panel-title"),
-                    Button(
-                        "\u00d7",
-                        id="detail-close",
-                        onclick="explorerCloseDetail()",
-                    ),
-                    cls="panel-header",
-                ),
-                Span(id="panel-category", cls="panel-category"),
-                Div(
-                    H4("Metaandmed"),
-                    Div(id="panel-meta"),
-                    cls="meta-section",
-                ),
-                # ----- Version history section -----
-                Div(
-                    H4("Versiooniajalugu"),
-                    Div(id="panel-versions"),
-                    id="version-history-section",
-                    cls="meta-section",
-                    style="display:none;",
-                ),
-                Div(
-                    H4("Seosed"),
-                    Ul(id="panel-neighbors", cls="neighbor-list"),
-                    cls="meta-section",
-                ),
-                # ----- Annotation button (entity-level) -----
-                Div(
-                    id="panel-annotation-btn",
-                    cls="annotation-section",
-                    style="display:none;",
-                ),
-                # ----- Bookmark button -----
+            # ----- Controls (navigation landmark) -----
+            Nav(
                 Div(
                     Button(
-                        "Lisa j\u00e4rjehoidjatesse",
-                        id="panel-bookmark-btn",
-                        cls="bookmark-btn",
-                        onclick="explorerBookmark()",
+                        "Taaskäivita simulatsioon",
+                        cls="ctrl-btn",
+                        onclick="explorerReheat()",
                     ),
-                    cls="bookmark-section",
+                    Button(
+                        "Lülita silte",
+                        cls="ctrl-btn",
+                        onclick="explorerToggleLabels()",
+                    ),
+                    Button(
+                        "Rühm. kategooria järgi",
+                        cls="ctrl-btn",
+                        onclick="explorerGroupByCategory()",
+                    ),
+                    Button(
+                        "Lähtesta vaade",
+                        cls="ctrl-btn",
+                        onclick="explorerResetView()",
+                    ),
+                    Button(
+                        "Ülevaade",
+                        cls="ctrl-btn",
+                        onclick="explorerCollapseToOverview()",
+                    ),
+                    # ----- Divider -----
+                    Div(cls="ctrl-divider"),
+                    # ----- Navigation links (semantic anchors, not buttons) -----
+                    A(
+                        "Töölaud",
+                        href="/dashboard",
+                        cls="nav-btn",
+                        role="link",
+                    ),
+                    A(
+                        "Eelnõud",
+                        href="/drafts",
+                        cls="nav-btn",
+                        role="link",
+                    ),
+                    A(
+                        "Koostaja",
+                        href="/drafter",
+                        cls="nav-btn",
+                        role="link",
+                    ),
+                    A(
+                        "Vestlus",
+                        href="/chat",
+                        cls="nav-btn",
+                        role="link",
+                    ),
+                    A(
+                        "Admin",
+                        href="/admin",
+                        cls="nav-btn",
+                        role="link",
+                    ),
+                    id="controls",
                 ),
-                A(
-                    "Ava allikas",
-                    id="panel-link",
-                    cls="external-link",
-                    href="#",
-                    target="_blank",
-                    rel="noopener",
-                ),
-                id="detail-panel",
+                aria_label="Vaate juhtimine",
             ),
-            # ----- SVG canvas -----
-            NotStr('<svg id="canvas"></svg>'),
+            # ----- Main content (graph canvas + companion UI) -----
+            Main(
+                # ----- Breadcrumb -----
+                Div(id="breadcrumb"),
+                # ----- Tooltip -----
+                Div(
+                    H3(id="tt-title"),
+                    Span(cls="cat", id="tt-cat"),
+                    P(id="tt-desc"),
+                    Div(id="tt-stat", cls="stat"),
+                    id="tooltip",
+                ),
+                # ----- Legend -----
+                Div(
+                    H3("Kategooriad"),
+                    Div(
+                        Div(cls="legend-dot", style="background:#38bdf8"),
+                        "Kehtiv seadus",
+                        cls="legend-item",
+                    ),
+                    Div(
+                        Div(cls="legend-dot", style="background:#a78bfa"),
+                        "Eelnõu",
+                        cls="legend-item",
+                    ),
+                    Div(
+                        Div(cls="legend-dot", style="background:#fb923c"),
+                        "Kohtulahend",
+                        cls="legend-item",
+                    ),
+                    Div(
+                        Div(cls="legend-dot", style="background:#34d399"),
+                        "EL õigusakt",
+                        cls="legend-item",
+                    ),
+                    Div(
+                        Div(cls="legend-dot", style="background:#f472b6"),
+                        "EL kohtulahend",
+                        cls="legend-item",
+                    ),
+                    id="legend",
+                ),
+                # ----- Instructions -----
+                Div(
+                    "Lohista sõlmpunkte ümber · Kerige suumimiseks "
+                    "· Klõpsa ja lohista tausta panoraamimiseks",
+                    Br(),
+                    "Hõlju sõlmpunktil detailide nägemiseks "
+                    "· Klõpsa kategooriat avamiseks "
+                    "· Klõpsa olemit kinnitamiseks",
+                    id="instructions",
+                ),
+                # ----- Loading overlay -----
+                Div(
+                    Div(cls="spinner"),
+                    id="loading-overlay",
+                ),
+                # ----- Timeline slider -----
+                Div(
+                    Div(
+                        Span("1990", cls="tl-label"),
+                        Input(
+                            id="timeline-slider",
+                            type="range",
+                            min="1990",
+                            max=str(datetime.now().year + 1),
+                            value=str(datetime.now().year + 1),
+                            step="1",
+                            aria_label="Ajafilter aastaid",
+                        ),
+                        Span(str(datetime.now().year + 1), cls="tl-label"),
+                        cls="tl-slider-row",
+                    ),
+                    Div(
+                        Span("Ajafilter: ", cls="tl-prefix"),
+                        Span("Keelatud", id="timeline-value", cls="tl-value"),
+                        Button(
+                            "Lähtesta",
+                            id="timeline-reset",
+                            cls="tl-reset-btn",
+                            onclick="explorerResetTimeline()",
+                        ),
+                        cls="tl-info-row",
+                    ),
+                    id="timeline-bar",
+                ),
+                # ----- Toast container -----
+                Div(id="toast-container"),
+                # ----- Detail panel (right sidebar) -----
+                Div(
+                    Div(
+                        H2(id="panel-title"),
+                        Button(
+                            "×",
+                            id="detail-close",
+                            onclick="explorerCloseDetail()",
+                            aria_label="Sulge üksikasjade paneel",
+                        ),
+                        cls="panel-header",
+                    ),
+                    Span(id="panel-category", cls="panel-category"),
+                    Div(
+                        H4("Metaandmed"),
+                        Div(id="panel-meta"),
+                        cls="meta-section",
+                    ),
+                    # ----- Version history section -----
+                    Div(
+                        H4("Versiooniajalugu"),
+                        Div(id="panel-versions"),
+                        id="version-history-section",
+                        cls="meta-section",
+                        style="display:none;",
+                    ),
+                    Div(
+                        H4("Seosed"),
+                        Ul(id="panel-neighbors", cls="neighbor-list"),
+                        cls="meta-section",
+                    ),
+                    # ----- Annotation button (entity-level) -----
+                    Div(
+                        id="panel-annotation-btn",
+                        cls="annotation-section",
+                        style="display:none;",
+                    ),
+                    # ----- Bookmark button -----
+                    Div(
+                        Button(
+                            "Lisa järjehoidjatesse",
+                            id="panel-bookmark-btn",
+                            cls="bookmark-btn",
+                            onclick="explorerBookmark()",
+                        ),
+                        cls="bookmark-section",
+                    ),
+                    A(
+                        "Ava allikas",
+                        id="panel-link",
+                        cls="external-link",
+                        href="#",
+                        target="_blank",
+                        rel="noopener",
+                    ),
+                    id="detail-panel",
+                ),
+                # ----- SVG canvas -----
+                NotStr('<svg id="canvas"></svg>'),
+            ),
             # ----- Explorer JS (after DOM) -----
             Script(src="/static/js/explorer.js"),
             # ----- Auto-hide banners via localStorage -----
@@ -589,6 +604,7 @@ def explorer_page(req: Request):
             *overlay_tags,
             cls="explorer-page",
         ),
+        lang="et",
         data_theme="dark",
     )
 

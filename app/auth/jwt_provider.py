@@ -75,7 +75,8 @@ class JWTAuthProvider(AuthProvider):
         """
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT id, email, password_hash, full_name, role, org_id "
+                "SELECT id, email, password_hash, full_name, role, org_id, "
+                "must_change_password "
                 "FROM users WHERE email = %s AND is_active = TRUE",
                 (email,),
             ).fetchone()
@@ -83,7 +84,7 @@ class JWTAuthProvider(AuthProvider):
         if row is None:
             return None
 
-        user_id, user_email, pw_hash, full_name, role, org_id = row
+        user_id, user_email, pw_hash, full_name, role, org_id, must_change = row
         if not verify_password(password, pw_hash):
             return None
 
@@ -93,6 +94,7 @@ class JWTAuthProvider(AuthProvider):
             full_name=full_name,
             role=role,
             org_id=str(org_id) if org_id else None,
+            must_change_password=bool(must_change),
         )
 
     def get_current_user(self, token: str) -> UserDict | None:
@@ -131,7 +133,8 @@ class JWTAuthProvider(AuthProvider):
         try:
             with self._connect() as conn:
                 row = conn.execute(
-                    "SELECT token_version, is_active, role, org_id FROM users WHERE id = %s",
+                    "SELECT token_version, is_active, role, org_id, must_change_password "
+                    "FROM users WHERE id = %s",
                     (sub,),
                 ).fetchone()
         except Exception:
@@ -141,7 +144,7 @@ class JWTAuthProvider(AuthProvider):
         if row is None:
             return None
 
-        db_tv, db_active, db_role, db_org_id = row
+        db_tv, db_active, db_role, db_org_id, db_must_change = row
         if not db_active:
             return None
         if db_tv != tv_claim:
@@ -162,6 +165,7 @@ class JWTAuthProvider(AuthProvider):
             full_name=payload.get("full_name", ""),
             role=db_role,
             org_id=db_org_id_str,
+            must_change_password=bool(db_must_change),
         )
 
     def logout(self, session_id: str) -> None:
@@ -229,7 +233,8 @@ class JWTAuthProvider(AuthProvider):
 
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT s.id, u.id, u.email, u.full_name, u.role, u.org_id "
+                "SELECT s.id, u.id, u.email, u.full_name, u.role, u.org_id, "
+                "u.must_change_password "
                 "FROM sessions s "
                 "JOIN users u ON u.id = s.user_id "
                 "WHERE s.token_hash = %s AND s.expires_at > %s AND u.is_active = TRUE",
@@ -239,13 +244,14 @@ class JWTAuthProvider(AuthProvider):
         if row is None:
             return None
 
-        _session_id, user_id, email, full_name, role, org_id = row
+        _session_id, user_id, email, full_name, role, org_id, must_change = row
         return UserDict(
             id=str(user_id),
             email=email,
             full_name=full_name,
             role=role,
             org_id=str(org_id) if org_id else None,
+            must_change_password=bool(must_change),
         )
 
     def delete_refresh_token(self, token: str) -> None:

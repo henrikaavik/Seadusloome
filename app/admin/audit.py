@@ -350,71 +350,103 @@ def _audit_results_content(
 
 
 def admin_audit_page(req: Request):
-    """GET /admin/audit -- paginated, filterable audit log viewer."""
+    """GET /admin/audit -- paginated, filterable audit log viewer.
+
+    The body is wrapped in a top-level try/except so any backend failure
+    (missing materialized view, transient DB error, malformed row) renders
+    a styled error banner instead of bubbling up as a raw 500.
+
+    Helpers are imported as locals inside the function body so the page
+    works correctly when the function is rebound by the
+    ``app.templates.admin_dashboard`` shim \u2014 that shim swaps
+    ``__globals__`` to its own module dict, which means private helpers
+    that live in this module cannot be resolved via the function's
+    global namespace.
+    """
     auth = req.scope.get("auth")
     theme = get_theme_from_request(req)
-
-    filters = _extract_filters(req)
-
-    page_str = req.query_params.get("page", "1")
     try:
-        page = max(1, int(page_str))
-    except ValueError:
-        page = 1
+        # Bind module-private helpers as locals so __globals__ rebinding
+        # by the admin_dashboard shim does not break name resolution.
+        from app.admin.audit import (
+            _audit_filter_form,
+            _audit_results_content,
+            _csv_export_link,
+            _extract_filters,
+            _get_audit_log_page,
+            _get_audit_users,
+            _get_distinct_actions,
+            _parse_date,
+        )
 
-    per_page = 25
-    action_filter = filters["action"] or None
-    user_filter = filters["user"] or None
-    date_from = _parse_date(filters["from"])
-    date_to = _parse_date(filters["to"])
-    query_filter = filters["query"] or None
+        filters = _extract_filters(req)
 
-    entries, total = _get_audit_log_page(
-        page,
-        per_page,
-        action=action_filter,
-        user_id=user_filter,
-        date_from=date_from,
-        date_to=date_to,
-        query=query_filter,
-    )
-    total_pages = max(1, (total + per_page - 1) // per_page)
+        page_str = req.query_params.get("page", "1")
+        try:
+            page = max(1, int(page_str))
+        except ValueError:
+            page = 1
 
-    # Fetch filter options
-    actions = _get_distinct_actions()
-    users = _get_audit_users()
+        per_page = 25
+        action_filter = filters["action"] or None
+        user_filter = filters["user"] or None
+        date_from = _parse_date(filters["from"])
+        date_to = _parse_date(filters["to"])
+        query_filter = filters["query"] or None
 
-    body, pagination = _audit_results_content(entries, page, total_pages, per_page, total, filters)
+        entries, total = _get_audit_log_page(
+            page,
+            per_page,
+            action=action_filter,
+            user_id=user_filter,
+            date_from=date_from,
+            date_to=date_to,
+            query=query_filter,
+        )
+        total_pages = max(1, (total + per_page - 1) // per_page)
 
-    filter_form = _audit_filter_form(filters, actions, users)
-    export_link = _csv_export_link(filters)
+        # Fetch filter options
+        actions = _get_distinct_actions()
+        users = _get_audit_users()
 
-    content = (
-        H1("Auditilogi", cls="page-title"),  # noqa: F405
-        P(A("\u2190 Tagasi adminipaneelile", href="/admin"), cls="back-link"),  # noqa: F405
-        Card(
-            CardHeader(
-                Div(  # noqa: F405
-                    H3("Filtrid", cls="card-title"),  # noqa: F405
-                    export_link,
-                    cls="card-header-row",
+        body, pagination = _audit_results_content(
+            entries, page, total_pages, per_page, total, filters
+        )
+
+        filter_form = _audit_filter_form(filters, actions, users)
+        export_link = _csv_export_link(filters)
+
+        content = (
+            H1("Auditilogi", cls="page-title"),  # noqa: F405
+            P(A("\u2190 Tagasi adminipaneelile", href="/admin"), cls="back-link"),  # noqa: F405
+            Card(
+                CardHeader(
+                    Div(  # noqa: F405
+                        H3("Filtrid", cls="card-title"),  # noqa: F405
+                        export_link,
+                        cls="card-header-row",
+                    ),
                 ),
+                CardBody(filter_form),
             ),
-            CardBody(filter_form),
-        ),
-        Card(
-            CardHeader(H3("Kirjed", cls="card-title")),  # noqa: F405
-            CardBody(Div(body, pagination, id="audit-results")),  # noqa: F405
-        ),
-    )
+            Card(
+                CardHeader(H3("Kirjed", cls="card-title")),  # noqa: F405
+                CardBody(Div(body, pagination, id="audit-results")),  # noqa: F405
+            ),
+        )
 
-    return PageShell(
-        *content,
-        title="Auditilogi",
-        user=auth,
-        theme=theme,
-        active_nav="/admin",
-    )
+        return PageShell(
+            *content,
+            title="Auditilogi",
+            user=auth,
+            theme=theme,
+            active_nav="/admin",
+        )
+    except Exception:
+        logger.exception("Failed to render admin audit page")
+        from app.admin._shared import _render_admin_error_page
+
+        return _render_admin_error_page(title="Auditilogi", user=auth, theme=theme)
 
 
 # ---------------------------------------------------------------------------
@@ -423,45 +455,67 @@ def admin_audit_page(req: Request):
 
 
 def admin_audit_export(req: Request):
-    """GET /admin/audit/export -- download filtered audit log as CSV."""
-    filters = _extract_filters(req)
+    """GET /admin/audit/export -- download filtered audit log as CSV.
 
-    action_filter = filters["action"] or None
-    user_filter = filters["user"] or None
-    date_from = _parse_date(filters["from"])
-    date_to = _parse_date(filters["to"])
-    query_filter = filters["query"] or None
+    Helpers are imported as locals so this handler works correctly when
+    rebound by the admin_dashboard shim. On error returns a styled
+    error response rather than a raw 500.
+    """
+    try:
+        # Bind module-private helpers as locals so __globals__ rebinding
+        # by the admin_dashboard shim does not break name resolution.
+        from app.admin.audit import (
+            _extract_filters,
+            _get_all_filtered_entries,
+            _parse_date,
+        )
+        from app.ui.time import format_tallinn
 
-    entries = _get_all_filtered_entries(
-        action=action_filter,
-        user_id=user_filter,
-        date_from=date_from,
-        date_to=date_to,
-        query=query_filter,
-    )
+        filters = _extract_filters(req)
 
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(["ID", "Kasutaja ID", "Kasutaja", "Tegevus", "Detailid", "Kuup\u00e4ev"])
+        action_filter = filters["action"] or None
+        user_filter = filters["user"] or None
+        date_from = _parse_date(filters["from"])
+        date_to = _parse_date(filters["to"])
+        query_filter = filters["query"] or None
 
-    for entry in entries:
-        ts = entry["created_at"]
-        writer.writerow(
-            [
-                entry["id"],
-                entry["user_id"],
-                entry["user_name"],
-                entry["action"],
-                entry["detail"],
-                format_tallinn(ts) if ts else "",
-            ]
+        entries = _get_all_filtered_entries(
+            action=action_filter,
+            user_id=user_filter,
+            date_from=date_from,
+            date_to=date_to,
+            query=query_filter,
         )
 
-    csv_content = output.getvalue()
-    return Response(
-        content=csv_content,
-        media_type="text/csv",
-        headers={
-            "Content-Disposition": "attachment; filename=auditilogi.csv",
-        },
-    )
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["ID", "Kasutaja ID", "Kasutaja", "Tegevus", "Detailid", "Kuup\u00e4ev"])
+
+        for entry in entries:
+            ts = entry["created_at"]
+            writer.writerow(
+                [
+                    entry["id"],
+                    entry["user_id"],
+                    entry["user_name"],
+                    entry["action"],
+                    entry["detail"],
+                    format_tallinn(ts) if ts else "",
+                ]
+            )
+
+        csv_content = output.getvalue()
+        return Response(
+            content=csv_content,
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": "attachment; filename=auditilogi.csv",
+            },
+        )
+    except Exception:
+        logger.exception("Failed to export admin audit log")
+        return Response(
+            content="Andmete eksportimine eba\u00f5nnestus.",
+            status_code=500,
+            media_type="text/plain; charset=utf-8",
+        )

@@ -4,7 +4,7 @@ Usage::
 
     from app.notifications.notify import notify
 
-    notify(user_id, "analysis_done", "Moju analuus valmis", link="/drafts/123")
+    notify(user_id, "analysis_done", "Mõjuanalüüs valmis", link="/drafts/123")
 
 The function opens its own DB connection, commits, and swallows all
 errors so callers never have to worry about notification failures

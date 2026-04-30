@@ -67,7 +67,7 @@ def notify_annotation_reply(annotation: Any, reply: Any) -> None:
         notify(
             user_id=annotation.user_id,
             type="annotation_reply",
-            title="Uus vastus teie margistusele",
+            title="Uus vastus teie märgistusele",
             body=reply.content[:200] if reply.content else None,
             link=_annotation_target_link(annotation),
             metadata={
@@ -96,8 +96,8 @@ def notify_analysis_done(draft: Any) -> None:
         notify(
             user_id=draft.user_id,
             type="analysis_done",
-            title="Moju analuus valmis",
-            body=f'Eelnou "{draft.title}" moju analuus on valmis.',
+            title="Mõjuanalüüs valmis",
+            body=f'Eelnõu "{draft.title}" mõjuanalüüs on valmis.',
             link=f"/drafts/{draft.id}/report",
             metadata={
                 "draft_id": str(draft.id),
@@ -118,11 +118,11 @@ def notify_drafter_complete(session: Any) -> None:
         session: A ``DraftingSession`` dataclass (from ``app.drafter.session_model``).
     """
     try:
-        title_text = session.intent[:80] if session.intent else "Eelnou"
+        title_text = session.intent[:80] if session.intent else "Eelnõu"
         notify(
             user_id=session.user_id,
             type="drafter_complete",
-            title="Eelnou koostamine valmis",
+            title="Eelnõu koostamine valmis",
             body=f'"{title_text}" on eksportimiseks valmis.',
             link=f"/drafter/{session.id}/step/7",
             metadata={
@@ -159,7 +159,7 @@ def notify_sync_failed(error_message: str) -> None:
             notify(
                 user_id=admin_id,
                 type="sync_failed",
-                title="Ontoloogia sunkroonimine ebaonnestus",
+                title="Ontoloogia sünkroonimine ebaõnnestus",
                 body=error_message[:300] if error_message else None,
                 # /admin/sync is POST-only; anchor on the sync card on
                 # the admin dashboard, which is a real GET page.
@@ -196,9 +196,9 @@ def notify_draft_archive_warning(draft: Any) -> None:
         notify(
             user_id=draft.user_id,
             type="draft_archive_warning",
-            title="Eelnou vajab tahelepanu",
+            title="Eeln\u00f5u vajab t\u00e4helepanu",
             body=(
-                f'Eeln\u00f5u "{draft.title}" ei ole 90 paeva kasutatud. '
+                f'Eeln\u00f5u "{draft.title}" ei ole 90 p\u00e4eva kasutatud. '
                 "Palun kinnitage, et soovite seda alles hoida, v\u00f5i kustutage see."
             ),
             link=f"/drafts/{draft.id}",

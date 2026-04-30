@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+from typing import Any
 
 from fasthtml.common import *
 from starlette.requests import Request
@@ -182,6 +184,102 @@ _ROLE_LABELS = {
     "drafter": "Koostaja",
 }
 
+# Map common audit-detail dict keys to Estonian labels for the
+# recent-activity table.  Keys not in this mapping fall through to the
+# first key/value pair so we don't silently drop interesting data.
+_AUDIT_DETAIL_LABELS: dict[str, str] = {
+    "draft_id": "Eelnõu",
+    "user_id": "Kasutaja",
+    "report_id": "Aruanne",
+    "filename": "Fail",
+    "title": "Pealkiri",
+    "role": "Roll",
+    "entity_uri": "URI",
+    "label": "Nimi",
+    "bookmark_id": "Järjehoidja",
+    "session_id": "Sessioon",
+    "conversation_id": "Vestlus",
+    "org_id": "Organisatsioon",
+}
+
+
+def _audit_detail_summary(action: str, detail: Any) -> str:
+    """Return an Estonian-friendly one-line summary of an audit detail payload.
+
+    The audit_log.detail column is a JSONB value (typically a dict) that
+    psycopg returns as a Python dict.  Older rows or test fixtures may pass
+    in a JSON string, so we accept both and degrade gracefully when the
+    payload is empty / unparsable.
+
+    Args:
+        action: The audit action label (kept for forward-compatible context;
+            currently unused but reserved so callers don't need to change
+            shape if we add per-action formatters).
+        detail: The raw payload — dict, JSON string, or ``None``.
+
+    Returns:
+        A short human-readable string. ``"—"`` when ``detail`` is empty.
+    """
+    del action  # reserved for future per-action overrides
+
+    if detail is None or detail == "":
+        return "—"
+
+    if isinstance(detail, str):
+        # Some legacy code paths may stash a raw JSON string; try to parse
+        # it but fall back to the literal text rather than crashing.
+        try:
+            detail = json.loads(detail)
+        except (TypeError, ValueError):
+            return detail
+
+    if not isinstance(detail, dict):
+        return str(detail)
+
+    parts: list[str] = []
+    for key, label in _AUDIT_DETAIL_LABELS.items():
+        if key in detail and detail[key] not in (None, ""):
+            value = str(detail[key])
+            # Truncate UUIDs to the first 8 chars for at-a-glance display;
+            # full value is still available in the disclosure below.
+            if len(value) == 36 and value.count("-") == 4:
+                value = value[:8] + "…"
+            parts.append(f"{label}: {value}")
+
+    if not parts:
+        # Surface SOMETHING for unmapped payloads instead of an empty cell.
+        first = next(iter(detail.items()), None)
+        if first is not None:
+            parts.append(f"{first[0]}: {first[1]}")
+
+    return " · ".join(parts) or "—"
+
+
+def _audit_detail_cell(row: dict[str, Any]):
+    """Render the recent-activity ``Detailid`` cell.
+
+    Shows a readable Estonian summary plus a ``<details>`` disclosure
+    containing the raw JSON for power users who need the exact payload.
+    Empty / scalar payloads collapse to the summary alone.
+    """
+    action = row.get("action", "")
+    raw = row.get("detail_raw")
+    summary = _audit_detail_summary(action, raw)
+
+    if raw in (None, ""):
+        return summary
+
+    if isinstance(raw, dict):
+        raw_str = json.dumps(raw, indent=2, ensure_ascii=False, default=str)
+    else:
+        raw_str = str(raw)
+
+    return Details(
+        Summary(summary),
+        Pre(raw_str, cls="audit-detail-json"),
+        cls="audit-detail",
+    )
+
 
 def _activity_card(activity: list[dict]):  # type: ignore[type-arg]
     """Render the recent activity card."""
@@ -191,7 +289,12 @@ def _activity_card(activity: list[dict]):  # type: ignore[type-arg]
         columns = [
             Column(key="time", label="Aeg", sortable=False),
             Column(key="action", label="Tegevus", sortable=False),
-            Column(key="detail", label="Detailid", sortable=False),
+            Column(
+                key="detail",
+                label="Detailid",
+                sortable=False,
+                render=_audit_detail_cell,
+            ),
         ]
         rows = []
         for entry in activity:
@@ -200,7 +303,13 @@ def _activity_card(activity: list[dict]):  # type: ignore[type-arg]
                 {
                     "time": format_tallinn(ts),
                     "action": entry["action"],
-                    "detail": str(entry["detail"]) if entry["detail"] else "—",
+                    # Carry the raw payload so the render callback can produce
+                    # both the summary and the disclosure.  The ``detail`` key
+                    # itself is unused by the renderer but kept for
+                    # backwards-compatibility with any consumer that still
+                    # reads the row dict directly.
+                    "detail": "",
+                    "detail_raw": entry["detail"],
                 }
             )
         body = DataTable(

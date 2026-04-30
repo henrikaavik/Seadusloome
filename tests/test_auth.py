@@ -191,7 +191,8 @@ class TestGetCurrentUser:
         token = jwt.encode(payload, SECRET_KEY, algorithm=JWT_ALGORITHM)
 
         conn = MagicMock()
-        conn.execute.return_value.fetchone.return_value = (0, True, "drafter", None)
+        # (token_version, is_active, role, org_id, must_change_password)
+        conn.execute.return_value.fetchone.return_value = (0, True, "drafter", None, False)
         ctx = MagicMock()
         ctx.__enter__ = MagicMock(return_value=conn)
         ctx.__exit__ = MagicMock(return_value=False)

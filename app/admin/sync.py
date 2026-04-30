@@ -101,6 +101,32 @@ def _sync_status_badge(status: str):
     return StatusBadge(key)  # type: ignore[arg-type]
 
 
+# Threshold above which we collapse the full error_message into a
+# ``<details>`` disclosure.  SHACL validation reports can run to a few KB,
+# which dominates the admin sync table when shown inline.
+_SYNC_ERROR_INLINE_LIMIT = 80
+
+
+def _sync_error_cell(row: dict):  # type: ignore[type-arg]
+    """Render the ``Veateade`` cell in the sync log table.
+
+    Short messages render as plain text; long messages (e.g. SHACL warning
+    blocks) are truncated to the first 80 chars with a ``<details>``
+    disclosure that exposes the full text in a scrollable preformatted
+    block.  The em-dash placeholder for an empty message renders as-is.
+    """
+    msg = row.get("error_message") or "—"
+    if msg == "—":
+        return msg
+    if len(msg) <= _SYNC_ERROR_INLINE_LIMIT:
+        return msg
+    return Details(  # noqa: F405
+        Summary(msg[:_SYNC_ERROR_INLINE_LIMIT] + "…"),  # noqa: F405
+        Pre(msg, cls="sync-error-full"),  # noqa: F405
+        cls="sync-error",
+    )
+
+
 def _sync_trigger_form():
     """Render the 'Sync now' button as an HTMX form.
 
@@ -308,7 +334,12 @@ def _sync_card(
                 render=lambda r: _sync_status_badge(r["status_raw"]),
             ),
             Column(key="entity_count", label="Olemeid", sortable=False),
-            Column(key="error_message", label="Veateade", sortable=False),
+            Column(
+                key="error_message",
+                label="Veateade",
+                sortable=False,
+                render=_sync_error_cell,
+            ),
         ]
         rows = []
         for entry in log_rows:

@@ -12,7 +12,6 @@ import logging
 from fasthtml.common import *  # noqa: F403
 from starlette.requests import Request
 
-from app.admin._shared import _tooltip
 from app.db import get_connection as _connect
 from app.ui.data.data_table import Column, DataTable
 from app.ui.layout import PageShell
@@ -21,7 +20,6 @@ from app.ui.primitives.button import Button  # noqa: F401, F811  -- shadow guard
 from app.ui.surfaces.card import Card, CardBody, CardHeader
 from app.ui.surfaces.info_box import InfoBox
 from app.ui.theme import get_theme_from_request
-from app.ui.time import format_tallinn
 
 logger = logging.getLogger(__name__)
 
@@ -130,98 +128,121 @@ def _svg_bar_chart(data: list[dict], key: str, label: str, color: str) -> object
 
 
 def admin_analytics_page(req: Request):
-    """GET /admin/analytics -- usage analytics page."""
+    """GET /admin/analytics -- usage analytics page.
+
+    Helpers are imported as locals inside the function body so the page
+    works correctly when rebound by the ``app.templates.admin_dashboard``
+    shim \u2014 that shim swaps ``__globals__`` to its own module dict, which
+    means private helpers (``_svg_bar_chart``, ``_tooltip``) cannot be
+    resolved via the function's global namespace. The whole body is
+    wrapped in a try/except so any backend failure (missing
+    ``usage_daily`` materialized view, transient DB error) renders a
+    styled error banner instead of bubbling up as a raw 500.
+    """
     auth = req.scope.get("auth")
     theme = get_theme_from_request(req)
-
-    days_str = req.query_params.get("days", "30")
     try:
-        days = max(1, min(365, int(days_str)))
-    except ValueError:
-        days = 30
+        from app.admin._shared import _tooltip
+        from app.admin.analytics import (
+            _get_usage_data,
+            _svg_bar_chart,
+            _usage_summary,
+        )
+        from app.ui.time import format_tallinn
 
-    data = _get_usage_data(days)
-    summary = _usage_summary(data)
+        days_str = req.query_params.get("days", "30")
+        try:
+            days = max(1, min(365, int(days_str)))
+        except ValueError:
+            days = 30
 
-    summary_dl = Dl(  # noqa: F405
-        Dt("Perioodi pikkus"),  # noqa: F405
-        Dd(Badge(f"{summary['days']} paeva", variant="default")),  # noqa: F405
-        Dt("Uleslaadimisi kokku"),  # noqa: F405
-        Dd(Badge(str(summary["total_uploads"]), variant="primary")),  # noqa: F405
-        Dt("Vestluse sonumeid kokku"),  # noqa: F405
-        Dd(Badge(str(summary["total_chat_messages"]), variant="primary")),  # noqa: F405
-        Dt("Koostamise seansse kokku"),  # noqa: F405
-        Dd(Badge(str(summary["total_drafter_sessions"]), variant="primary")),  # noqa: F405
-        cls="info-list",
-    )
+        data = _get_usage_data(days)
+        summary = _usage_summary(data)
 
-    # Charts
-    uploads_chart = _svg_bar_chart(data, "uploads", "Uleslaadimised paevas", "#0066cc")
-    chat_chart = _svg_bar_chart(data, "chat_messages", "Vestluse sonumid paevas", "#2e8b57")
-    drafter_chart = _svg_bar_chart(
-        data, "drafter_sessions", "Koostamise seansid paevas", "#9b59b6"
-    )
+        summary_dl = Dl(  # noqa: F405
+            Dt("Perioodi pikkus"),  # noqa: F405
+            Dd(Badge(f"{summary['days']} paeva", variant="default")),  # noqa: F405
+            Dt("Uleslaadimisi kokku"),  # noqa: F405
+            Dd(Badge(str(summary["total_uploads"]), variant="primary")),  # noqa: F405
+            Dt("Vestluse sonumeid kokku"),  # noqa: F405
+            Dd(Badge(str(summary["total_chat_messages"]), variant="primary")),  # noqa: F405
+            Dt("Koostamise seansse kokku"),  # noqa: F405
+            Dd(Badge(str(summary["total_drafter_sessions"]), variant="primary")),  # noqa: F405
+            cls="info-list",
+        )
 
-    # Detail table
-    if data:
-        columns = [
-            Column(key="day", label="Kuupaev", sortable=False),
-            Column(key="uploads", label="Uleslaadimised", sortable=False),
-            Column(key="chat_messages", label="Vestluse sonumid", sortable=False),
-            Column(key="drafter_sessions", label="Koostamise seansid", sortable=False),
-        ]
-        rows = [
-            {
-                "day": (
-                    format_tallinn(r["day"], fmt="%d.%m.%Y")
-                    if hasattr(r["day"], "strftime")
-                    else str(r["day"])
+        # Charts
+        uploads_chart = _svg_bar_chart(data, "uploads", "Uleslaadimised paevas", "#0066cc")
+        chat_chart = _svg_bar_chart(data, "chat_messages", "Vestluse sonumid paevas", "#2e8b57")
+        drafter_chart = _svg_bar_chart(
+            data, "drafter_sessions", "Koostamise seansid paevas", "#9b59b6"
+        )
+
+        # Detail table
+        if data:
+            columns = [
+                Column(key="day", label="Kuupaev", sortable=False),
+                Column(key="uploads", label="Uleslaadimised", sortable=False),
+                Column(key="chat_messages", label="Vestluse sonumid", sortable=False),
+                Column(key="drafter_sessions", label="Koostamise seansid", sortable=False),
+            ]
+            rows = [
+                {
+                    "day": (
+                        format_tallinn(r["day"], fmt="%d.%m.%Y")
+                        if hasattr(r["day"], "strftime")
+                        else str(r["day"])
+                    ),
+                    "uploads": str(r["uploads"]),
+                    "chat_messages": str(r["chat_messages"]),
+                    "drafter_sessions": str(r["drafter_sessions"]),
+                }
+                for r in data
+            ]
+            table = DataTable(columns=columns, rows=rows)
+        else:
+            table = P("Kasutusandmed puuduvad.", cls="muted-text")  # noqa: F405
+
+        content = (
+            H1("Kasutusanaluutika", cls="page-title"),  # noqa: F405
+            P(A("\u2190 Tagasi adminipaneelile", href="/admin"), cls="back-link"),  # noqa: F405
+            InfoBox(
+                P(  # noqa: F405
+                    "Kasutusanaluutika naitab uleslaadimiste, vestluse sonumite "
+                    "ja koostamise seansside statistikat paevade kaupa."
                 ),
-                "uploads": str(r["uploads"]),
-                "chat_messages": str(r["chat_messages"]),
-                "drafter_sessions": str(r["drafter_sessions"]),
-            }
-            for r in data
-        ]
-        table = DataTable(columns=columns, rows=rows)
-    else:
-        table = P("Kasutusandmed puuduvad.", cls="muted-text")  # noqa: F405
-
-    content = (
-        H1("Kasutusanaluutika", cls="page-title"),  # noqa: F405
-        P(A("\u2190 Tagasi adminipaneelile", href="/admin"), cls="back-link"),  # noqa: F405
-        InfoBox(
-            P(  # noqa: F405
-                "Kasutusanaluutika naitab uleslaadimiste, vestluse sonumite "
-                "ja koostamise seansside statistikat paevade kaupa."
+                variant="info",
+                dismissible=True,
             ),
-            variant="info",
-            dismissible=True,
-        ),
-        Card(
-            CardHeader(
-                H3(  # noqa: F405
-                    "Kokkuvote",
-                    _tooltip(f"Viimased {days} paeva"),
-                    cls="card-title",
-                )
+            Card(
+                CardHeader(
+                    H3(  # noqa: F405
+                        "Kokkuvote",
+                        _tooltip(f"Viimased {days} paeva"),
+                        cls="card-title",
+                    )
+                ),
+                CardBody(summary_dl),
             ),
-            CardBody(summary_dl),
-        ),
-        Card(
-            CardHeader(H3("Trendid", cls="card-title")),  # noqa: F405
-            CardBody(uploads_chart, chat_chart, drafter_chart),
-        ),
-        Card(
-            CardHeader(H3("Detailne tabel", cls="card-title")),  # noqa: F405
-            CardBody(table),
-        ),
-    )
+            Card(
+                CardHeader(H3("Trendid", cls="card-title")),  # noqa: F405
+                CardBody(uploads_chart, chat_chart, drafter_chart),
+            ),
+            Card(
+                CardHeader(H3("Detailne tabel", cls="card-title")),  # noqa: F405
+                CardBody(table),
+            ),
+        )
 
-    return PageShell(
-        *content,
-        title="Kasutusanaluutika",
-        user=auth,
-        theme=theme,
-        active_nav="/admin",
-    )
+        return PageShell(
+            *content,
+            title="Kasutusanaluutika",
+            user=auth,
+            theme=theme,
+            active_nav="/admin",
+        )
+    except Exception:
+        logger.exception("Failed to render admin analytics page")
+        from app.admin._shared import _render_admin_error_page
+
+        return _render_admin_error_page(title="Kasutusanaluutika", user=auth, theme=theme)

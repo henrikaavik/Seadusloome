@@ -2422,3 +2422,37 @@
   border-color: var(--color-primary);
   box-shadow: 0 0 0 2px var(--color-primary-alpha);
 }
+
+/* ===========================================================================
+   Disclosure cells in admin / dashboard tables
+   ---------------------------------------------------------------------------
+   Audit log "Detailid" and sync "Veateade" columns wrap long technical
+   payloads in a <details> element so the table stays scannable.  The
+   summary line is the truncated/Estonian-rendered preview; the <pre>
+   inside expands on click with the raw JSON / full error text.
+   =========================================================================== */
+
+details.audit-detail summary,
+details.sync-error summary {
+  cursor: pointer;
+  list-style: revert;
+}
+
+details.audit-detail pre,
+details.sync-error pre {
+  margin-top: 0.5rem;
+  padding: 0.75rem;
+  background: rgba(15, 23, 41, 0.4);
+  border: 1px solid rgba(100, 116, 139, 0.2);
+  border-radius: 6px;
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.audit-detail-json,
+.sync-error-full {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+}

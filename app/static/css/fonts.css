@@ -8,8 +8,16 @@
    admin UI contexts). font-display: optional prevents 404 retries —
    if the file is missing the browser gives up immediately and uses
    the fallback rather than blocking text rendering.
+
+   NOTE (2026-04-29): Aino files are not committed; restore by
+   uncommenting the @font-face blocks below after dropping the woff2
+   files into app/static/fonts/aino/. The blocks are commented out to
+   prevent 404 noise in the browser console for every PageShell page.
+   The existing fallback (Verdana, defined in tokens.css) continues to
+   apply.
    =========================================================================== */
 
+/*
 @font-face {
   font-family: 'Aino';
   src: url('/static/fonts/aino/Aino-Regular.woff2') format('woff2');
@@ -41,3 +49,4 @@
   font-style: normal;
   font-display: optional;
 }
+*/

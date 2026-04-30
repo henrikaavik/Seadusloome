@@ -10,6 +10,7 @@ NAV_ITEMS: list[tuple[str, str, str, set[str]]] = [
     ("Töölaud", "/dashboard", "home", {"drafter", "reviewer", "org_admin", "admin"}),
     ("Uurija", "/explorer", "graph", {"drafter", "reviewer", "org_admin", "admin"}),
     ("Eelnõud", "/drafts", "file-text", {"drafter", "reviewer", "org_admin", "admin"}),
+    ("Koostaja", "/drafter", "edit", {"drafter", "reviewer", "org_admin", "admin"}),
     ("Vestlus", "/chat", "message-circle", {"drafter", "reviewer", "org_admin", "admin"}),
     ("Kasutajad", "/org/users", "users", {"org_admin", "admin"}),
     ("Administraator", "/admin", "shield", {"admin"}),

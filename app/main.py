@@ -13,6 +13,7 @@ from app.admin import register_admin_routes
 from app.annotations.routes import register_annotation_routes
 from app.auth.middleware import SKIP_PATHS, auth_before
 from app.auth.organizations import register_org_routes
+from app.auth.profile import register_profile_routes
 from app.auth.routes import register_auth_routes
 from app.auth.users import register_user_routes
 from app.chat.routes import register_chat_routes
@@ -148,7 +149,16 @@ bware = Beforeware(auth_before, skip=SKIP_PATHS)
 # pico=False: using custom design system (app/ui) instead of Pico CSS.
 # lifespan=lifespan: FastHTML forwards this to Starlette so the
 # background job worker starts/stops with the ASGI app.
-app, rt = fast_app(before=bware, pico=False, hdrs=_HDRS, lifespan=lifespan)
+# htmlkw={"lang": "et"}: set the document language to Estonian so
+# Chrome's native validation bubbles, screen readers, and translation
+# tools all use the correct locale (P1 from the 2026-04-29 UI review).
+app, rt = fast_app(
+    before=bware,
+    pico=False,
+    hdrs=_HDRS,
+    lifespan=lifespan,
+    htmlkw={"lang": "et"},
+)
 
 # Middleware order matters: Starlette's `add_middleware` prepends to the
 # user_middleware list, so the LAST middleware added becomes the OUTERMOST
@@ -201,6 +211,7 @@ app.routes[:] = [r for r in app.routes if getattr(r, "name", None) != "static_ro
 app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
 register_auth_routes(rt)
+register_profile_routes(rt)
 register_org_routes(rt)
 register_user_routes(rt)
 register_explorer_routes(rt)

@@ -111,6 +111,7 @@ def TopBar(  # noqa: ANN201
             Nav(  # noqa: F405
                 A("Uurija", href="/explorer"),  # noqa: F405
                 A("Eelnõud", href="/drafts"),  # noqa: F405
+                A("Koostaja", href="/drafter"),  # noqa: F405
                 A("Vestlus", href="/chat"),  # noqa: F405
                 cls="top-nav",
             )

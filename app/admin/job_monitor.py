@@ -321,40 +321,68 @@ def _job_monitor_content() -> object:
 
 
 def admin_jobs_page(req: Request):
-    """GET /admin/jobs -- full job monitor page."""
+    """GET /admin/jobs -- full job monitor page.
+
+    Helpers are imported as locals so this handler works correctly when
+    rebound by the admin_dashboard shim (which swaps ``__globals__`` to
+    its own module dict). On error renders a styled error banner.
+    """
     auth = req.scope.get("auth")
     theme = get_theme_from_request(req)
+    try:
+        from app.admin.job_monitor import _job_monitor_content
 
-    content = (
-        H1("T\u00f6\u00f6de monitor", cls="page-title"),  # noqa: F405
-        P(A("\u2190 Tagasi adminipaneelile", href="/admin"), cls="back-link"),  # noqa: F405
-        _job_monitor_content(),
-    )
+        content = (
+            H1("T\u00f6\u00f6de monitor", cls="page-title"),  # noqa: F405
+            P(A("\u2190 Tagasi adminipaneelile", href="/admin"), cls="back-link"),  # noqa: F405
+            _job_monitor_content(),
+        )
 
-    return PageShell(
-        *content,
-        title="T\u00f6\u00f6de monitor",
-        user=auth,
-        theme=theme,
-        active_nav="/admin",
-    )
+        return PageShell(
+            *content,
+            title="T\u00f6\u00f6de monitor",
+            user=auth,
+            theme=theme,
+            active_nav="/admin",
+        )
+    except Exception:
+        logger.exception("Failed to render admin jobs page")
+        from app.admin._shared import _render_admin_error_page
+
+        return _render_admin_error_page(title="T\u00f6\u00f6de monitor", user=auth, theme=theme)
 
 
 def admin_job_retry(req: Request, id: int):
     """POST /admin/jobs/{id}/retry -- retry a single failed job."""
-    success = _retry_job(id)
-    if not success:
+    try:
+        from app.admin.job_monitor import _job_monitor_content, _retry_job
+
+        success = _retry_job(id)
+        if not success:
+            msg = "T\u00f6\u00f6d ei leitud v\u00f5i ei ole eba\u00f5nnestunud staatuses."
+            return JSONResponse({"error": msg}, status_code=404)
+        # Return refreshed content
+        return _job_monitor_content()
+    except Exception:
+        logger.exception("Failed to retry admin job id=%s", id)
         return JSONResponse(
-            {"error": "T\u00f6\u00f6d ei leitud v\u00f5i ei ole eba\u00f5nnestunud staatuses."},
-            status_code=404,
+            {"error": "T\u00f6\u00f6 taask\u00e4ivitamine eba\u00f5nnestus."},
+            status_code=500,
         )
-    # Return refreshed content
-    return _job_monitor_content()
 
 
 def admin_jobs_purge(req: Request):
     """POST /admin/jobs/purge -- delete completed jobs older than 7 days."""
-    deleted = _purge_completed(days=7)
-    logger.info("Purged %d completed jobs older than 7 days", deleted)
-    # Return refreshed content
-    return _job_monitor_content()
+    try:
+        from app.admin.job_monitor import _job_monitor_content, _purge_completed
+
+        deleted = _purge_completed(days=7)
+        logger.info("Purged %d completed jobs older than 7 days", deleted)
+        # Return refreshed content
+        return _job_monitor_content()
+    except Exception:
+        logger.exception("Failed to purge completed jobs")
+        return JSONResponse(
+            {"error": "T\u00f6\u00f6de puhastamine eba\u00f5nnestus."},
+            status_code=500,
+        )

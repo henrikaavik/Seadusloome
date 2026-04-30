@@ -65,13 +65,17 @@ svg#canvas { width: 100%; height: 100vh; display: block; }
   background: rgba(100,116,139,0.25);
 }
 
-/* ------- Navigation buttons (override design-system .btn) ------- */
+/* ------- Navigation buttons / links (override design-system .btn) ------- */
+/* Match both <button class="nav-btn"> (legacy) and <a class="nav-btn"> (current). */
+#controls a.nav-btn,
 #controls button.nav-btn {
   background: rgba(52,211,153,0.08); border: 1px solid rgba(52,211,153,0.25); color: #6ee7b7;
   padding: 6px 14px; border-radius: 8px; font-size: 12px; cursor: pointer;
   backdrop-filter: blur(8px); transition: all 0.15s; text-align: left;
   font-weight: 500;
+  text-decoration: none; display: block;
 }
+#controls a.nav-btn:hover,
 #controls button.nav-btn:hover { background: rgba(52,211,153,0.18); color: #a7f3d0; border-color: rgba(52,211,153,0.4); }
 
 /* ------- Tooltip ------- */
@@ -384,12 +388,54 @@ body.explorer-page .info-box-dismiss:hover {
   #search-input { width: 180px; }
 }
 @media (max-width: 768px) {
-  #topbar { padding: 12px 16px 24px; gap: 8px; }
+  /* Allow the page to scroll on small viewports so fixed/positioned
+     elements don't collide with the graph. */
+  body.explorer-page { overflow-y: auto; }
+
+  /* Topbar: let the title + badges + search wrap onto multiple lines
+     instead of clipping. */
+  #topbar { padding: 12px 16px 16px; gap: 8px; flex-wrap: wrap; }
   #topbar h1 { font-size: 14px; }
-  #search-box { display: none; }
-  #controls { top: 48px; left: 12px; }
+
+  /* Compact mobile search: keep the search input visible but slim,
+     full-width on its own row. */
+  #search-box {
+    display: flex;
+    width: 100%;
+    margin-left: 0;
+    margin-top: 0.5rem;
+  }
+  #search-input { width: 100%; flex: 1; }
+
+  /* Controls bar: cap height so it doesn't dominate the viewport,
+     and shift to a tighter left inset. */
+  #controls {
+    top: 48px;
+    left: 12px;
+    max-height: 40vh;
+  }
   .ctrl-btn { padding: 5px 10px; font-size: 11px; }
-  #legend { left: 12px; padding: 10px; }
-  #instructions { display: none; }
+
+  /* Help / tip banners: stop floating over the graph; flow inline
+     beneath the header instead. */
+  #explorer-help-banner {
+    position: static;
+    left: auto;
+    right: auto;
+    padding: 0.5rem 0.75rem 0;
+  }
+  #explorer-tip-banner {
+    padding: 0 0.75rem;
+  }
+
+  /* Legend + instructions: sit below the graph rather than overlapping
+     it on small screens. */
+  #legend,
+  #instructions {
+    position: static;
+    margin: 0.5rem;
+  }
+
+  /* Detail panel takes the full width on phones. */
   #detail-panel { width: 100vw; max-width: 100vw; }
 }

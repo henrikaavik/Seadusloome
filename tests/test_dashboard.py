@@ -186,6 +186,172 @@ class TestAdminDashboard:
 
 
 # ---------------------------------------------------------------------------
+# Recent-activity detail cell formatting (P3 UI fix)
+# ---------------------------------------------------------------------------
+
+
+class TestAuditDetailSummary:
+    """``_audit_detail_summary`` produces an Estonian one-line preview of
+    audit-log payloads. It must never crash on weird inputs (empty, plain
+    string, non-dict) and should map common keys to friendly labels."""
+
+    def test_returns_dash_for_none(self):
+        from app.templates.dashboard import _audit_detail_summary
+
+        assert _audit_detail_summary("draft.upload", None) == "—"
+
+    def test_returns_dash_for_empty_string(self):
+        from app.templates.dashboard import _audit_detail_summary
+
+        assert _audit_detail_summary("draft.upload", "") == "—"
+
+    def test_maps_known_keys_to_estonian_labels(self):
+        from app.templates.dashboard import _audit_detail_summary
+
+        result = _audit_detail_summary(
+            "draft.upload",
+            {"draft_id": "abc-uuid-123", "filename": "akt.docx"},
+        )
+        assert "Eelnõu:" in result
+        assert "Fail: akt.docx" in result
+        # Two parts joined with a middle dot separator
+        assert " · " in result
+
+    def test_truncates_uuid_values(self):
+        from app.templates.dashboard import _audit_detail_summary
+
+        uuid = "11111111-2222-3333-4444-555555555555"
+        result = _audit_detail_summary("draft.upload", {"draft_id": uuid})
+        # First 8 chars + ellipsis, full UUID NOT in summary
+        assert "11111111" in result
+        assert "…" in result
+        assert uuid not in result
+
+    def test_falls_back_to_first_key_for_unknown_keys(self):
+        from app.templates.dashboard import _audit_detail_summary
+
+        result = _audit_detail_summary("custom.event", {"custom_field": "value-x"})
+        assert "custom_field" in result
+        assert "value-x" in result
+
+    def test_parses_json_string_payload(self):
+        """Legacy or weird code paths may pass a JSON-encoded string."""
+        from app.templates.dashboard import _audit_detail_summary
+
+        result = _audit_detail_summary("draft.upload", '{"filename": "test.docx"}')
+        assert "Fail: test.docx" in result
+
+    def test_returns_string_payload_verbatim_on_parse_failure(self):
+        from app.templates.dashboard import _audit_detail_summary
+
+        result = _audit_detail_summary("draft.upload", "not json at all")
+        assert result == "not json at all"
+
+    def test_handles_non_dict_non_string(self):
+        from app.templates.dashboard import _audit_detail_summary
+
+        # Lists, ints — should not crash; convert to str
+        assert _audit_detail_summary("x", [1, 2, 3]) == "[1, 2, 3]"
+        assert _audit_detail_summary("x", 42) == "42"
+
+
+class TestAuditDetailCell:
+    """``_audit_detail_cell`` renders the table cell.  Empty payloads
+    collapse to a plain string; non-empty payloads wrap the summary in a
+    ``<details>`` element with the raw JSON inside ``<pre>``."""
+
+    def test_empty_detail_returns_plain_string(self):
+        from app.templates.dashboard import _audit_detail_cell
+
+        assert _audit_detail_cell({"action": "x", "detail_raw": None}) == "—"
+
+    def test_non_empty_detail_renders_details_disclosure(self):
+        from fasthtml.common import to_xml
+
+        from app.templates.dashboard import _audit_detail_cell
+
+        cell = _audit_detail_cell(
+            {
+                "action": "draft.upload",
+                "detail_raw": {"draft_id": "abc-uuid", "filename": "akt.docx"},
+            }
+        )
+        html = to_xml(cell)
+        assert "<details" in html
+        assert "audit-detail" in html
+        # Summary visible up-front
+        assert "<summary>" in html
+        assert "Fail: akt.docx" in html
+        # Raw JSON in the disclosure
+        assert "<pre" in html
+        assert '"draft_id"' in html
+        assert "audit-detail-json" in html
+
+    def test_raw_json_uses_unicode_friendly_dump(self):
+        """Estonian characters in JSON payloads must NOT render as
+        \\u escapes inside the disclosure."""
+        from fasthtml.common import to_xml
+
+        from app.templates.dashboard import _audit_detail_cell
+
+        cell = _audit_detail_cell(
+            {"action": "draft.upload", "detail_raw": {"title": "Eelnõu õigusakt"}}
+        )
+        html = to_xml(cell)
+        # FastHTML escapes ``õ`` to its HTML entity but the raw JSON should
+        # NOT contain the \u-escape form ensure_ascii=True would emit.
+        assert "\\u" not in html
+
+
+class TestActivityCardRenderUsesDisclosure:
+    """End-to-end: the activity card columns wire ``_audit_detail_cell``
+    into the DataTable so the rendered HTML contains the disclosure for
+    rows whose detail payload is non-empty."""
+
+    def test_card_renders_details_for_dict_detail(self):
+        from datetime import UTC, datetime
+
+        from fasthtml.common import to_xml
+
+        from app.templates.dashboard import _activity_card
+
+        activity = [
+            {
+                "id": 1,
+                "action": "draft.upload",
+                "detail": {"draft_id": "abc-uuid", "filename": "akt.docx"},
+                "created_at": datetime(2026, 4, 29, 10, 0, tzinfo=UTC),
+            }
+        ]
+        html = to_xml(_activity_card(activity))
+        assert "<details" in html
+        assert "audit-detail" in html
+        # The raw Python dict ``str()`` (with single quotes, "{'k': 'v'}")
+        # must NOT appear — that was the pre-fix behaviour.
+        assert "{'draft_id'" not in html
+
+    def test_card_renders_dash_for_empty_detail(self):
+        from datetime import UTC, datetime
+
+        from fasthtml.common import to_xml
+
+        from app.templates.dashboard import _activity_card
+
+        activity = [
+            {
+                "id": 1,
+                "action": "user.login",
+                "detail": None,
+                "created_at": datetime(2026, 4, 29, 10, 0, tzinfo=UTC),
+            }
+        ]
+        html = to_xml(_activity_card(activity))
+        # No disclosure for an empty payload
+        assert "<details" not in html
+        assert "—" in html
+
+
+# ---------------------------------------------------------------------------
 # Bookmark DB helpers (unit tests with mocked DB)
 # ---------------------------------------------------------------------------
 

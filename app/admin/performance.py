@@ -289,27 +289,54 @@ def _llm_latencies_card(latencies: list[dict[str, object]]):
 
 
 def admin_performance_page(req: Request):
-    """GET /admin/performance — performance metrics dashboard."""
+    """GET /admin/performance — performance metrics dashboard.
+
+    Helpers are imported as locals inside the function body so the page
+    works correctly when rebound by the ``app.templates.admin_dashboard``
+    shim — that shim swaps ``__globals__`` to its own module dict, which
+    means private card builders (``_latency_card``,
+    ``_slowest_routes_card``, etc.) cannot be resolved via the function's
+    global namespace. The whole body is wrapped in a try/except so any
+    backend failure (missing ``metrics`` table, transient DB error)
+    renders a styled error banner instead of bubbling up as a raw 500.
+    """
     auth = req.scope.get("auth")
     theme = get_theme_from_request(req)
+    try:
+        from app.admin.performance import (
+            _get_job_durations,
+            _get_latency_percentiles,
+            _get_llm_latencies,
+            _get_slowest_routes,
+            _job_durations_card,
+            _latency_card,
+            _llm_latencies_card,
+            _slowest_routes_card,
+        )
 
-    percentiles = _get_latency_percentiles()
-    routes = _get_slowest_routes()
-    jobs = _get_job_durations()
-    llm = _get_llm_latencies()
+        percentiles = _get_latency_percentiles()
+        routes = _get_slowest_routes()
+        jobs = _get_job_durations()
+        llm = _get_llm_latencies()
 
-    content = (
-        H1("Jõudlus", cls="page-title"),  # noqa: F405
-        _latency_card(percentiles),
-        _slowest_routes_card(routes),
-        _job_durations_card(jobs),
-        _llm_latencies_card(llm),
-    )
+        content = (
+            H1("Jõudlus", cls="page-title"),  # noqa: F405
+            P(A("← Tagasi adminipaneelile", href="/admin"), cls="back-link"),  # noqa: F405
+            _latency_card(percentiles),
+            _slowest_routes_card(routes),
+            _job_durations_card(jobs),
+            _llm_latencies_card(llm),
+        )
 
-    return PageShell(
-        *content,
-        title="J\u00f5udlus",
-        user=auth,
-        theme=theme,
-        active_nav="/admin",
-    )
+        return PageShell(
+            *content,
+            title="Jõudlus",
+            user=auth,
+            theme=theme,
+            active_nav="/admin",
+        )
+    except Exception:
+        logger.exception("Failed to render admin performance page")
+        from app.admin._shared import _render_admin_error_page
+
+        return _render_admin_error_page(title="Jõudlus", user=auth, theme=theme)
