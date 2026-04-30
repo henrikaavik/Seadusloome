@@ -2456,3 +2456,24 @@ details.sync-error pre {
 .sync-error-full {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
 }
+
+/* Sync explainer: contextual help shown above the "Sync now" button. */
+.sync-explainer {
+  margin: 0.75rem 0;
+}
+
+.sync-explainer-details {
+  margin-top: 0.75rem;
+}
+
+.sync-explainer-details > summary.sync-explainer-summary {
+  cursor: pointer;
+  list-style: revert;
+  font-weight: 600;
+  padding: 0.25rem 0;
+}
+
+.sync-explainer-details p {
+  margin: 0.5rem 0;
+  line-height: 1.5;
+}

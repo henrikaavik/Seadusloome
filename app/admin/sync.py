@@ -25,6 +25,7 @@ from app.ui.forms.app_form import AppForm
 from app.ui.primitives.badge import StatusBadge
 from app.ui.primitives.button import Button  # noqa: F401, F811  -- shadow guard
 from app.ui.surfaces.card import Card, CardBody, CardHeader
+from app.ui.surfaces.info_box import InfoBox
 from app.ui.time import format_tallinn
 
 # Module-level lock — keeps rapid double-clicks on the "Sync now" button
@@ -124,6 +125,67 @@ def _sync_error_cell(row: dict):  # type: ignore[type-arg]
         Summary(msg[:_SYNC_ERROR_INLINE_LIMIT] + "…"),  # noqa: F405
         Pre(msg, cls="sync-error-full"),  # noqa: F405
         cls="sync-error",
+    )
+
+
+def _sync_explainer():
+    """Render the explainer InfoBox shown above the trigger button.
+
+    Surfaces the *what*, *why*, and *side effects* of a manual sync so
+    an admin clicking the button knows what's about to happen, how long
+    it takes, and whether it's safe to navigate away mid-sync.
+    """
+    return InfoBox(
+        Div(  # noqa: F405
+            Strong("Mida s\u00fcnkroniseerimine teeb?"),  # noqa: F405
+            " T\u00f5mbab Eesti \u00f5iguse ontoloogia v\u00e4rskeima versiooni GitHubist (",
+            A(  # noqa: F405
+                "henrikaavik/estonian-legal-ontology",
+                href="https://github.com/henrikaavik/estonian-legal-ontology",
+                target="_blank",
+                rel="noopener",
+            ),
+            ") ja laadib selle Apache Jena Fuseki triplestore'i. "
+            "P\u00e4rast l\u00f5ppemist kajastab Uurija ja AI-vestlus "
+            "uusimaid seaduseid, kohtuotsuseid ja EL-i \u00f5igusakte.",
+        ),
+        Details(  # noqa: F405
+            Summary(  # noqa: F405
+                "T\u00e4psem \u00fclevaade",
+                cls="sync-explainer-summary",
+            ),
+            P(  # noqa: F405
+                Strong("Pipeline: "),  # noqa: F405
+                "kloonimine GitHubist \u2192 JSON-LD konverteerimine RDF-iks "
+                "\u2192 SHACL valideerimine \u2192 \u00fclesladidine Jena "
+                "Fuseki'sse \u2192 vahem\u00e4lu taasindekseerimine. "
+                "Kestab tavaliselt m\u00f5ni minut.",
+            ),
+            P(  # noqa: F405
+                Strong("Millal k\u00e4ivitub automaatselt? "),  # noqa: F405
+                "Iga GitHubi muudatuse j\u00e4rel webhooki kaudu. "
+                "K\u00e4sitsi k\u00e4ivitamine on vajalik ainult siis, "
+                "kui webhook on vahele j\u00e4\u00e4nud v\u00f5i soovid "
+                "kontrollida, et runtime andmed on v\u00e4rsked.",
+            ),
+            P(  # noqa: F405
+                Strong("Kas saan vahepeal lehte vahetada? "),  # noqa: F405
+                "Jah \u2014 s\u00fcnkroniseerimine k\u00e4ib serveris "
+                "taustal ega katke, kui navigeerid \u00e4ra v\u00f5i sulged "
+                "akna. Edenemise vaatamiseks naase /admin lehele \u2014 "
+                "viimane staatus on alati n\u00e4htav alumises tabelis.",
+            ),
+            P(  # noqa: F405
+                Strong("Mis EI muutu? "),  # noqa: F405
+                "Eeln\u00f5ude andmed (named graphs), kasutajate vestlused, "
+                "annoteeringud ja eeln\u00f5ude m\u00f5juanal\u00fc\u00fcsid "
+                "s\u00e4ilivad. S\u00fcnkroniseerimine puudutab ainult "
+                "avalikku ontoloogiat.",
+            ),
+            cls="sync-explainer-details",
+        ),
+        variant="info",
+        cls="sync-explainer",
     )
 
 
@@ -358,6 +420,13 @@ def _sync_card(
                 }
             )
         body_nodes.append(DataTable(columns=columns, rows=rows))
+
+    # Show the what-and-why explainer above the trigger button so the
+    # admin can read it before clicking. Hidden while a sync is in
+    # flight (the running panel takes precedence; rerunning isn't
+    # available anyway).
+    if not poll_for_updates:
+        body_nodes.append(_sync_explainer())
 
     body_nodes.append(_sync_trigger_form())
 

@@ -108,9 +108,46 @@ class TestSyncCardErrorColumn:
         from app.admin.sync import _sync_card
 
         html = to_xml(_sync_card([self._failed_log("Connection refused")]))
-        # No details element introduced for the short error
-        assert "<details" not in html
+        # No `sync-error` disclosure introduced for the short error.
+        # (The card may include other unrelated `<details>` elements such
+        # as the sync explainer; we scope the assertion to the error cell.)
+        assert 'class="sync-error"' not in html
         assert "Connection refused" in html
+
+    def test_card_renders_sync_explainer_when_idle(self):
+        """The what-and-why InfoBox is shown above the trigger button when idle."""
+        from fasthtml.common import to_xml
+
+        from app.admin.sync import _sync_card
+
+        html = to_xml(_sync_card([]))
+        # The headline plus each disclosure section land in the rendered card.
+        assert "Mida sünkroniseerimine teeb?" in html
+        assert "henrikaavik/estonian-legal-ontology" in html
+        assert "Kas saan vahepeal lehte vahetada?" in html
+        assert "Pipeline:" in html
+        # The explainer is anchored by its own class, not the sync-error one.
+        # InfoBox composes its variant class with the caller-supplied one.
+        assert "sync-explainer" in html
+
+    def test_card_omits_sync_explainer_while_running(self):
+        """While a sync is in flight the explainer is suppressed in favour of the live panel."""
+        from fasthtml.common import to_xml
+
+        from app.admin.sync import _sync_card
+
+        running_log = {
+            "id": 3,
+            "started_at": datetime(2026, 4, 29, 9, 30, tzinfo=UTC),
+            "finished_at": None,
+            "status": "running",
+            "entity_count": None,
+            "error_message": None,
+            "current_step": "cloning",
+        }
+        html = to_xml(_sync_card([running_log]))
+        assert "Mida sünkroniseerimine teeb?" not in html
+        assert "sync-explainer" not in html
 
     def test_card_with_no_error_renders_dash(self):
         """Successful runs have no error message — render the em-dash."""
@@ -128,7 +165,7 @@ class TestSyncCardErrorColumn:
             "current_step": None,
         }
         html = to_xml(_sync_card([success_log]))
-        # No details disclosure for a clean run
-        assert "<details" not in html
+        # No `sync-error` disclosure for a clean run.
+        assert 'class="sync-error"' not in html
         # The em-dash placeholder is rendered (data-label="Veateade" cell)
         assert "—" in html
