@@ -32,6 +32,7 @@ def _user(org_id: str | None = "org-1") -> UserDict:
         "full_name": "Test Koostaja",
         "role": "drafter",
         "org_id": org_id,
+        "must_change_password": False,
     }
 
 

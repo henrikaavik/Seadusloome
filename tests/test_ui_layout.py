@@ -53,6 +53,7 @@ def _user(role: str) -> UserDict:
         "full_name": "Test User",
         "role": role,
         "org_id": None,
+        "must_change_password": False,
     }
 
 
