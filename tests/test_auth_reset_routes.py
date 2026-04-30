@@ -68,10 +68,12 @@ def test_post_reset_success_clears_cookies_and_changes_password(client, real_use
     assert any("access_token" in sc and "Max-Age=0" in sc for sc in set_cookies)
     assert any("refresh_token" in sc and "Max-Age=0" in sc for sc in set_cookies)
     with _connect() as conn:
-        new_hash = conn.execute(
+        row = conn.execute(
             "SELECT password_hash FROM users WHERE id = %s",
             (real_user_with_token["id"],),
-        ).fetchone()[0]
+        ).fetchone()
+        assert row is not None
+        new_hash = row[0]
     assert bcrypt.checkpw(b"Brandnew1Z", new_hash.encode())
 
 

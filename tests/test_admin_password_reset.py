@@ -89,10 +89,12 @@ def test_system_admin_can_reset_drafter(org_with_users):
     resp = c.post(f"/admin/users/{target}/reset_email", follow_redirects=False)
     assert resp.status_code == 303
     with _connect() as conn:
-        n = conn.execute(
+        row = conn.execute(
             "SELECT COUNT(*) FROM password_reset_tokens WHERE user_id = %s AND created_by = %s",
             (target, sa),
-        ).fetchone()[0]
+        ).fetchone()
+        assert row is not None
+        n = row[0]
     assert n == 1
 
 
@@ -104,10 +106,12 @@ def test_org_admin_can_reset_own_org_drafter(org_with_users):
     resp = c.post(f"/org/users/{target}/reset_email", follow_redirects=False)
     assert resp.status_code == 303
     with _connect() as conn:
-        n = conn.execute(
+        row = conn.execute(
             "SELECT COUNT(*) FROM password_reset_tokens WHERE user_id = %s AND created_by = %s",
             (target, oa),
-        ).fetchone()[0]
+        ).fetchone()
+        assert row is not None
+        n = row[0]
     assert n == 1
 
 
@@ -119,10 +123,12 @@ def test_org_admin_cannot_reset_another_org_admin(org_with_users):
     resp = c.post(f"/org/users/{target}/reset_email", follow_redirects=False)
     assert resp.status_code in (200, 303, 403)
     with _connect() as conn:
-        n = conn.execute(
+        row = conn.execute(
             "SELECT COUNT(*) FROM password_reset_tokens WHERE user_id = %s",
             (target,),
-        ).fetchone()[0]
+        ).fetchone()
+        assert row is not None
+        n = row[0]
     assert n == 0
 
 
@@ -145,6 +151,7 @@ def test_system_admin_temp_password_sets_must_change(org_with_users):
             "SELECT must_change_password, password_hash FROM users WHERE id = %s",
             (target,),
         ).fetchone()
+    assert row is not None
     must_change, pw_hash = row
     assert must_change is True
     assert bcrypt.checkpw(b"Tempnew1Z", pw_hash.encode())
@@ -162,8 +169,10 @@ def test_org_admin_cannot_temp_password_org_admin(org_with_users):
     )
     assert resp.status_code in (200, 303, 403)
     with _connect() as conn:
-        must_change = conn.execute(
+        row = conn.execute(
             "SELECT must_change_password FROM users WHERE id = %s",
             (target,),
-        ).fetchone()[0]
+        ).fetchone()
+        assert row is not None
+        must_change = row[0]
     assert must_change is False

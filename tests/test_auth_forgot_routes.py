@@ -77,10 +77,12 @@ def test_post_forgot_known_email_creates_token_and_logs_email(client, real_user,
     assert resp.status_code == 200
     assert any("/auth/reset/" in r.message for r in caplog.records)
     with _connect() as conn:
-        n = conn.execute(
+        row = conn.execute(
             "SELECT COUNT(*) FROM password_reset_tokens WHERE user_id = %s",
             (real_user["id"],),
-        ).fetchone()[0]
+        ).fetchone()
+        assert row is not None
+        n = row[0]
     assert n == 1
 
 
@@ -89,9 +91,11 @@ def test_post_forgot_records_attempt_for_unknown_email(client):
     resp = client.post("/auth/forgot", data={"email": "rate-limit@example.com"})
     assert resp.status_code == 200
     with _connect() as conn:
-        n = conn.execute(
+        row = conn.execute(
             "SELECT COUNT(*) FROM password_reset_attempts WHERE email_hash = "
             "encode(digest(lower(%s), 'sha256'), 'hex')",
             ("rate-limit@example.com",),
-        ).fetchone()[0]
+        ).fetchone()
+        assert row is not None
+        n = row[0]
     assert n == 1
