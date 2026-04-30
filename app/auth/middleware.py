@@ -44,6 +44,8 @@ def _get_provider() -> JWTAuthProvider:
 # that ontology data queries are not publicly accessible.
 SKIP_PATHS: list[str] = [
     r"/auth/login",
+    r"/auth/forgot",
+    r"/auth/reset/.*",
     r"/static/.*",
     r"/favicon\.ico",
     r"/api/health",
