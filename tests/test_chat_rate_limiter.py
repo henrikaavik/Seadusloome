@@ -178,22 +178,32 @@ class TestCheckOrgCostBudget:
 class TestCheckOrgCostBudgetWithConn:
     def test_advisory_lock_is_taken_when_conn_is_provided(self):
         """When a caller-supplied conn is passed, we must take the advisory lock
-        before reading the running total. This serialises concurrent checks."""
+        before reading the running total. This serialises concurrent checks.
+
+        After the #658 fix the call order is:
+          1. ``SET LOCAL lock_timeout`` (bounds the lock acquire)
+          2. ``pg_advisory_xact_lock`` (the actual lock)
+          3. ``SELECT SUM(cost_usd)`` (the running-total read)
+        """
         conn = MagicMock()
-        # Two execute() calls: lock + select. Chain them via side_effect.
+        # Three execute() calls: lock_timeout + lock + select. Chain via side_effect.
+        timeout_result = MagicMock()
         lock_result = MagicMock()
         select_result = MagicMock()
         select_result.fetchone.return_value = (10.0,)
-        conn.execute.side_effect = [lock_result, select_result]
+        conn.execute.side_effect = [timeout_result, lock_result, select_result]
 
         check_org_cost_budget(_ORG_ID, conn=conn)
 
-        # First call must be the advisory lock.
+        # First call must set the lock_timeout (#658 hang fix).
         first_call_sql = conn.execute.call_args_list[0].args[0]
-        assert "pg_advisory_xact_lock" in first_call_sql
-        # Second call reads the running total.
+        assert "lock_timeout" in first_call_sql
+        # Second call must be the advisory lock.
         second_call_sql = conn.execute.call_args_list[1].args[0]
-        assert "SUM(cost_usd)" in second_call_sql
+        assert "pg_advisory_xact_lock" in second_call_sql
+        # Third call reads the running total.
+        third_call_sql = conn.execute.call_args_list[2].args[0]
+        assert "SUM(cost_usd)" in third_call_sql
 
     def test_second_check_sees_accumulated_cost(self):
         """Proxy for FOR UPDATE correctness: two sequential checks against the
@@ -202,15 +212,25 @@ class TestCheckOrgCostBudgetWithConn:
         a higher SUM on the second SELECT."""
         conn = MagicMock()
 
+        # Each call now emits 3 execute()s: lock_timeout, advisory lock, select.
+        timeout1 = MagicMock()
         lock1 = MagicMock()
         select1 = MagicMock()
         select1.fetchone.return_value = (10.0,)  # Under cap — passes.
+        timeout2 = MagicMock()
         lock2 = MagicMock()
         select2 = MagicMock()
         # Simulates another request that successfully charged between the two
         # checks, pushing us over the monthly cap.
         select2.fetchone.return_value = (_MAX_MONTHLY_COST_USD + 5.0,)
-        conn.execute.side_effect = [lock1, select1, lock2, select2]
+        conn.execute.side_effect = [
+            timeout1,
+            lock1,
+            select1,
+            timeout2,
+            lock2,
+            select2,
+        ]
 
         # First call: still under budget.
         check_org_cost_budget(_ORG_ID, conn=conn)

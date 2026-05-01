@@ -145,12 +145,25 @@ def check_org_cost_budget(
     its own short-lived connection and performs the plain SELECT with
     no locking. This mode is intentionally kept for non-critical paths
     (status/usage display) where a momentary race is acceptable.
+
+    The advisory-lock acquire is bounded by ``SET LOCAL lock_timeout =
+    '3s'``: if a stale connection holds the lock for longer than that,
+    psycopg raises ``LockNotAvailable``, the outer ``except`` catches
+    it, and we fail-open for this turn (the org will simply have a
+    momentary unmetered spend; the next turn will see the corrected
+    sum). Trade-off: brief budget-check skew during lock contention vs.
+    indefinite hangs that lose user data (#658).
     """
     max_cost = _get_max_monthly_cost_usd()
     total_cost = 0.0
 
     try:
         if conn is not None:
+            # Bound the advisory-lock acquire so a stuck pre-deploy
+            # connection holding the lock can't hang the whole turn
+            # (#658). On lock_timeout, psycopg raises LockNotAvailable
+            # which the outer except catches and we fail-open.
+            conn.execute("SET LOCAL lock_timeout = '3s'")
             # Serialise concurrent budget checks for this org inside the
             # caller's transaction. The lock is released on commit/rollback.
             conn.execute(
