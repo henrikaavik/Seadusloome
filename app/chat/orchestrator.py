@@ -55,6 +55,8 @@ from typing import Any
 
 from app.auth.policy import can_access_conversation
 from app.chat.models import (
+    Conversation,
+    Message,
     create_message,
     get_conversation,
     list_messages,
@@ -482,6 +484,26 @@ def _check_budget_in_own_tx(org_id: uuid.UUID | str) -> None:
         conn.commit()
 
 
+def _load_conversation(conversation_id: uuid.UUID) -> Conversation | None:
+    """Load a conversation row in a sync ``with get_connection()`` block.
+
+    Wrapped by :func:`asyncio.to_thread` in ``handle_message`` so the
+    sync psycopg call doesn't block the event loop (#658).
+    """
+    with get_connection() as conn:
+        return get_conversation(conn, conversation_id)
+
+
+def _load_history(conversation_id: uuid.UUID) -> list[Message]:
+    """Load message history for a conversation.
+
+    Wrapped by :func:`asyncio.to_thread` in ``handle_message`` so the
+    sync psycopg call doesn't block the event loop (#658).
+    """
+    with get_connection() as conn:
+        return list_messages(conn, conversation_id)
+
+
 # ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
@@ -571,28 +593,66 @@ class ChatOrchestrator:
         org_id = auth.get("org_id")
 
         # 0. Per-user message rate limit (cheap pre-check, fail-open on DB
-        # error). The per-org cost budget is checked in step 3 inside the
-        # same transaction that persists the user message so the advisory
-        # lock covers the read-then-insert window (see below).
+        # error). Bounded by _PRE_STREAM_DB_TIMEOUT_SECONDS via
+        # asyncio.wait_for so a stuck pool can't hang the turn here (#658).
+        logger.info(
+            "chat.handle_message step=0-rate-check conv=%s user=%s",
+            conversation_id,
+            user_id,
+        )
         try:
             if user_id:
-                check_message_rate(user_id)
+                await asyncio.wait_for(
+                    asyncio.to_thread(check_message_rate, user_id),
+                    timeout=_PRE_STREAM_DB_TIMEOUT_SECONDS,
+                )
         except RateLimitExceededError as exc:
             try:
                 await _safe_send(send, {"type": "error", "message": str(exc)})
             except WebSocketSendTimeout:
                 pass
             return
+        except TimeoutError:
+            logger.warning(
+                "Rate-limit check timed out after %.1fs for user=%s; failing open",
+                _PRE_STREAM_DB_TIMEOUT_SECONDS,
+                user_id,
+            )
+            # Fail open — let the turn through; a stuck rate-limit DB
+            # call shouldn't block a paying user from chatting.
 
-        # 1. Load conversation
+        # 1. Load conversation. Bounded for the same reason as step 0.
+        logger.info(
+            "chat.handle_message step=1-load-conv conv=%s",
+            conversation_id,
+        )
         try:
-            with get_connection() as conn:
-                conversation = get_conversation(conn, conversation_id)
+            conversation = await asyncio.wait_for(
+                asyncio.to_thread(_load_conversation, conversation_id),
+                timeout=_PRE_STREAM_DB_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            logger.warning(
+                "Conversation load timed out after %.1fs for conv=%s",
+                _PRE_STREAM_DB_TIMEOUT_SECONDS,
+                conversation_id,
+            )
+            try:
+                await _safe_send(
+                    send,
+                    {
+                        "type": "error",
+                        "message": "Andmebaas vastab aeglaselt. Palun proovi uuesti.",
+                    },
+                )
+            except WebSocketSendTimeout:
+                pass
+            return
         except Exception:
             logger.exception("Failed to load conversation %s", conversation_id)
             try:
                 await _safe_send(
-                    send, {"type": "error", "message": "Vestluse laadimine ebaonnestus."}
+                    send, {"type": "error", "message": "Vestluse laadimine ebaõnnestus."}
                 )
             except WebSocketSendTimeout:
                 pass
@@ -617,12 +677,26 @@ class ChatOrchestrator:
                 pass
             return
 
-        # Load message history
+        # 2. Load message history. Bounded; on error or timeout we
+        # proceed with empty history so the turn can still happen.
+        logger.info(
+            "chat.handle_message step=2-load-history conv=%s",
+            conversation_id,
+        )
         try:
-            with get_connection() as conn:
-                history = list_messages(conn, conversation_id)
+            history = await asyncio.wait_for(
+                asyncio.to_thread(_load_history, conversation_id),
+                timeout=_PRE_STREAM_DB_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            logger.warning(
+                "History load timed out after %.1fs for conv=%s; using empty",
+                _PRE_STREAM_DB_TIMEOUT_SECONDS,
+                conversation_id,
+            )
+            history = []
         except Exception:
-            logger.exception("Failed to load messages for conversation %s", conversation_id)
+            logger.exception("Failed to load messages for conv=%s", conversation_id)
             history = []
 
         history_length_before = len(history)
