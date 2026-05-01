@@ -48,6 +48,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import aclosing
@@ -98,12 +99,21 @@ _RAG_RETRIEVE_TIMEOUT_SECONDS = 15.0
 _TURN_DEADLINE_SECONDS = 120.0
 
 # #658 — pre-stream DB-call deadline. Each sync DB op (rate check,
-# conversation load, history load, user-msg persist, budget check)
-# is wrapped in ``asyncio.wait_for(... , _PRE_STREAM_DB_TIMEOUT_SECONDS)``
-# so a stalled connection pool surfaces as a friendly error event
-# instead of an indefinite "thinking" spinner. 8 seconds is generous
-# for a healthy DB and short enough that the user notices.
-_PRE_STREAM_DB_TIMEOUT_SECONDS = 8.0
+# conversation load, history load, user-msg persist, budget check,
+# impact-summary load) is wrapped in ``asyncio.wait_for`` so a stalled
+# connection pool surfaces as a friendly error event instead of an
+# indefinite "thinking" spinner.
+#
+# Two limits compose:
+#   - ``_PRE_STREAM_DB_TIMEOUT_SECONDS`` is the per-step ceiling.
+#   - ``_PRE_STREAM_TOTAL_BUDGET_SECONDS`` is the cumulative wall-clock
+#     budget for the whole pre-stream phase, computed from
+#     ``time.monotonic()``. Without it, five sequential 8s steps could
+#     stall a turn for ~40s before the user saw any feedback (post-
+#     review fix to #684). With both limits, worst-case pre-stream
+#     latency is ``_PRE_STREAM_TOTAL_BUDGET_SECONDS``.
+_PRE_STREAM_DB_TIMEOUT_SECONDS = 4.0
+_PRE_STREAM_TOTAL_BUDGET_SECONDS = 12.0
 
 # Module-level registry of fire-and-forget background tasks (e.g. the
 # auto-title job). Holding a strong reference prevents asyncio from
@@ -469,6 +479,21 @@ async def _maybe_generate_title(
 # ---------------------------------------------------------------------------
 
 
+def _step_deadline(pre_stream_start: float) -> float:
+    """Return the deadline for the next pre-stream DB step.
+
+    Capped at ``_PRE_STREAM_DB_TIMEOUT_SECONDS`` (per-step ceiling) AND
+    by the remaining cumulative ``_PRE_STREAM_TOTAL_BUDGET_SECONDS``
+    budget. Returns at least 0.1s so :func:`asyncio.wait_for` always
+    has something to wait on rather than failing pre-emptively (a
+    healthy DB call still completes in a few ms; only stalled pools
+    hit the ceiling).
+    """
+    elapsed = time.monotonic() - pre_stream_start
+    remaining = _PRE_STREAM_TOTAL_BUDGET_SECONDS - elapsed
+    return max(0.1, min(_PRE_STREAM_DB_TIMEOUT_SECONDS, remaining))
+
+
 def _persist_user_message(conversation_id: uuid.UUID, user_message: str) -> None:
     """Insert the user message in a tiny standalone transaction.
 
@@ -603,10 +628,21 @@ class ChatOrchestrator:
         user_id = auth.get("id")
         org_id = auth.get("org_id")
 
+        # Post-review fix to #684: track pre-stream wall-clock so each
+        # awaited DB step is capped by ``min(per_step_ceiling,
+        # remaining_total_budget)``. Without the global cap, five
+        # sequential 8s steps could stall the turn for ~40s before the
+        # user saw any feedback. With it, worst-case pre-stream latency
+        # is ``_PRE_STREAM_TOTAL_BUDGET_SECONDS``.
+        pre_stream_start = time.monotonic()
+
         # 0. Per-user message rate limit (cheap pre-check, fail-open on DB
-        # error). Bounded by _PRE_STREAM_DB_TIMEOUT_SECONDS via
-        # asyncio.wait_for so a stuck pool can't hang the turn here (#658).
-        logger.info(
+        # error). Bounded via asyncio.wait_for so a stuck pool can't hang
+        # the turn here (#658). Effective deadline is
+        # ``min(_PRE_STREAM_DB_TIMEOUT_SECONDS, remaining_global_budget)``.
+        # Demoted to debug (post-review fix): info-level on every turn was
+        # ~1500 lines/min peak — keep the marker but only at debug.
+        logger.debug(
             "chat.handle_message step=0-rate-check conv=%s user=%s",
             conversation_id,
             user_id,
@@ -615,7 +651,7 @@ class ChatOrchestrator:
             if user_id:
                 await asyncio.wait_for(
                     asyncio.to_thread(check_message_rate, user_id),
-                    timeout=_PRE_STREAM_DB_TIMEOUT_SECONDS,
+                    timeout=_step_deadline(pre_stream_start),
                 )
         except RateLimitExceededError as exc:
             try:
@@ -625,27 +661,29 @@ class ChatOrchestrator:
             return
         except TimeoutError:
             logger.warning(
-                "Rate-limit check timed out after %.1fs for user=%s; failing open",
-                _PRE_STREAM_DB_TIMEOUT_SECONDS,
+                "Rate-limit check timed out after %.1fs of pre-stream budget "
+                "for user=%s; failing open",
+                time.monotonic() - pre_stream_start,
                 user_id,
             )
             # Fail open — let the turn through; a stuck rate-limit DB
             # call shouldn't block a paying user from chatting.
 
         # 1. Load conversation. Bounded for the same reason as step 0.
-        logger.info(
+        # Debug-level marker (post-review fix): see step 0 rationale.
+        logger.debug(
             "chat.handle_message step=1-load-conv conv=%s",
             conversation_id,
         )
         try:
             conversation = await asyncio.wait_for(
                 asyncio.to_thread(_load_conversation, conversation_id),
-                timeout=_PRE_STREAM_DB_TIMEOUT_SECONDS,
+                timeout=_step_deadline(pre_stream_start),
             )
         except TimeoutError:
             logger.warning(
-                "Conversation load timed out after %.1fs for conv=%s",
-                _PRE_STREAM_DB_TIMEOUT_SECONDS,
+                "Conversation load timed out after %.1fs of pre-stream budget for conv=%s",
+                time.monotonic() - pre_stream_start,
                 conversation_id,
             )
             try:
@@ -682,7 +720,7 @@ class ChatOrchestrator:
         if not can_access_conversation(auth, conversation):
             try:
                 await _safe_send(
-                    send, {"type": "error", "message": "Puudub oigus sellele vestlusele."}
+                    send, {"type": "error", "message": "Puudub õigus sellele vestlusele."}
                 )
             except WebSocketSendTimeout:
                 pass
@@ -690,19 +728,20 @@ class ChatOrchestrator:
 
         # 2. Load message history. Bounded; on error or timeout we
         # proceed with empty history so the turn can still happen.
-        logger.info(
+        # Debug-level marker (post-review fix): see step 0 rationale.
+        logger.debug(
             "chat.handle_message step=2-load-history conv=%s",
             conversation_id,
         )
         try:
             history = await asyncio.wait_for(
                 asyncio.to_thread(_load_history, conversation_id),
-                timeout=_PRE_STREAM_DB_TIMEOUT_SECONDS,
+                timeout=_step_deadline(pre_stream_start),
             )
         except TimeoutError:
             logger.warning(
-                "History load timed out after %.1fs for conv=%s; using empty",
-                _PRE_STREAM_DB_TIMEOUT_SECONDS,
+                "History load timed out after %.1fs of pre-stream budget for conv=%s; using empty",
+                time.monotonic() - pre_stream_start,
                 conversation_id,
             )
             history = []
@@ -712,43 +751,19 @@ class ChatOrchestrator:
 
         history_length_before = len(history)
 
-        # 2b. Build system prompt. The impact-summary load is a sync DB
-        # call; wrap it in the same wait_for+to_thread pattern as the
-        # other pre-stream loads so a stalled pool can't hang the turn
-        # before persist (#658). Fail-open with no summary on timeout —
-        # the chat still works, it just won't reference impact details.
-        impact_summary: str | None = None
-        draft_context_id: str | None = None
-        if conversation.context_draft_id:
-            draft_context_id = str(conversation.context_draft_id)
-            try:
-                impact_summary = await asyncio.wait_for(
-                    asyncio.to_thread(_load_impact_summary, draft_context_id, str(org_id)),
-                    timeout=_PRE_STREAM_DB_TIMEOUT_SECONDS,
-                )
-            except TimeoutError:
-                logger.warning(
-                    "Impact summary load timed out after %.1fs for draft=%s; "
-                    "proceeding without context",
-                    _PRE_STREAM_DB_TIMEOUT_SECONDS,
-                    draft_context_id,
-                )
-                impact_summary = None
-            except Exception:
-                logger.exception("Failed to load impact summary for draft=%s", draft_context_id)
-                impact_summary = None
-
-        system_prompt = build_system_prompt(
-            draft_context_id=draft_context_id,
-            impact_summary=impact_summary,
-        )
-
         # 3a. Persist the user message FIRST in its own transaction (#658).
         # Decoupled from the budget check so a stuck pg_advisory_xact_lock
         # or any downstream failure cannot lose user input. Bounded by an
         # 8s deadline so a stalled pool surfaces as an error instead of a
         # silent hang. The persist runs in a thread because psycopg is
         # sync; ``asyncio.to_thread`` keeps the event loop responsive.
+        #
+        # Reordered (post-review fix to #658): persist now precedes the
+        # impact-summary load + system-prompt build. Previously a future
+        # contributor adding an early return from the impact-summary
+        # path would silently re-introduce the data-loss bug. Persist is
+        # now unconditionally the first DB write of the turn after the
+        # read-only setup steps.
         logger.info(
             "chat.handle_message step=3a-persist-user conv=%s user=%s",
             conversation_id,
@@ -757,12 +772,12 @@ class ChatOrchestrator:
         try:
             await asyncio.wait_for(
                 asyncio.to_thread(_persist_user_message, conversation_id, user_message),
-                timeout=_PRE_STREAM_DB_TIMEOUT_SECONDS,
+                timeout=_step_deadline(pre_stream_start),
             )
         except TimeoutError:
             logger.warning(
-                "User-message persist timed out after %.1fs for conv=%s",
-                _PRE_STREAM_DB_TIMEOUT_SECONDS,
+                "User-message persist timed out after %.1fs of pre-stream budget for conv=%s",
+                time.monotonic() - pre_stream_start,
                 conversation_id,
             )
             try:
@@ -798,7 +813,7 @@ class ChatOrchestrator:
             try:
                 await asyncio.wait_for(
                     asyncio.to_thread(_check_budget_in_own_tx, org_id),
-                    timeout=_PRE_STREAM_DB_TIMEOUT_SECONDS,
+                    timeout=_step_deadline(pre_stream_start),
                 )
             except CostBudgetExceededError as exc:
                 try:
@@ -808,8 +823,9 @@ class ChatOrchestrator:
                 return
             except TimeoutError:
                 logger.warning(
-                    "Budget check timed out after %.1fs for conv=%s; failing open",
-                    _PRE_STREAM_DB_TIMEOUT_SECONDS,
+                    "Budget check timed out after %.1fs of pre-stream budget "
+                    "for conv=%s; failing open",
+                    time.monotonic() - pre_stream_start,
                     conversation_id,
                 )
                 # Fail open — user message already persisted; better to
@@ -818,7 +834,39 @@ class ChatOrchestrator:
                 logger.exception("Budget check failed for conv=%s", conversation_id)
                 # Fail open
 
-        # 3c. RAG retrieval — now that the user message is safely persisted,
+        # 4. Build system prompt. The impact-summary load is a sync DB
+        # call; wrap it in the same wait_for+to_thread pattern as the
+        # other pre-stream loads. Moved AFTER persist (post-review fix
+        # to #658): an early return from this load can no longer regress
+        # the data-loss guarantee. Fail-open with no summary on timeout
+        # — the chat still works, it just won't reference impact details.
+        impact_summary: str | None = None
+        draft_context_id: str | None = None
+        if conversation.context_draft_id:
+            draft_context_id = str(conversation.context_draft_id)
+            try:
+                impact_summary = await asyncio.wait_for(
+                    asyncio.to_thread(_load_impact_summary, draft_context_id, str(org_id)),
+                    timeout=_step_deadline(pre_stream_start),
+                )
+            except TimeoutError:
+                logger.warning(
+                    "Impact summary load timed out after %.1fs of pre-stream "
+                    "budget for draft=%s; proceeding without context",
+                    time.monotonic() - pre_stream_start,
+                    draft_context_id,
+                )
+                impact_summary = None
+            except Exception:
+                logger.exception("Failed to load impact summary for draft=%s", draft_context_id)
+                impact_summary = None
+
+        system_prompt = build_system_prompt(
+            draft_context_id=draft_context_id,
+            impact_summary=impact_summary,
+        )
+
+        # 5. RAG retrieval — now that the user message is safely persisted,
         # we can afford to have RAG fail or time out without losing data.
         # Tenant scoping landed in #576: retriever filters by caller's org_id
         # (public NULL-scoped rows + caller's own private rows).
@@ -1225,7 +1273,7 @@ class ChatOrchestrator:
                 )
             try:
                 await _safe_send(
-                    send, {"type": "error", "message": "Vastuse genereerimine ebaonnestus."}
+                    send, {"type": "error", "message": "Vastuse genereerimine ebaõnnestus."}
                 )
             except WebSocketSendTimeout:
                 pass

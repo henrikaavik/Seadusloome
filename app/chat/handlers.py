@@ -780,7 +780,7 @@ async def edit_message_handler(req: Request, conv_id: str, msg_id: str):
                 return _not_found_response()
             if msg.role != "user":
                 return Response(
-                    "Vaid kasutaja sonumeid saab muuta.",
+                    "Vaid kasutaja sõnumeid saab muuta.",
                     status_code=400,
                     media_type="text/plain",
                 )
