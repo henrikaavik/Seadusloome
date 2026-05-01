@@ -1117,9 +1117,14 @@ async def delete_conversation_handler(req: Request, conv_id: str):
 
     is_htmx = req.headers.get("HX-Request") == "true"
     if is_htmx and from_list:
-        # Empty body + 200 — htmx replaces the <tr> with nothing, so the
-        # row vanishes from the list without touching pagination.
-        return Response("", status_code=200)
+        # #663: a row-only swap leaves pagination/counts stale. Use
+        # HX-Refresh so the row vanishes AND the counts/pagination
+        # refresh, matching what the user sees after a manual reload.
+        return Response(
+            "",
+            status_code=200,
+            headers={"HX-Refresh": "true"},
+        )
     if is_htmx:
         return Response(
             status_code=204,

@@ -249,11 +249,12 @@ class TestPinConversation:
 
 
 class TestArchiveConversation:
-    def test_archive_htmx_returns_empty_row_swap(self, provider_patch, mock_conn):
-        """Bug #654: htmx archive removes the row in place (empty 200).
-
+    def test_archive_htmx_returns_hx_refresh(self, provider_patch, mock_conn):
+        """Bug #663: htmx archive returns HX-Refresh so the row removal
+        AND the toolbar/pagination counts refresh atomically. Slight
+        scroll-loss cost is acceptable since the row leaves view anyway.
         The HX-Trigger event is preserved so sidebar counters listening
-        for ``chat:conversation-updated`` still refresh.
+        for ``chat:conversation-updated`` still refresh too.
         """
         conv = _make_conversation()
         with (
@@ -268,6 +269,7 @@ class TestArchiveConversation:
             )
             assert resp.status_code == 200
             assert resp.text == ""
+            assert resp.headers.get("HX-Refresh") == "true"
             assert resp.headers.get("HX-Trigger") == "chat:conversation-updated"
             mock_set.assert_called_once()
 
