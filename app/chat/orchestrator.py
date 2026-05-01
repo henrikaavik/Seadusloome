@@ -701,12 +701,31 @@ class ChatOrchestrator:
 
         history_length_before = len(history)
 
-        # 2. Build system prompt
+        # 2b. Build system prompt. The impact-summary load is a sync DB
+        # call; wrap it in the same wait_for+to_thread pattern as the
+        # other pre-stream loads so a stalled pool can't hang the turn
+        # before persist (#658). Fail-open with no summary on timeout —
+        # the chat still works, it just won't reference impact details.
         impact_summary: str | None = None
         draft_context_id: str | None = None
         if conversation.context_draft_id:
             draft_context_id = str(conversation.context_draft_id)
-            impact_summary = _load_impact_summary(draft_context_id, str(org_id))
+            try:
+                impact_summary = await asyncio.wait_for(
+                    asyncio.to_thread(_load_impact_summary, draft_context_id, str(org_id)),
+                    timeout=_PRE_STREAM_DB_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "Impact summary load timed out after %.1fs for draft=%s; "
+                    "proceeding without context",
+                    _PRE_STREAM_DB_TIMEOUT_SECONDS,
+                    draft_context_id,
+                )
+                impact_summary = None
+            except Exception:
+                logger.exception("Failed to load impact summary for draft=%s", draft_context_id)
+                impact_summary = None
 
         system_prompt = build_system_prompt(
             draft_context_id=draft_context_id,

@@ -44,6 +44,11 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # UI component functions follow FastHTML's PascalCase convention for FT builders
 "app/ui/**/*.py" = ["F403", "F405", "N802"]
 
+[tool.pytest.ini_options]
+markers = [
+    "integration: integration tests that require a live database (skipped without DATABASE_URL)",
+]
+
 [tool.pyright]
 pythonVersion = "3.13"
 typeCheckingMode = "basic"
