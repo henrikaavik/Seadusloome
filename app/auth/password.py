@@ -1,50 +1,29 @@
-"""Shared password validation and password-change helpers.
+"""Shared password helpers used by self-service, profile, and admin flows.
 
-The single ``change_password`` core is used by every flow that mutates
-``users.password_hash`` so the same invariants apply everywhere:
+This module owns:
 
-* hash with bcrypt;
-* bump ``token_version`` so every previously-issued access token is
-  rejected on its next use (#635);
-* set ``must_change_password`` per the caller's flag (only the
-  admin temp-password flow passes ``True``);
-* set ``password_changed_at = now()`` for audit;
-* delete ``sessions`` rows for the user so refresh tokens cannot be
-  replayed after the password rotation.
+- :func:`validate_password` — rule check (length, case, digit, email substring).
+- :func:`change_password` — atomic mutation: hash, bump token_version,
+  delete sessions, set ``password_changed_at``, optionally set
+  ``must_change_password``.
+- Token issuance / claim helpers used by the forgot/reset flows.
 
-All five operations run inside one transaction so a partial failure
-cannot leave a half-rotated row behind.
-
-Validation rules (`validate_password`) are kept here, not in
-``app/auth/users.py``, because the same checks are applied across the
-self-service forgot, /profile/password, and admin temp-password flows.
-The Estonian error strings live in `docs/superpowers/specs/
-2026-04-28-password-management-design.md` §8 (single glossary).
+See `docs/superpowers/specs/2026-04-28-password-management-design.md`.
 """
 
 from __future__ import annotations
+
+import hashlib
+import secrets
+from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
 import bcrypt
 import psycopg
 
 
 def validate_password(password: str, *, email: str | None = None) -> str | None:
-    """Return an Estonian error message when *password* fails policy.
-
-    Returns ``None`` when the password is acceptable. Rules:
-
-    1. ``len(password) >= 8``;
-    2. at least one uppercase letter;
-    3. at least one digit;
-    4. when ``email`` is given, the local-part (before ``@``)
-       lowercased must NOT appear as a substring in the lowercased
-       password.
-
-    Rule 4 is the new, password-management-spec rule (§4.5). It blocks
-    obvious passwords like ``Henrik2024`` for ``henrik@…``. Existing
-    callers that don't pass ``email`` get the same behaviour as
-    ``app.auth.users.validate_password`` for back-compat.
-    """
+    """Return an Estonian error message if *password* fails the rules, else ``None``."""
     if len(password) < 8:
         return "Parool peab olema vähemalt 8 tähemärki pikk"
     if not any(c.isupper() for c in password):
@@ -58,59 +37,100 @@ def validate_password(password: str, *, email: str | None = None) -> str | None:
     return None
 
 
+def hash_password(password: str) -> str:
+    """Return a bcrypt-encoded hash for *password*."""
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+
+
 def change_password(
-    user_id: str,
+    user_id: UUID | str,
     new_password: str,
     *,
-    conn: psycopg.Connection,  # type: ignore[type-arg]
+    conn: psycopg.Connection,
     must_change: bool = False,
 ) -> None:
-    """Rotate the user's password atomically.
+    """Atomically rotate password, bump token_version, delete sessions.
 
-    All five steps run inside a single transaction:
-
-    * compute a fresh bcrypt hash;
-    * UPDATE ``users`` setting ``password_hash``,
-      ``token_version = token_version + 1``,
-      ``must_change_password = must_change``,
-      ``password_changed_at = now()``;
-    * DELETE ``sessions`` for the user.
-
-    The caller is responsible for:
-
-    * password validation (see :func:`validate_password`);
-    * audit logging (e.g. ``user.password_change`` /
-      ``user.password_reset``);
-    * consuming the reset token (when applicable, §4.6 of the spec);
-    * clearing the browser's ``access_token`` and ``refresh_token``
-      cookies on the redirect response (§4.7 of the spec).
-
-    Pass ``must_change=True`` ONLY for the admin temp-password flow
-    (§5.4 of the spec). All other paths set ``must_change=False`` so
-    the user is not forced to change again immediately after picking a
-    real password.
-
-    The ``conn`` parameter is required so the caller can compose this
-    call with other DB work in the same transaction (notably the
-    atomic reset-token UPDATE in §4.6). The function ``commit()``s on
-    success and ``rollback()``s on failure.
+    - ``must_change=True`` is set ONLY by the admin temp-password flow
+      (§5.4 of the spec); every other flow leaves it False so the user
+      is not forced to change again.
     """
-    pw_hash = bcrypt.hashpw(new_password.encode(), bcrypt.gensalt()).decode()
-    try:
+    pw_hash = hash_password(new_password)
+    with conn.transaction():
         conn.execute(
-            "UPDATE users "
-            "SET password_hash = %s, "
-            "    token_version = token_version + 1, "
-            "    must_change_password = %s, "
-            "    password_changed_at = now() "
+            "UPDATE users SET "
+            "  password_hash = %s, "
+            "  token_version = token_version + 1, "
+            "  must_change_password = %s, "
+            "  password_changed_at = now() "
             "WHERE id = %s",
-            (pw_hash, must_change, user_id),
+            (pw_hash, must_change, str(user_id)),
+        )
+        conn.execute("DELETE FROM sessions WHERE user_id = %s", (str(user_id),))
+
+
+def hash_token(raw_token: str) -> str:
+    """SHA-256 hex digest of *raw_token* — the form stored in DB."""
+    return hashlib.sha256(raw_token.encode()).hexdigest()
+
+
+def hash_email(email: str) -> str:
+    """SHA-256 hex digest of the lowercased *email* — keyed for rate-limit table."""
+    return hashlib.sha256(email.strip().lower().encode()).hexdigest()
+
+
+def issue_reset_token(
+    *,
+    user_id: UUID | str,
+    created_by: UUID | str | None,
+    conn: psycopg.Connection,
+    ttl: timedelta = timedelta(hours=1),
+) -> str:
+    """Generate, store, and return a fresh raw reset token for *user_id*.
+
+    Invalidates any prior unused tokens for the same user (single-current-token
+    policy, §4.3).
+
+    Returns the raw token (caller emails it; only the SHA-256 hash is in DB).
+    """
+    raw = secrets.token_hex(32)
+    digest = hash_token(raw)
+    expires_at = datetime.now(UTC) + ttl
+    with conn.transaction():
+        conn.execute(
+            "UPDATE password_reset_tokens "
+            "SET used_at = now() "
+            "WHERE user_id = %s AND used_at IS NULL",
+            (str(user_id),),
         )
         conn.execute(
-            "DELETE FROM sessions WHERE user_id = %s",
-            (user_id,),
+            "INSERT INTO password_reset_tokens "
+            "(user_id, token_hash, expires_at, created_by) "
+            "VALUES (%s, %s, %s, %s)",
+            (str(user_id), digest, expires_at, str(created_by) if created_by else None),
         )
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
+    return raw
+
+
+def claim_reset_token(
+    raw_token: str, *, conn: psycopg.Connection
+) -> tuple[str, str | None] | None:
+    """Atomically claim the token. Returns ``(user_id, created_by)`` or None.
+
+    Race-safe: PostgreSQL serializes concurrent UPDATEs of the same row so
+    only one writer claims the token; the others get zero rows back.
+    """
+    digest = hash_token(raw_token)
+    row = conn.execute(
+        "UPDATE password_reset_tokens "
+        "SET used_at = now() "
+        "WHERE token_hash = %s "
+        "  AND used_at IS NULL "
+        "  AND expires_at > now() "
+        "RETURNING user_id, created_by",
+        (digest,),
+    ).fetchone()
+    if row is None:
+        return None
+    user_id, created_by = row
+    return str(user_id), str(created_by) if created_by else None
