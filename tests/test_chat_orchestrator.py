@@ -856,8 +856,11 @@ class TestOrchestratorPartialPersistence:
         error_events = [e for e in collector.events if e.get("type") == "error"]
         assert len(error_events) == 1
 
-        # Only 1 commit (for the user message), not 2 (no assistant msg persisted)
-        assert conn.commit.call_count == 1
+        # #658: user-msg persist and budget check now run in separate
+        # transactions, so we expect 2 commits (one per tx) — neither is
+        # the assistant message, since the LLM exploded before producing
+        # any content.
+        assert conn.commit.call_count == 2
 
 
 # ---------------------------------------------------------------------------
@@ -1470,18 +1473,18 @@ class TestMaxToolRoundsCapVerified:
 
 
 class TestCostBudgetAdvisoryLock:
-    """The advisory lock must engage on the same conn that persists the user msg."""
+    """User-msg INSERT and advisory lock must run on SEPARATE conns (#658)."""
 
     @patch("app.chat.orchestrator.check_message_rate")
     @patch("app.chat.orchestrator.get_connection")
-    def test_cost_budget_uses_advisory_lock_when_conn_passed(self, mock_get_conn, mock_rate):
-        """The advisory lock must be taken on the conn that then INSERTs the
-        user message — the two operations must share a transaction so the
-        lock serialises the read-then-insert window.
+    def test_cost_budget_lock_and_user_msg_insert_are_decoupled(self, mock_get_conn, mock_rate):
+        """The advisory lock and the user-msg INSERT must run on DIFFERENT
+        connections (#658). A stuck advisory lock must not be able to hold
+        up the user-message persist, so the two operations live in
+        independent short-lived transactions. This test asserts that
+        separation: the conn that takes ``pg_advisory_xact_lock`` does not
+        also run ``INSERT INTO messages``.
         """
-        # Two independent conn mocks: the first is used for loading the
-        # conversation + history, the second is the budget-check-plus-
-        # user-message-insert conn we care about.
         conv = _make_conversation()
         now = datetime.now(UTC)
 
@@ -1522,8 +1525,8 @@ class TestCostBudgetAdvisoryLock:
 
         # We'll hand out a stream of conns — the orchestrator opens a fresh
         # connection per ``with get_connection()`` block. Capture per-conn
-        # execute history so we can verify the budget+insert conn started
-        # with the advisory-lock SQL.
+        # execute history so we can verify the lock-holding conn never
+        # performs the user-msg INSERT.
         conn_histories: list[list[str]] = []
 
         def make_conn() -> MagicMock:
@@ -1559,28 +1562,39 @@ class TestCostBudgetAdvisoryLock:
         orchestrator = ChatOrchestrator(FakeLLM(), FakeSparql())
         asyncio.run(orchestrator.handle_message(_CONV_ID, "Tere", _auth(), collector))
 
-        # Locate the conn whose first SQL statement contains the advisory
-        # lock. That conn must ALSO run an INSERT INTO messages call (the
-        # shared-transaction guarantee from the review fix).
+        # Locate the conn that took the advisory lock and the conn that
+        # inserted the user message. They MUST be different conns now (#658).
         lock_conn_history: list[str] | None = None
+        user_insert_conn_history: list[str] | None = None
         for history in conn_histories:
-            if history and "pg_advisory_xact_lock" in history[0]:
+            if any(isinstance(sql, str) and "pg_advisory_xact_lock" in sql for sql in history):
                 lock_conn_history = history
-                break
+            if any(isinstance(sql, str) and "INSERT INTO messages" in sql for sql in history):
+                # Take the FIRST INSERT-using conn as the user-msg conn; that
+                # is the step-3a persist (assistant-msg persistence happens
+                # later on a different conn).
+                if user_insert_conn_history is None:
+                    user_insert_conn_history = history
 
         assert lock_conn_history is not None, (
-            "No connection took pg_advisory_xact_lock as its first SQL. "
+            f"No connection took pg_advisory_xact_lock. Observed histories: {conn_histories}"
+        )
+        assert user_insert_conn_history is not None, (
+            "No connection ran INSERT INTO messages for the user message. "
             f"Observed histories: {conn_histories}"
         )
-        # The very first SQL on that conn is the lock call — this is the
-        # TOCTOU-closing property.
-        assert "pg_advisory_xact_lock" in lock_conn_history[0]
-        # And the same conn later inserts the user message.
-        assert any(
-            "INSERT INTO messages" in sql for sql in lock_conn_history if isinstance(sql, str)
+        # The user-msg INSERT and the advisory lock must NOT live on the
+        # same conn — that decoupling is the #658 fix.
+        assert lock_conn_history is not user_insert_conn_history, (
+            "Advisory lock and user-msg INSERT shared a connection. The "
+            "#658 fix requires them to run in independent transactions."
+        )
+        # Sanity: the lock-holding conn must not contain a user-msg INSERT.
+        assert not any(
+            isinstance(sql, str) and "INSERT INTO messages" in sql for sql in lock_conn_history
         ), (
-            "Lock-holding conn never persisted a user message — the "
-            "transaction-sharing guarantee is not wired up."
+            "Lock-holding conn ran INSERT INTO messages — that re-couples "
+            "the user-msg persist with the budget tx (regression on #658)."
         )
 
 

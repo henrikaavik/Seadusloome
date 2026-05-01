@@ -95,6 +95,14 @@ _FOLLOW_UPS_MAX_TOKENS = 180
 _RAG_RETRIEVE_TIMEOUT_SECONDS = 15.0
 _TURN_DEADLINE_SECONDS = 120.0
 
+# #658 — pre-stream DB-call deadline. Each sync DB op (rate check,
+# conversation load, history load, user-msg persist, budget check)
+# is wrapped in ``asyncio.wait_for(... , _PRE_STREAM_DB_TIMEOUT_SECONDS)``
+# so a stalled connection pool surfaces as a friendly error event
+# instead of an indefinite "thinking" spinner. 8 seconds is generous
+# for a healthy DB and short enough that the user notices.
+_PRE_STREAM_DB_TIMEOUT_SECONDS = 8.0
+
 # Module-level registry of fire-and-forget background tasks (e.g. the
 # auto-title job). Holding a strong reference prevents asyncio from
 # GC'ing the task mid-flight and logging the noisy "Task was destroyed
@@ -444,6 +452,37 @@ async def _maybe_generate_title(
 
 
 # ---------------------------------------------------------------------------
+# Pre-stream DB helpers (#658)
+# ---------------------------------------------------------------------------
+
+
+def _persist_user_message(conversation_id: uuid.UUID, user_message: str) -> None:
+    """Insert the user message in a tiny standalone transaction.
+
+    Decoupled from the budget transaction (#658) so a stuck advisory
+    lock cannot lose user input. Runs in a thread via
+    ``asyncio.to_thread`` because psycopg is sync.
+    """
+    with get_connection() as conn:
+        create_message(conn, conversation_id, "user", user_message)
+        conn.commit()
+
+
+def _check_budget_in_own_tx(org_id: uuid.UUID | str) -> None:
+    """Run the per-org cost-budget check in its own short-lived tx.
+
+    The advisory lock taken inside ``check_org_cost_budget`` is bounded
+    by ``SET LOCAL lock_timeout = '3s'`` (set inside the function),
+    so a stuck lock raises ``LockNotAvailable`` which the function's
+    own except catches and fails open. Raises
+    :class:`CostBudgetExceededError` if the org is over budget.
+    """
+    with get_connection() as conn:
+        check_org_cost_budget(org_id, conn=conn)
+        conn.commit()
+
+
+# ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
 
@@ -600,35 +639,82 @@ class ChatOrchestrator:
             impact_summary=impact_summary,
         )
 
-        # 3. Budget check + persist user message BEFORE RAG retrieval (#652).
-        # RAG and the LLM can stall for minutes; if we wait until after them
-        # to persist, a timeout means the user's message is silently lost
-        # and they can't see it after a reload. The advisory lock taken in
-        # ``check_org_cost_budget`` still covers the read-then-insert window
-        # because it runs in the same transaction as ``create_message``.
+        # 3a. Persist the user message FIRST in its own transaction (#658).
+        # Decoupled from the budget check so a stuck pg_advisory_xact_lock
+        # or any downstream failure cannot lose user input. Bounded by an
+        # 8s deadline so a stalled pool surfaces as an error instead of a
+        # silent hang. The persist runs in a thread because psycopg is
+        # sync; ``asyncio.to_thread`` keeps the event loop responsive.
+        logger.info(
+            "chat.handle_message step=3a-persist-user conv=%s user=%s",
+            conversation_id,
+            user_id,
+        )
         try:
-            with get_connection() as conn:
-                if org_id:
-                    check_org_cost_budget(org_id, conn=conn)
-                create_message(conn, conversation_id, "user", user_message)
-                conn.commit()
-        except CostBudgetExceededError as exc:
+            await asyncio.wait_for(
+                asyncio.to_thread(_persist_user_message, conversation_id, user_message),
+                timeout=_PRE_STREAM_DB_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            logger.warning(
+                "User-message persist timed out after %.1fs for conv=%s",
+                _PRE_STREAM_DB_TIMEOUT_SECONDS,
+                conversation_id,
+            )
             try:
-                await _safe_send(send, {"type": "error", "message": str(exc)})
+                await _safe_send(
+                    send,
+                    {
+                        "type": "error",
+                        "message": "Andmebaas vastab aeglaselt. Palun proovi uuesti.",
+                    },
+                )
             except WebSocketSendTimeout:
                 pass
             return
         except Exception:
-            logger.exception("Failed to persist user message")
+            logger.exception("Failed to persist user message for conv=%s", conversation_id)
             try:
                 await _safe_send(
-                    send, {"type": "error", "message": "Sonum salvestamine ebaonnestus."}
+                    send, {"type": "error", "message": "Sõnumi salvestamine ebaõnnestus."}
                 )
             except WebSocketSendTimeout:
                 pass
             return
 
-        # 3b. RAG retrieval — now that the user message is safely persisted,
+        # 3b. Budget check in a separate transaction. The user message is
+        # already safely persisted; if the budget is over the user simply
+        # sees an error (and can see what they tried to ask on reload).
+        if org_id:
+            logger.info(
+                "chat.handle_message step=3b-budget conv=%s org=%s",
+                conversation_id,
+                org_id,
+            )
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(_check_budget_in_own_tx, org_id),
+                    timeout=_PRE_STREAM_DB_TIMEOUT_SECONDS,
+                )
+            except CostBudgetExceededError as exc:
+                try:
+                    await _safe_send(send, {"type": "error", "message": str(exc)})
+                except WebSocketSendTimeout:
+                    pass
+                return
+            except TimeoutError:
+                logger.warning(
+                    "Budget check timed out after %.1fs for conv=%s; failing open",
+                    _PRE_STREAM_DB_TIMEOUT_SECONDS,
+                    conversation_id,
+                )
+                # Fail open — user message already persisted; better to
+                # let this turn through than to lose data.
+            except Exception:
+                logger.exception("Budget check failed for conv=%s", conversation_id)
+                # Fail open
+
+        # 3c. RAG retrieval — now that the user message is safely persisted,
         # we can afford to have RAG fail or time out without losing data.
         # Tenant scoping landed in #576: retriever filters by caller's org_id
         # (public NULL-scoped rows + caller's own private rows).

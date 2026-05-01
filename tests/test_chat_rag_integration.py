@@ -387,6 +387,7 @@ class TestOrchestratorRateLimitIntegration:
         assert collector.events[0]["type"] == "error"
         assert "100" in collector.events[0]["message"]
 
+    @patch("app.chat.orchestrator._persist_user_message")
     @patch(
         "app.chat.orchestrator.check_org_cost_budget",
         side_effect=CostBudgetExceededError("Kulueelarve on taidetud."),
@@ -399,14 +400,20 @@ class TestOrchestratorRateLimitIntegration:
     @patch("app.chat.orchestrator.list_messages", return_value=[])
     @patch("app.chat.orchestrator.get_connection")
     def test_cost_budget_sends_error_event(
-        self, mock_get_conn, mock_list, mock_get_conv, mock_rate, mock_cost
+        self,
+        mock_get_conn,
+        mock_list,
+        mock_get_conv,
+        mock_rate,
+        mock_cost,
+        mock_persist,
     ):
         """CostBudgetExceededError triggers an error event, no LLM call.
 
-        The budget check was relocated inside the conversation-load
-        transaction so the advisory lock can actually serialise
-        concurrent checks (TOCTOU fix). The test therefore needs to
-        feed past conversation loading before the cost check fires.
+        The user-message persist runs in its own transaction (#658) before
+        the budget check, so we patch it to a no-op to focus this test
+        purely on the budget-error path. The persist step is exercised
+        elsewhere in ``test_chat_orchestrator.py``.
         """
         llm = FakeLLM()
         collector = _Collector()
