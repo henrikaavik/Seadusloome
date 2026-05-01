@@ -385,13 +385,20 @@ async def archive_conversation_handler(req: Request, conv_id: str):
     )
 
     if _is_htmx(req):
-        # Empty body + 200 collapses the row out of the list. We trigger
-        # ``chat:conversation-updated`` so any sidebar counters listening
-        # for the event can still refresh.
+        # #663: a row-only outerHTML swap collapsed the <tr> but left
+        # the toolbar/pagination counts stale, which was confusing on
+        # the archived-filter view in particular. HX-Refresh: true does
+        # a full page reload so the row vanishes AND the counts are
+        # always honest. Slight scroll-loss cost is acceptable since
+        # the row leaves view anyway. The HX-Trigger event is kept so
+        # any sidebar counters listening for it refresh too.
         return Response(
             "",
             status_code=200,
-            headers={"HX-Trigger": "chat:conversation-updated"},
+            headers={
+                "HX-Refresh": "true",
+                "HX-Trigger": "chat:conversation-updated",
+            },
         )
     return RedirectResponse(url="/chat", status_code=303)
 

@@ -414,12 +414,13 @@ class TestChatDelete:
     @patch("app.chat.routes.delete_conversation")
     @patch("app.chat.routes._connect")
     @patch("app.auth.middleware._get_provider")
-    def test_delete_from_list_returns_empty_row_swap(
+    def test_delete_from_list_returns_hx_refresh(
         self, mock_provider, mock_connect, mock_delete, mock_audit
     ):
-        """Bug #654: the ``/chat`` list delete form posts ``from_list=1``
-        so htmx can swap the row out in place (empty 200 body, no
-        HX-Redirect).
+        """Bug #663: the ``/chat`` list delete form posts ``from_list=1``;
+        the response uses ``HX-Refresh: true`` so the row vanishes AND
+        the toolbar/pagination counts refresh (a row-only swap left
+        counts stale).
         """
         mock_provider.return_value = _stub_provider()
         conn = MagicMock()
@@ -436,7 +437,8 @@ class TestChatDelete:
             )
             assert resp.status_code == 200
             assert resp.text == ""
-            # No HX-Redirect — row just disappears from the list.
+            assert resp.headers.get("HX-Refresh") == "true"
+            # No HX-Redirect — the refresh handles the page change.
             assert "HX-Redirect" not in resp.headers
         mock_delete.assert_called_once()
 
