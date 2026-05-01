@@ -719,6 +719,160 @@ class TestOrchestratorPersistence:
         assert conn.commit.call_count >= 1
 
 
+class TestAssistantTokensPersistence:
+    """#662: token counts from the LLM stream's terminal stop event must be
+    persisted on the assistant message row. Before the fix the orchestrator
+    initialised tokens_in/out to 0 and never read them off StreamEvent, so
+    every assistant row landed with NULL tokens."""
+
+    @patch("app.chat.orchestrator.create_message")
+    @patch("app.chat.orchestrator.get_connection")
+    def test_stop_event_tokens_propagate_to_create_message(self, mock_get_conn, mock_create_msg):
+        """When astream emits a terminal ``stop`` carrying tokens_input
+        and tokens_output, the orchestrator must pass those values to
+        ``create_message`` for the assistant message row."""
+        conn = MagicMock()
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
+
+        conv = _make_conversation()
+        now = datetime.now(UTC)
+        call_counter = {"n": 0}
+        base_conv_row = (
+            conv.id,
+            conv.user_id,
+            conv.org_id,
+            conv.title,
+            None,
+            conv.created_at,
+            conv.updated_at,
+        )
+
+        def side_effect_fetchone():
+            call_counter["n"] += 1
+            if call_counter["n"] == 1:
+                return base_conv_row
+            return (
+                uuid.uuid4(),
+                _CONV_ID,
+                "user",
+                "x",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                now,
+                None,
+                None,
+                None,
+                None,
+            )
+
+        conn.execute.return_value.fetchone = side_effect_fetchone
+        conn.execute.return_value.fetchall.return_value = []
+        mock_create_msg.return_value = MagicMock(id=_MSG_ID)
+
+        events = [
+            [
+                StreamEvent(type="content", delta="Tere!"),
+                StreamEvent(type="stop", tokens_input=1234, tokens_output=567),
+            ]
+        ]
+        llm = FakeLLM(events)
+        collector = _Collector()
+        orchestrator = ChatOrchestrator(llm, FakeSparql())
+        asyncio.run(orchestrator.handle_message(_CONV_ID, "Test", _auth(), collector))
+
+        # Find the create_message call for the assistant role and assert
+        # its tokens_input / tokens_output kwargs were passed through.
+        assistant_calls = [
+            c for c in mock_create_msg.call_args_list if c.args[2:3] == ("assistant",)
+        ]
+        assert assistant_calls, "expected at least one assistant create_message call"
+        assistant_call = assistant_calls[-1]
+        assert assistant_call.kwargs.get("tokens_input") == 1234, (
+            f"expected tokens_input=1234, got {assistant_call.kwargs.get('tokens_input')}"
+        )
+        assert assistant_call.kwargs.get("tokens_output") == 567, (
+            f"expected tokens_output=567, got {assistant_call.kwargs.get('tokens_output')}"
+        )
+
+    @patch("app.chat.orchestrator.create_message")
+    @patch("app.chat.orchestrator.get_connection")
+    def test_stop_event_without_tokens_persists_none(self, mock_get_conn, mock_create_msg):
+        """When astream emits a terminal ``stop`` without token counts
+        (legacy provider, stub mode, etc.), the orchestrator must persist
+        NULL rather than 0 — matches the pre-fix falsy-check semantics for
+        backwards compatibility."""
+        conn = MagicMock()
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
+
+        conv = _make_conversation()
+        now = datetime.now(UTC)
+        call_counter = {"n": 0}
+        base_conv_row = (
+            conv.id,
+            conv.user_id,
+            conv.org_id,
+            conv.title,
+            None,
+            conv.created_at,
+            conv.updated_at,
+        )
+
+        def side_effect_fetchone():
+            call_counter["n"] += 1
+            if call_counter["n"] == 1:
+                return base_conv_row
+            return (
+                uuid.uuid4(),
+                _CONV_ID,
+                "user",
+                "x",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                now,
+                None,
+                None,
+                None,
+                None,
+            )
+
+        conn.execute.return_value.fetchone = side_effect_fetchone
+        conn.execute.return_value.fetchall.return_value = []
+        mock_create_msg.return_value = MagicMock(id=_MSG_ID)
+
+        events = [
+            [
+                StreamEvent(type="content", delta="Tere!"),
+                StreamEvent(type="stop"),  # no tokens
+            ]
+        ]
+        llm = FakeLLM(events)
+        collector = _Collector()
+        orchestrator = ChatOrchestrator(llm, FakeSparql())
+        asyncio.run(orchestrator.handle_message(_CONV_ID, "Test", _auth(), collector))
+
+        assistant_calls = [
+            c for c in mock_create_msg.call_args_list if c.args[2:3] == ("assistant",)
+        ]
+        assert assistant_calls, "expected at least one assistant create_message call"
+        assistant_call = assistant_calls[-1]
+        # The orchestrator's falsy-check stores None for 0 totals so
+        # legacy stub providers don't pollute analytics with fake zeroes.
+        assert assistant_call.kwargs.get("tokens_input") is None
+        assert assistant_call.kwargs.get("tokens_output") is None
+
+
 class TestOrchestratorPartialPersistence:
     """M1: Partial message should be persisted with error suffix on LLM failure."""
 
