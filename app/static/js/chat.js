@@ -825,6 +825,14 @@
     switch (event.type) {
 
       // -----------------------------------------------------------------------
+      case 'ping':
+        // Server-side heartbeat (#658) — keeps WS alive through NAT idle
+        // timeouts / proxy idle-cuts during long RAG / LLM rounds. No UI
+        // effect; drop silently so it doesn't hit the default branch (or
+        // any future "unknown event type" log).
+        return;
+
+      // -----------------------------------------------------------------------
       case 'retrieval_started':
         updateThinkingStatus('Otsin allikaid ontoloogiast...');
         break;

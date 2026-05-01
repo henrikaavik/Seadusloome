@@ -36,16 +36,58 @@ logger = logging.getLogger(__name__)
 
 _MAX_MESSAGE_LENGTH = 10_000
 
+# #658 — server-side WS heartbeat. Emit a tiny ping every N seconds for
+# the lifetime of the connection so NAT idle timeouts / proxy idle-cuts
+# can't silently kill the socket during long RAG / LLM rounds.
+_WS_HEARTBEAT_INTERVAL_SECONDS = 25.0
+
+# #658 — per-connection heartbeat task registry. Keyed by id(send) so
+# we can cancel the heartbeat when the WS disconnects. ``id(send)`` is
+# stable for the lifetime of one connection (same pattern as the
+# existing ``_per_send_tasks`` registry below).
+_heartbeat_tasks: dict[int, asyncio.Task[None]] = {}
+
+
+def _start_heartbeat(send: Any) -> asyncio.Task[None]:
+    """Spawn a background task that emits ``{"type": "ping"}`` every
+    ``_WS_HEARTBEAT_INTERVAL_SECONDS``.
+
+    Returns the task so the caller can cancel it on disconnect. Send
+    errors are logged at DEBUG and swallowed — the task keeps ticking
+    so a transient send failure doesn't take down the heartbeat.
+    """
+
+    async def _beat() -> None:
+        while True:
+            try:
+                await asyncio.sleep(_WS_HEARTBEAT_INTERVAL_SECONDS)
+                await send(json.dumps({"type": "ping"}))
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug("WS heartbeat send failed (continuing)", exc_info=True)
+
+    task = asyncio.create_task(_beat())
+    return task
+
 
 async def on_connect(send: Any) -> None:
     """Called when a WebSocket client connects to /ws/chat."""
     logger.info("Chat WS client connected")
     await send(json.dumps({"type": "connected"}))
+    _heartbeat_tasks[id(send)] = _start_heartbeat(send)
 
 
 async def on_disconnect(send: Any) -> None:
     """Called when a WebSocket client disconnects."""
     logger.info("Chat WS client disconnected")
+    task = _heartbeat_tasks.pop(id(send), None)
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
 
 
 async def ws_chat(
