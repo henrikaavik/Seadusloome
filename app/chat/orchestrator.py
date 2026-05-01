@@ -1089,7 +1089,10 @@ class ChatOrchestrator:
                 conversation_id,
             )
             if stream_state["full_content"]:
-                _persist_partial_assistant(
+                # #660: psycopg is sync; offload the partial-persist so a
+                # cancellation handler doesn't block the event loop.
+                await asyncio.to_thread(
+                    _persist_partial_assistant,
                     conversation_id,
                     stream_state["full_content"],
                     getattr(self.llm, "_model", None),
@@ -1113,12 +1116,19 @@ class ChatOrchestrator:
             # as truncated, emit a stopped event, then re-raise so the
             # caller's task.cancel() propagates correctly.
             cancelled = True
-            assistant_msg_id = _persist_partial_assistant(
-                conversation_id,
-                stream_state["full_content"],
-                getattr(self.llm, "_model", None),
-                rag_context_json,
-                is_truncated=True,
+            # #660: shield the partial-persist from a second cancel — we
+            # already chose to record the partial; let it complete. Also
+            # offload to a thread so psycopg I/O doesn't block the event
+            # loop during the cancellation path.
+            assistant_msg_id = await asyncio.shield(
+                asyncio.to_thread(
+                    _persist_partial_assistant,
+                    conversation_id,
+                    stream_state["full_content"],
+                    getattr(self.llm, "_model", None),
+                    rag_context_json,
+                    is_truncated=True,
+                )
             )
             # #661: shield the stopped-event send from a second cancel so
             # the UI still receives the stop acknowledgement even if the
@@ -1143,7 +1153,10 @@ class ChatOrchestrator:
         except WebSocketSendTimeout:
             # Client socket is unresponsive — persist whatever we have and
             # bail without sending further events.
-            _persist_partial_assistant(
+            # #660: offload the sync persist so the event loop is free
+            # to drain other connections while we save the partial.
+            await asyncio.to_thread(
+                _persist_partial_assistant,
                 conversation_id,
                 stream_state["full_content"],
                 getattr(self.llm, "_model", None),
@@ -1155,7 +1168,10 @@ class ChatOrchestrator:
             logger.exception("LLM streaming failed for conversation %s", conversation_id)
             # M1: persist partial content with error suffix when streaming fails
             if stream_state["full_content"]:
-                _persist_partial_assistant(
+                # #660: offload the sync persist so the cancellation/error
+                # path doesn't block the event loop.
+                await asyncio.to_thread(
+                    _persist_partial_assistant,
                     conversation_id,
                     stream_state["full_content"],
                     getattr(self.llm, "_model", None),
