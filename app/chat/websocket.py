@@ -36,58 +36,70 @@ logger = logging.getLogger(__name__)
 
 _MAX_MESSAGE_LENGTH = 10_000
 
-# #658 — server-side WS heartbeat. Emit a tiny ping every N seconds for
-# the lifetime of the connection so NAT idle timeouts / proxy idle-cuts
-# can't silently kill the socket during long RAG / LLM rounds.
+# #658 — server-side WS heartbeat. Emit a tiny ping every N seconds
+# during message handling so NAT idle timeouts / proxy idle-cuts can't
+# silently kill the socket during long RAG / LLM rounds.
 _WS_HEARTBEAT_INTERVAL_SECONDS = 25.0
 
-# #658 — per-connection heartbeat task registry. Keyed by id(send) so
-# we can cancel the heartbeat when the WS disconnects. ``id(send)`` is
-# stable for the lifetime of one connection (same pattern as the
-# existing ``_per_send_tasks`` registry below).
-_heartbeat_tasks: dict[int, asyncio.Task[None]] = {}
+# Bound the heartbeat ``send()`` call so a hung TCP send buffer (the
+# exact scenario the heartbeat is meant to detect) can't itself hang
+# the heartbeat task forever. Post-review fix to #684.
+_WS_HEARTBEAT_SEND_TIMEOUT_SECONDS = 5.0
 
 
 def _start_heartbeat(send: Any) -> asyncio.Task[None]:
     """Spawn a background task that emits ``{"type": "ping"}`` every
     ``_WS_HEARTBEAT_INTERVAL_SECONDS``.
 
-    Returns the task so the caller can cancel it on disconnect. Send
-    errors are logged at DEBUG and swallowed — the task keeps ticking
-    so a transient send failure doesn't take down the heartbeat.
+    Returns the task so the caller can cancel it when message handling
+    completes. Self-terminates on the first send failure (post-review
+    fix to #684): once the socket is dead, every subsequent ``send``
+    will fail forever, so the loop is pointless. Each ``send`` is also
+    bounded by ``_WS_HEARTBEAT_SEND_TIMEOUT_SECONDS`` so a hung TCP
+    buffer cannot hang the heartbeat indefinitely.
+
+    Lifetime is scoped to a single ``_ws_handler`` invocation
+    (per-message-handling) rather than to the whole WS connection.
+    NAT/proxy idle-cuts are only a concern *during* a long server-side
+    operation; an idle connection sends nothing in either direction and
+    is functionally unaffected by an absent heartbeat.
     """
 
     async def _beat() -> None:
         while True:
             try:
                 await asyncio.sleep(_WS_HEARTBEAT_INTERVAL_SECONDS)
-                await send(json.dumps({"type": "ping"}))
+                await asyncio.wait_for(
+                    send(json.dumps({"type": "ping"})),
+                    timeout=_WS_HEARTBEAT_SEND_TIMEOUT_SECONDS,
+                )
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.debug("WS heartbeat send failed (continuing)", exc_info=True)
+                # Self-terminate: the socket is dead or the buffer is
+                # hung. Continuing the loop would just re-fail every
+                # 25s and accumulate noisy DEBUG logs forever.
+                logger.debug("WS heartbeat send failed; terminating", exc_info=True)
+                return
 
     task = asyncio.create_task(_beat())
     return task
 
 
 async def on_connect(send: Any) -> None:
-    """Called when a WebSocket client connects to /ws/chat."""
+    """Called when a WebSocket client connects to /ws/chat.
+
+    The heartbeat is now spawned inside ``_ws_handler`` per message
+    handling (see ``register_chat_ws_routes`` below) so this hook just
+    emits the initial ``connected`` event.
+    """
     logger.info("Chat WS client connected")
     await send(json.dumps({"type": "connected"}))
-    _heartbeat_tasks[id(send)] = _start_heartbeat(send)
 
 
 async def on_disconnect(send: Any) -> None:
     """Called when a WebSocket client disconnects."""
     logger.info("Chat WS client disconnected")
-    task = _heartbeat_tasks.pop(id(send), None)
-    if task is not None:
-        task.cancel()
-        try:
-            await task
-        except (asyncio.CancelledError, Exception):
-            pass
 
 
 async def ws_chat(
@@ -399,6 +411,17 @@ def register_chat_ws_routes(app: Any) -> None:
 
         key = id(send)
         tasks = _per_send_tasks.setdefault(key, {})
+        # Post-review fix to #684: spawn the heartbeat here (where
+        # ``send`` is the closure-local that ``_per_send_tasks`` keys
+        # off) rather than in the FastHTML ``conn``/``disconn`` hooks.
+        # Those hooks are separate ASGI invocations and may receive
+        # different ``send`` objects (each constructed as
+        # ``partial(_send_ws, conn)`` per call), so a registry keyed by
+        # ``id(send)`` cannot reliably pair register-with-cancel across
+        # them. Scoping the heartbeat to one ``_ws_handler`` invocation
+        # is also functionally sufficient: NAT idle timeouts only
+        # matter while a long server-side operation is in flight.
+        heartbeat = _start_heartbeat(send)
         try:
             await ws_chat(
                 msg,
@@ -414,6 +437,14 @@ def register_chat_ws_routes(app: Any) -> None:
             _cancel_all_and_drop(key)
             raise
         finally:
+            # Always cancel the heartbeat when message handling ends —
+            # success, exception, or graceful return — so we never leak
+            # background tasks beyond the request lifetime.
+            heartbeat.cancel()
+            try:
+                await heartbeat
+            except (asyncio.CancelledError, Exception):
+                pass
             # Drop the registry slot once no tasks are running. If a task
             # is still in-flight (normal mid-stream case) we leave it —
             # its own ``_run`` finally-block pops the conversation key

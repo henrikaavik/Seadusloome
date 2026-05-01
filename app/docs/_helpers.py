@@ -30,11 +30,19 @@ from app.ui.theme import get_theme_from_request
 class ResolvedDraft(NamedTuple):
     """Result of a successful :func:`resolve_draft` call.
 
-    A real subclass (not a bare ``tuple[Draft, dict]``) so call sites can
-    discriminate via ``isinstance(result, ResolvedDraft)`` — important
-    because FastHTML FT elements (e.g. the 404 page returned on
-    auth/load/authz failure) are themselves plain tuples and would
-    otherwise match a tuple-based discriminator.
+    A typed ``NamedTuple`` (rather than a bare ``tuple[Draft, dict]``) so
+    call sites can discriminate the success branch from the failure
+    branch via ``isinstance(result, ResolvedDraft)``. The failure branch
+    returns an opaque response object (Starlette ``Response`` for auth
+    redirects, FastHTML FT element for the 404 page) and the typed
+    discriminator stays unambiguous regardless of what the failure side
+    returns. Future-proofs against fastcore versions where FT may
+    inherit from ``tuple``, and against ad-hoc ``(error, code)`` tuples
+    returned by any upstream helper.
+
+    Supports both attribute access (``resolved.draft``) and tuple
+    unpacking (``draft, auth = resolved``) — see the test in
+    ``tests/test_docs_helpers.py`` that locks in this dual API.
     """
 
     draft: Draft
@@ -92,8 +100,10 @@ def resolve_draft(
     appropriate response object — either a Starlette ``Response`` (auth
     redirect) or a FastHTML FT element from :func:`_not_found_page`.
 
-    Discriminate via ``isinstance(result, ResolvedDraft)`` (NOT plain
-    ``tuple`` — FT elements are tuples too)::
+    Discriminate via ``isinstance(result, ResolvedDraft)`` rather than
+    ``isinstance(result, tuple)`` — see :class:`ResolvedDraft` for the
+    rationale (typed discriminator that does not depend on whether the
+    failure-branch return type happens to subclass ``tuple``)::
 
         resolved = resolve_draft(req, draft_id)
         if not isinstance(resolved, ResolvedDraft):

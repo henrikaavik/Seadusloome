@@ -872,6 +872,265 @@ class TestAssistantTokensPersistence:
         assert assistant_call.kwargs.get("tokens_input") is None
         assert assistant_call.kwargs.get("tokens_output") is None
 
+    @patch("app.chat.orchestrator.create_message")
+    @patch("app.chat.orchestrator.execute_tool")
+    @patch("app.chat.orchestrator.get_connection")
+    def test_multi_round_tool_use_persists_last_round_tokens(
+        self, mock_get_conn, mock_execute_tool, mock_create_msg
+    ):
+        """Anthropic's message_start.input_tokens reports the FULL
+        prompt for each tool-use round (including all prior turns and
+        tool_result blocks). If the orchestrator accumulated across
+        rounds the persisted total would sum the prompt-prefix N times.
+        Contract: persist the LAST round's tokens — the count that
+        corresponds to the assistant content actually shown.
+
+        Per-round costs are separately tallied one row per API call in
+        the ``llm_usage`` table by ``_log_cost`` inside the provider.
+        """
+        conn = MagicMock()
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
+
+        conv = _make_conversation()
+        now = datetime.now(UTC)
+        call_counter = {"n": 0}
+        base_conv_row = (
+            conv.id,
+            conv.user_id,
+            conv.org_id,
+            conv.title,
+            None,
+            conv.created_at,
+            conv.updated_at,
+        )
+
+        def side_effect_fetchone():
+            call_counter["n"] += 1
+            if call_counter["n"] == 1:
+                return base_conv_row
+            return (
+                uuid.uuid4(),
+                _CONV_ID,
+                "user",
+                "x",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                now,
+                None,
+                None,
+                None,
+                None,
+            )
+
+        conn.execute.return_value.fetchone = side_effect_fetchone
+        conn.execute.return_value.fetchall.return_value = []
+        mock_create_msg.return_value = MagicMock(id=_MSG_ID)
+        mock_execute_tool.return_value = {"results": []}
+
+        # Two-round tool use: round 1 yields a tool_use + stop with
+        # 100/50 tokens; round 2 yields content + stop with 180/120 tokens
+        # (the round-2 prompt includes round-1's history, so 180 > 100
+        # is realistic for what Anthropic reports).
+        events_seq = [
+            [
+                StreamEvent(
+                    type="tool_use",
+                    tool_name="get_provision_details",
+                    tool_input={"provision_uri": "estleg:ks_113"},
+                    tool_use_id="toolu_round1",
+                ),
+                StreamEvent(type="stop", tokens_input=100, tokens_output=50),
+            ],
+            [
+                StreamEvent(type="content", delta="Lõplik vastus."),
+                StreamEvent(type="stop", tokens_input=180, tokens_output=120),
+            ],
+        ]
+        llm = FakeLLM(events_seq)
+        collector = _Collector()
+        orchestrator = ChatOrchestrator(llm, FakeSparql())
+        asyncio.run(orchestrator.handle_message(_CONV_ID, "Test", _auth(), collector))
+
+        assistant_calls = [
+            c for c in mock_create_msg.call_args_list if c.args[2:3] == ("assistant",)
+        ]
+        assert assistant_calls, "expected an assistant create_message call"
+        assistant_call = assistant_calls[-1]
+        # Last-round-wins: 180 (not 100+180=280) and 120 (not 50+120=170).
+        assert assistant_call.kwargs.get("tokens_input") == 180, (
+            f"expected last round's tokens_input=180, got "
+            f"{assistant_call.kwargs.get('tokens_input')}"
+        )
+        assert assistant_call.kwargs.get("tokens_output") == 120, (
+            f"expected last round's tokens_output=120, got "
+            f"{assistant_call.kwargs.get('tokens_output')}"
+        )
+
+
+class TestPartialPersistTokensCapture:
+    """Post-review fix to #688: every cancel/timeout path must forward the
+    accumulated tokens to ``_persist_partial_assistant`` so the partial
+    assistant row records billable usage instead of NULL."""
+
+    @patch("app.chat.orchestrator.create_message")
+    @patch("app.chat.orchestrator.get_connection")
+    def test_persist_partial_assistant_forwards_tokens_to_create_message(
+        self, mock_get_conn, mock_create_msg
+    ):
+        """Direct unit test on the helper: when called with non-zero
+        ``tokens_input`` / ``tokens_output``, ``create_message`` receives
+        the same values."""
+        from app.chat.orchestrator import _persist_partial_assistant
+
+        conn = MagicMock()
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
+        mock_create_msg.return_value = MagicMock(id=_MSG_ID)
+
+        result = _persist_partial_assistant(
+            _CONV_ID,
+            "partial content",
+            "fake-model",
+            None,
+            is_truncated=True,
+            tokens_input=234,
+            tokens_output=67,
+        )
+
+        assert result == _MSG_ID
+        mock_create_msg.assert_called_once()
+        kwargs = mock_create_msg.call_args.kwargs
+        assert kwargs.get("tokens_input") == 234
+        assert kwargs.get("tokens_output") == 67
+
+    @patch("app.chat.orchestrator.create_message")
+    @patch("app.chat.orchestrator.get_connection")
+    def test_persist_partial_assistant_passes_none_for_zero_tokens(
+        self, mock_get_conn, mock_create_msg
+    ):
+        """Falsy-check semantics: ``tokens_input=0`` is forwarded as
+        ``None`` so stub-mode and pre-stream-cancel scenarios don't
+        pollute analytics with fake zeroes."""
+        from app.chat.orchestrator import _persist_partial_assistant
+
+        conn = MagicMock()
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
+        mock_create_msg.return_value = MagicMock(id=_MSG_ID)
+
+        _persist_partial_assistant(
+            _CONV_ID,
+            "partial",
+            None,
+            None,
+            is_truncated=True,
+            tokens_input=0,
+            tokens_output=0,
+        )
+
+        kwargs = mock_create_msg.call_args.kwargs
+        assert kwargs.get("tokens_input") is None
+        assert kwargs.get("tokens_output") is None
+
+    @patch("app.chat.orchestrator.create_message")
+    @patch("app.chat.orchestrator.get_connection")
+    def test_cancel_path_persists_tokens_captured_so_far(self, mock_get_conn, mock_create_msg):
+        """End-to-end: CancelledError mid-stream-loop must call
+        ``_persist_partial_assistant`` with the tokens from whatever
+        stop events fired before the cancel arrived."""
+        conn = MagicMock()
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
+
+        conv = _make_conversation()
+        now = datetime.now(UTC)
+        call_counter = {"n": 0}
+        base_conv_row = (
+            conv.id,
+            conv.user_id,
+            conv.org_id,
+            conv.title,
+            None,
+            conv.created_at,
+            conv.updated_at,
+        )
+
+        def side_effect_fetchone():
+            call_counter["n"] += 1
+            if call_counter["n"] == 1:
+                return base_conv_row
+            return (
+                uuid.uuid4(),
+                _CONV_ID,
+                "user",
+                "x",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                now,
+                None,
+                None,
+                None,
+                None,
+            )
+
+        conn.execute.return_value.fetchone = side_effect_fetchone
+        conn.execute.return_value.fetchall.return_value = []
+        mock_create_msg.return_value = MagicMock(id=_MSG_ID)
+
+        # LLM emits content + a stop with tokens, then on the FOLLOW-UP
+        # round the orchestrator would loop again; we simulate cancel by
+        # raising CancelledError on the second astream call.
+        class CancellingLLM(FakeLLM):
+            def __init__(self):
+                super().__init__()
+                self._calls = 0
+
+            async def astream(self, prompt, **kwargs):
+                self._calls += 1
+                if self._calls == 1:
+                    yield StreamEvent(type="content", delta="Esimene osa.")
+                    yield StreamEvent(
+                        type="tool_use",
+                        tool_name="search_provisions",
+                        tool_input={"query": "x"},
+                        tool_use_id="toolu_1",
+                    )
+                    yield StreamEvent(type="stop", tokens_input=300, tokens_output=80)
+                else:
+                    raise asyncio.CancelledError()
+
+        with patch("app.chat.orchestrator.execute_tool", return_value={"results": []}):
+            llm = CancellingLLM()
+            collector = _Collector()
+            orchestrator = ChatOrchestrator(llm, FakeSparql())
+            try:
+                asyncio.run(orchestrator.handle_message(_CONV_ID, "Test", _auth(), collector))
+            except asyncio.CancelledError:
+                pass  # expected — orchestrator re-raises after persist
+
+        # The orchestrator should have persisted a partial assistant row
+        # via the CancelledError handler with the tokens captured from
+        # round 1's stop event.
+        assistant_calls = [
+            c for c in mock_create_msg.call_args_list if c.args[2:3] == ("assistant",)
+        ]
+        assert assistant_calls, "CancelledError path must persist a partial assistant row"
+        # Last call is the partial-persist (round 1's stop set tokens=300/80).
+        assistant_call = assistant_calls[-1]
+        assert assistant_call.kwargs.get("tokens_input") == 300
+        assert assistant_call.kwargs.get("tokens_output") == 80
+
 
 class TestOrchestratorPartialPersistence:
     """M1: Partial message should be persisted with error suffix on LLM failure."""

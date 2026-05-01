@@ -508,24 +508,28 @@ class ClaudeProvider(LLMProvider):
                         if usage:
                             tokens_input = getattr(usage, "input_tokens", 0)
 
-        self._log_cost(
-            feature=feature,
-            tokens_input=tokens_input,
-            tokens_output=tokens_output,
-            user_id=user_id,
-            org_id=org_id,
-        )
-
-        # #662: emit the per-turn token counts on the terminal stop
-        # event so the orchestrator can persist them on the assistant
-        # message row. The cost-tracker call above writes a separate
-        # llm_usage row; the message-level counts here are what the
-        # chat history shows in the UI ("input: 1234, output: 567").
-        yield StreamEvent(
-            type="stop",
-            tokens_input=tokens_input,
-            tokens_output=tokens_output,
-        )
+        # #662 / post-review fix: yield the stop event FIRST so the
+        # orchestrator can read the per-turn tokens off it and persist
+        # them on the assistant message row, then log_cost in a finally
+        # block so the llm_usage row is recorded even if the consumer
+        # cancels the generator immediately after receiving the stop
+        # frame. Previously cost was logged before the yield, so a
+        # cancel between the two left llm_usage incremented but the
+        # message row had NULL tokens — analytics drift across cancel.
+        try:
+            yield StreamEvent(
+                type="stop",
+                tokens_input=tokens_input,
+                tokens_output=tokens_output,
+            )
+        finally:
+            self._log_cost(
+                feature=feature,
+                tokens_input=tokens_input,
+                tokens_output=tokens_output,
+                user_id=user_id,
+                org_id=org_id,
+            )
 
 
 _default_provider: ClaudeProvider | None = None
