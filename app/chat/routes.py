@@ -81,7 +81,7 @@ def _not_found_page(req: Request):
     return PageShell(
         H1("Vestlust ei leitud", cls="page-title"),  # noqa: F405
         Alert(
-            "Otsitud vestlust ei ole olemas voi Teil puudub selle vaatamise oigus.",
+            "Otsitud vestlust ei ole olemas või Teil puudub selle vaatamise õigus.",
             variant="warning",
         ),
         P(A("< Tagasi vestluste nimekirja", href="/chat"), cls="back-link"),  # noqa: F405
@@ -284,7 +284,7 @@ def _conversation_list_columns() -> list[Column]:
     return [
         Column(key="title", label="Pealkiri", sortable=False, render=_title_cell),
         Column(key="message_count", label="Sonumeid", sortable=False),
-        Column(key="last_message_at", label="Viimane sonum", sortable=False),
+        Column(key="last_message_at", label="Viimane sõnum", sortable=False),
         Column(key="context", label="Kontekst", sortable=False, render=_context_cell),
         Column(key="created_at", label="Loodud", sortable=False),
         Column(key="actions", label="Tegevused", sortable=False, render=_actions_cell),

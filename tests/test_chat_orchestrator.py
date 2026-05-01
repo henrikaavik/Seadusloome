@@ -28,6 +28,7 @@ from app.chat.orchestrator import (
     _load_impact_summary,
     _messages_to_prompt,
     _safe_send,
+    _step_deadline,
     _tool_result_count,
 )
 from app.llm.provider import LLMProvider, StreamEvent
@@ -660,7 +661,7 @@ class TestOrchestratorLLMError:
 
         error_events = [e for e in collector.events if e.get("type") == "error"]
         assert len(error_events) == 1
-        assert "ebaonnestus" in error_events[0]["message"].lower()
+        assert "ebaõnnestus" in error_events[0]["message"].lower()
 
 
 class TestOrchestratorPersistence:
@@ -971,6 +972,51 @@ class TestAssistantTokensPersistence:
             f"expected last round's tokens_output=120, got "
             f"{assistant_call.kwargs.get('tokens_output')}"
         )
+
+
+class TestStepDeadlineBudget:
+    """Post-review fix to #684: ``_step_deadline`` caps each pre-stream
+    step at ``min(_PRE_STREAM_DB_TIMEOUT_SECONDS, remaining_global_budget)``
+    so a chain of slow-but-not-timed-out steps cannot blow the
+    cumulative pre-stream budget."""
+
+    def test_returns_per_step_ceiling_when_budget_fresh(self):
+        """At t=0 the global budget is the full window, so the cap is
+        the per-step ceiling."""
+        from app.chat import orchestrator as orch_mod
+
+        start = orch_mod.time.monotonic()
+        deadline = _step_deadline(start)
+        assert abs(deadline - orch_mod._PRE_STREAM_DB_TIMEOUT_SECONDS) < 0.05, (
+            f"expected ~{orch_mod._PRE_STREAM_DB_TIMEOUT_SECONDS}, got {deadline}"
+        )
+
+    def test_returns_remaining_budget_when_total_almost_exhausted(self, monkeypatch):
+        """When the global budget is almost gone, the cap drops below
+        the per-step ceiling so the wait_for honors the global limit."""
+        from app.chat import orchestrator as orch_mod
+
+        monkeypatch.setattr(orch_mod, "_PRE_STREAM_DB_TIMEOUT_SECONDS", 4.0)
+        monkeypatch.setattr(orch_mod, "_PRE_STREAM_TOTAL_BUDGET_SECONDS", 5.0)
+
+        # Pretend 4.5s have already elapsed in the pre-stream phase.
+        fake_start = orch_mod.time.monotonic() - 4.5
+        deadline = _step_deadline(fake_start)
+        # Remaining budget = 5.0 - 4.5 = 0.5; under the 4.0 ceiling.
+        assert 0.4 < deadline < 0.6, f"expected ~0.5s remaining budget, got {deadline}"
+
+    def test_returns_minimum_floor_when_budget_overrun(self, monkeypatch):
+        """If the global budget is already exhausted, the helper still
+        returns a minimum floor so wait_for has SOMETHING to wait on
+        (a healthy DB call typically completes in 1-10ms)."""
+        from app.chat import orchestrator as orch_mod
+
+        monkeypatch.setattr(orch_mod, "_PRE_STREAM_DB_TIMEOUT_SECONDS", 4.0)
+        monkeypatch.setattr(orch_mod, "_PRE_STREAM_TOTAL_BUDGET_SECONDS", 5.0)
+
+        fake_start = orch_mod.time.monotonic() - 100  # way past budget
+        deadline = _step_deadline(fake_start)
+        assert deadline == 0.1, f"expected the 0.1s floor when budget overrun, got {deadline}"
 
 
 class TestPartialPersistTokensCapture:
