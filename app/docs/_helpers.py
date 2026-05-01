@@ -5,26 +5,33 @@ Extracted out of :mod:`app.docs.routes` so that sibling modules
 creating an import cycle at module-load time.
 
 Keep this file **dependency-light**: anything imported here must not
-depend on :mod:`app.docs.routes` itself, or the cycle returns.
+depend on :mod:`app.docs.routes` itself, or the cycle returns. The
+heavy UI imports used by :func:`_not_found_page` are deferred inside
+the function body so this charter is preserved (post-review fix).
 """
 
 from __future__ import annotations
 
 import uuid
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
-from fasthtml.common import H1, A, P  # noqa: F401
 from starlette.requests import Request
 from starlette.responses import Response
 
 from app.auth.helpers import require_auth
-from app.auth.policy import can_edit_draft, can_view_draft
+from app.auth.policy import can_delete_draft, can_edit_draft, can_view_draft
 from app.auth.provider import UserDict
 from app.docs import draft_model as _dm
 from app.docs.draft_model import Draft
-from app.ui.layout import PageShell
-from app.ui.surfaces.alert import Alert
-from app.ui.theme import get_theme_from_request
+
+if TYPE_CHECKING:
+    from fastcore.xml import FT
+
+
+# Set of valid actions for :func:`resolve_draft`. Using ``Literal`` so a
+# typo at the call site is a pyright error rather than a silent fallback
+# to the more permissive ``view`` gate.
+DraftAction = Literal["view", "edit", "delete"]
 
 
 class ResolvedDraft(NamedTuple):
@@ -46,9 +53,11 @@ class ResolvedDraft(NamedTuple):
     """
 
     draft: Draft
-    # ``UserDict`` is a TypedDict; widen to ``Any`` so call sites can
-    # also pass a plain ``dict`` (test fixtures, audit-log reconstructions).
-    auth: UserDict | dict[str, Any] | Any
+    # ``UserDict`` is a TypedDict; widen so call sites can also pass a
+    # plain ``dict`` (test fixtures, audit-log reconstructions). The
+    # extra ``Any`` is dropped (post-review fix) because it collapsed
+    # the union to ``Any`` and erased downstream type info.
+    auth: UserDict | dict[str, Any]
 
 
 def _parse_uuid(raw: str) -> uuid.UUID | None:
@@ -59,8 +68,26 @@ def _parse_uuid(raw: str) -> uuid.UUID | None:
         return None
 
 
-def _not_found_page(req: Request):
-    """Render the 404 page used whenever a draft is missing or out of scope."""
+def _not_found_page(req: Request) -> Any:
+    """Render the 404 page used whenever a draft is missing or out of scope.
+
+    UI-layer imports are deferred to the function body so the module
+    stays dependency-light at import time (preserves the charter that
+    lets :mod:`app.docs.retry_handler` and other lean importers load
+    without dragging the entire ``app.ui`` subtree).
+
+    Return is typed ``Any`` because :func:`PageShell` returns an FT
+    element whose concrete fastcore type is exposed as a 3-tuple,
+    which conflicts with the narrower ``FT`` annotation on
+    :func:`resolve_draft`'s return. Pragmatically the value is opaque
+    to callers — they just return it from their handler.
+    """
+    from fasthtml.common import H1, A, P
+
+    from app.ui.layout import PageShell
+    from app.ui.surfaces.alert import Alert
+    from app.ui.theme import get_theme_from_request
+
     auth = req.scope.get("auth")
     theme = get_theme_from_request(req)
     return PageShell(
@@ -82,8 +109,8 @@ def resolve_draft(
     req: Request,
     draft_id: str,
     *,
-    action: str = "view",
-) -> ResolvedDraft | Any:
+    action: DraftAction = "view",
+) -> ResolvedDraft | Response | FT:
     """Run the standard auth + parse + load + authorize preamble for a draft route.
 
     The drafts module has ~15 handlers that all open with the same five
@@ -92,8 +119,9 @@ def resolve_draft(
     1. Auth check (redirect to /auth/login on miss).
     2. Parse the URL ``draft_id`` into a UUID.
     3. Load the draft from the DB.
-    4. Authorize the caller against the draft (view / edit) — return 404
-       (not 403) so we never leak existence of out-of-scope drafts.
+    4. Authorize the caller against the draft (view / edit / delete) —
+       return 404 (not 403) so we never leak existence of out-of-scope
+       drafts.
 
     This helper consolidates that preamble (#624). On success it returns
     a :class:`ResolvedDraft` named tuple. On any failure it returns the
@@ -113,9 +141,13 @@ def resolve_draft(
     Args:
         req: The Starlette request.
         draft_id: The URL-path UUID string for the draft.
-        action: ``"view"`` (default) gates on :func:`can_view_draft`;
-            ``"edit"`` gates on :func:`can_edit_draft` for handlers that
-            mutate state.
+        action: Authorization gate. ``"view"`` (default) gates on
+            :func:`can_view_draft`; ``"edit"`` gates on
+            :func:`can_edit_draft` for handlers that mutate state;
+            ``"delete"`` gates on :func:`can_delete_draft`. Using
+            :data:`DraftAction` (``Literal``) so a typo at the call site
+            is a pyright error rather than a silent fallback to the more
+            permissive view gate.
 
     Returns:
         Either a :class:`ResolvedDraft` if authorised, or an opaque
@@ -136,9 +168,57 @@ def resolve_draft(
     if draft is None:
         return _not_found_page(req)
 
-    gate = can_edit_draft if action == "edit" else can_view_draft
+    if action == "edit":
+        gate = can_edit_draft
+    elif action == "delete":
+        gate = can_delete_draft
+    else:  # "view" — Literal narrowing means this is the only remaining option
+        gate = can_view_draft
+
     if not gate(auth, draft):
         # 404 (not 403) so cross-org probing can't enumerate draft ids.
         return _not_found_page(req)
 
     return ResolvedDraft(draft=draft, auth=auth)
+
+
+def audit_draft_access(
+    auth: UserDict | dict[str, Any],
+    draft: Draft,
+    action: str,
+) -> None:
+    """Log + touch-access for a draft access event.
+
+    Companion to :func:`resolve_draft` (#624 follow-up). Callers used to
+    pair these two operations by hand:
+
+        log_action(auth.get("id"), f"draft.{action}", {...})
+        touch_draft_access_conn(draft.id)
+
+    This helper consolidates them so the migration to ``resolve_draft``
+    doesn't leave 6+ copy-pasted audit blocks behind. The ``action``
+    string becomes the audit-log discriminator (``"draft.view"``,
+    ``"draft.edit"``, ``"draft.delete"``, etc.).
+
+    Failures are non-fatal: a failed audit must not block the request,
+    so every step is wrapped in its own try/except and silenced.
+    """
+    # Lazy imports to keep the module dependency-light at import time.
+    from app.auth.audit import log_action
+
+    user_id = auth.get("id") if isinstance(auth, dict) else None
+    try:
+        log_action(
+            user_id,
+            f"draft.{action}",
+            {"draft_id": str(draft.id)},
+        )
+    except Exception:
+        # Audit-log infrastructure is best-effort; never block on it.
+        pass
+
+    # #572: surface-to-user counts as access; reset the archive clock.
+    try:
+        _dm.touch_draft_access_conn(draft.id)
+    except Exception:
+        pass
