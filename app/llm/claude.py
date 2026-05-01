@@ -516,7 +516,16 @@ class ClaudeProvider(LLMProvider):
             org_id=org_id,
         )
 
-        yield StreamEvent(type="stop")
+        # #662: emit the per-turn token counts on the terminal stop
+        # event so the orchestrator can persist them on the assistant
+        # message row. The cost-tracker call above writes a separate
+        # llm_usage row; the message-level counts here are what the
+        # chat history shows in the UI ("input: 1234, output: 567").
+        yield StreamEvent(
+            type="stop",
+            tokens_input=tokens_input,
+            tokens_output=tokens_output,
+        )
 
 
 _default_provider: ClaudeProvider | None = None

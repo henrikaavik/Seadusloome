@@ -28,6 +28,12 @@ class StreamEvent:
             Forward-compatibility hook so orchestrators can echo the id
             back in a follow-up ``tool_result`` message; the current
             orchestrator still mints its own opaque ``tool_call_id``.
+        tokens_input: Total prompt-token count for the turn, set on the
+            terminal ``stop`` event so the orchestrator can persist it
+            alongside the assistant message (#662). ``None`` for non-stop
+            events and for providers that don't report usage.
+        tokens_output: Total completion-token count for the turn, set on
+            the terminal ``stop`` event (#662). ``None`` otherwise.
     """
 
     type: str  # "content", "tool_use", "stop"
@@ -35,6 +41,8 @@ class StreamEvent:
     tool_name: str | None = None
     tool_input: dict | None = field(default=None)
     tool_use_id: str | None = None
+    tokens_input: int | None = None
+    tokens_output: int | None = None
 
 
 class LLMProvider(ABC):

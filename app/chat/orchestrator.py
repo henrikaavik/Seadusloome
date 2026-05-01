@@ -991,7 +991,17 @@ class ChatOrchestrator:
                                 },
                             )
                         elif event.type == "stop":
-                            pass  # handled after loop
+                            # #662: capture per-turn token counts so the
+                            # assistant message row records them. The
+                            # provider tallies these from message_start /
+                            # message_delta usage events; this is the
+                            # final hand-off to persistence.
+                            if event.tokens_input is not None:
+                                stream_state["tokens_in"] += event.tokens_input
+                            if event.tokens_output is not None:
+                                stream_state["tokens_out"] += event.tokens_output
+                            # Continue — the post-loop logic decides
+                            # whether we're truly done (no pending tools).
 
                 # If no tool use requested, we're done
                 if not pending_tools:
