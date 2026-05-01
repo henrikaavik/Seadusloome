@@ -360,6 +360,8 @@ def _persist_partial_assistant(
     *,
     is_truncated: bool,
     error_suffix: str | None = None,
+    tokens_input: int | None = None,
+    tokens_output: int | None = None,
 ) -> uuid.UUID | None:
     """Persist a partial / truncated assistant message.
 
@@ -367,6 +369,13 @@ def _persist_partial_assistant(
     missing (migration 017 not yet applied) we fall back to a plain
     insert + WARNING. Returns the new message id on success or ``None``
     if persistence itself fails.
+
+    ``tokens_input`` / ``tokens_output`` capture the per-turn token
+    counts accumulated up to the point of cancellation/timeout (post-
+    review fix to #688). Without them every cancelled or timed-out turn
+    persisted the partial assistant row with NULL tokens despite the
+    LLM having produced billable output that ``_log_cost`` already
+    recorded in the ``llm_usage`` table.
     """
     if not full_content and not error_suffix:
         return None
@@ -384,6 +393,8 @@ def _persist_partial_assistant(
                 text,
                 model=model,
                 rag_context=rag_context_json,
+                tokens_input=tokens_input if tokens_input else None,
+                tokens_output=tokens_output if tokens_output else None,
             )
             if is_truncated:
                 try:
@@ -991,15 +1002,27 @@ class ChatOrchestrator:
                                 },
                             )
                         elif event.type == "stop":
-                            # #662: capture per-turn token counts so the
-                            # assistant message row records them. The
-                            # provider tallies these from message_start /
-                            # message_delta usage events; this is the
-                            # final hand-off to persistence.
+                            # #662 / post-review fix: capture per-round
+                            # token counts and OVERWRITE rather than
+                            # accumulate. Anthropic's
+                            # ``message_start.input_tokens`` reports the
+                            # FULL prompt for that round, which on a
+                            # multi-round tool-use turn includes the
+                            # original prompt PLUS every prior assistant
+                            # message PLUS every tool_result block.
+                            # Accumulating across N rounds would sum the
+                            # prompt-prefix N times.
+                            #
+                            # The persisted message-row tokens reflect
+                            # the FINAL round (the assistant content
+                            # actually shown to the user). Per-round
+                            # API-call costs are separately recorded one
+                            # row per call in ``llm_usage`` by
+                            # ``_log_cost`` inside the provider.
                             if event.tokens_input is not None:
-                                stream_state["tokens_in"] += event.tokens_input
+                                stream_state["tokens_in"] = event.tokens_input
                             if event.tokens_output is not None:
-                                stream_state["tokens_out"] += event.tokens_output
+                                stream_state["tokens_out"] = event.tokens_output
                             # Continue — the post-loop logic decides
                             # whether we're truly done (no pending tools).
 
@@ -1101,6 +1124,9 @@ class ChatOrchestrator:
             if stream_state["full_content"]:
                 # #660: psycopg is sync; offload the partial-persist so a
                 # cancellation handler doesn't block the event loop.
+                # Post-review fix to #688: forward the per-turn token
+                # counts captured so far so the assistant message row
+                # records billable tokens even on the deadline path.
                 await asyncio.to_thread(
                     _persist_partial_assistant,
                     conversation_id,
@@ -1109,6 +1135,8 @@ class ChatOrchestrator:
                     rag_context_json,
                     is_truncated=True,
                     error_suffix=" [Viga: serveri vastus võttis liiga kaua aega]",
+                    tokens_input=stream_state["tokens_in"],
+                    tokens_output=stream_state["tokens_out"],
                 )
             try:
                 await _safe_send(
@@ -1138,6 +1166,8 @@ class ChatOrchestrator:
                     getattr(self.llm, "_model", None),
                     rag_context_json,
                     is_truncated=True,
+                    tokens_input=stream_state["tokens_in"],
+                    tokens_output=stream_state["tokens_out"],
                 )
             )
             # #661: shield the stopped-event send from a second cancel so
@@ -1172,6 +1202,8 @@ class ChatOrchestrator:
                 getattr(self.llm, "_model", None),
                 rag_context_json,
                 is_truncated=True,
+                tokens_input=stream_state["tokens_in"],
+                tokens_output=stream_state["tokens_out"],
             )
             return
         except Exception:
@@ -1188,6 +1220,8 @@ class ChatOrchestrator:
                     rag_context_json,
                     is_truncated=True,
                     error_suffix=" [Viga: vastus katkestati]",
+                    tokens_input=stream_state["tokens_in"],
+                    tokens_output=stream_state["tokens_out"],
                 )
             try:
                 await _safe_send(
