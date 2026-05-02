@@ -53,6 +53,14 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends curl git && \
     rm -rf /var/lib/apt/lists/*
 
+# §4.3 LibreOffice base image (Eelnõud sprint plan 2026-05-02).
+# Installed here so the deploy risk is validated independently before any
+# code that calls `soffice --headless --convert-to pdf` ships (#613 PDF export).
+# Nothing in the app uses LibreOffice yet — this is a pure infrastructure step.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libreoffice-core libreoffice-writer \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 COPY --from=builder /app/.venv /app/.venv
