@@ -151,6 +151,13 @@ def parse_draft(
             )
             conn.commit()
 
+        # #608: push the new status to any subscribed WS clients. The
+        # call is best-effort; failures are swallowed so the pipeline
+        # is unaffected.
+        from app.docs.status_events import emit_threadsafe
+
+        emit_threadsafe(draft_id, type="status", status="extracting")
+
         # Step 7: enqueue the next stage. A failure here should not
         # leave the draft in 'extracting' without a pending job, so we
         # let the exception propagate and mark the draft failed below.
@@ -238,6 +245,19 @@ def _mark_draft_failed(draft_id: UUID, exc: BaseException) -> None:
             conn.commit()
     except Exception:  # noqa: BLE001 — best-effort cleanup
         logger.exception("Failed to mark draft %s as failed", draft_id)
+        return
+
+    # #608: notify WS subscribers of the failure transition so the UI
+    # can swap the status tracker without waiting for the 3s polling
+    # tick. Best-effort — never raise into the pipeline.
+    from app.docs.status_events import emit_threadsafe
+
+    emit_threadsafe(
+        draft_id,
+        type="status",
+        status="failed",
+        error_message=user_msg[:500],
+    )
 
 
 # ---------------------------------------------------------------------------

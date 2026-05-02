@@ -20,6 +20,7 @@ from app.chat.routes import register_chat_routes
 from app.chat.websocket import register_chat_ws_routes
 from app.docs.report_routes import register_report_routes
 from app.docs.routes import register_draft_routes
+from app.docs.websocket import register_draft_ws_routes
 from app.drafter.routes import register_drafter_routes
 from app.explorer.pages import explorer_page, register_explorer_pages
 from app.explorer.routes import register_explorer_routes
@@ -84,6 +85,24 @@ async def lifespan(_app):  # type: ignore[no-untyped-def]
             logger.warning("Marked %d stale 'running' sync_log row(s) as failed", stale)
     except Exception:
         logger.exception("Startup: stale sync_log cleanup failed (non-critical)")
+
+    # #608: capture the running event loop so the sync pipeline worker
+    # thread can schedule WS broadcast coroutines via
+    # ``asyncio.run_coroutine_threadsafe``. Done unconditionally — even
+    # if the worker is disabled (test mode), an in-process emit can
+    # still happen if/when somebody triggers a status transition from
+    # an async route.
+    try:
+        import asyncio as _asyncio
+
+        from app.docs import status_events as _status_events
+
+        _status_events.register_event_loop(_asyncio.get_running_loop())
+    except Exception:
+        logger.debug(
+            "Failed to register event loop for draft status events",
+            exc_info=True,
+        )
 
     if os.environ.get("DISABLE_BACKGROUND_WORKER") == "1":
         logger.info("Background worker disabled via DISABLE_BACKGROUND_WORKER=1")
@@ -227,6 +246,7 @@ register_drafter_routes(rt)
 register_report_routes(rt)
 register_chat_routes(rt)
 register_chat_ws_routes(app)
+register_draft_ws_routes(app)
 register_annotation_routes(rt)
 register_notification_routes(rt)
 

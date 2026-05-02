@@ -530,6 +530,21 @@ def _status_tracker(draft: Draft):
     # assistive tech reads just the changed node instead of the whole
     # tracker. The existing failed-state Alert still carries
     # ``role="alert"`` for the more urgent announcement.
+    # #608: marker for the WS push listener. ``draft-status.js`` finds
+    # this attribute on DOMContentLoaded, opens a WebSocket to
+    # /ws/drafts/status, subscribes to ``draft.id`` and swaps the
+    # tracker on every status event. The hx-* polling attributes above
+    # are deliberately preserved so the page degrades to 3s polling if
+    # the WS is unavailable. The marker is dropped once the draft
+    # reaches a terminal status — at that point the JS will already
+    # have closed the WS and there's nothing more to push.
+    ws_attrs: dict[str, Any] = {}
+    if draft.status not in _TERMINAL_STATUSES:
+        ws_attrs = {
+            "data_draft_status_ws": "1",
+            "data_draft_id": str(draft.id),
+        }
+
     return Div(  # noqa: F405
         *children,
         id=f"draft-status-{draft.id}",
@@ -537,6 +552,7 @@ def _status_tracker(draft: Draft):
         aria_live="polite",
         aria_atomic="false",
         **poll_attrs,
+        **ws_attrs,
     )
 
 
@@ -2176,6 +2192,11 @@ def draft_detail_page(req: Request, draft_id: str):
         _vtk_children_card(draft, children=vtk_children, uploader_index=uploader_index)
         if draft.doc_type == "vtk"
         else "",
+        # #608: client-side WS listener for live status pushes.
+        # Self-initialises off the data-draft-id marker on the
+        # status-tracker Div; gracefully no-ops if the WS fails so
+        # the existing 3s polling continues unaffected.
+        Script(src="/static/js/draft-status.js", defer=True),  # noqa: F405
         title=draft.title,
         user=auth,
         theme=theme,

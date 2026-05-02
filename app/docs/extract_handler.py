@@ -164,6 +164,11 @@ def extract_entities(
             )
             conn.commit()
 
+        # #608: push the new status to subscribed WS clients.
+        from app.docs.status_events import emit_threadsafe
+
+        emit_threadsafe(draft_id, type="status", status="analyzing")
+
         # -- 6. Enqueue next step --------------------------------------
         JobQueue().enqueue("analyze_impact", {"draft_id": str(draft_id)}, priority=0)
 
@@ -199,6 +204,16 @@ def extract_entities(
                 logger.exception(
                     "extract_entities: failed to mark draft %s as failed",
                     draft_id,
+                )
+            else:
+                # #608: notify WS subscribers of the failure transition.
+                from app.docs.status_events import emit_threadsafe
+
+                emit_threadsafe(
+                    draft_id,
+                    type="status",
+                    status="failed",
+                    error_message=user_msg[:500],
                 )
         else:
             logger.warning(
