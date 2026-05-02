@@ -726,6 +726,11 @@ def draft_report_page(req: Request, draft_id: str):
         _eu_compliance_section(findings, draft_id=str(draft.id)),
         _gaps_section(findings, draft_id=str(draft.id)),
         _export_section(draft),
+        # #610: progressive enhancement — opens a WebSocket subscription
+        # to /ws/drafts/export-progress when the spinner fragment lands
+        # in the DOM. Falls back silently to the existing HTMX polling
+        # if the WS connection fails.
+        Script(src="/static/js/export-progress.js", defer=True),  # noqa: F405
         title=f"Mõjuaruanne — {draft.title}",
         user=auth,
         theme=theme,
@@ -940,11 +945,49 @@ def _export_status_spinner(
     job_id: int,
     job_created: datetime | None = None,
 ) -> Any:
-    """Return the spinner-with-poll fragment used while a job is in flight."""
+    """Return the progress-bar-with-poll fragment used while a job is in flight.
+
+    The fragment contains:
+    - A live ``<progress>`` element (the WS push updates ``value`` /
+      ``max``; without WS data it falls back to the indeterminate
+      style via ``data-indeterminate``).
+    - A numeric label ("42%" once the WS reports progress; falls back
+      to "Eksport käimas..." until the first push lands).
+    - A ``data-export-progress-ws`` marker that the static JS shim
+      (``app/static/js/export-progress.js``) finds on DOMContentLoaded
+      / htmx:afterSwap and uses to open the WebSocket subscription.
+    - The existing ``hx-get`` / ``hx-trigger`` polling attributes so
+      the fragment continues to swap itself every N seconds even when
+      the WebSocket is unavailable (the graceful-degradation contract
+      the polling pre-#610 provided is preserved verbatim).
+    """
     interval = _export_poll_interval_seconds(job_created)
     return Div(
-        Span(cls="btn-spinner", aria_hidden="true"),  # noqa: F405
-        Span(" Eksport käimas... (jälgi allpool olevast logist)"),  # noqa: F405
+        # Marker container the JS shim binds to. Holds the progress
+        # bar + label so a single querySelector finds both children.
+        Div(
+            Progress(  # noqa: F405
+                # No initial ``value`` → renders as indeterminate until
+                # the WS pushes the first ``{current, total}`` payload.
+                cls="export-progress-bar",
+                aria_label="Ekspordi edenemine",
+                data_indeterminate="1",
+            ),
+            Span(  # noqa: F405
+                "Eksport käimas...",
+                cls="export-progress-label",
+            ),
+            data_export_progress_ws="1",
+            data_job_id=str(job_id),
+            data_draft_id=str(draft_id),
+            cls="export-progress-wrapper",
+        ),
+        # Visually-hidden status text for assistive tech (the bar
+        # itself is decorative once the label carries the percentage).
+        Span(  # noqa: F405
+            " (jälgi allpool olevast logist)",
+            cls="muted-text export-status-hint",
+        ),
         id="export-status",
         cls="export-status export-status-pending",
         hx_get=f"/drafts/{draft_id}/export-status/{job_id}",

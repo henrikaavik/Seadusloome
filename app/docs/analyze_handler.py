@@ -54,6 +54,7 @@ def analyze_impact(
     *,
     attempt: int = 1,
     max_attempts: int = 3,
+    job_id: int | None = None,
 ) -> dict[str, Any]:
     """Run the impact analysis pipeline for one draft.
 

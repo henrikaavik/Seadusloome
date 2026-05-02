@@ -46,6 +46,7 @@ def extract_entities(
     *,
     attempt: int = 1,
     max_attempts: int = 3,
+    job_id: int | None = None,
 ) -> dict[str, Any]:
     """Real ``extract_entities`` handler.
 
