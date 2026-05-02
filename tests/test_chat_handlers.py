@@ -249,28 +249,46 @@ class TestPinConversation:
 
 
 class TestArchiveConversation:
-    def test_archive_htmx_returns_hx_refresh(self, provider_patch, mock_conn):
-        """Bug #663: htmx archive returns HX-Refresh so the row removal
-        AND the toolbar/pagination counts refresh atomically. Slight
-        scroll-loss cost is acceptable since the row leaves view anyway.
-        The HX-Trigger event is preserved so sidebar counters listening
-        for ``chat:conversation-updated`` still refresh too.
+    def test_archive_htmx_returns_chat_list_body_fragment(self, provider_patch, mock_conn):
+        """Bug #663 (post-review fix): htmx archive returns the
+        refreshed ``#chat-list-body`` fragment with HX-Reswap +
+        HX-Retarget so the row removal AND the pagination counts
+        update in place — preserving scroll. The previous HX-Refresh
+        approach reloaded the page and scrolled to top on every
+        action.
         """
         conv = _make_conversation()
+        # Stub the renderer so we don't hit the DB; assertion is on
+        # the response shape (fragment + headers), not on the rendered
+        # rows themselves (covered separately by chat_list_page tests).
+        from fastcore.xml import Div
+
+        fake_fragment = Div("stubbed-fragment", id="chat-list-body")
         with (
             patch("app.chat.handlers.get_conversation", return_value=conv),
             patch("app.chat.handlers._set_conversation_archived") as mock_set,
+            patch(
+                "app.chat.routes._render_chat_list_body",
+                return_value=fake_fragment,
+            ),
         ):
             client = _authed_client()
             resp = client.post(
                 f"/chat/{_CONV_ID}/archive",
-                headers={"HX-Request": "true"},
+                headers={"HX-Request": "true", "HX-Current-URL": "/chat?page=2"},
                 data={"archived": "1"},
             )
             assert resp.status_code == 200
-            assert resp.text == ""
-            assert resp.headers.get("HX-Refresh") == "true"
-            assert resp.headers.get("HX-Trigger") == "chat:conversation-updated"
+            # The body is the refreshed fragment, not an empty string.
+            assert "stubbed-fragment" in resp.text
+            assert 'id="chat-list-body"' in resp.text
+            # Headers redirect the swap from the form's "closest tr"
+            # target onto the whole list body.
+            assert resp.headers.get("HX-Reswap") == "outerHTML"
+            assert resp.headers.get("HX-Retarget") == "#chat-list-body"
+            # The previous dead HX-Refresh / HX-Trigger headers must
+            # not be set — they were no-op signalling on a full reload.
+            assert "HX-Refresh" not in resp.headers
             mock_set.assert_called_once()
 
     def test_archive_non_htmx_redirects_303(self, provider_patch, mock_conn):

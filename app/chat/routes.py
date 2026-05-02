@@ -321,6 +321,136 @@ def _count_conversations_for_user(
         return 0
 
 
+def _render_chat_list_body(
+    user_id: str,
+    *,
+    page: int,
+    search_q: str,
+    include_archived: bool,
+):
+    """Render the ``#chat-list-body`` fragment for the chat list page.
+
+    Bug #663 (post-review fix): archive and delete handlers used to
+    return ``HX-Refresh: true`` which scrolls the user back to the top
+    of the page on every action. By returning this fragment with
+    ``HX-Reswap: outerHTML`` + ``HX-Retarget: #chat-list-body`` the
+    handlers can update the rows AND the pagination counts in place,
+    preserving scroll.
+
+    The fragment now wraps both the data table AND the pagination
+    footer inside a single ``#chat-list-body`` div so one swap updates
+    both. Empty-state and "no results" branches are shaped so the
+    parent container stays stable.
+
+    Args:
+        user_id: caller's user UUID (already validated by the caller).
+        page: 1-indexed page (clamped to >= 1 by the caller).
+        search_q: optional title-substring filter.
+        include_archived: whether to include archived rows.
+    """
+    offset = (page - 1) * _PAGE_SIZE
+    try:
+        with _connect() as conn:
+            conversations = list_conversations_for_user(
+                conn,
+                user_id,
+                limit=_PAGE_SIZE,
+                offset=offset,
+                include_archived=include_archived,
+                pinned_first=True,
+                search=search_q or None,
+            )
+    except Exception:
+        logger.exception("Failed to list conversations")
+        conversations = []
+
+    total = _count_conversations_for_user(
+        user_id,
+        search=search_q or None,
+        include_archived=include_archived,
+    )
+    total_pages = max(1, (total + _PAGE_SIZE - 1) // _PAGE_SIZE)
+
+    if total == 0 and not search_q:
+        # Genuine empty state (no conversations at all). Wrap inside
+        # the same #chat-list-body anchor so the swap target stays
+        # stable when an archive/delete empties the list.
+        return Div(  # noqa: F405
+            P(  # noqa: F405
+                "Vestlusi pole. Alustage uut vestlust!",
+                cls="muted-text",
+            ),
+            A(  # noqa: F405
+                "Alusta uut vestlust",
+                href="/chat/new",
+                cls="btn btn-primary btn-md",
+            ),
+            cls="empty-state",
+            id="chat-list-body",
+        )
+
+    pagination = (
+        Pagination(
+            current_page=page,
+            total_pages=total_pages,
+            base_url="/chat",
+            page_size=_PAGE_SIZE,
+            total=total,
+        )
+        if total > 0
+        else None
+    )
+    children: list = [
+        DataTable(
+            columns=_conversation_list_columns(),
+            rows=_conversation_rows(conversations),
+            empty_message="Vestlusi ei leitud.",
+        ),
+    ]
+    if pagination is not None:
+        children.append(pagination)
+    return Div(*children, id="chat-list-body")  # noqa: F405
+
+
+def _chat_list_state_from_request(req: Request) -> tuple[int, str, bool]:
+    """Extract the chat-list query state from a request.
+
+    For HTMX-driven row mutations the state lives in the
+    ``HX-Current-URL`` header (which HTMX always sets to the URL of
+    the page that triggered the request) rather than the form's POST
+    body. For full-page GETs the state is in the query string. This
+    helper reads from both shapes so the handlers don't have to.
+
+    Returns ``(page, search_q, include_archived)`` with the same
+    parsing semantics as ``chat_list_page``.
+    """
+    from urllib.parse import parse_qs, urlparse
+
+    # Prefer the request's own query params (covers GET /chat).
+    params = dict(req.query_params)
+    if "page" not in params and "q" not in params and "archived" not in params:
+        # Fall back to HX-Current-URL (covers HTMX row mutations posted
+        # from the chat list view).
+        current_url = req.headers.get("HX-Current-URL")
+        if current_url:
+            qs = parse_qs(urlparse(current_url).query)
+            if "page" in qs:
+                params["page"] = qs["page"][0]
+            if "q" in qs:
+                params["q"] = qs["q"][0]
+            if "archived" in qs:
+                params["archived"] = qs["archived"][0]
+
+    page_str = params.get("page", "1")
+    try:
+        page = max(1, int(page_str))
+    except ValueError:
+        page = 1
+    search_q = (params.get("q") or "").strip()
+    include_archived = params.get("archived") in ("1", "true", "on")
+    return page, search_q, include_archived
+
+
 def chat_list_page(req: Request):
     """GET /chat -- paginated list of the caller's conversations."""
     auth_or_redirect = _require_auth(req)
@@ -330,80 +460,20 @@ def chat_list_page(req: Request):
     theme = get_theme_from_request(req)
     user_id = auth.get("id")
 
-    page_str = req.query_params.get("page", "1")
-    try:
-        page = max(1, int(page_str))
-    except ValueError:
-        page = 1
-    offset = (page - 1) * _PAGE_SIZE
-
-    # New: search + include-archived filters (migration 017 UX polish).
-    search_q = (req.query_params.get("q") or "").strip()
-    include_archived = req.query_params.get("archived") in ("1", "true", "on")
+    page, search_q, include_archived = _chat_list_state_from_request(req)
 
     if not user_id:
         body: Any = Alert(
             "Kasutaja andmed puuduvad.",
             variant="warning",
         )
-        pagination = None
     else:
-        try:
-            with _connect() as conn:
-                conversations = list_conversations_for_user(
-                    conn,
-                    user_id,
-                    limit=_PAGE_SIZE,
-                    offset=offset,
-                    include_archived=include_archived,
-                    pinned_first=True,
-                    search=search_q or None,
-                )
-        except Exception:
-            logger.exception("Failed to list conversations")
-            conversations = []
-
-        total = _count_conversations_for_user(
+        body = _render_chat_list_body(
             user_id,
-            search=search_q or None,
+            page=page,
+            search_q=search_q,
             include_archived=include_archived,
         )
-        total_pages = max(1, (total + _PAGE_SIZE - 1) // _PAGE_SIZE)
-
-        if total == 0 and not search_q:
-            body = Div(  # noqa: F405
-                P(  # noqa: F405
-                    "Vestlusi pole. Alustage uut vestlust!",
-                    cls="muted-text",
-                ),
-                A(  # noqa: F405
-                    "Alusta uut vestlust",
-                    href="/chat/new",
-                    cls="btn btn-primary btn-md",
-                ),
-                cls="empty-state",
-            )
-            pagination = None
-        else:
-            body = Div(  # noqa: F405
-                DataTable(
-                    columns=_conversation_list_columns(),
-                    rows=_conversation_rows(conversations),
-                    empty_message="Vestlusi ei leitud.",
-                ),
-                id="chat-list-body",
-            )
-            pagination = (
-                Pagination(
-                    current_page=page,
-                    total_pages=total_pages,
-                    base_url="/chat",
-                    page_size=_PAGE_SIZE,
-                    total=total,
-                )
-                if total > 0
-                else None
-            )
 
     # Search + archived toolbar
     toolbar = Form(  # noqa: F405
@@ -482,9 +552,10 @@ def chat_list_page(req: Request):
         )
     )
 
+    # Pagination is now nested inside ``body`` (the #chat-list-body
+    # fragment) so a single archive/delete swap updates rows AND counts
+    # in place — see :func:`_render_chat_list_body`.
     card_body_children: list = [toolbar, body]
-    if pagination is not None:
-        card_body_children.append(pagination)
 
     return PageShell(
         *header_children,
@@ -1117,13 +1188,28 @@ async def delete_conversation_handler(req: Request, conv_id: str):
 
     is_htmx = req.headers.get("HX-Request") == "true"
     if is_htmx and from_list:
-        # #663: a row-only swap leaves pagination/counts stale. Use
-        # HX-Refresh so the row vanishes AND the counts/pagination
-        # refresh, matching what the user sees after a manual reload.
+        # #663 (post-review fix): return the refreshed #chat-list-body
+        # fragment with HX-Reswap+HX-Retarget so the row vanishes AND
+        # the counts/pagination update in place — preserving scroll
+        # instead of doing the previous HX-Refresh full reload that
+        # bounced the user to top.
+        from fasthtml.common import to_xml
+
+        page, search_q, include_archived = _chat_list_state_from_request(req)
+        fragment = _render_chat_list_body(
+            str(auth.get("id")),
+            page=page,
+            search_q=search_q,
+            include_archived=include_archived,
+        )
         return Response(
-            "",
+            content=to_xml(fragment),
             status_code=200,
-            headers={"HX-Refresh": "true"},
+            media_type="text/html",
+            headers={
+                "HX-Reswap": "outerHTML",
+                "HX-Retarget": "#chat-list-body",
+            },
         )
     if is_htmx:
         return Response(
