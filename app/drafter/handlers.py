@@ -4,10 +4,13 @@ Each handler follows the Phase 2 convention established by
 :mod:`app.docs.analyze_handler`:
 
     - Registered via ``@register_handler(job_type)``
-    - Accepts ``(payload, *, attempt, max_attempts)``
+    - Accepts ``(payload, *, attempt, max_attempts, job_id=None)``
     - Returns a summary dict persisted in ``background_jobs.result``
     - Raises on failure; only marks domain state as ``abandoned`` on the
       final attempt (#448 retry-gating pattern)
+    - ``job_id`` is accepted for handler-contract compatibility (#610);
+      drafter handlers don't currently publish progress, so the value
+      is ignored.
 
 The handlers are imported as a side-effect in ``app.drafter.__init__.py``
 so they are registered before the worker claims any drafter job.
@@ -298,6 +301,7 @@ def drafter_clarify(
     *,
     attempt: int = 1,
     max_attempts: int = 3,
+    job_id: int | None = None,
 ) -> dict[str, Any]:
     """Generate clarifying questions for a drafting session.
 
@@ -388,6 +392,7 @@ def drafter_research(
     *,
     attempt: int = 1,
     max_attempts: int = 3,
+    job_id: int | None = None,
 ) -> dict[str, Any]:
     """Run deep SPARQL queries based on intent + clarifications."""
     session_id = UUID(str(payload["session_id"]))
@@ -445,6 +450,7 @@ def drafter_structure(
     *,
     attempt: int = 1,
     max_attempts: int = 3,
+    job_id: int | None = None,
 ) -> dict[str, Any]:
     """Generate a proposed law structure via LLM or use VTK fixed structure."""
     session_id = UUID(str(payload["session_id"]))
@@ -564,6 +570,7 @@ def drafter_draft(
     *,
     attempt: int = 1,
     max_attempts: int = 3,
+    job_id: int | None = None,
 ) -> dict[str, Any]:
     """Draft legal text for every section in the proposed structure."""
     session_id = UUID(str(payload["session_id"]))
@@ -677,6 +684,7 @@ def drafter_regenerate_clause(
     *,
     attempt: int = 1,
     max_attempts: int = 3,
+    job_id: int | None = None,
 ) -> dict[str, Any]:
     """Regenerate a single clause via LLM and update the session."""
     session_id = UUID(str(payload["session_id"]))

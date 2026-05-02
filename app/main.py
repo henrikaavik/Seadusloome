@@ -21,6 +21,7 @@ from app.chat.websocket import register_chat_ws_routes
 from app.docs.report_routes import register_report_routes
 from app.docs.routes import register_draft_routes
 from app.docs.websocket import register_draft_ws_routes
+from app.docs.ws_export_progress import register_export_progress_ws_routes
 from app.drafter.routes import register_drafter_routes
 from app.explorer.pages import explorer_page, register_explorer_pages
 from app.explorer.routes import register_explorer_routes
@@ -247,6 +248,7 @@ register_report_routes(rt)
 register_chat_routes(rt)
 register_chat_ws_routes(app)
 register_draft_ws_routes(app)
+register_export_progress_ws_routes(app)
 register_annotation_routes(rt)
 register_notification_routes(rt)
 

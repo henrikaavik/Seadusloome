@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +50,40 @@ from app.docs.labels import TYPE_LABELS_ET as _TYPE_LABELS_ET
 from app.ui.time import format_tallinn
 
 logger = logging.getLogger(__name__)
+
+
+# Progress callback signature: ``(current, total)``. ``current`` and
+# ``total`` are 1-based work-unit counters; the export progress WS pushes
+# them straight to the browser as ``{"current": N, "total": M}``. Called
+# from inside ``build_impact_report_docx`` after each major section so
+# the UI can render a real ``<progress>`` bar instead of an indeterminate
+# spinner (#610). ``None`` disables progress reporting entirely (used by
+# the existing test suite + any caller that doesn't need WS push).
+ProgressCallback = Callable[[int, int], None]
+
+
+# How often to publish progress mid-table. Larger tables report after
+# every Nth row in addition to the per-section checkpoints; smaller
+# tables (< _PROGRESS_BATCH rows) just emit once on entry + once on
+# exit via the section-level checkpoints. Tunable here so the WS push
+# rate stays reasonable even for outlier 200-row reports (~10 frames
+# per second worst case).
+_PROGRESS_BATCH = 10
+
+
+def _safe_publish(callback: ProgressCallback | None, current: int, total: int) -> None:
+    """Invoke *callback* swallowing any exception.
+
+    The progress channel is best-effort UX glue; a stuck DB write or a
+    flaky Postgres pool must never abort the .docx render. The handler
+    layer logs the failure already, so we don't re-log here.
+    """
+    if callback is None:
+        return
+    try:
+        callback(current, total)
+    except Exception:
+        logger.debug("docx_export: progress callback failed", exc_info=True)
 
 
 # Column order used by ``app.docs.export_handler.export_report`` when
@@ -187,14 +222,27 @@ def _add_summary(doc: Any, report_row: tuple) -> None:
     doc.add_paragraph(f"Tuvastatud lünkade arv: {gaps}")
 
 
-def _add_affected_entities(doc: Any, findings: dict[str, Any]) -> None:
-    """Write the "Mõjutatud üksused" table."""
+def _add_affected_entities(
+    doc: Any,
+    findings: dict[str, Any],
+    *,
+    progress_callback: ProgressCallback | None = None,
+    progress_base: int = 0,
+    progress_total: int = 0,
+) -> int:
+    """Write the "Mõjutatud üksused" table.
+
+    Returns the number of work units consumed (1 for the heading +
+    1 per ``_PROGRESS_BATCH`` rows). The caller passes ``progress_base``
+    (= work units already done) and ``progress_total`` (= grand total)
+    so per-row publishes carry the right numerator.
+    """
     doc.add_heading("Mõjutatud üksused", level=1)
 
     rows: list[dict[str, Any]] = list(findings.get("affected_entities") or [])
     if not rows:
         doc.add_paragraph("Mõjutatud üksuseid ei tuvastatud.")
-        return
+        return 1
 
     table = doc.add_table(rows=1, cols=3)
     table.style = "Light Grid Accent 1"
@@ -202,21 +250,39 @@ def _add_affected_entities(doc: Any, findings: dict[str, Any]) -> None:
     header[0].text = "Tüüp"
     header[1].text = "Nimetus"
     header[2].text = "URI"
-    for row in rows:
+    for index, row in enumerate(rows):
         cells = table.add_row().cells
         cells[0].text = _short_type(str(row.get("type", "")))
         cells[1].text = str(row.get("label", "") or "—")
         cells[2].text = str(row.get("uri", "") or "—")
+        # Mid-table checkpoint: every Nth row OR the last row. Avoids
+        # firing for tiny tables where the section-level publish above
+        # already covers the work.
+        if (index + 1) % _PROGRESS_BATCH == 0:
+            _safe_publish(
+                progress_callback,
+                progress_base + 1 + ((index + 1) // _PROGRESS_BATCH),
+                progress_total,
+            )
+    extra_units = len(rows) // _PROGRESS_BATCH
+    return 1 + extra_units
 
 
-def _add_conflicts(doc: Any, findings: dict[str, Any]) -> None:
-    """Write the "Konfliktid" table."""
+def _add_conflicts(
+    doc: Any,
+    findings: dict[str, Any],
+    *,
+    progress_callback: ProgressCallback | None = None,
+    progress_base: int = 0,
+    progress_total: int = 0,
+) -> int:
+    """Write the "Konfliktid" table. See ``_add_affected_entities`` for the progress contract."""
     doc.add_heading("Konfliktid", level=1)
 
     rows: list[dict[str, Any]] = list(findings.get("conflicts") or [])
     if not rows:
         doc.add_paragraph("Konflikte ei tuvastatud.")
-        return
+        return 1
 
     table = doc.add_table(rows=1, cols=3)
     table.style = "Light Grid Accent 1"
@@ -224,23 +290,41 @@ def _add_conflicts(doc: Any, findings: dict[str, Any]) -> None:
     header[0].text = "Eelnõu viide"
     header[1].text = "Konflikti üksus"
     header[2].text = "Põhjus"
-    for row in rows:
+    for index, row in enumerate(rows):
         cells = table.add_row().cells
         cells[0].text = str(row.get("draft_ref", "") or "—")
         cells[1].text = str(
             row.get("conflicting_label") or row.get("conflicting_entity", "") or "—"
         )
         cells[2].text = str(row.get("reason", "") or "—")
+        if (index + 1) % _PROGRESS_BATCH == 0:
+            _safe_publish(
+                progress_callback,
+                progress_base + 1 + ((index + 1) // _PROGRESS_BATCH),
+                progress_total,
+            )
+    extra_units = len(rows) // _PROGRESS_BATCH
+    return 1 + extra_units
 
 
-def _add_eu_compliance(doc: Any, findings: dict[str, Any]) -> None:
-    """Write the "EL-i õigusaktide vastavus" table."""
+def _add_eu_compliance(
+    doc: Any,
+    findings: dict[str, Any],
+    *,
+    progress_callback: ProgressCallback | None = None,
+    progress_base: int = 0,
+    progress_total: int = 0,
+) -> int:
+    """Write the "EL-i õigusaktide vastavus" table.
+
+    See ``_add_affected_entities`` for the progress contract.
+    """
     doc.add_heading("EL-i õigusaktide vastavus", level=1)
 
     rows: list[dict[str, Any]] = list(findings.get("eu_compliance") or [])
     if not rows:
         doc.add_paragraph("EL-i õigusaktide seoseid ei tuvastatud.")
-        return
+        return 1
 
     table = doc.add_table(rows=1, cols=3)
     table.style = "Light Grid Accent 1"
@@ -248,21 +332,36 @@ def _add_eu_compliance(doc: Any, findings: dict[str, Any]) -> None:
     header[0].text = "EL õigusakt"
     header[1].text = "Eesti säte"
     header[2].text = "Staatus"
-    for row in rows:
+    for index, row in enumerate(rows):
         cells = table.add_row().cells
         cells[0].text = str(row.get("eu_label") or row.get("eu_act", "") or "—")
         cells[1].text = str(row.get("provision_label") or row.get("estonian_provision", "") or "—")
         cells[2].text = str(row.get("transposition_status", "") or "—")
+        if (index + 1) % _PROGRESS_BATCH == 0:
+            _safe_publish(
+                progress_callback,
+                progress_base + 1 + ((index + 1) // _PROGRESS_BATCH),
+                progress_total,
+            )
+    extra_units = len(rows) // _PROGRESS_BATCH
+    return 1 + extra_units
 
 
-def _add_gaps(doc: Any, findings: dict[str, Any]) -> None:
-    """Write the "Lüngad" table."""
+def _add_gaps(
+    doc: Any,
+    findings: dict[str, Any],
+    *,
+    progress_callback: ProgressCallback | None = None,
+    progress_base: int = 0,
+    progress_total: int = 0,
+) -> int:
+    """Write the "Lüngad" table. See ``_add_affected_entities`` for the progress contract."""
     doc.add_heading("Lüngad", level=1)
 
     rows: list[dict[str, Any]] = list(findings.get("gaps") or [])
     if not rows:
         doc.add_paragraph("Lünki ei tuvastatud.")
-        return
+        return 1
 
     table = doc.add_table(rows=1, cols=3)
     table.style = "Light Grid Accent 1"
@@ -270,13 +369,21 @@ def _add_gaps(doc: Any, findings: dict[str, Any]) -> None:
     header[0].text = "Teemaklaster"
     header[1].text = "Sätete kaetus"
     header[2].text = "Kirjeldus"
-    for row in rows:
+    for index, row in enumerate(rows):
         cells = table.add_row().cells
         cells[0].text = str(row.get("topic_cluster_label") or row.get("topic_cluster", "") or "—")
         cells[
             1
         ].text = f"{row.get('referenced_provisions', '0')} / {row.get('total_provisions', '0')}"
         cells[2].text = str(row.get("description", "") or "—")
+        if (index + 1) % _PROGRESS_BATCH == 0:
+            _safe_publish(
+                progress_callback,
+                progress_base + 1 + ((index + 1) // _PROGRESS_BATCH),
+                progress_total,
+            )
+    extra_units = len(rows) // _PROGRESS_BATCH
+    return 1 + extra_units
 
 
 def _add_footer_page_numbers(doc: Any) -> None:
@@ -342,7 +449,32 @@ def _add_footer_page_numbers(doc: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
-def build_impact_report_docx(draft: Draft, report_row: tuple) -> Path:
+def _compute_progress_total(report_data: dict[str, Any]) -> int:
+    """Total work units for one ``build_impact_report_docx`` call.
+
+    The fixed cost is 4 sections (cover + summary + footer + save).
+    Each of the four detail tables contributes 1 unit for the heading
+    + 1 unit per ``_PROGRESS_BATCH`` rows. We compute it up front so
+    the ``<progress>`` bar's ``max`` attribute is right from the first
+    push (browsers can render an indeterminate bar if ``value > max``,
+    which looks broken).
+    """
+    fixed = 4  # cover, summary, footer, save
+    sections = ("affected_entities", "conflicts", "eu_compliance", "gaps")
+    table_units = 0
+    for key in sections:
+        rows = report_data.get(key) or []
+        # 1 unit for the section heading + 1 unit per N rows.
+        table_units += 1 + (len(rows) // _PROGRESS_BATCH)
+    return fixed + table_units
+
+
+def build_impact_report_docx(
+    draft: Draft,
+    report_row: tuple,
+    *,
+    progress_callback: ProgressCallback | None = None,
+) -> Path:
     """Render the impact report as an Estonian-styled ``.docx`` file.
 
     Writes to ``<EXPORT_DIR>/<draft_id>-<report_id>.docx`` using
@@ -353,6 +485,11 @@ def build_impact_report_docx(draft: Draft, report_row: tuple) -> Path:
         draft: The owning draft dataclass (used for title + created_at).
         report_row: Raw tuple fetched in the order declared by
             :data:`_REPORT_COLUMN_INDEX`.
+        progress_callback: Optional ``(current, total)`` reporter
+            invoked after each major section + every
+            ``_PROGRESS_BATCH`` table rows. ``None`` (default) disables
+            progress reporting entirely so existing callers and tests
+            keep their original behaviour.
 
     Returns:
         Absolute :class:`pathlib.Path` to the generated file.
@@ -364,23 +501,71 @@ def build_impact_report_docx(draft: Draft, report_row: tuple) -> Path:
     out_path = export_dir / f"{draft.id}-{report_id}.docx"
 
     report_data = _parse_report_data(report_row[_REPORT_COLUMN_INDEX["report_data"]])
+    total = _compute_progress_total(report_data)
 
     doc = Document()
 
     _add_cover(doc, draft, report_row)
+    done = 1
+    _safe_publish(progress_callback, done, total)
+
     _add_summary(doc, report_row)
-    _add_affected_entities(doc, report_data)
+    done += 1
+    _safe_publish(progress_callback, done, total)
+
+    consumed = _add_affected_entities(
+        doc,
+        report_data,
+        progress_callback=progress_callback,
+        progress_base=done,
+        progress_total=total,
+    )
+    done += consumed
+    _safe_publish(progress_callback, done, total)
     # Section break keeps the detail tables from bleeding into the cover
     # on single-page reports. WD_SECTION.NEW_PAGE is a page break; if the
     # tables are short the blank space is acceptable for a legal export.
     doc.add_section(WD_SECTION.CONTINUOUS)
-    _add_conflicts(doc, report_data)
-    _add_eu_compliance(doc, report_data)
-    _add_gaps(doc, report_data)
+
+    consumed = _add_conflicts(
+        doc,
+        report_data,
+        progress_callback=progress_callback,
+        progress_base=done,
+        progress_total=total,
+    )
+    done += consumed
+    _safe_publish(progress_callback, done, total)
+
+    consumed = _add_eu_compliance(
+        doc,
+        report_data,
+        progress_callback=progress_callback,
+        progress_base=done,
+        progress_total=total,
+    )
+    done += consumed
+    _safe_publish(progress_callback, done, total)
+
+    consumed = _add_gaps(
+        doc,
+        report_data,
+        progress_callback=progress_callback,
+        progress_base=done,
+        progress_total=total,
+    )
+    done += consumed
+    _safe_publish(progress_callback, done, total)
 
     _add_footer_page_numbers(doc)
+    done += 1
+    _safe_publish(progress_callback, done, total)
 
     doc.save(str(out_path))
+    # Final tick — guarantees the WS sees current == total even when
+    # rounding from per-N-row publishes leaves a small gap.
+    _safe_publish(progress_callback, total, total)
+
     logger.info(
         "docx_export: wrote impact report docx draft=%s report=%s path=%s",
         draft.id,

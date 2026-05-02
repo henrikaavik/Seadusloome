@@ -44,6 +44,7 @@ def draft_cleanup(
     *,
     attempt: int = 1,
     max_attempts: int = 3,
+    job_id: int | None = None,
 ) -> dict[str, Any]:
     """Delete the encrypted file + Jena named graph for a removed draft.
 

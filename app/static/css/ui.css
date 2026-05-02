@@ -1759,6 +1759,73 @@
   align-items: center;
   gap: var(--space-2);
   color: var(--color-text-muted);
+  flex-wrap: wrap;
+}
+
+/* #610 — export progress bar (replaces the indeterminate spinner so
+   the user sees real completion feedback). The marker wrapper holds
+   the <progress> + numeric label; the JS shim binds to it on
+   DOMContentLoaded / htmx:afterSwap. */
+.export-progress-wrapper {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1 1 auto;
+  min-width: 12rem;
+}
+
+.export-progress-bar {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 100%;
+  height: 0.6rem;
+  border: none;
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface-strong, var(--color-surface));
+  overflow: hidden;
+}
+
+/* Determinate (we have a numeric value/max) */
+.export-progress-bar::-webkit-progress-bar {
+  background-color: var(--color-surface-strong, var(--color-surface));
+  border-radius: var(--radius-sm);
+}
+
+.export-progress-bar::-webkit-progress-value {
+  background-color: var(--color-primary, currentColor);
+  border-radius: var(--radius-sm);
+  transition: width 200ms ease-out;
+}
+
+.export-progress-bar::-moz-progress-bar {
+  background-color: var(--color-primary, currentColor);
+  border-radius: var(--radius-sm);
+}
+
+/* Indeterminate fallback — pulses while the WS hasn't pushed any
+   numeric value yet (or when no WS connection ever opened). */
+.export-progress-bar[data-indeterminate] {
+  background-image: linear-gradient(
+    90deg,
+    var(--color-surface-strong, var(--color-surface)) 0%,
+    var(--color-primary, currentColor) 50%,
+    var(--color-surface-strong, var(--color-surface)) 100%
+  );
+  background-size: 200% 100%;
+  animation: export-progress-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes export-progress-pulse {
+  0% { background-position: 100% 0%; }
+  100% { background-position: -100% 0%; }
+}
+
+.export-progress-label {
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+  min-width: 4ch;
+  text-align: right;
 }
 
 /* ===========================================================================

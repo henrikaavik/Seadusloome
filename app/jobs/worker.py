@@ -9,11 +9,18 @@ safe because ``JobQueue.claim_next`` uses ``FOR UPDATE SKIP LOCKED``.
 
 Handler contract:
     - Handlers are plain synchronous functions with the signature
-      ``(payload: dict, *, attempt: int = 1, max_attempts: int = 3) -> dict | None``.
+      ``(payload: dict, *, attempt: int = 1, max_attempts: int = 3,
+      job_id: int | None = None) -> dict | None``.
       The keyword-only ``attempt``/``max_attempts`` arguments let
       handlers distinguish "first failure, will retry" from "final
       failure, give up" so they can hold off on flipping domain rows
-      to ``failed`` until the retry budget is exhausted (#448).
+      to ``failed`` until the retry budget is exhausted (#448). The
+      ``job_id`` kwarg is the row id for this invocation; long-running
+      handlers use it to publish progress to ``background_jobs.progress``
+      (see ``app/docs/export_handler.py`` for the export progress
+      indicator wired up in #610). Handlers that don't need it are free
+      to capture it via ``**_kwargs`` or ignore it; the worker passes it
+      unconditionally because the caller-cost is one int per dispatch.
     - The returned dict is persisted in ``background_jobs.result``.
     - Handlers MUST raise to signal failure; raising triggers the
       queue's exponential backoff retry logic automatically.
@@ -159,6 +166,7 @@ class JobWorker:
                 job.payload,
                 attempt=attempt_number,
                 max_attempts=job.max_attempts,
+                job_id=job.id,
             )
         except Exception as exc:  # noqa: BLE001 — handler errors flip job to failed
             tb = traceback.format_exc()

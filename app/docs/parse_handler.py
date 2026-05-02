@@ -63,6 +63,7 @@ def parse_draft(
     *,
     attempt: int = 1,
     max_attempts: int = 3,
+    job_id: int | None = None,
 ) -> dict[str, Any]:
     """Parse an uploaded draft's file via Apache Tika.
 
