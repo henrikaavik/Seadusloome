@@ -164,6 +164,13 @@ def analyze_impact(
             )
             conn.commit()
 
+        # #608: push the terminal status to subscribed WS clients first
+        # (cheap; a notify_analysis_done failure shouldn't drop the WS
+        # event).
+        from app.docs.status_events import emit_threadsafe
+
+        emit_threadsafe(draft_id, type="status", status="ready")
+
         # Notify the draft owner that analysis is complete.
         try:
             from app.notifications.wire import notify_analysis_done
@@ -318,6 +325,17 @@ def _mark_draft_failed(draft_id: UUID, exc: BaseException) -> None:
             conn.commit()
     except Exception:  # noqa: BLE001
         logger.exception("analyze_impact: failed to mark draft %s as failed", draft_id)
+        return
+
+    # #608: push the failure transition to WS subscribers.
+    from app.docs.status_events import emit_threadsafe
+
+    emit_threadsafe(
+        draft_id,
+        type="status",
+        status="failed",
+        error_message=user_msg[:500],
+    )
 
 
 # ---------------------------------------------------------------------------
