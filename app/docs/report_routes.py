@@ -40,6 +40,7 @@ from app.ui.layout import PageShell
 from app.ui.primitives.annotation_button import AnnotationButton
 from app.ui.primitives.badge import Badge, BadgeVariant
 from app.ui.primitives.button import Button
+from app.ui.primitives.link_button import LinkButton
 from app.ui.surfaces.alert import Alert
 from app.ui.surfaces.card import Card, CardBody, CardHeader
 from app.ui.surfaces.info_box import InfoBox
@@ -682,10 +683,10 @@ def draft_report_page(req: Request, draft_id: str):
                 cls="back-link",
             ),
             Div(
-                A(  # noqa: F405
+                LinkButton(
                     "Ava uurijas →",
                     href=f"/explorer?draft={draft.id}",
-                    cls="btn btn-secondary btn-md",
+                    variant="secondary",
                     title="Visualiseeri eelnõu ja mõjutatud sätted graafil.",
                 ),
                 # #614: one-line helper below the button so reviewers
@@ -1080,10 +1081,10 @@ def export_status_fragment(req: Request, draft_id: str, job_id: str):
             )
         return Div(
             Span("Eksport valmis. ", cls="export-status-text"),  # noqa: F405
-            A(  # noqa: F405
+            LinkButton(
                 "Laadi alla .docx",
                 href=f"/drafts/{parsed_draft}/export/{parsed_job_id}/download",
-                cls="btn btn-primary btn-sm",
+                size="sm",
             ),
             id="export-status",
             cls="export-status export-status-success",

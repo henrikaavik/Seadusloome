@@ -243,6 +243,7 @@ def Button(
 |-----------|---------|----------|
 | `Button` | Actions | primary, secondary, ghost, danger |
 | `IconButton` | Icon-only button (e.g., close) | same + sizes |
+| `LinkButton` | Anchor styled as a button (use when action navigates) | same + sizes |
 | `Input` | Single-line text input | text, email, password, number, search, url |
 | `Textarea` | Multi-line text | — |
 | `Select` | Dropdown | single, searchable |
