@@ -92,9 +92,13 @@ class TestHappyPath:
         # 2) status→extracting
         # 3) combined delete + inserts + update
         mock_conns = [MagicMock(), MagicMock(), MagicMock()]
-        # Status update (block 2) must report rowcount > 0 so
-        # update_draft_status returns True.
+        # Status update calls (block 2 ``extracting`` and block 3
+        # ``analyzing``) must report rowcount > 0 so the SSOT helper
+        # returns True. Post-#625 the analyzing transition routes
+        # through ``update_draft_status`` from inside the combined
+        # transaction, so conn[2] also needs a real rowcount.
         mock_conns[1].execute.return_value.rowcount = 1
+        mock_conns[2].execute.return_value.rowcount = 1
 
         extracted = [_ref("KarS § 133"), _ref("TsÜS § 12"), _ref("KarS § 1")]
         resolved = [
@@ -167,7 +171,13 @@ class TestHappyPath:
         ]
         assert len(insert_calls) == 3
 
-        # The UPDATE drafts call must set entity_count=3 and status='analyzing'.
+        # The UPDATE drafts call must set status='analyzing' and
+        # entity_count=3. Post-#625 the SSOT helper writes parameterised
+        # SQL (``status = %s``, not the literal); we assert on the param
+        # order produced by ``app.docs.status.update_draft_status`` --
+        # the prefix is always ``[status, error_message, error_debug]``
+        # followed by sorted-by-column-name extras (``entity_count``)
+        # and finally the WHERE-clause draft id.
         update_calls = [
             call
             for call in combined_exec.call_args_list
@@ -175,9 +185,13 @@ class TestHappyPath:
         ]
         assert len(update_calls) == 1
         update_sql, update_params = update_calls[0].args
-        assert "status = 'analyzing'" in update_sql
-        assert update_params[0] == 3  # entity_count
-        assert update_params[1] == str(draft_id)
+        assert "status = %s" in update_sql
+        assert "entity_count = %s" in update_sql
+        assert update_params[0] == "analyzing"
+        assert update_params[1] is None  # error_message cleared
+        assert update_params[2] is None  # error_debug cleared
+        assert update_params[3] == 3  # entity_count (sole extras key)
+        assert update_params[-1] == str(draft_id)
 
         # Exactly ONE commit for the combined transaction.
         mock_conns[2].commit.assert_called_once()
@@ -200,8 +214,11 @@ class TestHappyPath:
         draft_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
         draft = _make_draft(draft_id=draft_id)
         # 3 connections: get_draft, status→extracting, combined tx.
+        # Both status-mutating connections need rowcount > 0 so the
+        # SSOT helper (#625 §4.2) returns True.
         mock_conns = [MagicMock(), MagicMock(), MagicMock()]
         mock_conns[1].execute.return_value.rowcount = 1
+        mock_conns[2].execute.return_value.rowcount = 1
 
         location = {"chunk": 5, "offset": 1234, "extra": "meta"}
         extracted = [
@@ -266,7 +283,11 @@ class TestHappyPath:
         draft = _make_draft(draft_id=draft_id)
 
         mock_conns = [MagicMock(), MagicMock(), MagicMock()]
+        # Both status-mutating connections need rowcount > 0 so the
+        # SSOT helper (#625 §4.2) returns True. conn[2] now hosts
+        # the analyzing transition alongside the DELETE/INSERT block.
         mock_conns[1].execute.return_value.rowcount = 1
+        mock_conns[2].execute.return_value.rowcount = 1
 
         extracted = [_ref("KarS § 133")]
         resolved = [
@@ -398,20 +419,21 @@ class TestFailurePaths:
             mock_resolve.assert_not_called()
 
         # The third connection's execute should be the failed UPDATE.
+        # Post-#625 the SSOT helper writes parameterised SQL so we
+        # check on the params produced by ``app.docs.status.update_draft_status``:
+        # the first param is the new status ("failed"), the second is
+        # the user-facing Estonian message (#609), the third is the
+        # raw debug detail, and the LAST is the draft id.
         failed_exec = mock_conns[2].execute.call_args_list
-        assert any(
-            "update drafts" in call.args[0].lower() and "status = 'failed'" in call.args[0].lower()
-            for call in failed_exec
-        )
-        # #609: the first param is the user-facing Estonian message,
-        # the second is the raw debug detail.
-        failed_call = next(
-            call for call in failed_exec if "status = 'failed'" in call.args[0].lower()
-        )
-        user_msg, debug_detail, draft_id_param = failed_call.args[1]
+        assert any("update drafts" in call.args[0].lower() for call in failed_exec)
+        failed_call = next(call for call in failed_exec if "update drafts" in call.args[0].lower())
+        params = failed_call.args[1]
+        assert params[0] == "failed"
+        user_msg = params[1]
+        debug_detail = params[2]
         assert isinstance(user_msg, str)
         assert "LLM boom" in debug_detail
-        assert draft_id_param == str(draft_id)
+        assert params[-1] == str(draft_id)
 
     def test_extractor_failure_does_not_mark_failed_when_retry_pending(self):
         """#448: a transient extractor error on attempt 1 must not flip the draft.
@@ -485,11 +507,12 @@ class TestFailurePaths:
                     max_attempts=3,
                 )
 
+        # Post-#625 the SSOT helper writes parameterised SQL so we
+        # assert on the params produced by ``update_draft_status``.
         last_exec = mock_conns[2].execute.call_args_list
-        assert any(
-            "update drafts" in call.args[0].lower() and "status = 'failed'" in call.args[0].lower()
-            for call in last_exec
-        )
+        assert any("update drafts" in call.args[0].lower() for call in last_exec)
+        failed_call = next(call for call in last_exec if "update drafts" in call.args[0].lower())
+        assert failed_call.args[1][0] == "failed"
 
 
 # ---------------------------------------------------------------------------
@@ -653,7 +676,10 @@ class TestCombinedTransaction:
 
         # Dedicated failed-status UPDATE ran on conn index 3 and
         # committed (independent transaction, doesn't touch
-        # draft_entities).
+        # draft_entities). Post-#625 the SSOT helper writes
+        # parameterised SQL so we check the params for "failed".
         failed_exec = mock_conns[3].execute.call_args_list
-        assert any("status = 'failed'" in call.args[0].lower() for call in failed_exec)
+        assert any("update drafts" in call.args[0].lower() for call in failed_exec)
+        failed_call = next(call for call in failed_exec if "update drafts" in call.args[0].lower())
+        assert failed_call.args[1][0] == "failed"
         mock_conns[3].commit.assert_called_once()

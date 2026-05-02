@@ -150,17 +150,17 @@ def extract_entities(
                         json.dumps(r.extracted.location),
                     ),
                 )
-            conn.execute(
-                """
-                update drafts
-                set entity_count = %s,
-                    status = 'analyzing',
-                    error_message = null,
-                    error_debug = null,
-                    updated_at = now()
-                where id = %s
-                """,
-                (len(resolved), str(draft_id)),
+            # #625 §4.2: route through the SSOT helper so the status
+            # flip and the entity_count write land in the SAME UPDATE
+            # (preserving the #626 atomicity guarantee). The helper
+            # clears ``error_message`` / ``error_debug`` to NULL on
+            # this transition so stale failure info from a prior
+            # attempt cannot leak forward.
+            update_draft_status(
+                conn,
+                draft_id,
+                "analyzing",
+                extras={"entity_count": len(resolved)},
             )
             conn.commit()
 
@@ -187,17 +187,12 @@ def extract_entities(
             user_msg, debug_detail = map_failure_to_user_message(exc, stage="extract")
             try:
                 with get_connection() as conn:
-                    conn.execute(
-                        """
-                        update drafts
-                        set status = 'failed',
-                            error_message = %s,
-                            error_debug = %s,
-                            updated_at = now(),
-                            processing_completed_at = now()
-                        where id = %s
-                        """,
-                        (user_msg[:500], debug_detail, str(draft_id)),
+                    update_draft_status(
+                        conn,
+                        draft_id,
+                        "failed",
+                        user_msg[:500],
+                        error_debug=debug_detail,
                     )
                     conn.commit()
             except Exception:  # noqa: BLE001

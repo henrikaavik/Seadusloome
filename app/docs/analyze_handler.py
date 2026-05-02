@@ -37,7 +37,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from app.db import get_connection
-from app.docs.draft_model import fetch_draft, get_draft
+from app.docs.draft_model import fetch_draft, get_draft, update_draft_status
 from app.docs.entity_extractor import ExtractedRef
 from app.docs.error_mapping import map_failure_to_user_message
 from app.docs.graph_builder import build_draft_graph, write_doc_lineage
@@ -150,18 +150,13 @@ def analyze_impact(
                     ontology_version,
                 ),
             )
-            conn.execute(
-                """
-                update drafts
-                set status = 'ready',
-                    error_message = null,
-                    error_debug = null,
-                    updated_at = now(),
-                    processing_completed_at = now()
-                where id = %s
-                """,
-                (str(draft_id),),
-            )
+            # #625 §4.2: route through the SSOT helper. The helper
+            # clears ``error_message`` / ``error_debug`` to NULL and
+            # stamps ``processing_completed_at = now()`` for terminal
+            # transitions (#670). Lives in the SAME transaction as the
+            # ``impact_reports`` insert above so observers never see a
+            # ``status='ready'`` row without its report.
+            update_draft_status(conn, draft_id, "ready")
             conn.commit()
 
         # #608: push the terminal status to subscribed WS clients first
@@ -310,17 +305,12 @@ def _mark_draft_failed(draft_id: UUID, exc: BaseException) -> None:
     user_msg, debug_detail = map_failure_to_user_message(exc, stage="analyze")
     try:
         with get_connection() as conn:
-            conn.execute(
-                """
-                update drafts
-                set status = 'failed',
-                    error_message = %s,
-                    error_debug = %s,
-                    updated_at = now(),
-                    processing_completed_at = now()
-                where id = %s
-                """,
-                (user_msg[:500], debug_detail, str(draft_id)),
+            update_draft_status(
+                conn,
+                draft_id,
+                "failed",
+                user_msg[:500],
+                error_debug=debug_detail,
             )
             conn.commit()
     except Exception:  # noqa: BLE001
