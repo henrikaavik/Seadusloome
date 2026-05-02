@@ -66,6 +66,33 @@ def _make_conversation(
     )
 
 
+def _make_message_row(
+    *,
+    role: str = "user",
+    content: str = "x",
+) -> tuple[Any, ...]:
+    """Build a 14-tuple matching ``app.chat.models._MESSAGE_COLUMNS`` order
+    (post-migration-026: no plaintext payload columns)."""
+    from app.storage import encrypt_text
+
+    return (
+        uuid.uuid4(),
+        _CONV_ID,
+        role,
+        None,  # tool_name
+        None,  # tokens_input
+        None,  # tokens_output
+        None,  # model
+        datetime.now(UTC),
+        encrypt_text(content),
+        None,  # tool_input_encrypted
+        None,  # tool_output_encrypted
+        None,  # rag_context_encrypted
+        False,  # is_pinned
+        False,  # is_truncated
+    )
+
+
 def _make_message(
     role: str = "user",
     content: str = "Tere",
@@ -264,7 +291,7 @@ class TestOrchestratorHappyPath:
         mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         conv = _make_conversation()
-        now = datetime.now(UTC)
+        datetime.now(UTC)
 
         call_counter = {"n": 0}
         base_conv_row = (
@@ -281,24 +308,7 @@ class TestOrchestratorHappyPath:
             call_counter["n"] += 1
             if call_counter["n"] == 1:
                 return base_conv_row
-            return (
-                uuid.uuid4(),
-                _CONV_ID,
-                "user",
-                "x",
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                now,
-                None,  # content_encrypted (#570)
-                None,  # tool_input_encrypted
-                None,  # tool_output_encrypted
-                None,  # rag_context_encrypted
-            )
+            return _make_message_row()
 
         conn.execute.return_value.fetchone = side_effect_fetchone
         conn.execute.return_value.fetchall.return_value = []
@@ -368,7 +378,7 @@ class TestOrchestratorToolUse:
         mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         conv = _make_conversation()
-        now = datetime.now(UTC)
+        datetime.now(UTC)
 
         call_counter = {"n": 0}
         base_conv_row = (
@@ -385,24 +395,7 @@ class TestOrchestratorToolUse:
             call_counter["n"] += 1
             if call_counter["n"] == 1:
                 return base_conv_row
-            return (
-                uuid.uuid4(),
-                _CONV_ID,
-                "user",
-                "Tere",
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                now,
-                None,  # content_encrypted (#570)
-                None,  # tool_input_encrypted
-                None,  # tool_output_encrypted
-                None,  # rag_context_encrypted
-            )
+            return _make_message_row(content="Tere")
 
         conn.execute.return_value.fetchone = side_effect_fetchone
         conn.execute.return_value.fetchall.return_value = []
@@ -453,7 +446,7 @@ class TestOrchestratorMaxToolRounds:
         mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         conv = _make_conversation()
-        now = datetime.now(UTC)
+        datetime.now(UTC)
 
         call_counter = {"n": 0}
         base_conv_row = (
@@ -470,24 +463,7 @@ class TestOrchestratorMaxToolRounds:
             call_counter["n"] += 1
             if call_counter["n"] == 1:
                 return base_conv_row
-            return (
-                uuid.uuid4(),
-                _CONV_ID,
-                "user",
-                "x",
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                now,
-                None,  # content_encrypted (#570)
-                None,  # tool_input_encrypted
-                None,  # tool_output_encrypted
-                None,  # rag_context_encrypted
-            )
+            return _make_message_row()
 
         conn.execute.return_value.fetchone = side_effect_fetchone
         conn.execute.return_value.fetchall.return_value = []
@@ -541,7 +517,7 @@ class TestOrchestratorDraftContext:
         mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         conv = _make_conversation(context_draft_id=_DRAFT_ID)
-        now = datetime.now(UTC)
+        datetime.now(UTC)
 
         call_counter = {"n": 0}
         base_conv_row = (
@@ -558,24 +534,7 @@ class TestOrchestratorDraftContext:
             call_counter["n"] += 1
             if call_counter["n"] == 1:
                 return base_conv_row
-            return (
-                uuid.uuid4(),
-                _CONV_ID,
-                "user",
-                "x",
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                now,
-                None,  # content_encrypted (#570)
-                None,  # tool_input_encrypted
-                None,  # tool_output_encrypted
-                None,  # rag_context_encrypted
-            )
+            return _make_message_row()
 
         conn.execute.return_value.fetchone = side_effect_fetchone
         conn.execute.return_value.fetchall.return_value = []
@@ -611,7 +570,7 @@ class TestOrchestratorLLMError:
         mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         conv = _make_conversation()
-        now = datetime.now(UTC)
+        datetime.now(UTC)
         call_counter = {"n": 0}
         base_conv_row = (
             conv.id,
@@ -627,24 +586,7 @@ class TestOrchestratorLLMError:
             call_counter["n"] += 1
             if call_counter["n"] == 1:
                 return base_conv_row
-            return (
-                uuid.uuid4(),
-                _CONV_ID,
-                "user",
-                "x",
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                now,
-                None,  # content_encrypted (#570)
-                None,  # tool_input_encrypted
-                None,  # tool_output_encrypted
-                None,  # rag_context_encrypted
-            )
+            return _make_message_row()
 
         conn.execute.return_value.fetchone = side_effect_fetchone
         conn.execute.return_value.fetchall.return_value = []
@@ -672,7 +614,7 @@ class TestOrchestratorPersistence:
         mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         conv = _make_conversation()
-        now = datetime.now(UTC)
+        datetime.now(UTC)
 
         call_counter = {"n": 0}
         base_conv_row = (
@@ -689,24 +631,7 @@ class TestOrchestratorPersistence:
             call_counter["n"] += 1
             if call_counter["n"] == 1:
                 return base_conv_row
-            return (
-                uuid.uuid4(),
-                _CONV_ID,
-                "user",
-                "x",
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                now,
-                None,  # content_encrypted (#570)
-                None,  # tool_input_encrypted
-                None,  # tool_output_encrypted
-                None,  # rag_context_encrypted
-            )
+            return _make_message_row()
 
         conn.execute.return_value.fetchone = side_effect_fetchone
         conn.execute.return_value.fetchall.return_value = []
@@ -1189,7 +1114,7 @@ class TestOrchestratorPartialPersistence:
         mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         conv = _make_conversation()
-        now = datetime.now(UTC)
+        datetime.now(UTC)
         call_counter = {"n": 0}
         base_conv_row = (
             conv.id,
@@ -1205,24 +1130,7 @@ class TestOrchestratorPartialPersistence:
             call_counter["n"] += 1
             if call_counter["n"] == 1:
                 return base_conv_row
-            return (
-                uuid.uuid4(),
-                _CONV_ID,
-                "user",
-                "x",
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                now,
-                None,  # content_encrypted (#570)
-                None,  # tool_input_encrypted
-                None,  # tool_output_encrypted
-                None,  # rag_context_encrypted
-            )
+            return _make_message_row()
 
         conn.execute.return_value.fetchone = side_effect_fetchone
         conn.execute.return_value.fetchall.return_value = []
@@ -1263,7 +1171,7 @@ class TestOrchestratorPartialPersistence:
         mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         conv = _make_conversation()
-        now = datetime.now(UTC)
+        datetime.now(UTC)
         call_counter = {"n": 0}
         base_conv_row = (
             conv.id,
@@ -1279,24 +1187,7 @@ class TestOrchestratorPartialPersistence:
             call_counter["n"] += 1
             if call_counter["n"] == 1:
                 return base_conv_row
-            return (
-                uuid.uuid4(),
-                _CONV_ID,
-                "user",
-                "x",
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                now,
-                None,  # content_encrypted (#570)
-                None,  # tool_input_encrypted
-                None,  # tool_output_encrypted
-                None,  # rag_context_encrypted
-            )
+            return _make_message_row()
 
         conn.execute.return_value.fetchone = side_effect_fetchone
         conn.execute.return_value.fetchall.return_value = []
@@ -1362,7 +1253,7 @@ def _setup_orchestrator_conn(mock_get_conn: Any, *, context_draft_id: Any = None
     mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
     conv = _make_conversation()
-    now = datetime.now(UTC)
+    datetime.now(UTC)
 
     call_counter = {"n": 0}
     base_conv_row = (
@@ -1379,24 +1270,7 @@ def _setup_orchestrator_conn(mock_get_conn: Any, *, context_draft_id: Any = None
         call_counter["n"] += 1
         if call_counter["n"] == 1:
             return base_conv_row
-        return (
-            uuid.uuid4(),
-            _CONV_ID,
-            "user",
-            "x",
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            now,
-            None,
-            None,
-            None,
-            None,
-        )
+        return _make_message_row()
 
     conn.execute.return_value.fetchone = side_effect_fetchone
     conn.execute.return_value.fetchall.return_value = []
@@ -1945,7 +1819,7 @@ class TestCostBudgetAdvisoryLock:
         also run ``INSERT INTO messages``.
         """
         conv = _make_conversation()
-        now = datetime.now(UTC)
+        datetime.now(UTC)
 
         # Shared counter so subsequent calls return message rows.
         call_counter = {"n": 0}
@@ -1963,24 +1837,7 @@ class TestCostBudgetAdvisoryLock:
             call_counter["n"] += 1
             if call_counter["n"] == 1:
                 return base_conv_row
-            return (
-                uuid.uuid4(),
-                _CONV_ID,
-                "user",
-                "x",
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                now,
-                None,
-                None,
-                None,
-                None,
-            )
+            return _make_message_row()
 
         # We'll hand out a stream of conns — the orchestrator opens a fresh
         # connection per ``with get_connection()`` block. Capture per-conn

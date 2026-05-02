@@ -222,40 +222,19 @@ def _delete_messages_after_pivot(conn: Any, conv_id: uuid.UUID, pivot_msg: Messa
 
 
 def _update_message_content(conn: Any, msg_id: uuid.UUID, new_content: str) -> None:
-    """Update a user message's content.
+    """Update a user message's content (encrypted column only).
 
-    Writes to ``content_encrypted`` when :func:`app.storage.encrypt_text`
-    is available (production) and falls back to the plaintext column
-    otherwise (dev environments without an encryption key). The read
-    path in :func:`_row_to_message` prefers the encrypted column, so the
-    dual-write keeps decryption working after edits.
-
-    Production safety: in ``APP_ENV=production`` (where
-    :func:`app.config.is_stub_allowed` returns ``False``) an encryption
-    failure re-raises instead of silently writing plaintext. Drafts are
-    politically sensitive — a plaintext fallback in prod would leak the
-    very data the encryption-at-rest policy exists to protect. In dev /
-    test the plaintext fallback keeps the app runnable without a key.
+    The plaintext ``content`` column was dropped by migration 026, so
+    every edit writes ciphertext to ``content_encrypted``. If
+    :func:`app.storage.encrypt_text` raises (e.g. dev environment with
+    no key configured) we re-raise instead of silently dropping the
+    edit — there is no plaintext column left to fall back to.
     """
-    from app.config import is_stub_allowed
+    from app.storage import encrypt_text
 
-    try:
-        from app.storage import encrypt_text
-
-        ciphertext = encrypt_text(new_content or "")
-    except Exception:
-        if not is_stub_allowed():
-            logger.exception("encrypt_text failed in production — refusing plaintext fallback")
-            raise
-        logger.exception("encrypt_text failed — writing plaintext content (dev fallback)")
-        conn.execute(
-            "UPDATE messages SET content = %s, content_encrypted = NULL WHERE id = %s",
-            (new_content, str(msg_id)),
-        )
-        return
-
+    ciphertext = encrypt_text(new_content or "")
     conn.execute(
-        "UPDATE messages SET content = NULL, content_encrypted = %s WHERE id = %s",
+        "UPDATE messages SET content_encrypted = %s WHERE id = %s",
         (ciphertext, str(msg_id)),
     )
 

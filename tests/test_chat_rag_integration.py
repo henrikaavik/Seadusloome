@@ -37,6 +37,33 @@ def _auth() -> dict[str, Any]:
     return {"id": _USER_ID, "org_id": _ORG_ID}
 
 
+def _make_message_row(
+    *,
+    role: str = "user",
+    content: str = "x",
+) -> tuple[Any, ...]:
+    """Build a 14-tuple matching ``app.chat.models._MESSAGE_COLUMNS`` order
+    (post-migration-026: no plaintext payload columns)."""
+    from app.storage import encrypt_text
+
+    return (
+        uuid.uuid4(),
+        _CONV_ID,
+        role,
+        None,  # tool_name
+        None,  # tokens_input
+        None,  # tokens_output
+        None,  # model
+        datetime.now(UTC),
+        encrypt_text(content),
+        None,  # tool_input_encrypted
+        None,  # tool_output_encrypted
+        None,  # rag_context_encrypted
+        False,  # is_pinned
+        False,  # is_truncated
+    )
+
+
 def _make_conversation(
     *,
     conv_id: uuid.UUID = _CONV_ID,
@@ -141,7 +168,7 @@ def _setup_mock_conn(mock_get_conn: MagicMock) -> MagicMock:
     mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
     conv = _make_conversation()
-    now = datetime.now(UTC)
+    datetime.now(UTC)
 
     call_counter = {"n": 0}
     base_conv_row = (
@@ -158,24 +185,7 @@ def _setup_mock_conn(mock_get_conn: MagicMock) -> MagicMock:
         call_counter["n"] += 1
         if call_counter["n"] == 1:
             return base_conv_row
-        return (
-            uuid.uuid4(),
-            _CONV_ID,
-            "user",
-            "x",
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            now,
-            None,  # content_encrypted (#570)
-            None,  # tool_input_encrypted
-            None,  # tool_output_encrypted
-            None,  # rag_context_encrypted
-        )
+        return _make_message_row()
 
     conn.execute.return_value.fetchone = side_effect_fetchone
     conn.execute.return_value.fetchall.return_value = []

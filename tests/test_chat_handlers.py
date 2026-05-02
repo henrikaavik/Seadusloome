@@ -900,37 +900,34 @@ class TestAuditKeys:
 
 
 # ---------------------------------------------------------------------------
-# P2.5: _update_message_content fail-safe in production.
+# P2.5: _update_message_content requires encryption (post-migration-026).
 # ---------------------------------------------------------------------------
 
 
-class TestUpdateMessageContentFailSafe:
-    def test_dev_falls_back_to_plaintext_on_encryption_failure(self, provider_patch, monkeypatch):
-        """In dev (``APP_ENV != production``) encrypt errors write plaintext."""
+class TestUpdateMessageContentRequiresEncryption:
+    """Migration 026 dropped the plaintext ``content`` column, so there is
+    no fallback. Every edit must encrypt; an encryption failure raises in
+    every environment (#687)."""
+
+    def test_writes_only_encrypted_column(self, provider_patch, monkeypatch):
         from app.chat.handlers import _update_message_content
 
         monkeypatch.setenv("APP_ENV", "development")
 
         conn = MagicMock()
-
-        def boom(_text: str) -> bytes:
-            raise RuntimeError("no key")
-
-        # Patch the import site used inside _update_message_content.
-        with patch("app.storage.encrypt_text", side_effect=boom):
+        with patch("app.storage.encrypt_text", return_value=b"ciphertext"):
             _update_message_content(conn, _MSG_ID, "uus sisu")
 
-        # Plaintext-path UPDATE landed.
         sql, params = conn.execute.call_args.args
-        assert "content = %s" in sql
-        assert "content_encrypted = NULL" in sql
-        assert params == ("uus sisu", str(_MSG_ID))
+        assert "content_encrypted = %s" in sql
+        # The plaintext column is gone — the SQL must not mention it.
+        assert "content = " not in sql
+        assert params == (b"ciphertext", str(_MSG_ID))
 
-    def test_prod_reraises_on_encryption_failure(self, provider_patch, monkeypatch):
-        """In production encrypt errors must NOT fall back to plaintext."""
+    def test_raises_on_encryption_failure(self, provider_patch, monkeypatch):
         from app.chat.handlers import _update_message_content
 
-        monkeypatch.setenv("APP_ENV", "production")
+        monkeypatch.setenv("APP_ENV", "development")
 
         conn = MagicMock()
 
@@ -941,7 +938,6 @@ class TestUpdateMessageContentFailSafe:
             with pytest.raises(RuntimeError, match="no key"):
                 _update_message_content(conn, _MSG_ID, "tundlik sisu")
 
-        # No UPDATE was executed — the write never touched the DB.
         conn.execute.assert_not_called()
 
 

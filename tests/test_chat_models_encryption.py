@@ -43,9 +43,9 @@ _CONV_ID = uuid.UUID("33333333-3333-3333-3333-333333333333")
 def _echo_row(conn_mock: MagicMock) -> list[Any]:
     """Capture the INSERT params and build a matching row for ``fetchone``.
 
-    The chat INSERT binds 10 positional params; columns 6..9 are the four
-    encrypted BYTEA values. We map those back into a cursor row that has
-    the full 16-column shape ``_MESSAGE_COLUMNS`` expects.
+    Migration 026 dropped the plaintext payload columns; the INSERT now
+    binds 10 positional params and ``_MESSAGE_COLUMNS`` is 14 wide
+    (no ``content``/``tool_input``/``tool_output``/``rag_context``).
     """
     params = conn_mock.execute.call_args.args[1]
     (
@@ -65,11 +65,7 @@ def _echo_row(conn_mock: MagicMock) -> list[Any]:
         uuid.uuid4(),
         _CONV_ID,
         role,
-        None,  # content (plaintext) — new writes NULL it
         tool_name,
-        None,  # tool_input plaintext
-        None,  # tool_output plaintext
-        None,  # rag_context plaintext
         tokens_input,
         tokens_output,
         model,
@@ -194,63 +190,38 @@ class TestNullJsonColumns:
         assert result.rag_context is None
 
 
-class TestPlaintextFallback:
-    """Rows that pre-date the #570 backfill still decode correctly."""
+class TestEncryptionInvariant:
+    """Migration 026 dropped the plaintext fallback. ``_row_to_message``
+    must refuse a row whose ``content_encrypted`` is NULL so a future
+    regression cannot silently serve empty message bodies (#687)."""
 
-    def test_row_with_plaintext_only_is_readable(self):
+    def test_null_content_encrypted_raises(self):
+        from app.chat.models import _row_to_message
+
         now = datetime.now(UTC)
         row = (
             uuid.uuid4(),
             _CONV_ID,
             "user",
-            "pre-backfill plaintext",  # content (plaintext)
             None,  # tool_name
-            None,  # tool_input plaintext
-            None,  # tool_output plaintext
-            None,  # rag_context plaintext
-            None,
-            None,
-            None,
+            None,  # tokens_input
+            None,  # tokens_output
+            None,  # model
             now,
-            None,  # content_encrypted — NULL, triggers fallback
+            None,  # content_encrypted — NULL is the regression
             None,
             None,
             None,
+            False,
+            False,
         )
 
-        msg = _row_to_message(row)
-        assert msg.content == "pre-backfill plaintext"
-        assert msg.tool_input is None
+        with pytest.raises(ValueError, match="content_encrypted IS NULL"):
+            _row_to_message(row)
 
-    def test_row_with_plaintext_jsonb_only_is_readable(self):
-        now = datetime.now(UTC)
-        row = (
-            uuid.uuid4(),
-            _CONV_ID,
-            "tool",
-            "legacy tool message",
-            "query_ontology",
-            {"query": "SELECT"},  # tool_input plaintext JSONB (parsed dict)
-            {"results": []},
-            [{"chunk_id": "x"}],
-            None,
-            None,
-            None,
-            now,
-            None,
-            None,
-            None,
-            None,
-        )
-
-        msg = _row_to_message(row)
-        assert msg.content == "legacy tool message"
-        assert msg.tool_input == {"query": "SELECT"}
-        assert msg.tool_output == {"results": []}
-        assert msg.rag_context == [{"chunk_id": "x"}]
-
-    def test_encrypted_column_takes_precedence_over_plaintext(self):
-        """If both columns are populated, the encrypted one wins."""
+    def test_encrypted_only_row_decodes_cleanly(self):
+        """Positive control: a row with only encrypted columns reads back
+        as the original plaintext, no plaintext column required."""
         from app.storage import encrypt_text
 
         now = datetime.now(UTC)
@@ -258,10 +229,6 @@ class TestPlaintextFallback:
             uuid.uuid4(),
             _CONV_ID,
             "user",
-            "stale plaintext",  # should be ignored
-            None,
-            None,
-            None,
             None,
             None,
             None,
@@ -271,9 +238,13 @@ class TestPlaintextFallback:
             None,
             None,
             None,
+            False,
+            False,
         )
+
         msg = _row_to_message(row)
         assert msg.content == "authoritative ciphertext"
+        assert msg.tool_input is None
 
 
 class TestSecurityInspection:
