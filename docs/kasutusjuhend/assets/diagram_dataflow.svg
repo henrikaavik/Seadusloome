@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="470" viewBox="0 0 1400 470">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#00C3FF"/>
+    </marker>
+    <style>
+      text{font-family:Arial,Verdana,sans-serif;fill:#fff}
+      .muted{fill:#CBD5E1;font-size:25px}
+      .title{font-weight:700;font-size:31px}
+      .box{fill:#1E293B;stroke:#3D4B5E;stroke-width:3;rx:18}
+      .accent{fill:#293548;stroke:#00C3FF;stroke-width:3;rx:18}
+      .line{stroke:#00C3FF;stroke-width:4;fill:none;marker-end:url(#arrow)}
+    </style>
+  </defs>
+  <rect width="1400" height="470" fill="#0F172A" rx="22"/>
+  <rect class="box" x="50" y="70" width="255" height="115"/>
+  <text class="title" x="84" y="121">Õigusallikad</text>
+  <text class="muted" x="84" y="158">RT, EIS, kohtud, EL</text>
+  <path class="line" d="M305 128 L420 128"/>
+  <rect class="box" x="420" y="70" width="250" height="115"/>
+  <text class="title" x="455" y="121">Sünkroonimine</text>
+  <text class="muted" x="455" y="158">JSON-LD → RDF</text>
+  <path class="line" d="M670 128 L790 128"/>
+  <rect class="accent" x="790" y="70" width="255" height="115"/>
+  <text class="title" x="828" y="121">Jena Fuseki</text>
+  <text class="muted" x="828" y="158">SPARQL-ontoloogia</text>
+  <path class="line" d="M1045 128 L1165 128"/>
+  <rect class="box" x="1165" y="70" width="185" height="115"/>
+  <text class="title" x="1195" y="121">Uurija</text>
+  <text class="muted" x="1195" y="158">Graaf + detailid</text>
+  <rect class="box" x="155" y="290" width="255" height="115"/>
+  <text class="title" x="190" y="341">Kasutaja eelnõu</text>
+  <text class="muted" x="190" y="378">DOCX/PDF või intent</text>
+  <path class="line" d="M410 348 L520 348"/>
+  <rect class="box" x="520" y="290" width="250" height="115"/>
+  <text class="title" x="555" y="341">Analüüs</text>
+  <text class="muted" x="555" y="378">Tika, LLM, SPARQL</text>
+  <path class="line" d="M770 348 L890 348"/>
+  <rect class="accent" x="890" y="290" width="260" height="115"/>
+  <text class="title" x="930" y="341">Tulemid</text>
+  <text class="muted" x="930" y="378">mõju, konfliktid, raport</text>
+  <path class="line" d="M1015 290 C1005 245 970 218 930 185"/>
+  <path class="line" d="M1150 348 L1250 348"/>
+  <rect class="box" x="1250" y="290" width="100" height="115"/>
+  <text class="title" x="1272" y="341">AI</text>
+  <text class="muted" x="1272" y="378">vestlus</text>
+</svg>

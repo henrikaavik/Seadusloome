@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="420" viewBox="0 0 1400 420">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#00C3FF"/>
+    </marker>
+    <style>
+      text{font-family:Arial,Verdana,sans-serif;fill:#fff}
+      .label{font-weight:700;font-size:28px}
+      .small{fill:#CBD5E1;font-size:22px}
+      .box{fill:#1E293B;stroke:#3D4B5E;stroke-width:3;rx:18}
+      .active{fill:#293548;stroke:#00C3FF;stroke-width:3;rx:18}
+      .line{stroke:#00C3FF;stroke-width:4;fill:none;marker-end:url(#arrow)}
+    </style>
+  </defs>
+  <rect width="1400" height="420" fill="#0F172A" rx="22"/>
+  <rect class="active" x="55" y="85" width="250" height="110"/><text class="label" x="93" y="133">1. Sisend</text><text class="small" x="93" y="168">eelnõu või kavatsus</text>
+  <path class="line" d="M305 140 L400 140"/>
+  <rect class="box" x="400" y="85" width="250" height="110"/><text class="label" x="438" y="133">2. Analüüs</text><text class="small" x="438" y="168">viited, mõjud, riskid</text>
+  <path class="line" d="M650 140 L745 140"/>
+  <rect class="box" x="745" y="85" width="250" height="110"/><text class="label" x="783" y="133">3. Tõlgendus</text><text class="small" x="783" y="168">graaf, vestlus, raport</text>
+  <path class="line" d="M995 140 L1090 140"/>
+  <rect class="box" x="1090" y="85" width="255" height="110"/><text class="label" x="1126" y="133">4. Otsus</text><text class="small" x="1126" y="168">parandus või eksport</text>
+  <rect class="box" x="195" y="265" width="1010" height="70"/>
+  <text class="small" x="235" y="310">Tüüpiline ring kordub: ametnik täiendab eelnõu, käivitab uue analüüsi ja võrdleb muutusi.</text>
+</svg>

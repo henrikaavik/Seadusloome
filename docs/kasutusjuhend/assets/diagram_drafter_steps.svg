@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="360" viewBox="0 0 1400 360">
+  <style>
+    text{font-family:Arial,Verdana,sans-serif;fill:#fff}
+    .step{fill:#1E293B;stroke:#3D4B5E;stroke-width:3;rx:18}
+    .num{fill:#00C3FF;font-weight:700;font-size:34px}
+    .label{font-weight:700;font-size:23px}
+    .small{fill:#CBD5E1;font-size:18px}
+    .line{stroke:#64748B;stroke-width:4}
+  </style>
+  <rect width="1400" height="360" fill="#0F172A" rx="22"/>
+  <line class="line" x1="140" y1="180" x2="1260" y2="180"/>
+  <g transform="translate(45 85)"><rect class="step" width="160" height="150"/><text class="num" x="22" y="48">1</text><text class="label" x="22" y="84">Kavatsus</text><text class="small" x="22" y="116">eesmärk ja piirid</text></g>
+  <g transform="translate(235 85)"><rect class="step" width="160" height="150"/><text class="num" x="22" y="48">2</text><text class="label" x="22" y="84">Täpsustus</text><text class="small" x="22" y="116">küsimused</text></g>
+  <g transform="translate(425 85)"><rect class="step" width="160" height="150"/><text class="num" x="22" y="48">3</text><text class="label" x="22" y="84">Uurimine</text><text class="small" x="22" y="116">ontoloogia</text></g>
+  <g transform="translate(615 85)"><rect class="step" width="160" height="150"/><text class="num" x="22" y="48">4</text><text class="label" x="22" y="84">Struktuur</text><text class="small" x="22" y="116">peatükid ja sätted</text></g>
+  <g transform="translate(805 85)"><rect class="step" width="160" height="150"/><text class="num" x="22" y="48">5</text><text class="label" x="22" y="84">Tekst</text><text class="small" x="22" y="116">sätete mustand</text></g>
+  <g transform="translate(995 85)"><rect class="step" width="160" height="150"/><text class="num" x="22" y="48">6</text><text class="label" x="22" y="84">Ülevaade</text><text class="small" x="22" y="116">mõjuanalüüs</text></g>
+  <g transform="translate(1185 85)"><rect class="step" width="160" height="150"/><text class="num" x="22" y="48">7</text><text class="label" x="22" y="84">Eksport</text><text class="small" x="22" y="116">DOCX</text></g>
+</svg>

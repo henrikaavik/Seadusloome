@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="et">
+<head>
+  <meta charset="utf-8">
+  <title>Seadusloome kasutusjuhend</title>
+  <style>
+    :root {
+      --bg: #0F172A;
+      --surface: #1E293B;
+      --raised: #293548;
+      --border: #3D4B5E;
+      --text: #FFFFFF;
+      --muted: #CBD5E1;
+      --primary: #00C3FF;
+      --blue: #0030DE;
+      --green: #34D399;
+      --warning: #FBBF24;
+      --danger: #EF4444;
+    }
+    @page { size: A4; margin: 15mm 14mm 16mm; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Arial, Verdana, sans-serif;
+      color: #111827;
+      background: #ffffff;
+      font-size: 11.2pt;
+      line-height: 1.45;
+    }
+    h1, h2, h3 { line-height: 1.18; margin: 0 0 9pt; color: #0F172A; }
+    h1 { font-size: 32pt; }
+    h2 { font-size: 20pt; border-bottom: 2px solid #E5E7EB; padding-bottom: 5pt; margin-top: 18pt; }
+    h3 { font-size: 14pt; margin-top: 12pt; }
+    p { margin: 0 0 8pt; }
+    ul, ol { margin: 0 0 8pt 18pt; padding: 0; }
+    li { margin: 2pt 0; }
+    table { width: 100%; border-collapse: collapse; margin: 7pt 0 11pt; font-size: 9.5pt; }
+    th, td { border: 1px solid #D1D5DB; padding: 6pt; vertical-align: top; }
+    th { background: #EAF7FF; text-align: left; color: #0F172A; }
+    .cover {
+      min-height: 255mm;
+      background: linear-gradient(135deg, #0F172A, #0030DE 60%, #00C3FF);
+      color: white;
+      margin: -15mm -14mm -16mm;
+      padding: 36mm 26mm;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+    .cover h1 { color: white; font-size: 39pt; margin-bottom: 8pt; }
+    .cover .subtitle { font-size: 17pt; max-width: 150mm; color: #E0F2FE; }
+    .cover .meta { color: #E0F2FE; font-size: 11pt; }
+    .cover .tagline {
+      margin-top: 26mm;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8pt;
+    }
+    .cover-card {
+      border: 1px solid rgba(255,255,255,0.35);
+      border-radius: 8px;
+      padding: 12pt;
+      background: rgba(15,23,42,0.32);
+      min-height: 32mm;
+    }
+    .cover-card strong { display:block; font-size: 13pt; margin-bottom: 4pt; }
+    .page-break { break-before: page; }
+    .avoid-break { break-inside: avoid; }
+    .lead { font-size: 12.6pt; color: #374151; }
+    .note {
+      border-left: 4px solid var(--primary);
+      background: #EFF6FF;
+      padding: 9pt 11pt;
+      margin: 10pt 0;
+      break-inside: avoid;
+    }
+    .warning {
+      border-left-color: var(--warning);
+      background: #FFFBEB;
+    }
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10pt;
+      margin: 8pt 0 11pt;
+    }
+    .card {
+      border: 1px solid #D1D5DB;
+      border-radius: 8px;
+      padding: 10pt;
+      break-inside: avoid;
+      background: #FFFFFF;
+    }
+    .card strong { color: #0F172A; }
+    .screen, .diagram {
+      width: 100%;
+      border: 1px solid #D1D5DB;
+      border-radius: 8px;
+      margin: 7pt 0 3pt;
+      display: block;
+      break-inside: avoid;
+    }
+    figure { margin: 10pt 0 12pt; break-inside: avoid; }
+    figcaption { font-size: 9pt; color: #4B5563; margin-top: 4pt; }
+    .toc {
+      columns: 2;
+      column-gap: 22pt;
+      font-size: 10.5pt;
+    }
+    .toc p { break-inside: avoid; margin-bottom: 6pt; }
+    .pill {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 2pt 7pt;
+      background: #E0F2FE;
+      color: #075985;
+      font-weight: 700;
+      font-size: 9pt;
+    }
+    .muted { color: #4B5563; }
+    .footer-note { color: #4B5563; font-size: 9.4pt; }
+  </style>
+</head>
+<body>
+  <section class="cover">
+    <div>
+      <p class="meta">Seadusloome kasutusjuhend · 30. aprill 2026</p>
+      <h1>Seadusloome</h1>
+      <p class="subtitle">Eesti õigusontoloogia nõustamistarkvara ametnikele, kes kavandavad, analüüsivad ja koostavad õigusakte.</p>
+      <div class="tagline">
+        <div class="cover-card"><strong>Mõista seoseid</strong>Graaf näitab, milliseid seadusi, sätteid, kohtuotsuseid ja EL allikaid kavatsus puudutab.</div>
+        <div class="cover-card"><strong>Hinda mõju</strong>Üleslaetud eelnõust leitakse viited, võimalikud konfliktid, lüngad ja vastavusriskid.</div>
+        <div class="cover-card"><strong>Koosta kiiremini</strong>AI vestlus ja koostaja aitavad kavatsuse muuta kontrollitavaks eelnõu mustandiks.</div>
+      </div>
+    </div>
+    <p class="meta">Kasutamiseks ministeeriumi või asutuse sisetöös. Süsteem toetab juristi otsust, kuid ei asenda õiguslikku vastutust ega lõplikku ekspertiisi.</p>
+  </section>
+
+  <section class="page-break">
+    <h2>Sisukord</h2>
+    <div class="toc">
+      <p>1. Mis on Seadusloome?</p>
+      <p>2. Miks seda vaja on?</p>
+      <p>3. Põhimõte ja töövoog</p>
+      <p>4. Töölaud ja navigeerimine</p>
+      <p>5. Eelnõud ja mõjuanalüüs</p>
+      <p>6. Ontoloogia uurija</p>
+      <p>7. AI vestlus</p>
+      <p>8. AI koostaja</p>
+      <p>9. Kasutuslood ja näited</p>
+      <p>10. Turvalisus ja head tavad</p>
+    </div>
+
+    <h2>1. Mis on Seadusloome?</h2>
+    <p class="lead">Seadusloome on nõustamistarkvara, mis aitab ametnikul näha kavandatava õigusakti mõju Eesti ja Euroopa õigusruumis enne, kui tekst liigub järgmisse kooskõlastus- või otsustusetappi.</p>
+    <p>Kasutaja saab süsteemi laadida eelnõu või väljatöötamiskavatsuse faili, kirjeldada kavatsust vabas keeles, uurida õigusontoloogia graafi, küsida AI-lt kontrollitavaid küsimusi ning koostada uue eelnõu mustandit sammhaaval. Süsteem seob kasutaja töö olemasoleva õigusraamistikuga: kehtivad seadused, varasemad eelnõud, Riigikohtu lahendid, EL õigusaktid ja EL kohtulahendid.</p>
+    <div class="note"><strong>Lühidalt:</strong> Seadusloome ei ole lihtsalt dokumendihaldus ega juturobot. Selle keskmes on õigusontoloogia: masinloetav seoste võrk, mille kaudu saab küsida, millist normi, mõistet, kohtupraktikat või EL kohustust kavandatav muudatus puudutab.</div>
+
+    <h3>Mida saab teha?</h3>
+    <div class="grid-2">
+      <div class="card"><strong>Leida seoseid.</strong><br>Otsi sätet, seadust, eelnõud või kohtulahendit ja vaata selle naabreid graafis.</div>
+      <div class="card"><strong>Analüüsida eelnõu.</strong><br>Laadi üles .docx või .pdf ja saa olemiotsing, mõjuanalüüs ning eksporditav aruanne.</div>
+      <div class="card"><strong>Küsida nõu.</strong><br>AI vestlus kasutab ontoloogiat ja RAG-i, et vastused oleksid seotud allikatega.</div>
+      <div class="card"><strong>Koostada mustand.</strong><br>AI koostaja juhib kavatsusest läbi küsimuste, uurimise, struktuuri, sätete ja ekspordini.</div>
+    </div>
+  </section>
+
+  <section class="page-break">
+    <h2>2. Miks seda vaja on?</h2>
+    <p>Eesti õigusloome kvaliteet sõltub sellest, kui vara on näha kavandatava muudatuse tegelik mõju. Praktikas on õigusruum suur ja killustunud: ühe uue kohustuse lisamine võib puudutada andmekaitset, avalikku teavet, haldusmenetlust, karistusõigust, eriseadusi, Riigikohtu praktikat ja EL õigusakte korraga.</p>
+    <p>Seadusloome aitab vähendada kolme tüüpilist riski.</p>
+    <ul>
+      <li><strong>Varjatud konfliktid:</strong> kavandatav norm võib korrata, kitsendada või vaidlustada kehtivat sätet.</li>
+      <li><strong>Lüngad:</strong> eelnõu võib jätta reguleerimata rakendamise, järelevalve, sanktsioonid, üleminekusätted või EL direktiivi osad.</li>
+      <li><strong>Teadmuse kadu:</strong> varasemad eelnõud ja kohtulahendid on olemas, kuid neid ei leita õigel hetkel üles.</li>
+    </ul>
+
+    <figure>
+      <img class="diagram" src="assets/diagram_dataflow.svg" alt="Seadusloome andmevoo skeem">
+      <figcaption>Skeem 1. Õigusallikad sünkroonitakse ontoloogiasse; kasutaja eelnõu analüüsitakse selle võrgustiku vastu.</figcaption>
+    </figure>
+
+    <p>Süsteemi andmekihis kasutatakse õigusallikate korpust, mis hõlmab muu hulgas 615 kehtivat seadust, 22 832 eelnõud, 12 137 Riigikohtu lahendit, 33 242 EL õigusakti ja 22 290 EL kohtulahendit. Kasutaja ei pea kõiki neid allikaid ise läbi otsima; ta saab alustada oma eelnõust, küsimusest või õiguslikust mõistest.</p>
+  </section>
+
+  <section class="page-break">
+    <h2>3. Põhimõte ja töövoog</h2>
+    <p>Seadusloome töövoog on iteratiivne. Ametnik sisestab kavatsuse või dokumendi, süsteem teeb automaatse analüüsi, kasutaja vaatab tulemused üle, parandab teksti ning kordab analüüsi kuni riskid ja ebaselgused on käsitletud.</p>
+    <figure>
+      <img class="diagram" src="assets/diagram_workflow.svg" alt="Tüüpiline kasutaja töövoog">
+      <figcaption>Skeem 2. Tavapärane ring: sisend → analüüs → tõlgendus → otsus.</figcaption>
+    </figure>
+    <h3>Süsteemi põhiosad</h3>
+    <table>
+      <thead><tr><th>Osa</th><th>Kasutaja vaates</th><th>Milleks kasutada</th></tr></thead>
+      <tbody>
+        <tr><td><span class="pill">Töölaud</span></td><td>Ülevaade teie eelnõudest, vestlustest, koostamissessioonidest ja järjehoidjatest.</td><td>Alustamiseks, pooleliolevate tööde leidmiseks ja viimaste tegevuste kontrolliks.</td></tr>
+        <tr><td><span class="pill">Uurija</span></td><td>D3 graaf, otsing, kategooriad, detailpaneel ja ajafilter.</td><td>Õigusaktide, sätete, mõistete, kohtupraktika ja EL seoste uurimiseks.</td></tr>
+        <tr><td><span class="pill">Eelnõud</span></td><td>Faili üleslaadimine, töötluse staatus, mõjuaruanne ja kustutamine.</td><td>Olemasoleva eelnõu või VTK automaatseks analüüsiks.</td></tr>
+        <tr><td><span class="pill">Koostaja</span></td><td>Seitsmesammuline AI töövoog kavatsusest DOCX mustandini.</td><td>Uue seaduse või VTK eeltöö loomiseks.</td></tr>
+        <tr><td><span class="pill">Vestlus</span></td><td>Allikatega põhjendatud AI nõustaja, vajadusel seotud konkreetse eelnõuga.</td><td>Küsimuste, võrdluste ja kontrollnimekirjade jaoks.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="page-break">
+    <h2>4. Töölaud ja navigeerimine</h2>
+    <p>Töölaud on kasutaja alguspunkt. Siit näeb pooleliolevaid eelnõusid, koostamissessioone, vestlusi, organisatsiooni infot, järjehoidjaid ja viimaseid tegevusi. Vasak menüü viib põhivaadete juurde.</p>
+    <figure>
+      <img class="screen" src="assets/screenshot_dashboard.png" alt="Töölaua ekraanivaate näide">
+      <figcaption>Ekraanivaate näide. Töölaud koondab kiirlingid, tegevused ja järjehoidjad.</figcaption>
+    </figure>
+    <h3>Hea alustamisjärjekord</h3>
+    <ol>
+      <li>Kui teil on olemas eelnõu või VTK fail, avage <strong>Eelnõud</strong> ja laadige dokument üles.</li>
+      <li>Kui teil on vaid eesmärk või probleemikirjeldus, avage <strong>Koostaja</strong> ja alustage kavatsuse kirjeldamisest.</li>
+      <li>Kui soovite enne kirjutamist õigust uurida, avage <strong>Uurija</strong> ja otsige lähim seadus, säte või mõiste.</li>
+      <li>Kui teil on konkreetne küsimus, avage <strong>Vestlus</strong>; eelnõu detailvaatest saab vestluse siduda dokumendi kontekstiga.</li>
+    </ol>
+  </section>
+
+  <section class="page-break">
+    <h2>5. Eelnõud ja mõjuanalüüs</h2>
+    <p><strong>Eelnõud</strong> on koht, kus üles laadida .docx või .pdf dokumente ja jälgida automaatset töötlust. Sama vaade toetab tavalist eelnõud ja VTK-d. Kui eelnõu põhineb VTK-l, saab need omavahel siduda, et hilisem analüüs näitaks ka arenguloogikat.</p>
+    <figure>
+      <img class="screen" src="assets/screenshot_drafts.png" alt="Eelnõude nimekirja ekraanivaate näide">
+      <figcaption>Ekraanivaate näide. Eelnõude tabelis saab filtreerida tüübi, staatuse, üleslaadija ja kuupäeva järgi.</figcaption>
+    </figure>
+    <h3>Mis juhtub pärast üleslaadimist?</h3>
+    <ol>
+      <li><strong>Üles laaditud:</strong> fail salvestatakse krüpteeritult ja lisatakse taustatöö järjekorda.</li>
+      <li><strong>Töötlemine:</strong> tekst eraldatakse dokumendist Apache Tika abil.</li>
+      <li><strong>Olemite eraldamine:</strong> süsteem leiab seaduste, paragrahvide, EL aktide, kohtulahendite ja õigusmõistete viited.</li>
+      <li><strong>Mõjude analüüs:</strong> SPARQL-päringud ja AI analüüs võrdlevad eelnõud ontoloogiaga.</li>
+      <li><strong>Valmis:</strong> detailvaates saab avada mõjuaruande, minna graafi mõjutatud üksusi vaatama või eksportida aruande DOCX-formaadis.</li>
+    </ol>
+    <div class="note warning"><strong>Näide:</strong> kui laadite üles eelnõu „Tehisintellekti kasutamine avalikus sektoris“, võib süsteem leida seosed isikuandmete kaitse, avaliku teabe, haldusmenetluse, järelevalve pädevuse ja EL AI määrusega. Aruanne aitab näha, kas tekstis on olemas õiguslik alus, vastutav asutus, vaidlustamise kord ja üleminekusätted.</div>
+  </section>
+
+  <section class="page-break">
+    <h2>6. Ontoloogia uurija</h2>
+    <p><strong>Uurija</strong> on interaktiivne graafivaade. See sobib olukorraks, kus tahate ise liikuda õigusruumi seoste vahel: alustada seadusest, sätetest, eelnõust, Riigikohtu lahendist või EL õigusaktist ning uurida, mis on nendega seotud.</p>
+    <figure>
+      <img class="screen" src="assets/screenshot_explorer.png" alt="Ontoloogia uurija ekraanivaate näide">
+      <figcaption>Ekraanivaate näide. Graafis saab otsida, suumida, avada detailpaneeli ning lisada olulisi üksusi järjehoidjatesse.</figcaption>
+    </figure>
+    <h3>Mida uurijas teha?</h3>
+    <ul>
+      <li><strong>Otsida:</strong> sisestage seaduse nimi, paragrahv, mõiste, eelnõu või kohtulahendi tunnus.</li>
+      <li><strong>Drill-down:</strong> avage esmalt kategooria, seejärel konkreetne olem ja selle naabrid.</li>
+      <li><strong>Vaadata detaili:</strong> detailpaneel näitab metaandmeid, seoseid, versiooniajalugu ja allika linki.</li>
+      <li><strong>Seostada eelnõuga:</strong> eelnõu detailist avatud graaf saab esile tõsta selle eelnõu mõjutatud üksused.</li>
+      <li><strong>Järjehoidja:</strong> salvestage sageli kasutatavad sätted või lahendid töölauale.</li>
+    </ul>
+    <p class="footer-note">Praktiline nipp: alustage laia kategooriaga ja piirake vaadet järk-järgult. Suurte õigusvõrgustike puhul ei renderda süsteem korraga kümneid tuhandeid sõlmi, vaid laeb andmeid vajaduse järgi.</p>
+  </section>
+
+  <section class="page-break">
+    <h2>7. AI vestlus</h2>
+    <p><strong>Vestlus</strong> on õigusnõustaja, mis kasutab ontoloogiat, RAG-otsingut ja vajadusel tööriistapäringuid. Vestluse saab jätta üldiseks või siduda konkreetse eelnõuga, et AI arvestaks selle dokumendi mõjuaruannet ja konteksti.</p>
+    <figure>
+      <img class="screen" src="assets/screenshot_chat.png" alt="AI vestluse ekraanivaate näide">
+      <figcaption>Ekraanivaate näide. Vestlus vastab allikapõhiselt ja kuvab kasutuse limiidi olekut.</figcaption>
+    </figure>
+    <h3>Head küsimuse näited</h3>
+    <ul>
+      <li>„Milliseid kehtivaid sätteid puudutab eelnõu, kui reguleerime AI kasutamist avalikus sektoris?“</li>
+      <li>„Võrdle seda kavatsust isikuandmete kaitse üldmääruse artikli 6 nõuetega.“</li>
+      <li>„Leia Riigikohtu lahendid, mis käsitlevad avaliku teabe juurdepääsupiiranguid.“</li>
+      <li>„Koosta kontrollnimekiri, mida peaksin enne kooskõlastusringi üle vaatama.“</li>
+      <li>„Selgita, millised sätted võivad vajada rakendusakte või üleminekusätteid.“</li>
+    </ul>
+    <div class="note"><strong>Oluline:</strong> AI vastust tuleb käsitleda nõuandva töövahendina. Kontrollige viidatud allikaid ja otsustage lõplik õiguslik lahendus ametliku menetluse, juristi ja poliitikakujundaja rollide järgi.</div>
+  </section>
+
+  <section class="page-break">
+    <h2>8. AI koostaja</h2>
+    <p><strong>Koostaja</strong> on mõeldud uue õigusakti või VTK eeltöö jaoks, kui alguses on olemas probleem, eesmärk või poliitikavalik, kuid mitte veel terviklik tekst. Süsteem juhib töö läbi seitsme sammu.</p>
+    <figure>
+      <img class="diagram" src="assets/diagram_drafter_steps.svg" alt="AI koostaja seitsme sammu skeem">
+      <figcaption>Skeem 3. AI koostaja töövoog kavatsusest ekspordini.</figcaption>
+    </figure>
+    <figure>
+      <img class="screen" src="assets/screenshot_drafter.png" alt="AI koostaja ekraanivaate näide">
+      <figcaption>Ekraanivaate näide. Esimeses sammus kirjeldab kasutaja kavatsuse vabas vormis.</figcaption>
+    </figure>
+    <h3>Näide: AI avalikus sektoris</h3>
+    <p>Kasutaja kirjeldab kavatsust: „Soovin reguleerida tehisintellekti kasutamist avalikus sektoris, sh andmekaitset, läbipaistvust ja inimjärelevalvet.“ Koostaja küsib täpsustusi: millised asutused on hõlmatud, kas seadus loob uue järelevalvepädevuse, millised riskitasemed kuuluvad keelatud või kõrge riskiga kasutuse alla ning kuidas lahendatakse registri- ja aruandluskohustus.</p>
+    <p>Pärast täpsustusi uurib süsteem ontoloogiat, pakub struktuuri, koostab sätted, käivitab integreeritud mõjuülevaate ja võimaldab eksportida DOCX mustandi. Kasutaja saab igas etapis teksti muuta; AI ei lukusta otsust.</p>
+  </section>
+
+  <section class="page-break">
+    <h2>9. Kasutuslood ja näited</h2>
+    <table>
+      <thead><tr><th>Kasutuslugu</th><th>Kuidas alustada</th><th>Tulemus</th></tr></thead>
+      <tbody>
+        <tr><td>Uue seaduse kavatsus</td><td>Koostaja → „Alusta uut koostamist“ → kirjelda eesmärk ja sihtrühm.</td><td>Täpsustatud küsimused, struktuur, sätted ja DOCX mustand.</td></tr>
+        <tr><td>Olemasoleva eelnõu kontroll</td><td>Eelnõud → laadi .docx/.pdf üles → oota staatust „Valmis“.</td><td>Mõjuaruanne, viidatud allikad, konfliktid ja lüngad.</td></tr>
+        <tr><td>EL direktiivi ülevõtmine</td><td>Vestlus või Uurija → otsi direktiiv või seotud EL õigusakt.</td><td>Nimekiri Eesti sätetest ja võimalikest katmata nõuetest.</td></tr>
+        <tr><td>Kohtupraktika kontroll</td><td>Uurija → otsi säte või mõiste → vaata seotud Riigikohtu lahendeid.</td><td>Asjakohased lahendid enne normi sõnastamist.</td></tr>
+        <tr><td>Kooskõlastusringi ettevalmistus</td><td>Vestlus → palu kontrollnimekirja või riskiülevaadet eelnõu kohta.</td><td>Kontrollitav nimekiri lahtistest küsimustest.</td></tr>
+        <tr><td>Organisatsiooni teadmuse hoidmine</td><td>Kasuta järjehoidjaid, kinnitatud vestlusi ja eelnõu seoseid.</td><td>Hiljem leitav põhjendus ja allikate rada.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>10. Turvalisus ja head tavad</h2>
+    <p>Eelnõud ja VTK-d võivad enne avalikustamist olla poliitiliselt tundlikud. Seetõttu kasutab Seadusloome organisatsioonipõhist ligipääsu, krüpteeritud failisalvestust, auditeerimist ja kontrollitud kustutamist.</p>
+    <ul>
+      <li><strong>Organisatsiooni piir:</strong> kasutaja näeb ainult oma organisatsiooni eelnõusid, vestlusi ja aruandeid.</li>
+      <li><strong>Krüpteerimine:</strong> üleslaetud failid ja parsitud tekst salvestatakse krüpteeritult.</li>
+      <li><strong>Audit:</strong> olulised tegevused, nagu üleslaadimine, vaatamine, kustutamine ja vestlusmuudatused, logitakse.</li>
+      <li><strong>Säilitamine:</strong> eelnõu säilib kuni omanik selle kustutab; 90 päeva tegevusetuse korral kuvatakse alleshoidmise hoiatus.</li>
+      <li><strong>Kustutamine:</strong> kustutamisel eemaldatakse fail, seotud nimega graaf ja andmebaasikirjed.</li>
+    </ul>
+    <div class="note warning"><strong>Hea tava:</strong> ärge sisestage vestlusse rohkem isikuandmeid või salastatud detaile, kui analüüsiks vajalik. Hoidke poliitilised valikud ja lõplik õiguslik otsus väljaspool AI automaatset soovitust ning dokumenteerige, miks otsus tehti.</div>
+    <h3>Kiirkontroll enne töö lõpetamist</h3>
+    <ul>
+      <li>Kas mõjuaruanne on valmis ja kriitilised seosed läbi vaadatud?</li>
+      <li>Kas EL, Riigikohtu ja kehtivate sätete viited on kontrollitud algallikast?</li>
+      <li>Kas vestluses saadud soovitused on vajadusel eelnõu tekstis või seletuskirjas põhjendatud?</li>
+      <li>Kas tundlik mustand on vajadusel kustutatud või teadlikult alles hoitud?</li>
+    </ul>
+  </section>
+</body>
+</html>
