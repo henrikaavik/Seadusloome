@@ -64,6 +64,7 @@ from app.ui.layout import PageShell
 from app.ui.primitives.annotation_button import AnnotationButton
 from app.ui.primitives.badge import Badge, BadgeVariant
 from app.ui.primitives.button import Button
+from app.ui.primitives.link_button import LinkButton
 from app.ui.surfaces.alert import Alert
 from app.ui.surfaces.card import Card, CardBody, CardHeader
 from app.ui.surfaces.info_box import InfoBox
@@ -610,10 +611,11 @@ def _draft_list_columns() -> list[Column]:
         return _status_badge(row["status_raw"])
 
     def _actions_cell(row: dict[str, Any]):
-        return A(  # noqa: F405
+        return LinkButton(
             "Vaata",
             href=f"/drafts/{row['id']}",
-            cls="btn btn-secondary btn-sm",
+            variant="secondary",
+            size="sm",
         )
 
     def _doc_type_cell(row: dict[str, Any]):
@@ -995,10 +997,10 @@ def _drafts_table_section(
                     "kõiki organisatsiooni eelnõusid."
                 ),
                 icon="🔍",
-                action=A(  # noqa: F405
+                action=LinkButton(
                     "Lähtesta filtrid",
                     href="/drafts",
-                    cls="btn btn-secondary btn-md",
+                    variant="secondary",
                 ),
             )
         else:
@@ -1010,10 +1012,9 @@ def _drafts_table_section(
                     "viiteid, konflikte ja EL-i vastavust."
                 ),
                 icon="📄",
-                action=A(  # noqa: F405
+                action=LinkButton(
                     "Laadi üles uus eelnõu",
                     href="/drafts/new",
-                    cls="btn btn-primary btn-md",
                 ),
             )
         return Div(body, id="drafts-table-wrapper")  # noqa: F405
@@ -1151,10 +1152,9 @@ def drafts_list_page(req: Request):
     )
     header_children.append(
         Div(
-            A(
+            LinkButton(
                 "Laadi üles uus eelnõu",
                 href="/drafts/new",
-                cls="btn btn-primary btn-md",
             ),
             cls="page-actions",
         )
@@ -1434,7 +1434,7 @@ def _upload_form(
                 variant="primary",
                 id="upload-submit",
             ),
-            A("Tühista", href="/drafts", cls="btn btn-ghost btn-md"),  # noqa: F405
+            LinkButton("Tühista", href="/drafts", variant="ghost"),
             # #599: spinner shown while the upload request is in
             # flight. HTMX toggles ``.htmx-request`` on the indicator
             # element referenced by ``hx-indicator`` so the form never
@@ -1974,10 +1974,9 @@ def _draft_detail_body(
     # "Vaata mõjuaruannet" link when the draft has reached ``ready``.
     if draft.status == "ready":
         actions.append(
-            A(  # noqa: F405
+            LinkButton(
                 "Vaata mõjuaruannet",
                 href=f"/drafts/{draft.id}/report",
-                cls="btn btn-primary btn-md",
             )
         )
 
