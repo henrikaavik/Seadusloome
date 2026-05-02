@@ -385,19 +385,36 @@ async def archive_conversation_handler(req: Request, conv_id: str):
     )
 
     if _is_htmx(req):
-        # #663: a row-only outerHTML swap collapsed the <tr> but left
-        # the toolbar/pagination counts stale, which was confusing on
-        # the archived-filter view in particular. HX-Refresh: true does
-        # a full page reload so the row vanishes AND the counts are
-        # always honest. Slight scroll-loss cost is acceptable since
-        # the row leaves view anyway. The HX-Trigger event is kept so
-        # any sidebar counters listening for it refresh too.
+        # #663 (post-review fix): return the refreshed #chat-list-body
+        # fragment with HX-Reswap+HX-Retarget so the swap target shifts
+        # from "closest tr" (the form's default) to the whole list body.
+        # The single swap updates BOTH the row removal AND the
+        # pagination counts/footer in place — preserving scroll instead
+        # of doing a full page reload (the previous HX-Refresh: true
+        # scrolled to top on every action). The dead HX-Trigger event
+        # is dropped: HX-Refresh would have destroyed the elements that
+        # listen for it anyway, so it was no-op signalling.
+        from fasthtml.common import to_xml
+
+        from app.chat.routes import (
+            _chat_list_state_from_request,
+            _render_chat_list_body,
+        )
+
+        page, search_q, include_archived = _chat_list_state_from_request(req)
+        fragment = _render_chat_list_body(
+            str(auth.get("id")),
+            page=page,
+            search_q=search_q,
+            include_archived=include_archived,
+        )
         return Response(
-            "",
+            content=to_xml(fragment),
             status_code=200,
+            media_type="text/html",
             headers={
-                "HX-Refresh": "true",
-                "HX-Trigger": "chat:conversation-updated",
+                "HX-Reswap": "outerHTML",
+                "HX-Retarget": "#chat-list-body",
             },
         )
     return RedirectResponse(url="/chat", status_code=303)

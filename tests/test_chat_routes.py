@@ -110,6 +110,70 @@ def _authed_client():
 # ---------------------------------------------------------------------------
 
 
+class TestChatListStateFromRequest:
+    """Helper that extracts (page, search_q, include_archived) from a
+    request — checks query params first, then falls back to
+    HX-Current-URL for HTMX-driven row mutations whose POST body lacks
+    the chat-list filter state.
+    """
+
+    def _make_req(self, *, query: str = "", current_url: str | None = None):
+        from starlette.requests import Request
+
+        # Build a minimal ASGI scope with query string + headers.
+        headers: list[tuple[bytes, bytes]] = []
+        if current_url is not None:
+            headers.append((b"hx-current-url", current_url.encode("latin-1")))
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/chat/abc/archive",
+            "query_string": query.encode("latin-1"),
+            "headers": headers,
+        }
+        return Request(scope)
+
+    def test_reads_state_from_query_string(self):
+        from app.chat.routes import _chat_list_state_from_request
+
+        req = self._make_req(query="page=3&q=foo&archived=1")
+        page, q, archived = _chat_list_state_from_request(req)
+        assert page == 3
+        assert q == "foo"
+        assert archived is True
+
+    def test_falls_back_to_hx_current_url(self):
+        """When the request has no chat-list query params (e.g. an
+        archive POST from a button), parse the page state out of the
+        HX-Current-URL header HTMX always sends."""
+        from app.chat.routes import _chat_list_state_from_request
+
+        req = self._make_req(
+            query="",
+            current_url="http://localhost/chat?page=2&archived=1",
+        )
+        page, q, archived = _chat_list_state_from_request(req)
+        assert page == 2
+        assert q == ""
+        assert archived is True
+
+    def test_defaults_when_neither_source_provides_state(self):
+        from app.chat.routes import _chat_list_state_from_request
+
+        req = self._make_req(query="", current_url=None)
+        page, q, archived = _chat_list_state_from_request(req)
+        assert page == 1
+        assert q == ""
+        assert archived is False
+
+    def test_invalid_page_falls_back_to_one(self):
+        from app.chat.routes import _chat_list_state_from_request
+
+        req = self._make_req(query="page=not-a-number")
+        page, _q, _a = _chat_list_state_from_request(req)
+        assert page == 1
+
+
 class TestAuthRequired:
     def test_chat_list_redirects_unauthenticated(self):
         from starlette.testclient import TestClient
@@ -414,31 +478,44 @@ class TestChatDelete:
     @patch("app.chat.routes.delete_conversation")
     @patch("app.chat.routes._connect")
     @patch("app.auth.middleware._get_provider")
-    def test_delete_from_list_returns_hx_refresh(
+    def test_delete_from_list_returns_chat_list_body_fragment(
         self, mock_provider, mock_connect, mock_delete, mock_audit
     ):
-        """Bug #663: the ``/chat`` list delete form posts ``from_list=1``;
-        the response uses ``HX-Refresh: true`` so the row vanishes AND
-        the toolbar/pagination counts refresh (a row-only swap left
-        counts stale).
+        """Bug #663 (post-review fix): the ``/chat`` list delete form
+        posts ``from_list=1``; the response is the refreshed
+        ``#chat-list-body`` fragment with HX-Reswap+HX-Retarget so the
+        row vanishes AND pagination counts update in place — without
+        the scroll-loss the previous HX-Refresh caused.
         """
+        from fastcore.xml import Div
+
         mock_provider.return_value = _stub_provider()
         conn = MagicMock()
         mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
         mock_connect.return_value.__exit__ = MagicMock(return_value=False)
 
+        fake_fragment = Div("stubbed-list-body", id="chat-list-body")
         conv = _make_conversation()
-        with patch("app.chat.routes.get_conversation", return_value=conv):
+        with (
+            patch("app.chat.routes.get_conversation", return_value=conv),
+            patch(
+                "app.chat.routes._render_chat_list_body",
+                return_value=fake_fragment,
+            ),
+        ):
             client = _authed_client()
             resp = client.post(
                 f"/chat/{_CONV_ID}/delete",
-                headers={"HX-Request": "true"},
+                headers={"HX-Request": "true", "HX-Current-URL": "/chat"},
                 data={"from_list": "1"},
             )
             assert resp.status_code == 200
-            assert resp.text == ""
-            assert resp.headers.get("HX-Refresh") == "true"
-            # No HX-Redirect — the refresh handles the page change.
+            assert "stubbed-list-body" in resp.text
+            assert 'id="chat-list-body"' in resp.text
+            assert resp.headers.get("HX-Reswap") == "outerHTML"
+            assert resp.headers.get("HX-Retarget") == "#chat-list-body"
+            # No more HX-Refresh / HX-Redirect on the from_list path.
+            assert "HX-Refresh" not in resp.headers
             assert "HX-Redirect" not in resp.headers
         mock_delete.assert_called_once()
 
