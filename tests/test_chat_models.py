@@ -88,9 +88,6 @@ def _make_message_row(
     role: str = "user",
     content: str = "Mis on tsiviilseadustik?",
     tool_name: str | None = None,
-    tool_input: str | None = None,
-    tool_output: str | None = None,
-    rag_context: str | None = None,
     tokens_input: int | None = None,
     tokens_output: int | None = None,
     model: str | None = None,
@@ -99,21 +96,23 @@ def _make_message_row(
     tool_output_encrypted: bytes | None = None,
     rag_context_encrypted: bytes | None = None,
 ) -> tuple[Any, ...]:
-    """Build a raw cursor row matching _MESSAGE_COLUMNS order.
+    """Build a raw cursor row matching :data:`_MESSAGE_COLUMNS` order.
 
-    #570 adds four encrypted BYTEA columns. The plaintext defaults above
-    exercise the fallback path used for pre-backfill rows.
+    Migration 026 dropped the plaintext payload columns; rows now carry
+    only the ``*_encrypted`` BYTEA columns. ``content_encrypted``
+    defaults to a real Fernet ciphertext of ``content`` so positive-path
+    tests need not pre-encrypt the fixture.
     """
+    from app.storage import encrypt_text
+
     now = datetime.now(UTC)
+    if content_encrypted is None:
+        content_encrypted = encrypt_text(content or "")
     return (
         msg_id or uuid.uuid4(),
         conversation_id or uuid.uuid4(),
         role,
-        content,
         tool_name,
-        tool_input,
-        tool_output,
-        rag_context,
         tokens_input,
         tokens_output,
         model,
@@ -319,14 +318,16 @@ class TestCreateMessage:
         conn.execute.assert_called_once()
 
     def test_create_tool_message(self):
+        from app.storage import encrypt_text
+
         conn = MagicMock()
         conv_id = uuid.uuid4()
         row = _make_message_row(
             conversation_id=conv_id,
             role="tool",
             tool_name="query_ontology",
-            tool_input='{"query": "SELECT ..."}',
-            tool_output='{"results": []}',
+            tool_input_encrypted=encrypt_text('{"query": "SELECT ..."}'),
+            tool_output_encrypted=encrypt_text('{"results": []}'),
         )
         conn.execute.return_value.fetchone.return_value = row
 

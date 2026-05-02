@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from app.db_utils import coerce_uuid, parse_jsonb
+from app.db_utils import coerce_uuid
 from app.storage import DecryptionError, decrypt_text, encrypt_text
 
 logger = logging.getLogger(__name__)
@@ -115,26 +115,26 @@ def _is_missing_v017_column_error(exc: BaseException) -> bool:
     )
 
 
-# NOTE (#570): SELECT returns both the plaintext and the ``*_encrypted``
-# columns. ``_row_to_message`` prefers the encrypted column when set and
-# falls back to the plaintext column for rows that predate the backfill
-# (migration 014 adds the columns, scripts/migrate_chat_encryption.py
-# populates them, a later migration drops the plaintext columns).
+# NOTE (#687, supersedes #570): the legacy plaintext columns
+# (``content``, ``tool_input``, ``tool_output``, ``rag_context``) were
+# dropped by migration 026. ``content_encrypted`` is the sole source of
+# truth and is NOT NULL at the DB level. The ``_row_to_message`` reader
+# raises if it ever sees a NULL ciphertext so a future regression cannot
+# silently serve "no content".
 _MESSAGE_COLUMNS = (
-    "id, conversation_id, role, content, tool_name, tool_input, "
-    "tool_output, rag_context, tokens_input, tokens_output, model, created_at, "
+    "id, conversation_id, role, tool_name, "
+    "tokens_input, tokens_output, model, created_at, "
     "content_encrypted, tool_input_encrypted, tool_output_encrypted, "
     "rag_context_encrypted, is_pinned, is_truncated"
 )
 
 # Legacy SELECT list used when migration 017 has not yet applied (the
-# ``is_pinned`` / ``is_truncated`` columns are absent). Without this
-# fallback, loading any conversation raises ``UndefinedColumn`` and the
-# conversation view silently renders the empty state — users then see
-# the example-prompt cards instead of their history. See #596 follow-up.
+# ``is_pinned`` / ``is_truncated`` columns are absent). Kept for the
+# narrow rollout window where the new image hits a stale schema cache;
+# post-026 the plaintext columns are also gone here.
 _MESSAGE_COLUMNS_PRE017 = (
-    "id, conversation_id, role, content, tool_name, tool_input, "
-    "tool_output, rag_context, tokens_input, tokens_output, model, created_at, "
+    "id, conversation_id, role, tool_name, "
+    "tokens_input, tokens_output, model, created_at, "
     "content_encrypted, tool_input_encrypted, tool_output_encrypted, "
     "rag_context_encrypted"
 )
@@ -213,52 +213,45 @@ def _row_to_conversation(row: tuple[Any, ...]) -> Conversation:
 def _row_to_message(row: tuple[Any, ...]) -> Message:
     """Build a ``Message`` from a raw cursor row.
 
-    Column order matches :data:`_MESSAGE_COLUMNS`. Encrypted columns take
-    precedence over their plaintext counterparts; the plaintext fallback
-    only matters for rows written before the #570 rollout (see migration
-    014 and ``scripts/migrate_chat_encryption.py``).
+    Column order matches :data:`_MESSAGE_COLUMNS`. The plaintext columns
+    were dropped by migration 026; ``content_encrypted`` is the sole
+    source of truth and is NOT NULL at the DB layer. We re-assert the
+    invariant here so a regression that re-introduces a NULL write
+    surfaces as a hard error instead of an empty message body.
     """
     msg_id = row[0]
     conversation_id = row[1]
     role = row[2]
-    content_plain = row[3]
-    tool_name = row[4]
-    tool_input_raw = row[5]
-    tool_output_raw = row[6]
-    rag_context_raw = row[7]
-    tokens_input = row[8]
-    tokens_output = row[9]
-    model = row[10]
-    created_at = row[11]
-    content_encrypted = row[12]
-    tool_input_encrypted = row[13]
-    tool_output_encrypted = row[14]
-    rag_context_encrypted = row[15]
-    # Migration 017 — pin / truncated flags. Defensive indexing so pre-017
-    # test fixtures that build 16-tuple rows continue to work.
-    is_pinned = bool(row[16]) if len(row) > 16 and row[16] is not None else False
-    is_truncated = bool(row[17]) if len(row) > 17 and row[17] is not None else False
+    tool_name = row[3]
+    tokens_input = row[4]
+    tokens_output = row[5]
+    model = row[6]
+    created_at = row[7]
+    content_encrypted = row[8]
+    tool_input_encrypted = row[9]
+    tool_output_encrypted = row[10]
+    rag_context_encrypted = row[11]
+    # Migration 017 — pin / truncated flags. Defensive indexing so the
+    # pre-017 SELECT fallback (12-tuple rows) still loads cleanly.
+    is_pinned = bool(row[12]) if len(row) > 12 and row[12] is not None else False
+    is_truncated = bool(row[13]) if len(row) > 13 and row[13] is not None else False
 
-    # Content: prefer encrypted blob, fall back to plaintext TEXT column.
-    decrypted_content = _decode_encrypted_text(content_encrypted)
-    content = decrypted_content if decrypted_content is not None else (content_plain or "")
+    if content_encrypted is None:
+        raise ValueError(
+            f"messages.id={msg_id}: content_encrypted IS NULL — "
+            "encryption-at-rest invariant violated (see migration 026)"
+        )
+    content = _decode_encrypted_text(content_encrypted) or ""
 
-    # tool_input: prefer encrypted JSON blob; fall back to plaintext JSONB.
     tool_input = _decode_encrypted_json(tool_input_encrypted)
-    if tool_input is None:
-        tool_input = parse_jsonb(tool_input_raw)
     if tool_input is not None and not isinstance(tool_input, dict):
         tool_input = None
 
     tool_output = _decode_encrypted_json(tool_output_encrypted)
-    if tool_output is None:
-        tool_output = parse_jsonb(tool_output_raw)
     if tool_output is not None and not isinstance(tool_output, dict):
         tool_output = None
 
     rag_context = _decode_encrypted_json(rag_context_encrypted)
-    if rag_context is None:
-        rag_context = parse_jsonb(rag_context_raw)
     if rag_context is not None and not isinstance(rag_context, list):
         rag_context = None
 
@@ -558,10 +551,11 @@ def create_message(
     if role not in VALID_ROLES:
         raise ValueError(f"Invalid message role: {role!r}")
 
-    # #570: write payload columns to their ``*_encrypted`` BYTEA siblings via
-    # Fernet. The legacy plaintext columns stay NULL on new INSERTs — Phase C
-    # migration will drop them entirely. Encrypting here (instead of at the
-    # DB layer via pgcrypto) keeps the key inside the app process and lets
+    # #687 (supersedes #570): payload columns are written exclusively to
+    # the ``*_encrypted`` BYTEA siblings via Fernet. The legacy plaintext
+    # columns were dropped by migration 026; ``content_encrypted`` is
+    # NOT NULL at the DB level. Encrypting here (rather than at the DB
+    # layer via pgcrypto) keeps the key inside the app process and lets
     # us reuse the same Fernet primitive as drafts.parsed_text_encrypted.
     content_ciphertext = encrypt_text(content) if content else encrypt_text("")
     tool_input_ciphertext = (
@@ -583,12 +577,10 @@ def create_message(
     row = conn.execute(
         f"""
         INSERT INTO messages
-            (conversation_id, role, content, tool_name, tool_input,
-             tool_output, rag_context, tokens_input, tokens_output, model,
+            (conversation_id, role, tool_name, tokens_input, tokens_output, model,
              content_encrypted, tool_input_encrypted, tool_output_encrypted,
              rag_context_encrypted)
-        VALUES (%s, %s, NULL, %s, NULL::jsonb, NULL::jsonb, NULL::jsonb, %s, %s, %s,
-                %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING {_MESSAGE_COLUMNS}
         """,
         (
@@ -827,20 +819,18 @@ def fork_conversation(
     # ``create_conversation`` does not set ``title_is_custom``; migration
     # 017 defaults it to FALSE so we do not need an extra UPDATE.
 
-    # Copy messages byte-for-byte — include the encrypted BYTEA columns
-    # directly. ``created_at`` is preserved so the fork reads in the same
-    # order as the source up to the boundary.
+    # Copy messages byte-for-byte — only the encrypted BYTEA columns
+    # carry payload after migration 026. ``created_at`` is preserved so
+    # the fork reads in the same order as the source up to the boundary.
     conn.execute(
         """
         INSERT INTO messages (
-            conversation_id, role, content, tool_name, tool_input,
-            tool_output, rag_context, tokens_input, tokens_output, model,
+            conversation_id, role, tool_name, tokens_input, tokens_output, model,
             content_encrypted, tool_input_encrypted, tool_output_encrypted,
             rag_context_encrypted, is_pinned, is_truncated, created_at
         )
         SELECT
-            %s, role, content, tool_name, tool_input,
-            tool_output, rag_context, tokens_input, tokens_output, model,
+            %s, role, tool_name, tokens_input, tokens_output, model,
             content_encrypted, tool_input_encrypted, tool_output_encrypted,
             rag_context_encrypted, is_pinned, is_truncated, created_at
         FROM messages
