@@ -128,26 +128,23 @@ def parse_draft(
             raise ValueError("Tika returned empty text — file may be corrupt or an image-only PDF")
 
         # Step 6: encrypt parsed text and persist alongside status flip.
-        # Use a direct UPDATE because ``update_draft_status`` doesn't
-        # know about the parsed_text_encrypted column; the two need to
-        # land in the same row update so observers never see an
-        # inconsistent (parsed_text_encrypted NULL, status=extracting)
-        # snapshot. encrypt_text raises RuntimeError if the key is unset
-        # in prod — that propagates to the except block below and flips
-        # the draft to failed on the final attempt.
+        # Routed through ``update_draft_status(extras=...)`` so the
+        # ``parsed_text_encrypted`` column lands in the SAME UPDATE as
+        # the status flip -- observers never see a mismatched
+        # ``status='extracting'`` row with NULL parsed_text. The helper
+        # also clears ``error_message`` / ``error_debug`` to NULL on
+        # this transition so stale failure info from a prior attempt
+        # cannot leak forward (#625 §4.2 SSOT). encrypt_text raises
+        # RuntimeError if the key is unset in prod; the exception
+        # propagates to the except block below and flips the draft to
+        # failed on the final attempt.
         encrypted = encrypt_text(parsed_text)
         with get_connection() as conn:
-            conn.execute(
-                """
-                update drafts
-                set parsed_text_encrypted = %s,
-                    status = 'extracting',
-                    error_message = null,
-                    error_debug = null,
-                    updated_at = now()
-                where id = %s
-                """,
-                (encrypted, str(draft_id)),
+            update_draft_status(
+                conn,
+                draft_id,
+                "extracting",
+                extras={"parsed_text_encrypted": encrypted},
             )
             conn.commit()
 
@@ -230,17 +227,12 @@ def _mark_draft_failed(draft_id: UUID, exc: BaseException) -> None:
     user_msg, debug_detail = map_failure_to_user_message(exc, stage="parse")
     try:
         with get_connection() as conn:
-            conn.execute(
-                """
-                update drafts
-                set status = 'failed',
-                    error_message = %s,
-                    error_debug = %s,
-                    updated_at = now(),
-                    processing_completed_at = now()
-                where id = %s
-                """,
-                (user_msg[:500], debug_detail, str(draft_id)),
+            update_draft_status(
+                conn,
+                draft_id,
+                "failed",
+                user_msg[:500],
+                error_debug=debug_detail,
             )
             conn.commit()
     except Exception:  # noqa: BLE001 — best-effort cleanup

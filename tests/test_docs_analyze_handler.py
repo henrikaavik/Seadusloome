@@ -167,11 +167,15 @@ class TestAnalyzeImpactHappyPath:
         mock_put.assert_called_once_with(_GRAPH_URI, "# turtle")
 
         # The insert_conn must have received one INSERT into impact_reports
-        # and one UPDATE drafts.
+        # and one UPDATE drafts. Post-#625 the SSOT helper writes
+        # parameterised SQL so we look for the "ready" status in the
+        # bound params, not the SQL string.
         calls = insert_conn.execute.call_args_list
         sql_texts = [c.args[0].lower() for c in calls]
         assert any("insert into impact_reports" in s for s in sql_texts)
-        assert any("update drafts" in s and "ready" in s for s in sql_texts)
+        update_calls = [c for c in calls if "update drafts" in c.args[0].lower()]
+        assert len(update_calls) == 1
+        assert update_calls[0].args[1][0] == "ready"
         insert_conn.commit.assert_called_once()
 
         # Return payload contains the critical summary fields.

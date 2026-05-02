@@ -45,6 +45,7 @@ from app.auth.policy import can_edit_draft
 from app.db import get_connection as _connect
 from app.docs._helpers import _not_found_page, _parse_uuid
 from app.docs.draft_model import fetch_draft
+from app.docs.status import update_draft_status
 from app.jobs.queue import JobQueue
 
 logger = logging.getLogger(__name__)
@@ -70,20 +71,18 @@ def _reset_draft_for_retry(draft_id: str) -> bool:
     audit trail of prior runs stays intact.
     """
     with _connect() as conn:
-        result = conn.execute(
-            """
-            update drafts
-            set status = 'uploaded',
-                error_message = null,
-                error_debug = null,
-                updated_at = now(),
-                processing_completed_at = null
-            where id = %s
-              and status = 'failed'
-            """,
-            (draft_id,),
+        # #625 §4.2: route through the SSOT helper. ``expected_status``
+        # provides the optimistic-concurrency guard so we only flip
+        # ``failed`` -> ``uploaded`` if the row is still in ``failed``
+        # at write time. The helper clears both error columns and
+        # resets ``processing_completed_at`` to NULL because
+        # ``uploaded`` is non-terminal (#670).
+        updated = update_draft_status(
+            conn,
+            draft_id,
+            "uploaded",
+            expected_status="failed",
         )
-        updated = (result.rowcount or 0) > 0
         if updated:
             # Only clean up the queue when we actually flipped the row.
             # If the UPDATE matched zero rows, something else is driving

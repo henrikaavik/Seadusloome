@@ -222,37 +222,34 @@ def _make_conn_factory(state: _State):
             return cursor
 
         if "update drafts" in sql_lower and "status" in sql_lower:
-            # update_draft_status / pipeline status flips. ``params`` for
-            # update_draft_status is (status, error_message, draft_id);
-            # for the parse_handler "set parsed_text_encrypted=..." flow
-            # it's (ciphertext_bytes, draft_id) — extract the new status
-            # from the SQL string instead of guessing the param order.
-            assert state.draft_row is not None
+            # Pipeline status flips. Post-#625 §4.2 every transition
+            # routes through ``app.docs.status.update_draft_status`` so
+            # the SQL is parameterised: the param tuple always starts
+            # with ``[status, error_message, error_debug, ...extras...,
+            # draft_id]``. Extras are sorted by column name so
+            # ``entity_count`` and ``parsed_text_encrypted`` (the only
+            # extras used in this package) land at known positions.
+            assert state.draft_row is not None and params is not None
             row = list(state.draft_row)
-            if "set parsed_text_encrypted" in sql_lower:
-                # Parse handler combined update: parsed_text_encrypted
-                # (Fernet bytes) + status='extracting'.
-                row[10] = params[0] if params else None
-                row[9] = "extracting"
-            elif "status = 'analyzing'" in sql_lower:
-                # extract_entities final UPDATE: entity_count + status.
-                if params is not None:
-                    row[11] = params[0]  # entity_count
-                row[9] = "analyzing"
-            elif "status = 'ready'" in sql_lower:
-                row[9] = "ready"
-            elif "status = 'failed'" in sql_lower:
-                # #609: _mark_draft_failed uses a direct UPDATE with
-                # params (user_msg, debug_detail, draft_id). The
-                # user-facing Estonian text lands in error_message.
-                row[9] = "failed"
-                if params is not None and len(params) >= 1:
-                    row[12] = params[0]  # error_message
-            elif params and len(params) >= 2:
-                # update_draft_status — first param is the new status.
-                row[9] = str(params[0])
-                if len(params) >= 3 and params[1] is not None:
-                    row[12] = params[1]  # error_message
+            new_status = str(params[0])
+            row[9] = new_status
+            error_message = params[1]
+            if error_message is not None:
+                row[12] = error_message
+            else:
+                row[12] = None  # successful transition clears stale error
+            # ``params[2]`` is error_debug (not mirrored on Draft).
+            # ``params[3:-1]`` are extras in sorted column-name order:
+            #   - extracting transition: ``parsed_text_encrypted``
+            #   - analyzing transition:  ``entity_count``
+            if "parsed_text_encrypted = %s" in sql_lower:
+                # Find the parsed_text_encrypted slot. Sorted alpha
+                # order with no other extras puts it at index 3.
+                row[10] = params[3]
+            if "entity_count = %s" in sql_lower:
+                # Sorted alpha order with no other extras puts entity_count
+                # at index 3.
+                row[11] = params[3]
             cursor.rowcount = 1
             state.draft_row = tuple(row)
             return cursor

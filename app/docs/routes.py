@@ -53,6 +53,16 @@ from app.docs.draft_model import (
     update_draft_parent_vtk,
 )
 from app.docs.graph_builder import write_doc_lineage
+from app.docs.status import (
+    PIPELINE_STAGES,
+    STATUS_BY_VALUE,
+)
+from app.docs.status import (
+    TERMINAL_STATUSES as _TERMINAL_STATUSES,
+)
+from app.docs.status import (
+    VALID_STATUSES as _VALID_STATUSES,
+)
 from app.docs.upload import DraftUploadError, handle_upload
 from app.jobs.queue import JobQueue
 from app.rag.retriever import delete_chunks_for_draft
@@ -79,20 +89,11 @@ logger = logging.getLogger(__name__)
 # Status display helpers
 # ---------------------------------------------------------------------------
 
-# Public pipeline stages in order. "failed" is a terminal branch rendered
+# Pipeline stages in order. "failed" is a terminal branch rendered
 # separately so the tracker reads left-to-right during normal operation.
-_STATUS_STAGES: tuple[tuple[str, str], ...] = (
-    ("uploaded", "Üles laaditud"),
-    ("parsing", "Töötlemine"),
-    ("extracting", "Olemite eraldamine"),
-    ("analyzing", "Mõjude analüüs"),
-    ("ready", "Valmis"),
-)
-
-_STATUS_LABELS: dict[str, str] = dict(_STATUS_STAGES)
-_STATUS_LABELS["failed"] = "Ebaõnnestus"
-
-_TERMINAL_STATUSES: frozenset[str] = frozenset({"ready", "failed"})
+# Sourced from :data:`app.docs.status.PIPELINE_STAGES` (#625 §4.2 SSOT)
+# so a new status only needs to be added in ``status.py``.
+_STATUS_STAGES: tuple[tuple[str, str], ...] = tuple((s.value, s.label_et) for s in PIPELINE_STAGES)
 
 _PAGE_SIZE = 25
 
@@ -118,36 +119,26 @@ def _is_draft_stale(draft: Draft) -> bool:
     return elapsed > _STALE_THRESHOLD_DAYS * 24 * 60 * 60
 
 
-_STATUS_KEY_MAP: dict[str, str] = {
-    "uploaded": "pending",
-    "parsing": "running",
-    "extracting": "running",
-    "analyzing": "running",
-    "ready": "ok",
-    "failed": "failed",
-}
-
-_STATUS_VARIANT_MAP: dict[str, BadgeVariant] = {
-    "uploaded": "default",
-    "parsing": "primary",
-    "extracting": "primary",
-    "analyzing": "primary",
-    "ready": "success",
-    "failed": "danger",
-}
-
-
 def _status_badge(status: str):
     """Return a Badge for a draft status.
 
     We use plain ``Badge`` instead of ``StatusBadge`` because the latter
     ships its own English-ish label set and our domain statuses
     (uploaded/parsing/extracting/analyzing) need Estonian copy.
+
+    Lookup goes through :data:`app.docs.status.STATUS_BY_VALUE` so the
+    label, variant, and CSS key all stay synchronised with the SSOT
+    (#625 §4.2). Unknown statuses fall back to a neutral pill so a
+    legacy row from before a label was added cannot crash the page.
     """
-    key = _STATUS_KEY_MAP.get(status, "pending")
-    variant: BadgeVariant = _STATUS_VARIANT_MAP.get(status, "default")
-    label = _STATUS_LABELS.get(status, status)
-    return Badge(label, variant=variant, cls=f"draft-status draft-status-{key}")
+    spec = STATUS_BY_VALUE.get(status)
+    if spec is None:
+        return Badge(status, variant="default", cls="draft-status draft-status-pending")
+    return Badge(
+        spec.label_et,
+        variant=spec.badge_variant,
+        cls=f"draft-status draft-status-{spec.css_key}",
+    )
 
 
 def _format_timestamp(value: Any) -> str:
@@ -655,16 +646,10 @@ _DOC_TYPE_CHOICES: tuple[tuple[str, str], ...] = (
 )
 _DOC_TYPE_VALUES: frozenset[str] = frozenset(v for v, _ in _DOC_TYPE_CHOICES)
 
-# Status checkbox group — same six values used by the pipeline.
-# Reusing _STATUS_LABELS keeps the Estonian copy in one place.
-_STATUS_VALUES: tuple[str, ...] = (
-    "uploaded",
-    "parsing",
-    "extracting",
-    "analyzing",
-    "ready",
-    "failed",
-)
+# Status checkbox group -- same six values used by the pipeline.
+# Sourced from :data:`app.docs.status.VALID_STATUSES` (#625 §4.2 SSOT)
+# so the filter bar picks up new statuses automatically.
+_STATUS_VALUES: tuple[str, ...] = _VALID_STATUSES
 
 # Sort dropdown options (label, value).
 _SORT_CHOICES: tuple[tuple[str, str], ...] = (
@@ -867,10 +852,11 @@ def _filter_bar(*, filters: dict, uploaders: list[dict]):
         }
         if value in selected_statuses:
             attrs["checked"] = True
+        spec = STATUS_BY_VALUE.get(value)
         status_inputs.append(
             Label(  # noqa: F405
                 Input(**attrs),  # noqa: F405
-                Span(_STATUS_LABELS.get(value, value)),  # noqa: F405
+                Span(spec.label_et if spec else value),  # noqa: F405
                 cls="checkbox-label",
                 For=f"filter-status-{value}",
             )

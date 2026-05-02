@@ -148,43 +148,38 @@ class _Patches:
 # ---------------------------------------------------------------------------
 
 
-def _failed_update_params(conns: list[_FakeConn]) -> tuple | None:
-    """Return the params of the first ``update drafts set status='failed'`` call.
+def _failed_update_params(conns: list[_FakeConn], update_draft_status_mock) -> tuple | None:
+    """Return ``(user_msg, debug_detail, draft_id)`` for the first
+    ``failed`` transition recorded on the ``update_draft_status`` mock.
 
-    ``_mark_draft_failed`` runs a direct SQL UPDATE so tests have to
-    introspect the connection's ``execute.call_args_list`` rather than
-    the ``update_draft_status`` mock.
+    Post-#625 the entire status SSOT lives in ``app.docs.status`` and
+    every transition (including ``_mark_draft_failed``) routes through
+    the helper -- so we look at the mock directly rather than scanning
+    raw SQL strings. The legacy positional-args tuple shape is preserved
+    so the per-test assertions don't have to change.
     """
-    for conn in conns:
-        for call in conn.execute.call_args_list:
-            sql = call.args[0].lower()
-            if "update drafts" in sql and "status = 'failed'" in sql:
-                return call.args[1]
+    del conns  # No longer used; raw SQL is gone post-cutover.
+    for call in update_draft_status_mock.call_args_list:
+        if len(call.args) < 3 or call.args[2] != "failed":
+            continue
+        # Positional call: (conn, draft_id, "failed", user_msg)
+        # Keyword call:   (conn, draft_id, "failed") + error_debug=...
+        user_msg = call.args[3] if len(call.args) > 3 else call.kwargs.get("error_message")
+        debug_detail = call.kwargs.get("error_debug")
+        return (user_msg, debug_detail, str(call.args[1]))
     return None
 
 
 def _statuses_written(conns: list[_FakeConn], update_draft_status_mock) -> list[str]:
     """Return every draft status written by the handler under test.
 
-    Covers both:
-      - ``update_draft_status(conn, id, <status>)`` (``parsing``
-        transition is routed through the draft_model helper)
-      - the direct SQL UPDATEs for the ``extracting`` and ``failed``
-        transitions.
+    Post-#625 every transition routes through ``update_draft_status``
+    (the SSOT helper at ``app.docs.status``), so we just collect the
+    third positional arg from the mock's call log. ``conns`` is still
+    accepted to keep the public test-helper signature stable.
     """
-    statuses = [c.args[2] for c in update_draft_status_mock.call_args_list]
-    for conn in conns:
-        for call in conn.execute.call_args_list:
-            sql = call.args[0].lower()
-            if "update drafts" not in sql:
-                continue
-            if "status = 'failed'" in sql:
-                statuses.append("failed")
-            elif "status = 'extracting'" in sql:
-                statuses.append("extracting")
-            elif "status = 'ready'" in sql:
-                statuses.append("ready")
-    return statuses
+    del conns  # No longer used; raw SQL is gone post-cutover.
+    return [c.args[2] for c in update_draft_status_mock.call_args_list if len(c.args) >= 3]
 
 
 # ---------------------------------------------------------------------------
@@ -209,29 +204,30 @@ class TestParseDraftHappyPath:
             "application/pdf",
         )
 
-        # 2. update_draft_status was called once with "parsing"
-        #    (the second transition, to "extracting", goes via direct
-        #    conn.execute because it needs to write parsed_text too).
+        # 2. update_draft_status was called twice: once for "parsing"
+        #    (mid-pipeline) and once for "extracting" (post-Tika). Both
+        #    transitions go through the §4.2 SSOT helper post-#625;
+        #    the second call carries the Fernet ciphertext via
+        #    ``extras={"parsed_text_encrypted": ...}``.
         status_calls = [c.args[2] for c in p.m_update_draft_status.call_args_list]
-        # No "failed" should appear on the happy path.
         assert "parsing" in status_calls
+        assert "extracting" in status_calls
+        # No "failed" should appear on the happy path.
         assert "failed" not in status_calls
 
-        # 3. The parsed_text_encrypted + status='extracting' UPDATE must
-        #    have run on one of the connections; the first param must be
-        #    bytes (Fernet ciphertext), not a plain string.
-        updated_ids = []
-        for conn in p.conns:
-            for call in conn.execute.call_args_list:
-                sql = call.args[0]
-                if "parsed_text_encrypted" in sql and "extracting" in sql:
-                    params = call.args[1]
-                    assert isinstance(params[0], bytes), (
-                        "parsed_text_encrypted must be bytes (Fernet ciphertext), "
-                        f"got {type(params[0])}"
-                    )
-                    updated_ids.append(params[1])
-        assert str(draft.id) in updated_ids
+        # 3. The "extracting" call must carry parsed_text_encrypted in
+        #    extras AND the value must be bytes (Fernet ciphertext), not
+        #    a plain string. This is the atomicity guarantee that lets
+        #    observers never see ``status='extracting'`` with NULL
+        #    parsed_text in the same row.
+        extracting_calls = [
+            c for c in p.m_update_draft_status.call_args_list if c.args[2] == "extracting"
+        ]
+        assert len(extracting_calls) == 1
+        extras = extracting_calls[0].kwargs.get("extras") or {}
+        assert "parsed_text_encrypted" in extras
+        assert isinstance(extras["parsed_text_encrypted"], bytes)
+        assert str(extracting_calls[0].args[1]) == str(draft.id)
 
         # 4. extract_entities was enqueued with the draft id.
         p.m_queue.enqueue.assert_called_once()
@@ -245,7 +241,14 @@ class TestParseDraftHappyPath:
         assert result["text_length"] == len("extracted legal text" * 10)
 
     def test_happy_path_strips_old_error_message(self):
-        """On success, the parsed_text UPDATE must also clear error_message."""
+        """On success the SSOT helper must clear error_message + error_debug.
+
+        Post-#625 every status transition goes through
+        ``update_draft_status`` -- the helper writes ``error_message``
+        and ``error_debug`` to NULL on every call where the kwargs are
+        not supplied (default ``None``), so a clean transition implicitly
+        purges stale failure info from a prior attempt.
+        """
         draft = _make_draft()
 
         with _Patches() as p:
@@ -255,15 +258,18 @@ class TestParseDraftHappyPath:
 
             parse_draft({"draft_id": str(draft.id)})
 
-            # At least one execute call must null out error_message.
-            found = False
-            for conn in p.conns:
-                for call in conn.execute.call_args_list:
-                    sql = call.args[0]
-                    if "error_message = null" in sql:
-                        found = True
-                        break
-            assert found, "Successful parse must clear error_message"
+        # The "extracting" transition must carry no explicit
+        # error_message / error_debug (so the helper writes NULL).
+        extracting_calls = [
+            c for c in p.m_update_draft_status.call_args_list if c.args[2] == "extracting"
+        ]
+        assert len(extracting_calls) == 1
+        call = extracting_calls[0]
+        # Either explicitly None (kwarg) or absent (positional shape).
+        assert call.kwargs.get("error_message") is None
+        assert call.kwargs.get("error_debug") is None
+        if len(call.args) > 3:
+            assert call.args[3] is None  # positional error_message slot
 
 
 # ---------------------------------------------------------------------------
@@ -324,7 +330,7 @@ class TestEmptyTikaResult:
 
         # #609: the stored error_message must be the mapped Estonian
         # string, and error_debug must carry the raw ValueError text.
-        params = _failed_update_params(p.conns)
+        params = _failed_update_params(p.conns, p.m_update_draft_status)
         assert params is not None, "expected an UPDATE ... status='failed' call"
         user_msg, debug_detail, _draft_id = params
         # "empty text" is not a currently mapped failure mode, so it
@@ -389,7 +395,7 @@ class TestTikaFailure:
         assert "failed" in statuses
         # #609: raw exception text goes to error_debug, user-facing
         # Estonian string goes to error_message.
-        params = _failed_update_params(p.conns)
+        params = _failed_update_params(p.conns, p.m_update_draft_status)
         assert params is not None
         user_msg, debug_detail, _ = params
         assert "connect refused" in debug_detail
@@ -440,7 +446,7 @@ class TestTikaFailure:
                     max_attempts=3,
                 )
 
-        params = _failed_update_params(p.conns)
+        params = _failed_update_params(p.conns, p.m_update_draft_status)
         assert params is not None
         user_msg, _debug, _ = params
         assert len(user_msg) <= 500
@@ -472,7 +478,7 @@ class TestStorageFailures:
         assert "failed" in statuses
         # #609: FileNotFoundError maps to the "laadige uuesti üles"
         # Estonian message so the user knows the next action.
-        params = _failed_update_params(p.conns)
+        params = _failed_update_params(p.conns, p.m_update_draft_status)
         assert params is not None
         user_msg, _debug, _ = params
         assert user_msg == MSG_FILE_MISSING
@@ -495,7 +501,7 @@ class TestStorageFailures:
 
         statuses = _statuses_written(p.conns, p.m_update_draft_status)
         assert "failed" in statuses
-        params = _failed_update_params(p.conns)
+        params = _failed_update_params(p.conns, p.m_update_draft_status)
         assert params is not None
         _user_msg, debug_detail, _ = params
         # Raw error text must be preserved in error_debug for admins.
@@ -526,7 +532,7 @@ class TestUnexpectedException:
         statuses = _statuses_written(p.conns, p.m_update_draft_status)
         assert "failed" in statuses
         # #609: unknown -> generic Estonian fallback + raw debug text.
-        params = _failed_update_params(p.conns)
+        params = _failed_update_params(p.conns, p.m_update_draft_status)
         assert params is not None
         user_msg, debug_detail, _ = params
         assert user_msg == MSG_UNKNOWN
@@ -567,7 +573,7 @@ class TestUnexpectedException:
                     max_attempts=3,
                 )
 
-        params = _failed_update_params(p.conns)
+        params = _failed_update_params(p.conns, p.m_update_draft_status)
         assert params is not None
         user_msg, debug_detail, _ = params
         assert user_msg == MSG_TIKA_CAPACITY
@@ -591,7 +597,7 @@ class TestUnexpectedException:
                     max_attempts=3,
                 )
 
-        params = _failed_update_params(p.conns)
+        params = _failed_update_params(p.conns, p.m_update_draft_status)
         assert params is not None
         user_msg, _debug, _ = params
         assert user_msg == MSG_ENCRYPTED_PDF

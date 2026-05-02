@@ -28,17 +28,19 @@ from typing import Any, Literal, LiteralString
 from app.db import get_connection as _connect
 from app.db_utils import coerce_uuid
 
-logger = logging.getLogger(__name__)
-
-
-VALID_STATUSES = (
-    "uploaded",
-    "parsing",
-    "extracting",
-    "analyzing",
-    "ready",
-    "failed",
+# Re-exported for backwards compatibility -- callers historically imported
+# ``VALID_STATUSES`` and ``update_draft_status`` from this module. The
+# canonical home is ``app.docs.status`` (#625, §4.2 SSOT). The ``noqa``
+# tags keep the re-export visible to ruff without a synthetic ``__all__``
+# (this module is import-by-name not star-imported, so an ``__all__``
+# entry would be cosmetic).
+from app.docs.status import (
+    STATUS_BY_VALUE,  # noqa: F401  -- re-exported
+    VALID_STATUSES,
+    update_draft_status,  # noqa: F401  -- re-exported
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -201,43 +203,10 @@ def create_draft(
     return _row_to_draft(row)
 
 
-_TERMINAL_STATUSES = frozenset({"ready", "failed"})
-
-
-def update_draft_status(
-    conn: Any,
-    draft_id: uuid.UUID | str,
-    status: str,
-    error_message: str | None = None,
-) -> bool:
-    """Transition a draft into a new ``status`` (and optional error message).
-
-    Returns ``True`` when a row was updated. Unlike the read helpers this
-    one takes an explicit connection so the worker can batch the update
-    with other state transitions in a single transaction.
-
-    #670: terminal transitions (``ready``, ``failed``) also stamp
-    ``processing_completed_at = now()``; non-terminal transitions clear
-    it back to NULL so a retry (``failed`` → ``uploaded``) starts with
-    a clean completion clock. Most handlers use raw SQL rather than this
-    helper, but they apply the same rule directly.
-    """
-    if status not in VALID_STATUSES:
-        raise ValueError(f"Invalid draft status: {status!r}")
-
-    completion_clause = "now()" if status in _TERMINAL_STATUSES else "null"
-    result = conn.execute(
-        f"""
-        update drafts
-        set status = %s,
-            error_message = %s,
-            updated_at = now(),
-            processing_completed_at = {completion_clause}
-        where id = %s
-        """,
-        (status, error_message, str(draft_id)),
-    )
-    return (result.rowcount or 0) > 0
+# ``update_draft_status`` lives in ``app.docs.status`` -- imported and
+# re-exported above so existing callers keep working unchanged. The
+# helper, the terminal-status set, and the validation tuple all moved
+# to ``app.docs.status`` as part of the §4.2 SSOT cutover (#625).
 
 
 def update_draft_parent_vtk(
