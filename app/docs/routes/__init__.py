@@ -111,15 +111,23 @@ logger = logging.getLogger(__name__)
 # ``_PAGE_SIZE`` / ``_DELETE_CONFIRM`` / ``_STALE_THRESHOLD_DAYS`` /
 # ``_POLLING_TIMEOUT_SECONDS`` / ``_TYPICAL_STAGE_SECONDS`` /
 # ``_STATUS_STAGES`` constants now live in
-# :mod:`app.docs.routes._shared` so the upcoming ``_list``/``_upload``
-# /``_detail`` submodules can import them without re-pulling the
-# package's full dependency graph (#704 PR-B). The big
-# ``_status_tracker`` renderer moved to
-# :mod:`app.docs.routes._status_tracker`.  Both modules are re-exported
-# from this package so existing test patches and imports
-# (``from app.docs.routes import _format_elapsed``,
-# ``patch("app.docs.routes._is_draft_stale")``) keep working without
-# any patch-path swap.
+# :mod:`app.docs.routes._shared`. The big ``_status_tracker`` renderer
+# moved to :mod:`app.docs.routes._status_tracker`.  Both modules are
+# re-exported here so direct imports
+# (``from app.docs.routes import _format_elapsed``) keep working.
+#
+# **Patch-path caveat (post-#704):** ``patch("app.docs.routes.X")``
+# rebinds the symbol in this package's namespace ONLY. Submodules
+# import these helpers directly from ``_shared`` and bind them in
+# their own globals at module load time — so a package-level patch
+# does NOT propagate to e.g. ``_status_tracker``'s internal calls.
+# To intercept a tracker dependency, patch where it is USED:
+# ``patch("app.docs.routes._status_tracker._poll_interval_seconds")``.
+# Same rule applies to any future submodule extracted in PR-C / D / E.
+# This is the standard "patch where used" rule from the Python testing
+# docs; the ``__all__`` block below is for direct-import convenience,
+# not for patch-path equivalence. Pinned by a regression test in
+# ``tests/test_docs_routes_patch_paths.py``.
 
 __all__ = [
     # _shared.py constants
