@@ -559,8 +559,8 @@ class TestNewDraftPage:
 
 
 class TestCreateDraftHandler:
-    @patch("app.docs.routes.log_draft_upload")
-    @patch("app.docs.routes.handle_upload")
+    @patch("app.docs.routes._upload.log_draft_upload")
+    @patch("app.docs.routes._upload.handle_upload")
     @patch("app.auth.middleware._get_provider")
     def test_successful_upload_redirects_to_detail(
         self,
@@ -596,7 +596,7 @@ class TestCreateDraftHandler:
         mock_handle.assert_called_once()
         mock_log.assert_called_once()
 
-    @patch("app.docs.routes.handle_upload")
+    @patch("app.docs.routes._upload.handle_upload")
     @patch("app.auth.middleware._get_provider")
     def test_validation_error_rerenders_form_with_title(
         self,
@@ -1320,8 +1320,8 @@ class TestFlashMessages:
         assert listing2.status_code == 200
         assert "Eelnõu kustutatud." not in listing2.text
 
-    @patch("app.docs.routes.log_draft_upload")
-    @patch("app.docs.routes.handle_upload")
+    @patch("app.docs.routes._upload.log_draft_upload")
+    @patch("app.docs.routes._upload.handle_upload")
     @patch("app.docs.routes.log_draft_view")
     @patch("app.docs.routes.fetch_draft")
     @patch("app.auth.middleware._get_provider")
@@ -1556,9 +1556,9 @@ def _make_vtk(
 
 
 class TestUploadWithVtkLinking:
-    @patch("app.docs.routes.log_draft_upload")
-    @patch("app.docs.routes.handle_upload")
-    @patch("app.docs.routes.list_vtks_for_org")
+    @patch("app.docs.routes._upload.log_draft_upload")
+    @patch("app.docs.routes._upload.handle_upload")
+    @patch("app.docs.routes._upload.list_vtks_for_org")
     @patch("app.auth.middleware._get_provider")
     def test_vtk_upload_persists_doc_type(
         self,
@@ -1590,10 +1590,10 @@ class TestUploadWithVtkLinking:
         assert kw["doc_type"] == "vtk"
         assert kw["parent_vtk_id"] is None
 
-    @patch("app.docs.routes.log_draft_upload")
-    @patch("app.docs.routes.handle_upload")
-    @patch("app.docs.routes._connect")
-    @patch("app.docs.routes.list_vtks_for_org")
+    @patch("app.docs.routes._upload.log_draft_upload")
+    @patch("app.docs.routes._upload.handle_upload")
+    @patch("app.docs.routes._upload._connect")
+    @patch("app.docs.routes._upload.list_vtks_for_org")
     @patch("app.auth.middleware._get_provider")
     def test_eelnou_upload_with_vtk_link_persists_both(
         self,
@@ -1633,8 +1633,8 @@ class TestUploadWithVtkLinking:
         assert kw["doc_type"] == "eelnou"
         assert str(kw["parent_vtk_id"]) == _VTK_ID
 
-    @patch("app.docs.routes.list_vtks_for_org")
-    @patch("app.docs.routes._connect")
+    @patch("app.docs.routes._upload.list_vtks_for_org")
+    @patch("app.docs.routes._upload._connect")
     @patch("app.auth.middleware._get_provider")
     def test_cross_org_vtk_fk_rejected(
         self,
@@ -1666,8 +1666,8 @@ class TestUploadWithVtkLinking:
         assert resp.status_code == 400
         assert "Valitud VTK ei ole kättesaadav." in resp.text
 
-    @patch("app.docs.routes.list_vtks_for_org")
-    @patch("app.docs.routes._connect")
+    @patch("app.docs.routes._upload.list_vtks_for_org")
+    @patch("app.docs.routes._upload._connect")
     @patch("app.auth.middleware._get_provider")
     def test_parent_pointing_at_eelnou_rejected(
         self,
@@ -1697,7 +1697,7 @@ class TestUploadWithVtkLinking:
         assert resp.status_code == 400
         assert "Valitud VTK ei ole kättesaadav." in resp.text
 
-    @patch("app.docs.routes.list_vtks_for_org")
+    @patch("app.docs.routes._upload.list_vtks_for_org")
     @patch("app.auth.middleware._get_provider")
     def test_vtk_upload_with_parent_rejected(
         self,
