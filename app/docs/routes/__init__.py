@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import Mapping
-from datetime import UTC, date, datetime
+from datetime import date
 from typing import Any
 
 from fasthtml.common import *  # noqa: F403
@@ -52,13 +52,27 @@ from app.docs.draft_model import (
 )
 from app.docs.graph_builder import write_doc_lineage
 from app.docs.routes._lifecycle import delete_draft_handler, keep_draft_handler
+from app.docs.routes._shared import (
+    _DELETE_CONFIRM,
+    _PAGE_SIZE,
+    _POLLING_TIMEOUT_SECONDS,
+    _STALE_THRESHOLD_DAYS,
+    _STATUS_STAGES,
+    _TYPICAL_STAGE_SECONDS,
+    _elapsed_seconds,
+    _format_elapsed,
+    _format_elapsed_final,
+    _format_timestamp,
+    _is_draft_stale,
+    _is_status_polling_stale,
+    _poll_interval_seconds,
+    _processing_duration_seconds,
+    _status_badge,
+)
+from app.docs.routes._status_tracker import _status_tracker
 from app.docs.similarity import list_similar_drafts_for_view
 from app.docs.status import (
-    PIPELINE_STAGES,
     STATUS_BY_VALUE,
-)
-from app.docs.status import (
-    TERMINAL_STATUSES as _TERMINAL_STATUSES,
 )
 from app.docs.status import (
     VALID_STATUSES as _VALID_STATUSES,
@@ -83,70 +97,64 @@ from app.ui.surfaces.card import Card, CardBody, CardHeader
 from app.ui.surfaces.info_box import InfoBox
 from app.ui.surfaces.modal import ConfirmModal, Modal, ModalBody, ModalFooter, ModalScript
 from app.ui.theme import get_theme_from_request
-from app.ui.time import format_tallinn
 
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Status display helpers
+# Re-exports (#704 PR-B)
 # ---------------------------------------------------------------------------
+#
+# The cross-cutting status / timestamp / pipeline helpers
+# (``_status_badge``, ``_format_timestamp``, ``_is_draft_stale``,
+# ``_elapsed_seconds``, ``_format_elapsed`` and friends) plus the
+# ``_PAGE_SIZE`` / ``_DELETE_CONFIRM`` / ``_STALE_THRESHOLD_DAYS`` /
+# ``_POLLING_TIMEOUT_SECONDS`` / ``_TYPICAL_STAGE_SECONDS`` /
+# ``_STATUS_STAGES`` constants now live in
+# :mod:`app.docs.routes._shared`. The big ``_status_tracker`` renderer
+# moved to :mod:`app.docs.routes._status_tracker`.  Both modules are
+# re-exported here so direct imports
+# (``from app.docs.routes import _format_elapsed``) keep working.
+#
+# **Patch-path caveat (post-#704):** ``patch("app.docs.routes.X")``
+# rebinds the symbol in this package's namespace ONLY. Submodules
+# import these helpers directly from ``_shared`` and bind them in
+# their own globals at module load time — so a package-level patch
+# does NOT propagate to e.g. ``_status_tracker``'s internal calls.
+# To intercept a tracker dependency, patch where it is USED:
+# ``patch("app.docs.routes._status_tracker._poll_interval_seconds")``.
+# Same rule applies to any future submodule extracted in PR-C / D / E.
+# This is the standard "patch where used" rule from the Python testing
+# docs; the ``__all__`` block below is for direct-import convenience,
+# not for patch-path equivalence. Pinned by a regression test in
+# ``tests/test_docs_routes_patch_paths.py``.
 
-# Pipeline stages in order. "failed" is a terminal branch rendered
-# separately so the tracker reads left-to-right during normal operation.
-# Sourced from :data:`app.docs.status.PIPELINE_STAGES` (#625 §4.2 SSOT)
-# so a new status only needs to be added in ``status.py``.
-_STATUS_STAGES: tuple[tuple[str, str], ...] = tuple((s.value, s.label_et) for s in PIPELINE_STAGES)
-
-_PAGE_SIZE = 25
-
-_DELETE_CONFIRM = (
-    "Kas olete kindel, et soovite selle eelnõu kustutada? Seda tegevust ei saa tagasi võtta."
-)
-
-# #572: drafts whose ``last_accessed_at`` is older than this are stale
-# and the UI surfaces a "Hoia alles" (Keep) button alongside the delete
-# button. The same threshold is used by the archive-warning scan job.
-_STALE_THRESHOLD_DAYS = 90
-
-
-def _is_draft_stale(draft: Draft) -> bool:
-    """Return True when the draft has not been accessed for 90+ days (#572)."""
-    last = getattr(draft, "last_accessed_at", None)
-    if last is None:
-        return False
-    try:
-        elapsed = (datetime.now(UTC) - last).total_seconds()
-    except (TypeError, ValueError):
-        return False
-    return elapsed > _STALE_THRESHOLD_DAYS * 24 * 60 * 60
-
-
-def _status_badge(status: str):
-    """Return a Badge for a draft status.
-
-    We use plain ``Badge`` instead of ``StatusBadge`` because the latter
-    ships its own English-ish label set and our domain statuses
-    (uploaded/parsing/extracting/analyzing) need Estonian copy.
-
-    Lookup goes through :data:`app.docs.status.STATUS_BY_VALUE` so the
-    label, variant, and CSS key all stay synchronised with the SSOT
-    (#625 §4.2). Unknown statuses fall back to a neutral pill so a
-    legacy row from before a label was added cannot crash the page.
-    """
-    spec = STATUS_BY_VALUE.get(status)
-    if spec is None:
-        return Badge(status, variant="default", cls="draft-status draft-status-pending")
-    return Badge(
-        spec.label_et,
-        variant=spec.badge_variant,
-        cls=f"draft-status draft-status-{spec.css_key}",
-    )
-
-
-def _format_timestamp(value: Any) -> str:
-    """Render a ``datetime`` in Europe/Tallinn (see app.ui.time)."""
-    return format_tallinn(value)
+__all__ = [
+    # _shared.py constants
+    "_DELETE_CONFIRM",
+    "_PAGE_SIZE",
+    "_POLLING_TIMEOUT_SECONDS",
+    "_STALE_THRESHOLD_DAYS",
+    "_STATUS_STAGES",
+    "_TYPICAL_STAGE_SECONDS",
+    # _shared.py helpers
+    "_elapsed_seconds",
+    "_format_elapsed",
+    "_format_elapsed_final",
+    "_format_timestamp",
+    "_is_draft_stale",
+    "_is_status_polling_stale",
+    "_poll_interval_seconds",
+    "_processing_duration_seconds",
+    "_status_badge",
+    # _status_tracker.py
+    "_status_tracker",
+    # _lifecycle.py (re-exported for symmetry; #703 already moved these)
+    "delete_draft_handler",
+    "keep_draft_handler",
+    # public registration entry-point
+    "register_draft_routes",
+]
 
 
 # #618 PR-C: human-readable Estonian labels for the
@@ -166,408 +174,6 @@ _READING_STAGE_LABELS_ET: dict[str, str] = {
 def _format_reading_stage(stage: str) -> str:
     """Return the Estonian label for a ``reading_stage`` value (#618 PR-C)."""
     return _READING_STAGE_LABELS_ET.get(stage, stage)
-
-
-# #457: stop polling after this many seconds since the draft was
-# created. Without an upper bound the page hammers /status forever
-# whenever a worker hangs (or the queue is paused), and the user has
-# no actionable signal.
-_POLLING_TIMEOUT_SECONDS = 300
-
-
-def _is_status_polling_stale(draft: Draft) -> bool:
-    """Return True if we should stop polling and surface a warning.
-
-    #470: we use ``updated_at`` (bumped by every handler on each
-    pipeline transition) rather than ``created_at``. A long-running
-    draft whose pipeline is still making progress will keep bumping
-    ``updated_at``, so the polling budget resets on each transition.
-    A pipeline that's genuinely hung leaves ``updated_at`` frozen, and
-    the polling window elapses against that frozen timestamp. If
-    ``updated_at`` is missing for any reason (older rows, DB race),
-    fall back to ``created_at`` so we still honour the timeout.
-    """
-    reference = draft.updated_at or draft.created_at
-    if reference is None:
-        return False
-    try:
-        elapsed = (datetime.now(UTC) - reference).total_seconds()
-    except (TypeError, ValueError):
-        return False
-    return elapsed > _POLLING_TIMEOUT_SECONDS
-
-
-# #606/#607: typical wall-clock range per pipeline stage, in seconds.
-# Hard-coded for now — a real histogram from background_jobs.finished_at
-# minus claimed_at can replace this later. Keep keys in sync with
-# _STATUS_STAGES (and note that ``uploaded`` + ``ready`` are excluded
-# because they're not running stages).
-_TYPICAL_STAGE_SECONDS: dict[str, tuple[int, int]] = {
-    "parsing": (10, 60),
-    "extracting": (60, 240),
-    "analyzing": (30, 180),
-}
-
-
-def _poll_interval_seconds(draft: Draft) -> int:
-    """Return the HTMX poll interval in seconds with exponential-ish backoff.
-
-    0-30s since creation → 3s, 30-120s → 6s, 120s+ → 10s. See #607.
-    """
-    reference = draft.created_at
-    if reference is None:
-        return 3
-    try:
-        elapsed = (datetime.now(UTC) - reference).total_seconds()
-    except (TypeError, ValueError):
-        return 3
-    if elapsed < 30:
-        return 3
-    if elapsed < 120:
-        return 6
-    return 10
-
-
-def _elapsed_seconds(draft: Draft) -> int | None:
-    """Seconds between ``draft.updated_at`` and now (for #606 timer)."""
-    reference = draft.updated_at or draft.created_at
-    if reference is None:
-        return None
-    try:
-        return max(0, int((datetime.now(UTC) - reference).total_seconds()))
-    except (TypeError, ValueError):
-        return None
-
-
-def _processing_duration_seconds(draft: Draft) -> int | None:
-    """Total wall-clock processing duration for a terminal draft (#657, #670).
-
-    Prefers ``processing_completed_at - created_at`` — ``processing_completed_at``
-    is frozen at the moment the pipeline flips into ``ready`` / ``failed``
-    (migration 023), so later edits (rename, VTK link, re-tag) no longer
-    inflate the label on an already-finished draft.
-
-    Falls back to ``updated_at - created_at`` for legacy rows where the
-    backfill left ``processing_completed_at`` NULL, so the label keeps
-    rendering for drafts that finished before migration 023 ran.
-
-    Returns ``None`` when neither timestamp pair is available.
-    """
-    if draft.created_at is None:
-        return None
-    completion = draft.processing_completed_at or draft.updated_at
-    if completion is None:
-        return None
-    try:
-        return max(0, int((completion - draft.created_at).total_seconds()))
-    except (TypeError, ValueError):
-        return None
-
-
-def _format_elapsed(seconds: int) -> str:
-    """Render seconds as ``M:SS möödas`` / ``H:MM:SS möödas``.
-
-    #657: the original ``M:SS`` output wrapped past 60 minutes into
-    three-digit minute counts like "8835:14" for drafts whose pipeline
-    had been running (or in the UI bug's case, appeared to be running)
-    for hours. The ticker now switches to ``H:MM:SS`` once the raw
-    seconds value clears the one-hour mark so the label stays legible
-    for genuinely long pipelines.
-    """
-    total = max(0, int(seconds))
-    hours, remainder = divmod(total, 3600)
-    minutes, secs = divmod(remainder, 60)
-    if hours > 0:
-        return f"{hours}:{minutes:02d}:{secs:02d} möödas"
-    return f"{minutes}:{secs:02d} möödas"
-
-
-def _format_elapsed_final(seconds: int) -> str:
-    """Render a FROZEN elapsed label for terminal drafts (#657).
-
-    Used when the draft is in ``ready`` or ``failed`` — the label is
-    computed once server-side and NOT wrapped in the
-    ``.draft-stage-elapsed`` class so the client-side ticker skips
-    over it. Format mirrors ``_format_elapsed`` for consistency but
-    swaps the "möödas" suffix for "Analüüsitud" prefix so the user
-    reads the label as a completion marker rather than a running
-    timer.
-    """
-    total = max(0, int(seconds))
-    hours, remainder = divmod(total, 3600)
-    minutes, secs = divmod(remainder, 60)
-    if hours > 0:
-        return f"Analüüsitud {hours} h {minutes} min {secs} s"
-    if minutes > 0:
-        return f"Analüüsitud {minutes} min {secs} s"
-    return f"Analüüsitud {secs} s"
-
-
-def _status_tracker(draft: Draft):
-    """Render the 6-stage horizontal status tracker.
-
-    Wrapped in a polling Div so HTMX can refresh it every 3 seconds
-    until the draft reaches a terminal state OR the polling timeout
-    elapses (#457). After the timeout we drop the polling attributes
-    and surface a yellow alert nudging the user to check the admin
-    dashboard so they don't sit on the page forever.
-    """
-    items: list = []
-    current_index = -1
-    for idx, (key, _) in enumerate(_STATUS_STAGES):
-        if key == draft.status:
-            current_index = idx
-            break
-
-    elapsed = _elapsed_seconds(draft)
-
-    for idx, (key, label) in enumerate(_STATUS_STAGES):
-        classes = ["draft-stage"]
-        is_active = False
-        if draft.status == "failed":
-            # On failure every stage past the last successful one is dim.
-            classes.append("draft-stage-idle")
-        elif current_index >= 0 and idx < current_index:
-            classes.append("draft-stage-done")
-        elif current_index >= 0 and idx == current_index:
-            classes.append("draft-stage-active")
-            is_active = True
-        else:
-            classes.append("draft-stage-idle")
-
-        # #606: render elapsed time + typical range under the active
-        # stage. The elapsed value is bumped client-side by a small
-        # inline interval so the user sees a live ticker without any
-        # extra HTMX polls.
-        # #657: the live ticker is ONLY attached when the draft is in
-        # a non-terminal state. For ``ready`` we render a frozen
-        # "Analüüsitud N min" label without the ``.draft-stage-elapsed``
-        # class so the client-side tick loop skips it. ``failed`` falls
-        # through to the idle branch above — no ticker is ever attached
-        # to a failed draft because no stage is marked active.
-        extras: list = []
-        if is_active and elapsed is not None and draft.status not in _TERMINAL_STATUSES:
-            extras.append(
-                Span(  # noqa: F405
-                    _format_elapsed(elapsed),
-                    cls="draft-stage-elapsed",
-                    data_elapsed_seconds=str(elapsed),
-                )
-            )
-            typical = _TYPICAL_STAGE_SECONDS.get(key)
-            if typical is not None:
-                low, high = typical
-                low_min, high_min = low // 60 or 1, high // 60 or 1
-                # Prefer a "N-M min" display; fall back to seconds when
-                # the lower bound is sub-minute (e.g. parsing 10s-60s).
-                if low < 60:
-                    range_text = f"tüüpiline aeg {low}s-{high // 60 or 1} min"
-                else:
-                    range_text = f"tüüpiline aeg {low_min}-{high_min} min"
-                extras.append(
-                    Span(  # noqa: F405
-                        range_text,
-                        cls="draft-stage-typical muted-text",
-                    )
-                )
-        elif is_active and draft.status == "ready":
-            # #657: render a frozen "Analüüsitud" label on the "Valmis"
-            # stage. Deliberately NOT ``.draft-stage-elapsed`` so the
-            # client-side ticker leaves it alone. The displayed
-            # duration is the total pipeline time (upload -> ready),
-            # not "time since completion".
-            duration = _processing_duration_seconds(draft)
-            if duration is not None:
-                extras.append(
-                    Span(  # noqa: F405
-                        _format_elapsed_final(duration),
-                        cls="draft-stage-done-label muted-text",
-                    )
-                )
-
-        items.append(
-            Li(  # noqa: F405
-                Span(str(idx + 1), cls="draft-stage-number", aria_hidden="true"),  # noqa: F405
-                Span(label, cls="draft-stage-label"),  # noqa: F405
-                *extras,
-                cls=" ".join(classes),
-            )
-        )
-
-    tracker = Ol(*items, cls="draft-status-tracker", aria_label="Töötluse staatus")  # noqa: F405
-
-    # Build the poll attributes only while the draft is still
-    # progressing AND we haven't blown the polling timeout (#457).
-    polling_stale = _is_status_polling_stale(draft)
-    poll_attrs: dict[str, Any] = {}
-    if draft.status not in _TERMINAL_STATUSES and not polling_stale:
-        poll_attrs = {
-            "hx_get": f"/drafts/{draft.id}/status",
-            # #607: exponential-ish polling backoff. Freshly created
-            # drafts poll every 3s so the tracker feels responsive, but
-            # as the wall-clock elapses we slow down to avoid hammering
-            # the server for genuinely-slow pipelines. The upper bound
-            # is still the _POLLING_TIMEOUT_SECONDS budget above.
-            "hx_trigger": f"every {_poll_interval_seconds(draft)}s",
-            "hx_target": "this",
-            "hx_swap": "outerHTML",
-        }
-
-    header = Div(  # noqa: F405
-        Span("Staatus:", cls="draft-status-label-text"),  # noqa: F405
-        _status_badge(draft.status),
-        cls="draft-status-header",
-    )
-
-    children: list = [header, tracker]
-    if draft.status == "failed" and draft.error_message:
-        # #656: surface a "Proovi uuesti" retry button alongside the
-        # red error banner so the user never has to re-upload the
-        # original file just to re-run the pipeline. The button posts
-        # to /drafts/{id}/retry which resets the draft back to
-        # ``uploaded`` and re-enqueues parse_draft. HTMX drives the
-        # submit so the action stays on the page; an HX-Redirect
-        # bounces the browser back to the detail page once the reset
-        # commits.
-        children.append(
-            Alert(
-                Div(
-                    P(draft.error_message, cls="draft-failed-message"),  # noqa: F405
-                    Form(  # noqa: F405
-                        Button(
-                            "Proovi uuesti",
-                            type="submit",
-                            variant="primary",
-                            size="md",
-                        ),
-                        method="post",
-                        action=f"/drafts/{draft.id}/retry",
-                        enctype="application/x-www-form-urlencoded",
-                        hx_post=f"/drafts/{draft.id}/retry",
-                        hx_target="body",
-                        hx_swap="outerHTML",
-                        cls="inline-form draft-retry-form",
-                    ),
-                    cls="draft-failed-body",
-                ),
-                variant="danger",
-                title="Töötlemine ebaõnnestus",
-            )
-        )
-    elif polling_stale and draft.status not in _TERMINAL_STATUSES:
-        # The pipeline has been running longer than the polling
-        # timeout. Stop the auto-poll and replace the old admin-
-        # dashboard dead-end (#606) with an actionable pair: a manual
-        # "Kontrolli uuesti kohe" button that fires one immediate
-        # /status fetch, plus a short guidance line telling the user
-        # when to escalate.
-        children.append(
-            Alert(
-                Div(
-                    P(  # noqa: F405
-                        "Töötlemine võtab oodatust kauem aega. "
-                        "Kui analüüs on kauem kui 10 minutit peatunud, "
-                        "võtke ühendust meeskonnaga.",
-                        cls="stale-guidance",
-                    ),
-                    Button(
-                        "Kontrolli uuesti kohe",
-                        type="button",
-                        variant="secondary",
-                        size="sm",
-                        hx_get=f"/drafts/{draft.id}/status",
-                        hx_target=f"#draft-status-{draft.id}",
-                        hx_swap="outerHTML",
-                    ),
-                    cls="stale-repoll",
-                ),
-                variant="warning",
-                title="Töötlemine venib",
-            )
-        )
-
-    # #606: inline ticker that increments the ".draft-stage-elapsed"
-    # span once per second so users see a live "1:40 möödas" counter
-    # without extra HTMX polls. The script runs on every HTMX swap
-    # because HTMX executes inline scripts inside swapped fragments.
-    # The window-level interval id is reused across swaps to avoid
-    # stacking multiple timers.
-    #
-    # #657: two bug-fixes applied here.
-    #   1. Format: past 60 minutes the old ``M:SS`` template emitted
-    #      unreadable three-digit minute counts ("8835:14"). Switch to
-    #      ``H:MM:SS möödas`` once the raw counter clears one hour.
-    #   2. Stop condition: when no ``.draft-stage-elapsed`` nodes
-    #      remain (terminal swap — the ``ready``/``failed`` status
-    #      fragment no longer renders one), clearInterval so the
-    #      timer is not left dangling on the window.
-    if any("draft-stage-elapsed" in str(child) for child in children):
-        children.append(
-            Script(  # noqa: F405
-                "(function () {\n"
-                "  if (window.__draftElapsedTimer) "
-                "clearInterval(window.__draftElapsedTimer);\n"
-                "  function pad(n) { return n < 10 ? '0' + n : '' + n; }\n"
-                "  function format(raw) {\n"
-                "    if (raw >= 3600) {\n"
-                "      var h = Math.floor(raw / 3600);\n"
-                "      var m = Math.floor((raw % 3600) / 60);\n"
-                "      var s = raw % 60;\n"
-                "      return h + ':' + pad(m) + ':' + pad(s) + ' möödas';\n"
-                "    }\n"
-                "    var mm = Math.floor(raw / 60);\n"
-                "    var ss = raw % 60;\n"
-                "    return mm + ':' + pad(ss) + ' möödas';\n"
-                "  }\n"
-                "  function tick() {\n"
-                "    var nodes = document.querySelectorAll('.draft-stage-elapsed');\n"
-                "    if (nodes.length === 0) {\n"
-                "      clearInterval(window.__draftElapsedTimer);\n"
-                "      window.__draftElapsedTimer = null;\n"
-                "      return;\n"
-                "    }\n"
-                "    nodes.forEach(function (el) {\n"
-                "      var raw = parseInt(el.getAttribute('data-elapsed-seconds'), 10);\n"
-                "      if (isNaN(raw)) return;\n"
-                "      raw += 1;\n"
-                "      el.setAttribute('data-elapsed-seconds', raw);\n"
-                "      el.textContent = format(raw);\n"
-                "    });\n"
-                "  }\n"
-                "  window.__draftElapsedTimer = setInterval(tick, 1000);\n"
-                "})();\n"
-            )
-        )
-
-    # #604: announce stage transitions to screen readers. ``polite``
-    # avoids interrupting the user mid-task; ``aria_atomic=false`` means
-    # assistive tech reads just the changed node instead of the whole
-    # tracker. The existing failed-state Alert still carries
-    # ``role="alert"`` for the more urgent announcement.
-    # #608: marker for the WS push listener. ``draft-status.js`` finds
-    # this attribute on DOMContentLoaded, opens a WebSocket to
-    # /ws/drafts/status, subscribes to ``draft.id`` and swaps the
-    # tracker on every status event. The hx-* polling attributes above
-    # are deliberately preserved so the page degrades to 3s polling if
-    # the WS is unavailable. The marker is dropped once the draft
-    # reaches a terminal status — at that point the JS will already
-    # have closed the WS and there's nothing more to push.
-    ws_attrs: dict[str, Any] = {}
-    if draft.status not in _TERMINAL_STATUSES:
-        ws_attrs = {
-            "data_draft_status_ws": "1",
-            "data_draft_id": str(draft.id),
-        }
-
-    return Div(  # noqa: F405
-        *children,
-        id=f"draft-status-{draft.id}",
-        cls="draft-status-wrapper",
-        aria_live="polite",
-        aria_atomic="false",
-        **poll_attrs,
-        **ws_attrs,
-    )
 
 
 # ---------------------------------------------------------------------------
