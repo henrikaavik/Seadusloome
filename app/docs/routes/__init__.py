@@ -64,6 +64,11 @@ from app.docs.status import (
     VALID_STATUSES as _VALID_STATUSES,
 )
 from app.docs.upload import DraftUploadError, handle_upload
+from app.docs.version_diff import compute_diff, render_diff_table
+from app.docs.version_model import (
+    DraftVersion,
+    list_versions_for_draft,
+)
 from app.ui.data.data_table import Column, DataTable
 from app.ui.data.pagination import Pagination
 from app.ui.feedback.empty_state import EmptyState
@@ -142,6 +147,25 @@ def _status_badge(status: str):
 def _format_timestamp(value: Any) -> str:
     """Render a ``datetime`` in Europe/Tallinn (see app.ui.time)."""
     return format_tallinn(value)
+
+
+# #618 PR-C: human-readable Estonian labels for the
+# ``draft_versions.reading_stage`` CHECK-constraint values.  Sourced
+# from :data:`app.docs.version_model.READING_STAGES` so a missing
+# label here surfaces as the raw stage key (still legible) rather
+# than a KeyError.
+_READING_STAGE_LABELS_ET: dict[str, str] = {
+    "vtk": "VTK",
+    "reading_1": "1. lugemine",
+    "reading_2": "2. lugemine",
+    "reading_3": "3. lugemine",
+    "enacted": "Vastu võetud",
+}
+
+
+def _format_reading_stage(stage: str) -> str:
+    """Return the Estonian label for a ``reading_stage`` value (#618 PR-C)."""
+    return _READING_STAGE_LABELS_ET.get(stage, stage)
 
 
 # #457: stop polling after this many seconds since the draft was
@@ -2353,6 +2377,21 @@ def draft_detail_page(req: Request, draft_id: str):
                 exc_info=True,
             )
 
+    # #618 PR-C: "Versioonide ajalugu" — best-effort; an empty list
+    # collapses to a friendly empty-state card so a dead DB never
+    # bricks the detail page. Org-scoped via the parent draft's
+    # ``org_id``, which transitively scopes the version rows.
+    version_timeline_rows: list[dict[str, Any]] = []
+    try:
+        with _connect() as conn:
+            version_timeline_rows = _version_timeline_rows(conn, draft.id, org_id=draft.org_id)
+    except Exception:
+        logger.warning(
+            "draft_detail_page: failed to load version timeline for draft=%s",
+            draft.id,
+            exc_info=True,
+        )
+
     return PageShell(
         H1(draft.title, cls="page-title"),  # noqa: F405
         P(A("\u2190 Tagasi eeln\u00f5ude nimekirja", href="/drafts"), cls="back-link"),  # noqa: F405
@@ -2384,6 +2423,11 @@ def draft_detail_page(req: Request, draft_id: str):
         ),
         # #621: similar-drafts card; hidden (returns "") when no results.
         _similar_drafts_card(similar),
+        # #618 PR-C: "Versioonide ajalugu" — one row per draft_versions
+        # entry, ordered v1 → latest. Always rendered (even with one
+        # version) so the user has a stable reference for the diff
+        # button once a v2 lands.
+        _version_timeline_section(draft, version_timeline_rows),
         # #643: VTK-only card listing follow-on eelnõud. Skipped on
         # eelnõu detail since VTKs are the only doc_type that can have
         # children in our model.
@@ -2612,6 +2656,338 @@ async def link_vtk_handler(req: Request, draft_id: str):
 
 
 # ---------------------------------------------------------------------------
+# Versioning UI (#618 PR-C) — timeline section + diff page
+# ---------------------------------------------------------------------------
+
+
+def _version_timeline_rows(
+    conn: Any,
+    draft_id: uuid.UUID,
+    *,
+    org_id: uuid.UUID,
+) -> list[dict[str, Any]]:
+    """Resolve ``draft_versions`` rows into timeline-ready row dicts (#618 PR-C).
+
+    Returned rows are ordered by ``version_number ASC`` (the timeline
+    reads top-down: v1 first, latest last) — the opposite of what
+    :func:`list_versions_for_draft` returns. Sorting in the helper
+    keeps the order in one place rather than every caller having to
+    remember to reverse.
+
+    ``created_by`` user IDs are resolved in a single ``list_users``
+    call so the timeline doesn't fan out into N+1 ``get_user`` lookups
+    for drafts with many readings. The lookup is org-scoped because
+    ``draft_versions`` lives under the same org as the parent draft —
+    cross-org user IDs simply fall through to the email-style fallback.
+
+    Args:
+        conn: Open psycopg connection (re-used by the caller's
+            transaction so the read sits in the same snapshot as the
+            preceding ``fetch_draft``).
+        draft_id: Parent draft id.
+        org_id: Org id of the parent draft. Used to scope the user
+            lookup so cross-org name resolution stays impossible
+            even if a stale ``created_by`` survived a user move.
+
+    Returns:
+        List of ``{"version": DraftVersion, "uploader_label": str,
+        "is_first": bool}`` dicts in ``version_number ASC`` order.
+        ``uploader_label`` falls back to the user's email then the raw
+        UUID if the full name is missing.
+    """
+    versions = list_versions_for_draft(conn, draft_id)
+    versions_asc = sorted(versions, key=lambda v: v.version_number)
+    if not versions_asc:
+        return []
+
+    # Bulk-resolve uploader names. Org-scoped so the lookup matches the
+    # invariant that draft_versions inherit org from the parent draft.
+    uploaders: dict[str, dict[str, Any]] = {}
+    try:
+        uploaders = {str(u["id"]): u for u in list_users(org_id=str(org_id))}
+    except Exception:
+        # list_users already swallows DB errors and returns []; this
+        # except is a defensive belt-and-braces in case the helper
+        # signature changes. The timeline degrades to "uuid only".
+        logger.warning(
+            "version timeline: list_users failed for org=%s",
+            org_id,
+            exc_info=True,
+        )
+
+    rows: list[dict[str, Any]] = []
+    for idx, version in enumerate(versions_asc):
+        uploader = uploaders.get(str(version.created_by))
+        if uploader and uploader.get("full_name"):
+            uploader_label = uploader["full_name"]
+        elif uploader and uploader.get("email"):
+            uploader_label = uploader["email"]
+        else:
+            uploader_label = str(version.created_by)
+        rows.append(
+            {
+                "version": version,
+                "uploader_label": uploader_label,
+                "is_first": idx == 0,
+            }
+        )
+    return rows
+
+
+def _version_timeline_section(
+    draft: Draft,
+    timeline_rows: list[dict[str, Any]],
+) -> Any:
+    """Render the "Versioonide ajalugu" card (#618 PR-C).
+
+    Returns an empty string when no versions exist for the draft. In
+    practice migration 030's backfill guarantees every draft has at
+    least one version, but the empty-state branch keeps the helper
+    safe to call from tests that omit the version row.
+    """
+    if not timeline_rows:
+        return Card(
+            CardHeader(H3("Versioonide ajalugu", cls="card-title")),  # noqa: F405
+            CardBody(
+                P(  # noqa: F405
+                    "Sellel eelnõul ei ole salvestatud versioone.",
+                    cls="version-timeline-empty",
+                ),
+            ),
+            cls="version-timeline-card",
+        )
+
+    def _version_number_cell(row: dict[str, Any]) -> Any:
+        version: DraftVersion = row["version"]
+        return Span(f"v{version.version_number}", cls="version-number")  # noqa: F405
+
+    def _stage_cell(row: dict[str, Any]) -> Any:
+        version: DraftVersion = row["version"]
+        return Badge(
+            _format_reading_stage(version.reading_stage),
+            variant="primary",
+            cls=f"reading-stage reading-stage-{version.reading_stage}",
+        )
+
+    def _created_cell(row: dict[str, Any]) -> Any:
+        version: DraftVersion = row["version"]
+        return _format_timestamp(version.created_at)
+
+    def _uploader_cell(row: dict[str, Any]) -> Any:
+        return row["uploader_label"]
+
+    def _status_cell(row: dict[str, Any]) -> Any:
+        version: DraftVersion = row["version"]
+        return _status_badge(version.status)
+
+    def _actions_cell(row: dict[str, Any]) -> Any:
+        version: DraftVersion = row["version"]
+        # "Ava" — link to the report scoped to this version. The
+        # report route ignores the unknown query param today; PR-D
+        # (out of scope here) will wire it through to per-version
+        # rendering. Surfacing the link now keeps the timeline
+        # actionable from day one.
+        actions: list[Any] = [
+            LinkButton(
+                "Ava",
+                href=f"/drafts/{draft.id}/report?version={version.id}",
+                variant="secondary",
+                size="sm",
+            ),
+        ]
+        # "Erinevus" — diff this version against the previous one.
+        # Spec: from=v-1 to=v, addressed by version_number not UUID.
+        # v1 has no predecessor so we omit the button; the markup
+        # also reads cleaner than a disabled-button stub.
+        if not row["is_first"]:
+            actions.append(
+                LinkButton(
+                    "Erinevus",
+                    href=(
+                        f"/drafts/{draft.id}/diff"
+                        f"?from={version.version_number - 1}"
+                        f"&to={version.version_number}"
+                    ),
+                    variant="secondary",
+                    size="sm",
+                )
+            )
+        return Span(*actions, cls="version-timeline-actions")  # noqa: F405
+
+    columns = [
+        Column(
+            key="version_number", label="Versioon", sortable=False, render=_version_number_cell
+        ),
+        Column(key="stage", label="Lugemine", sortable=False, render=_stage_cell),
+        Column(key="created_at", label="Üles laaditud", sortable=False, render=_created_cell),
+        Column(key="uploader", label="Üleslaadija", sortable=False, render=_uploader_cell),
+        Column(key="status", label="Staatus", sortable=False, render=_status_cell),
+        Column(key="actions", label="Tegevused", sortable=False, render=_actions_cell),
+    ]
+
+    return Card(
+        CardHeader(H3("Versioonide ajalugu", cls="card-title")),  # noqa: F405
+        CardBody(DataTable(columns, timeline_rows)),
+        cls="version-timeline-card",
+    )
+
+
+def _diff_not_found_response(req: Request) -> Any:
+    """404 page used whenever the diff route can't resolve a version (#618 PR-C).
+
+    Re-uses :func:`_not_found_page` so the rendered shell and copy
+    match the rest of the drafts module — no version-specific
+    "not found" leak hints at whether a missing slot exists.
+    """
+    return _not_found_page(req)
+
+
+def draft_diff_page(req: Request, draft_id: str):
+    """GET /drafts/{draft_id}/diff?from=<v1>&to=<v2> — side-by-side diff.
+
+    The ``from`` and ``to`` query parameters are **version numbers**
+    (1-based ints), not UUIDs — easier to type, link, and bookmark.
+    Out-of-range or non-numeric values render the not-found page so
+    we never leak whether a particular version ever existed.
+
+    Org scoping is enforced by ``can_view_draft`` against the parent
+    draft (which is the source of truth for org membership;
+    ``draft_versions`` inherits org from its parent). Cross-org
+    callers receive a 404 page rather than a 403 so the route never
+    reveals draft existence.
+
+    The handler decrypts both versions' parsed text via
+    :func:`app.storage.encrypted.decrypt_text`, runs them through
+    :func:`compute_diff`, and renders the result with
+    :func:`render_diff_table` inside a :func:`PageShell` so the
+    diff opens directly from the timeline as a full page.
+    """
+    auth_or_redirect = _require_auth(req)
+    if isinstance(auth_or_redirect, Response):
+        return auth_or_redirect
+    auth = auth_or_redirect
+    theme = get_theme_from_request(req)
+
+    parsed = _parse_uuid(draft_id)
+    if parsed is None:
+        return _diff_not_found_response(req)
+
+    draft = fetch_draft(parsed)
+    if draft is None or not can_view_draft(auth, draft):
+        # 404 (not 403) so cross-org probing can't enumerate ids.
+        return _diff_not_found_response(req)
+
+    # Parse + validate the version-number query params. Both must
+    # exist, both must parse as positive ints, and from < to. We
+    # silently swap a reversed pair so deep links from the old
+    # timeline shape (where the action read "v2 vs v1") still work;
+    # this matches the spec's "from=v2&to=v1 swap" branch.
+    qp = req.query_params
+    from_raw = qp.get("from", "")
+    to_raw = qp.get("to", "")
+    try:
+        from_num = int(from_raw)
+        to_num = int(to_raw)
+    except (TypeError, ValueError):
+        return _diff_not_found_response(req)
+    if from_num <= 0 or to_num <= 0:
+        return _diff_not_found_response(req)
+    if from_num == to_num:
+        # Diff against itself: nothing useful to render. Redirect
+        # callers back to the detail page rather than serving an
+        # all-unchanged table that just wastes a page-load.
+        return _diff_not_found_response(req)
+    if from_num > to_num:
+        from_num, to_num = to_num, from_num
+
+    # Resolve both versions inside one connection so the lookups
+    # share a snapshot. ``list_versions_for_draft`` is cheaper than
+    # two version-number-keyed queries and gives us the existence
+    # check + decrypt source in a single pass.
+    try:
+        with _connect() as conn:
+            versions = list_versions_for_draft(conn, draft.id)
+    except Exception:
+        logger.exception(
+            "draft_diff_page: failed to list versions for draft=%s",
+            draft.id,
+        )
+        return _diff_not_found_response(req)
+
+    by_number: dict[int, DraftVersion] = {v.version_number: v for v in versions}
+    left_version = by_number.get(from_num)
+    right_version = by_number.get(to_num)
+    if left_version is None or right_version is None:
+        return _diff_not_found_response(req)
+
+    # Decrypt both texts. A missing ``parsed_text_encrypted`` (the
+    # parse pipeline hasn't run yet for this version) collapses to
+    # an empty string so the diff degrades gracefully — the UI
+    # surfaces the version's status badge anyway in the timeline.
+    from app.storage.encrypted import decrypt_text
+
+    def _decrypt_or_empty(version: DraftVersion) -> str:
+        if version.parsed_text_encrypted is None:
+            return ""
+        try:
+            return decrypt_text(version.parsed_text_encrypted)
+        except Exception:
+            logger.warning(
+                "draft_diff_page: decrypt failed for version=%s draft=%s",
+                version.id,
+                draft.id,
+                exc_info=True,
+            )
+            return ""
+
+    left_text = _decrypt_or_empty(left_version)
+    right_text = _decrypt_or_empty(right_version)
+    diff_rows = compute_diff(left_text, right_text)
+
+    # Audit log: surfacing an old version of a sensitive draft is a
+    # meaningful access event. Reuses the existing draft-view logger
+    # rather than minting a new audit code so dashboards keep working.
+    try:
+        log_draft_view(auth.get("id"), draft.id)
+    except Exception:
+        logger.warning("draft_diff_page: log_draft_view failed", exc_info=True)
+
+    title = f"{draft.title} — versioonide erinevus v{from_num} → v{to_num}"
+
+    return PageShell(
+        H1(  # noqa: F405
+            f"Versioonide erinevus v{from_num} → v{to_num}",
+            cls="page-title",
+        ),
+        P(  # noqa: F405
+            A(  # noqa: F405
+                f"← Tagasi eelnõu juurde: {draft.title}",
+                href=f"/drafts/{draft.id}",
+            ),
+            cls="back-link",
+        ),
+        Card(
+            CardHeader(
+                H3(  # noqa: F405
+                    (
+                        f"v{from_num} ({_format_reading_stage(left_version.reading_stage)}) "
+                        f"võrreldes v{to_num} "
+                        f"({_format_reading_stage(right_version.reading_stage)})"
+                    ),
+                    cls="card-title",
+                ),
+            ),
+            CardBody(render_diff_table(diff_rows)),
+        ),
+        title=title,
+        user=auth,
+        theme=theme,
+        active_nav="/drafts",
+        request=req,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Route registration
 # ---------------------------------------------------------------------------
 
@@ -2631,6 +3007,8 @@ def register_draft_routes(rt) -> None:  # type: ignore[no-untyped-def]
     rt("/drafts/{draft_id}/keep", methods=["POST"])(keep_draft_handler)
     rt("/drafts/{draft_id}/delete", methods=["POST"])(delete_draft_handler)
     rt("/drafts/{draft_id}/link-vtk", methods=["POST"])(link_vtk_handler)
+    # #618 PR-C: side-by-side diff between two versions of a draft.
+    rt("/drafts/{draft_id}/diff", methods=["GET"])(draft_diff_page)
     # #656: retry a failed draft's pipeline from the parse stage.
     from app.docs.retry_handler import retry_draft_handler
 
