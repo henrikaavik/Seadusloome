@@ -982,11 +982,11 @@ class TestDraftStatusFragment:
 
 
 class TestDeleteDraftHandler:
-    @patch("app.docs.routes.JobQueue")
-    @patch("app.docs.routes.log_draft_delete")
-    @patch("app.docs.routes.delete_draft")
-    @patch("app.docs.routes._connect")
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._lifecycle.JobQueue")
+    @patch("app.docs.routes._lifecycle.log_draft_delete")
+    @patch("app.docs.routes._lifecycle.delete_draft")
+    @patch("app.docs.routes._lifecycle._connect")
+    @patch("app.docs.routes._lifecycle.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_delete_removes_draft_and_enqueues_cleanup(
         self,
@@ -1051,7 +1051,7 @@ class TestDeleteDraftHandler:
         assert payload["storage_path"] == "/tmp/ciphertext.enc"
         assert payload["graph_uri"] == draft.graph_uri
 
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._lifecycle.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_delete_other_org_draft_returns_not_found(
         self,
@@ -1067,7 +1067,7 @@ class TestDeleteDraftHandler:
         assert resp.status_code == 200
         assert "Eelnõu ei leitud" in resp.text
 
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._lifecycle.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_delete_same_org_non_owner_returns_not_found(
         self,
@@ -1087,11 +1087,11 @@ class TestDeleteDraftHandler:
         assert resp.status_code == 200
         assert "Eelnõu ei leitud" in resp.text
 
-    @patch("app.docs.routes.JobQueue")
-    @patch("app.docs.routes.log_draft_delete")
-    @patch("app.docs.routes.delete_draft")
-    @patch("app.docs.routes._connect")
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._lifecycle.JobQueue")
+    @patch("app.docs.routes._lifecycle.log_draft_delete")
+    @patch("app.docs.routes._lifecycle.delete_draft")
+    @patch("app.docs.routes._lifecycle._connect")
+    @patch("app.docs.routes._lifecycle.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_delete_system_admin_cross_org_succeeds(
         self,
@@ -1129,11 +1129,11 @@ class TestDeleteDraftHandler:
         assert resp.headers["location"] == "/drafts"
         mock_delete.assert_called_once()
 
-    @patch("app.docs.routes.JobQueue")
-    @patch("app.docs.routes.log_draft_delete")
-    @patch("app.docs.routes.delete_draft")
-    @patch("app.docs.routes._connect")
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._lifecycle.JobQueue")
+    @patch("app.docs.routes._lifecycle.log_draft_delete")
+    @patch("app.docs.routes._lifecycle.delete_draft")
+    @patch("app.docs.routes._lifecycle._connect")
+    @patch("app.docs.routes._lifecycle.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_delete_draft_htmx_returns_hx_redirect(
         self,
@@ -1271,11 +1271,11 @@ class TestUploadPrecheck:
 class TestFlashMessages:
     @patch("app.docs.routes.list_users")
     @patch("app.docs.routes.list_drafts_for_org_filtered")
-    @patch("app.docs.routes.JobQueue")
-    @patch("app.docs.routes.log_draft_delete")
-    @patch("app.docs.routes.delete_draft")
-    @patch("app.docs.routes._connect")
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._lifecycle.JobQueue")
+    @patch("app.docs.routes._lifecycle.log_draft_delete")
+    @patch("app.docs.routes._lifecycle.delete_draft")
+    @patch("app.docs.routes._lifecycle._connect")
+    @patch("app.docs.routes._lifecycle.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_delete_flash_toast_appears_on_listing(
         self,
@@ -1362,10 +1362,10 @@ class TestFlashMessages:
         assert "Eelnõu üles laaditud, analüüs algas." in detail.text
         assert "toast-success" in detail.text
 
-    @patch("app.docs.routes.touch_draft_access")
-    @patch("app.docs.routes._connect")
+    @patch("app.docs.routes._lifecycle.touch_draft_access")
+    @patch("app.docs.routes._lifecycle._connect")
     @patch("app.docs.routes.log_draft_view")
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._lifecycle.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_keep_flashes_toast_on_detail(
         self,
