@@ -636,8 +636,8 @@ class TestCreateDraftHandler:
 
 
 class TestDraftDetailPage:
-    @patch("app.docs.routes.log_draft_view")
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail.log_draft_view")
+    @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_draft_in_own_org_renders(
         self,
@@ -663,7 +663,7 @@ class TestDraftDetailPage:
         # Audit log was written.
         mock_log.assert_called_once()
 
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_draft_in_other_org_returns_404_page(
         self,
@@ -685,7 +685,7 @@ class TestDraftDetailPage:
         assert "Eelnõu ei leitud" in resp.text
         assert "Minu eelnõu" not in resp.text
 
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_missing_draft_returns_404_page(
         self,
@@ -701,7 +701,7 @@ class TestDraftDetailPage:
         assert resp.status_code == 200
         assert "Eelnõu ei leitud" in resp.text
 
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_ready_draft_shows_report_link(
         self,
@@ -721,7 +721,7 @@ class TestDraftDetailPage:
         # No polling for terminal statuses.
         assert "every 3s" not in resp.text
 
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_failed_draft_shows_error_message(
         self,
@@ -742,7 +742,7 @@ class TestDraftDetailPage:
         assert "Tika teenus on kättesaamatu." in resp.text
         assert "every 3s" not in resp.text
 
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_delete_draft_has_confirmation(
         self,
@@ -787,7 +787,7 @@ class TestDraftDetailPage:
 
 
 class TestDraftStatusFragment:
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_status_fragment_returns_partial_without_shell(
         self,
@@ -814,7 +814,7 @@ class TestDraftStatusFragment:
         assert "Olemite eraldamine" in resp.text
         assert f"draft-status-{draft.id}" in resp.text
 
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_status_fragment_other_org_returns_placeholder(
         self,
@@ -830,7 +830,7 @@ class TestDraftStatusFragment:
         assert resp.status_code == 200
         assert "Eelnõu ei leitud" in resp.text
 
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_status_fragment_keeps_polling_when_recently_updated(
         self,
@@ -867,7 +867,7 @@ class TestDraftStatusFragment:
         assert 'hx-trigger="every 10s"' in resp.text
         assert "Vajab tähelepanu" not in resp.text
 
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_status_fragment_shows_elapsed_and_typical_range(
         self,
@@ -892,7 +892,7 @@ class TestDraftStatusFragment:
         # The ticker script must be included on the fragment.
         assert "draft-stage-elapsed" in resp.text
 
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_status_fragment_poll_backoff_fresh_is_3s(
         self,
@@ -914,7 +914,7 @@ class TestDraftStatusFragment:
         assert resp.status_code == 200
         assert 'hx-trigger="every 3s"' in resp.text
 
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_status_fragment_poll_backoff_medium_is_6s(
         self,
@@ -936,7 +936,7 @@ class TestDraftStatusFragment:
         assert resp.status_code == 200
         assert 'hx-trigger="every 6s"' in resp.text
 
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_status_fragment_marks_stale_when_updated_at_is_old(
         self,
@@ -1223,8 +1223,8 @@ class TestHxIndicator:
         assert 'hx-indicator=".upload-spinner"' in body
         assert "upload-spinner" in body
 
-    @patch("app.docs.routes.log_draft_view")
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail.log_draft_view")
+    @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_delete_form_has_hx_indicator(
         self,
@@ -1322,8 +1322,8 @@ class TestFlashMessages:
 
     @patch("app.docs.routes._upload.log_draft_upload")
     @patch("app.docs.routes._upload.handle_upload")
-    @patch("app.docs.routes.log_draft_view")
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail.log_draft_view")
+    @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_upload_success_flashes_toast_on_detail(
         self,
@@ -1364,7 +1364,7 @@ class TestFlashMessages:
 
     @patch("app.docs.routes._lifecycle.touch_draft_access")
     @patch("app.docs.routes._lifecycle._connect")
-    @patch("app.docs.routes.log_draft_view")
+    @patch("app.docs.routes._detail.log_draft_view")
     @patch("app.docs.routes._lifecycle.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_keep_flashes_toast_on_detail(
@@ -1399,7 +1399,7 @@ class TestFlashMessages:
 
 
 class TestDraftReadyTrigger:
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_status_fragment_emits_hx_trigger_when_ready(
         self,
@@ -1417,7 +1417,7 @@ class TestDraftReadyTrigger:
         # listens for (``hx-trigger="draft-ready from:body"``).
         assert resp.headers.get("hx-trigger") == "draft-ready"
 
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_status_fragment_no_trigger_while_still_running(
         self,
@@ -1434,8 +1434,8 @@ class TestDraftReadyTrigger:
         # No HX-Trigger header while the draft is still pre-ready.
         assert resp.headers.get("hx-trigger") is None
 
-    @patch("app.docs.routes.log_draft_view")
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail.log_draft_view")
+    @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_actions_container_wired_for_draft_ready(
         self,
@@ -1457,7 +1457,7 @@ class TestDraftReadyTrigger:
         assert 'hx-trigger="draft-ready from:body"' in body
         assert f'hx-get="/drafts/{draft.id}/actions"' in body
 
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_actions_fragment_renders_report_cta_when_ready(
         self,
@@ -1481,8 +1481,8 @@ class TestDraftReadyTrigger:
 
 
 class TestGraphUriHidden:
-    @patch("app.docs.routes.log_draft_view")
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail.log_draft_view")
+    @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_detail_page_does_not_render_graph_uri(
         self,
@@ -1508,8 +1508,8 @@ class TestGraphUriHidden:
 
 
 class TestStatusAriaLive:
-    @patch("app.docs.routes.log_draft_view")
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail.log_draft_view")
+    @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_status_wrapper_has_aria_live_polite(
         self,
@@ -1724,11 +1724,11 @@ class TestUploadWithVtkLinking:
 
 
 class TestLinkVtkHandler:
-    @patch("app.docs.routes.write_doc_lineage")
-    @patch("app.docs.routes.log_action")
-    @patch("app.docs.routes.update_draft_parent_vtk")
-    @patch("app.docs.routes._connect")
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail.write_doc_lineage")
+    @patch("app.docs.routes._detail.log_action")
+    @patch("app.docs.routes._detail.update_draft_parent_vtk")
+    @patch("app.docs.routes._detail._connect")
+    @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_link_vtk_happy_path_returns_metadata_fragment(
         self,
@@ -1766,8 +1766,8 @@ class TestLinkVtkHandler:
         mock_write_lineage.assert_called_once()
         assert 'id="draft-metadata"' in resp.text
 
-    @patch("app.docs.routes._connect")
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail._connect")
+    @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_link_vtk_cross_org_rejected(
         self,
@@ -1795,7 +1795,7 @@ class TestLinkVtkHandler:
         assert resp.status_code == 400
         assert "Valitud VTK ei ole kättesaadav." in resp.text
 
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_link_vtk_non_owner_returns_not_found(
         self,
@@ -1818,8 +1818,8 @@ class TestLinkVtkHandler:
 
 
 class TestLinkVtkModalOnDetailPage:
-    @patch("app.docs.routes.list_vtks_for_org")
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail.list_vtks_for_org")
+    @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_detail_page_renders_link_vtk_modal_for_owner(
         self,
@@ -1886,9 +1886,9 @@ class TestDocTypeColumn:
 class TestVtkDetailChildrenCard:
     """VTK detail page surfaces its follow-on eelnõud."""
 
-    @patch("app.docs.routes.list_eelnous_for_vtk")
-    @patch("app.docs.routes.list_vtks_for_org")
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail.list_eelnous_for_vtk")
+    @patch("app.docs.routes._detail.list_vtks_for_org")
+    @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_vtk_detail_does_not_show_seotud_vtk_row(
         self,
@@ -1914,10 +1914,10 @@ class TestVtkDetailChildrenCard:
         assert "<dt>Seotud VTK</dt>" not in resp.text
         assert "Seo VTKga" not in resp.text
 
-    @patch("app.docs.routes.list_users")
-    @patch("app.docs.routes.list_eelnous_for_vtk")
-    @patch("app.docs.routes.list_vtks_for_org")
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail.list_users")
+    @patch("app.docs.routes._detail.list_eelnous_for_vtk")
+    @patch("app.docs.routes._detail.list_vtks_for_org")
+    @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_vtk_detail_lists_children_newest_first(
         self,
@@ -1976,9 +1976,9 @@ class TestVtkDetailChildrenCard:
         # layer — no post-filter in the route.
         assert mock_list_children.call_args.kwargs["org_id"] == uuid.UUID(_ORG_ID)
 
-    @patch("app.docs.routes.list_eelnous_for_vtk")
-    @patch("app.docs.routes.list_vtks_for_org")
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail.list_eelnous_for_vtk")
+    @patch("app.docs.routes._detail.list_vtks_for_org")
+    @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_vtk_detail_with_no_children_shows_empty_state(
         self,
@@ -2000,9 +2000,9 @@ class TestVtkDetailChildrenCard:
         assert "Sellest VTKst tulenevad eelnõud" in resp.text
         assert "VTKga pole veel eelnõusid seotud." in resp.text
 
-    @patch("app.docs.routes.list_eelnous_for_vtk")
-    @patch("app.docs.routes.list_vtks_for_org")
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail.list_eelnous_for_vtk")
+    @patch("app.docs.routes._detail.list_vtks_for_org")
+    @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_eelnou_detail_does_not_render_children_card(
         self,
@@ -2028,9 +2028,9 @@ class TestVtkDetailChildrenCard:
 class TestListEelnousForVtkHelper:
     """Route-level wiring of the children helper."""
 
-    @patch("app.docs.routes.list_eelnous_for_vtk")
-    @patch("app.docs.routes.list_vtks_for_org")
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail.list_eelnous_for_vtk")
+    @patch("app.docs.routes._detail.list_vtks_for_org")
+    @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_route_passes_org_id_to_helper(
         self,
@@ -2223,7 +2223,7 @@ class TestRetryFailedDraft:
         assert resp.status_code == 303
         assert resp.headers["location"] == "/auth/login"
 
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_failed_detail_page_renders_retry_button(
         self,
@@ -2282,7 +2282,7 @@ class TestResetDraftForRetrySql:
 class TestElapsedCounterTerminalStates:
     """Live ticker must stop on terminal drafts and format hours correctly."""
 
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_ready_draft_does_not_render_live_ticker(
         self,
@@ -2314,7 +2314,7 @@ class TestElapsedCounterTerminalStates:
         # without pinning the exact value under test-run clock jitter.
         assert "Analüüsitud" in resp.text
 
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_failed_draft_does_not_render_live_ticker(
         self,
@@ -2343,7 +2343,7 @@ class TestElapsedCounterTerminalStates:
         assert "möödas" not in resp.text
         assert "__draftElapsedTimer" not in resp.text
 
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_multi_hour_elapsed_formats_as_h_mm_ss(
         self,
@@ -2362,7 +2362,7 @@ class TestElapsedCounterTerminalStates:
         assert _format_elapsed(3661) == "1:01:01 möödas"
         assert _format_elapsed(36000) == "10:00:00 möödas"
 
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_ticker_script_clears_interval_when_no_nodes(
         self,
@@ -2453,7 +2453,7 @@ class TestProcessingCompletedAtFreeze:
         draft.created_at = None  # type: ignore[assignment]
         assert _processing_duration_seconds(draft) is None
 
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_ready_draft_rename_does_not_inflate_label(
         self,
@@ -2687,9 +2687,9 @@ def _stub_connect(mock_connect: MagicMock) -> MagicMock:
 class TestVersionTimelineOnDetailPage:
     """The detail page renders a "Versioonide ajalugu" card with one row per version."""
 
-    @patch("app.docs.routes._version_timeline_rows")
-    @patch("app.docs.routes._connect")
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail._version_timeline_rows")
+    @patch("app.docs.routes._detail._connect")
+    @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_renders_one_row_per_version_in_ascending_order(
         self,
@@ -2743,9 +2743,9 @@ class TestVersionTimelineOnDetailPage:
         assert "Mari Maasikas" in body
         assert "Jüri Mustikas" in body
 
-    @patch("app.docs.routes._version_timeline_rows")
-    @patch("app.docs.routes._connect")
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail._version_timeline_rows")
+    @patch("app.docs.routes._detail._connect")
+    @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_first_version_has_no_diff_button(
         self,
@@ -2783,9 +2783,9 @@ class TestVersionTimelineOnDetailPage:
         # No diff link starting at version 0 (would be a v1 button).
         assert "from=0" not in body
 
-    @patch("app.docs.routes._version_timeline_rows")
-    @patch("app.docs.routes._connect")
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail._version_timeline_rows")
+    @patch("app.docs.routes._detail._connect")
+    @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_every_version_has_open_button(
         self,
@@ -2822,9 +2822,9 @@ class TestVersionTimelineOnDetailPage:
 class TestDraftDiffPage:
     """GET /drafts/{draft_id}/diff?from=<v1>&to=<v2> — side-by-side diff page."""
 
-    @patch("app.docs.routes.list_versions_for_draft")
-    @patch("app.docs.routes._connect")
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail_versions.list_versions_for_draft")
+    @patch("app.docs.routes._detail_versions._connect")
+    @patch("app.docs.routes._detail_versions.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_valid_request_renders_diff_table(
         self,
@@ -2873,7 +2873,7 @@ class TestDraftDiffPage:
         # Back-link to the parent draft.
         assert f"/drafts/{draft.id}" in body
 
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail_versions.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_cross_org_returns_not_found_page(
         self,
@@ -2894,9 +2894,9 @@ class TestDraftDiffPage:
         # The diff table must NOT render for an unauthorised viewer.
         assert "diff-table" not in resp.text
 
-    @patch("app.docs.routes.list_versions_for_draft")
-    @patch("app.docs.routes._connect")
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail_versions.list_versions_for_draft")
+    @patch("app.docs.routes._detail_versions._connect")
+    @patch("app.docs.routes._detail_versions.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_nonexistent_version_number_returns_not_found(
         self,
@@ -2920,7 +2920,7 @@ class TestDraftDiffPage:
         assert "Eelnõu ei leitud" in resp.text
         assert "diff-table" not in resp.text
 
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail_versions.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_missing_query_params_returns_not_found(
         self,
@@ -2938,7 +2938,7 @@ class TestDraftDiffPage:
         assert resp.status_code == 200
         assert "Eelnõu ei leitud" in resp.text
 
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail_versions.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_non_numeric_query_params_returns_not_found(
         self,
@@ -2956,9 +2956,9 @@ class TestDraftDiffPage:
         assert resp.status_code == 200
         assert "Eelnõu ei leitud" in resp.text
 
-    @patch("app.docs.routes.list_versions_for_draft")
-    @patch("app.docs.routes._connect")
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail_versions.list_versions_for_draft")
+    @patch("app.docs.routes._detail_versions._connect")
+    @patch("app.docs.routes._detail_versions.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_swapped_from_to_pair_is_normalised(
         self,
@@ -2997,7 +2997,7 @@ class TestDraftDiffPage:
         assert "Versioonide erinevus v1" in body
         assert "diff-table" in body
 
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._detail_versions.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_same_version_compared_to_itself_returns_not_found(
         self,
