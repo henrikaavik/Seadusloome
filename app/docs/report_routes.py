@@ -27,6 +27,21 @@ from fasthtml.common import *  # noqa: F403
 from starlette.requests import Request
 from starlette.responses import FileResponse, Response
 
+from app.annotations.row_keys import (
+    collect_row_specs as _collect_row_specs,
+)
+from app.annotations.row_keys import (
+    row_key_for_conflict as _row_key_for_conflict,
+)
+from app.annotations.row_keys import (
+    row_key_for_entity as _row_key_for_entity,
+)
+from app.annotations.row_keys import (
+    row_key_for_eu as _row_key_for_eu,
+)
+from app.annotations.row_keys import (
+    row_key_for_gap as _row_key_for_gap,
+)
 from app.auth.audit import log_action
 from app.auth.helpers import require_auth as _require_auth
 from app.auth.policy import can_view_draft
@@ -115,6 +130,133 @@ def _short_type(uri: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Annotation side-panel container + per-row trigger button (PR-C)
+# ---------------------------------------------------------------------------
+#
+# Row-key formulas live in :mod:`app.annotations.row_keys` (the §9.4
+# contract) so both the renderer and the analyze handler share the SAME
+# code path.  Helpers below glue those keys to the side-panel UI.
+
+# Container ID matches ``app/annotations/routes.py::_SIDE_PANEL_ID`` so the
+# PR-B GET handler can swap its fragment in via hx_target.  Rendered ONCE per
+# report page below; every row's trigger button targets this same container.
+_ANNOTATION_SIDE_PANEL_ID = "annotation-side-panel"
+
+
+def _annotation_side_panel_container() -> Any:
+    """Render the empty side-panel container the row buttons swap into.
+
+    Lives once per report page right before the section cards.  When a
+    user clicks an AnnotationButton the PR-B GET handler returns the
+    side-panel fragment which HTMX swaps into ``innerHTML`` of this Div.
+    """
+    return Div(  # noqa: F405
+        id=_ANNOTATION_SIDE_PANEL_ID,
+        cls="annotation-side-panel",
+        # ARIA role keeps the empty container a valid landmark even
+        # before the first fragment lands inside it.
+        role="complementary",
+        aria_label="Märkuste paneel",
+    )
+
+
+def _row_annotation_button(
+    draft_version_id: str,
+    row_kind: str,
+    row_key: str,
+    unresolved_count: int,
+) -> Any:
+    """Per-row trigger button: opens the side panel for that row's thread.
+
+    Distinct from the canonical ``AnnotationButton`` primitive (which is
+    hard-coded to ``/api/annotations`` + a popover container) because the
+    row-annotation flow uses the §9.4 version-scoped routes from PR-B and
+    targets the page-wide :func:`_annotation_side_panel_container`.
+    Returns an empty string when ``draft_version_id`` or ``row_key`` is
+    missing — the row simply has no annotation affordance in that case
+    (e.g. a legacy report without a version FK).
+    """
+    if not draft_version_id or not row_key:
+        return ""
+
+    badge: Any = ""
+    if unresolved_count > 0:
+        badge = Badge(
+            str(unresolved_count),
+            variant="primary",
+            cls="annotation-count-badge",
+        )
+
+    base = f"/annotations/version/{draft_version_id}/{row_kind}/{row_key}"
+    return Button(  # noqa: F405
+        NotStr("&#128172;"),  # noqa: F405  # speech balloon glyph
+        badge,
+        type="button",
+        hx_get=base,
+        hx_target=f"#{_ANNOTATION_SIDE_PANEL_ID}",
+        hx_swap="innerHTML",
+        cls="annotation-button annotation-row-button",
+        aria_label=f"Ava märkuste paneel ({unresolved_count} lahendamata)",
+        title="Ava märkuste paneel",
+        # Data attrs make the button addressable from tests + future JS
+        # without parsing the URL again.
+        data_row_kind=row_kind,
+        data_row_key=row_key,
+        data_draft_version_id=draft_version_id,
+    )
+
+
+def _load_unresolved_counts(
+    draft_version_id: str,
+    row_specs: list[tuple[str, str]],
+) -> dict[tuple[str, str], int]:
+    """Bulk-load unresolved badge counts for every row in one report page.
+
+    One COUNT(*) per row would be O(rows) round-trips; we instead issue one
+    grouped query that returns the unresolved count per ``target_id`` and
+    then partition by ``row_kind``.  Falls back to an empty dict on any
+    failure so the page still renders without badges.
+    """
+    if not draft_version_id or not row_specs:
+        return {}
+    target_ids = [f"{kind}:{key}" for kind, key in row_specs if key]
+    if not target_ids:
+        return {}
+    try:
+        with _connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT target_id, COUNT(*)
+                FROM annotations
+                WHERE draft_version_id = %s
+                  AND target_type = 'impact_report_item'
+                  AND target_id = ANY(%s)
+                  AND resolved = FALSE
+                GROUP BY target_id
+                """,
+                (str(draft_version_id), target_ids),
+            ).fetchall()
+    except Exception:
+        logger.warning(
+            "_load_unresolved_counts failed for version=%s",
+            draft_version_id,
+            exc_info=True,
+        )
+        return {}
+    out: dict[tuple[str, str], int] = {}
+    for row in rows:
+        target_id = str(row[0] or "")
+        if ":" not in target_id:
+            continue
+        kind, key = target_id.split(":", 1)
+        try:
+            out[(kind, key)] = int(row[1])
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+# ---------------------------------------------------------------------------
 # DB helpers
 # ---------------------------------------------------------------------------
 
@@ -185,6 +327,37 @@ def _fetch_latest_report(draft_id: uuid.UUID) -> tuple | None:
     except Exception:
         logger.exception("_fetch_latest_report failed for draft=%s", draft_id)
         return None
+
+
+def _fetch_latest_report_version_id(report_id: uuid.UUID | str) -> str | None:
+    """Look up the ``draft_version_id`` for an ``impact_reports`` row.
+
+    Kept as a separate query (not folded into ``_REPORT_SELECT_COLUMNS``)
+    so the column-index contract shared with :mod:`app.docs.docx_export` —
+    and locked in by every existing report-page test — stays untouched.
+
+    Returns:
+        The version FK as a string, or ``None`` when missing / on DB error.
+        ``None`` is the right sentinel because :func:`_row_annotation_button`
+        gracefully renders no button when *draft_version_id* is empty, which
+        is exactly the legacy-row degraded behaviour we want.
+    """
+    try:
+        with _connect() as conn:
+            row = conn.execute(
+                "SELECT draft_version_id FROM impact_reports WHERE id = %s",
+                (str(report_id),),
+            ).fetchone()
+    except Exception:
+        logger.warning(
+            "_fetch_latest_report_version_id failed for report=%s",
+            report_id,
+            exc_info=True,
+        )
+        return None
+    if row is None or row[0] is None:
+        return None
+    return str(row[0])
 
 
 def _parse_report_data(raw: Any) -> dict[str, Any]:
@@ -277,7 +450,39 @@ _SECTION_EU = "eu"
 _SECTION_GAPS = "gaps"
 
 
-def _affected_columns() -> list[Column]:
+def _annotation_column(
+    row_kind: str,
+    draft_version_id: str,
+    counts: dict[tuple[str, str], int],
+    key_for_row: Any,
+) -> Column:
+    """Build the trailing "Märkused" column that hosts :func:`_row_annotation_button`.
+
+    Used by every section's ``_*_columns`` builder so the annotation button
+    sits in a consistent slot at the end of every table.  ``key_for_row``
+    is the row-kind-specific row_key formula (e.g. :func:`_row_key_for_entity`).
+    """
+
+    def _render(row: dict[str, Any]) -> Any:
+        row_key = key_for_row(row)
+        if not row_key:
+            return ""
+        unresolved = counts.get((row_kind, row_key), 0)
+        return _row_annotation_button(draft_version_id, row_kind, row_key, unresolved)
+
+    return Column(
+        key="_annotation",
+        label="Märkused",
+        sortable=False,
+        align="center",
+        render=_render,
+    )
+
+
+def _affected_columns(
+    draft_version_id: str = "",
+    counts: dict[tuple[str, str], int] | None = None,
+) -> list[Column]:
     def _type_cell(row: dict[str, Any]):
         return _short_type(str(row.get("type", "")))
 
@@ -294,14 +499,22 @@ def _affected_columns() -> list[Column]:
             cls="data-table-link",
         )
 
-    return [
+    cols: list[Column] = [
         Column(key="type", label="Tüüp", sortable=False, render=_type_cell),
         Column(key="label", label="Nimetus", sortable=False, render=_label_cell),
         Column(key="uri", label="URI", sortable=False, render=_uri_cell),
     ]
+    if draft_version_id:
+        cols.append(
+            _annotation_column("entity", draft_version_id, counts or {}, _row_key_for_entity)
+        )
+    return cols
 
 
-def _conflicts_columns() -> list[Column]:
+def _conflicts_columns(
+    draft_version_id: str = "",
+    counts: dict[tuple[str, str], int] | None = None,
+) -> list[Column]:
     def _draft_ref(row: dict[str, Any]):
         return str(row.get("draft_ref") or "—")
 
@@ -319,7 +532,7 @@ def _conflicts_columns() -> list[Column]:
     def _reason(row: dict[str, Any]):
         return str(row.get("reason") or "—")
 
-    return [
+    cols: list[Column] = [
         Column(key="draft_ref", label="Eelnõu viide", sortable=False, render=_draft_ref),
         Column(
             key="conflicting_entity",
@@ -329,9 +542,17 @@ def _conflicts_columns() -> list[Column]:
         ),
         Column(key="reason", label="Põhjus", sortable=False, render=_reason),
     ]
+    if draft_version_id:
+        cols.append(
+            _annotation_column("conflict", draft_version_id, counts or {}, _row_key_for_conflict)
+        )
+    return cols
 
 
-def _eu_columns() -> list[Column]:
+def _eu_columns(
+    draft_version_id: str = "",
+    counts: dict[tuple[str, str], int] | None = None,
+) -> list[Column]:
     def _eu_act(row: dict[str, Any]):
         uri = str(row.get("eu_act") or "")
         label = str(row.get("eu_label") or uri or "—")
@@ -349,14 +570,20 @@ def _eu_columns() -> list[Column]:
     def _status(row: dict[str, Any]):
         return str(row.get("transposition_status") or "—")
 
-    return [
+    cols: list[Column] = [
         Column(key="eu_act", label="EL õigusakt", sortable=False, render=_eu_act),
         Column(key="provision", label="Eesti säte", sortable=False, render=_ee_provision),
         Column(key="status", label="Staatus", sortable=False, render=_status),
     ]
+    if draft_version_id:
+        cols.append(_annotation_column("eu", draft_version_id, counts or {}, _row_key_for_eu))
+    return cols
 
 
-def _gaps_columns() -> list[Column]:
+def _gaps_columns(
+    draft_version_id: str = "",
+    counts: dict[tuple[str, str], int] | None = None,
+) -> list[Column]:
     def _cluster(row: dict[str, Any]):
         return str(row.get("topic_cluster_label") or row.get("topic_cluster") or "—")
 
@@ -366,36 +593,52 @@ def _gaps_columns() -> list[Column]:
     def _description(row: dict[str, Any]):
         return str(row.get("description") or "—")
 
-    return [
+    cols: list[Column] = [
         Column(key="cluster", label="Teemaklaster", sortable=False, render=_cluster),
         Column(key="coverage", label="Sätete kaetus", sortable=False, render=_coverage),
         Column(key="description", label="Kirjeldus", sortable=False, render=_description),
     ]
+    if draft_version_id:
+        cols.append(_annotation_column("gap", draft_version_id, counts or {}, _row_key_for_gap))
+    return cols
 
 
-# Section → (findings key, columns builder, empty message). Used by
-# the "Näita rohkem" route to look up the source rows + column shape
-# from just the URL slug.
-_SECTION_CONFIG: dict[str, tuple[str, Any, str]] = {
+# Section → (findings key, columns builder, empty message, row_kind, key_for_row).
+# Used by the "Näita rohkem" route to look up the source rows + column shape
+# + per-row annotation row_key formula from just the URL slug.
+#
+# row_kind / key_for_row are required because the paginated fragment must
+# also render the AnnotationButton column with the correct §9.4 keys.  The
+# columns builder accepts ``draft_version_id`` and ``counts`` so the
+# annotation column can attach its badge state.
+_SECTION_CONFIG: dict[str, tuple[str, Any, str, str, Any]] = {
     _SECTION_AFFECTED: (
         "affected_entities",
         _affected_columns,
         "Mõjutatud üksuseid ei tuvastatud.",
+        "entity",
+        _row_key_for_entity,
     ),
     _SECTION_CONFLICTS: (
         "conflicts",
         _conflicts_columns,
         "Konflikte ei tuvastatud.",
+        "conflict",
+        _row_key_for_conflict,
     ),
     _SECTION_EU: (
         "eu_compliance",
         _eu_columns,
         "EL-i õigusaktide seoseid ei tuvastatud.",
+        "eu",
+        _row_key_for_eu,
     ),
     _SECTION_GAPS: (
         "gaps",
         _gaps_columns,
         "Lünki ei tuvastatud.",
+        "gap",
+        _row_key_for_gap,
     ),
 }
 
@@ -439,7 +682,13 @@ def _section_pager(
     return Div(*children, id=pager_id, cls="section-pager")  # noqa: F405
 
 
-def _affected_entities_section(findings: dict[str, Any], draft_id: str = "") -> Any:
+def _affected_entities_section(
+    findings: dict[str, Any],
+    draft_id: str = "",
+    *,
+    draft_version_id: str = "",
+    counts: dict[tuple[str, str], int] | None = None,
+) -> Any:
     """Build the "Mõjutatud üksused" data table section."""
     rows = list(findings.get("affected_entities") or [])
     total = len(rows)
@@ -448,7 +697,7 @@ def _affected_entities_section(findings: dict[str, Any], draft_id: str = "") -> 
 
     body_children: list = [
         DataTable(
-            columns=_affected_columns(),
+            columns=_affected_columns(draft_version_id, counts),
             rows=table_rows,
             empty_message="Mõjutatud üksuseid ei tuvastatud.",
         ),
@@ -462,7 +711,13 @@ def _affected_entities_section(findings: dict[str, Any], draft_id: str = "") -> 
     )
 
 
-def _conflicts_section(findings: dict[str, Any], draft_id: str = "") -> Any:
+def _conflicts_section(
+    findings: dict[str, Any],
+    draft_id: str = "",
+    *,
+    draft_version_id: str = "",
+    counts: dict[tuple[str, str], int] | None = None,
+) -> Any:
     """Build the "Konfliktid" section."""
     rows = list(findings.get("conflicts") or [])
     total = len(rows)
@@ -476,7 +731,7 @@ def _conflicts_section(findings: dict[str, Any], draft_id: str = "") -> Any:
     else:
         visible = rows[:_MAX_INLINE_ROWS]
         body = DataTable(
-            columns=_conflicts_columns(),
+            columns=_conflicts_columns(draft_version_id, counts),
             rows=visible,
             empty_message="Konflikte ei tuvastatud.",
         )
@@ -502,7 +757,13 @@ def _conflicts_section(findings: dict[str, Any], draft_id: str = "") -> Any:
     )
 
 
-def _eu_compliance_section(findings: dict[str, Any], draft_id: str = "") -> Any:
+def _eu_compliance_section(
+    findings: dict[str, Any],
+    draft_id: str = "",
+    *,
+    draft_version_id: str = "",
+    counts: dict[tuple[str, str], int] | None = None,
+) -> Any:
     """Build the "EL-i õigusaktide vastavus" section."""
     rows = list(findings.get("eu_compliance") or [])
     total = len(rows)
@@ -510,7 +771,7 @@ def _eu_compliance_section(findings: dict[str, Any], draft_id: str = "") -> Any:
 
     body_children: list = [
         DataTable(
-            columns=_eu_columns(),
+            columns=_eu_columns(draft_version_id, counts),
             rows=visible,
             empty_message="EL-i õigusaktide seoseid ei tuvastatud.",
         ),
@@ -534,7 +795,13 @@ def _eu_compliance_section(findings: dict[str, Any], draft_id: str = "") -> Any:
     )
 
 
-def _gaps_section(findings: dict[str, Any], draft_id: str = "") -> Any:
+def _gaps_section(
+    findings: dict[str, Any],
+    draft_id: str = "",
+    *,
+    draft_version_id: str = "",
+    counts: dict[tuple[str, str], int] | None = None,
+) -> Any:
     """Build the "Lüngad" section."""
     rows = list(findings.get("gaps") or [])
     total = len(rows)
@@ -542,7 +809,7 @@ def _gaps_section(findings: dict[str, Any], draft_id: str = "") -> Any:
 
     body_children: list = [
         DataTable(
-            columns=_gaps_columns(),
+            columns=_gaps_columns(draft_version_id, counts),
             rows=visible,
             empty_message="Lünki ei tuvastatud.",
         ),
@@ -657,6 +924,17 @@ def draft_report_page(req: Request, draft_id: str):
 
     findings = _parse_report_data(report_row[6])
 
+    # #619 PR-C: per-row annotations.  Look up the version FK that PR-A
+    # backfilled so each row's AnnotationButton can target the §9.4
+    # /annotations/version/{id}/{kind}/{key} routes.  Bulk-load the
+    # unresolved counts in one DB round-trip so badge rendering is O(1)
+    # per row instead of O(N) queries.
+    draft_version_id = _fetch_latest_report_version_id(report_row[0]) or ""
+    row_specs = _collect_row_specs(findings)
+    unresolved_counts = (
+        _load_unresolved_counts(draft_version_id, row_specs) if draft_version_id else {}
+    )
+
     # #612: detect ontology-version drift. The report's snapshot tag
     # lives in report_row[7]; if it no longer matches the live Jena
     # sync_log snapshot, surface a banner offering a one-click re-run.
@@ -743,10 +1021,34 @@ def draft_report_page(req: Request, draft_id: str):
     )
     return PageShell(
         *shell_children,
-        _affected_entities_section(findings, draft_id=str(draft.id)),
-        _conflicts_section(findings, draft_id=str(draft.id)),
-        _eu_compliance_section(findings, draft_id=str(draft.id)),
-        _gaps_section(findings, draft_id=str(draft.id)),
+        # #619 PR-C: side-panel container is rendered ONCE on the page.
+        # Every row's AnnotationButton swaps the PR-B fragment into this
+        # element.  Empty-state skeleton until the user clicks a row.
+        _annotation_side_panel_container(),
+        _affected_entities_section(
+            findings,
+            draft_id=str(draft.id),
+            draft_version_id=draft_version_id,
+            counts=unresolved_counts,
+        ),
+        _conflicts_section(
+            findings,
+            draft_id=str(draft.id),
+            draft_version_id=draft_version_id,
+            counts=unresolved_counts,
+        ),
+        _eu_compliance_section(
+            findings,
+            draft_id=str(draft.id),
+            draft_version_id=draft_version_id,
+            counts=unresolved_counts,
+        ),
+        _gaps_section(
+            findings,
+            draft_id=str(draft.id),
+            draft_version_id=draft_version_id,
+            counts=unresolved_counts,
+        ),
         _export_section(draft),
         # #610: progressive enhancement — opens a WebSocket subscription
         # to /ws/drafts/export-progress when the spinner fragment lands
@@ -857,7 +1159,7 @@ def report_section_fragment(req: Request, draft_id: str, section: str):
     config = _SECTION_CONFIG.get(section)
     if config is None:
         return _not_found_page(req)
-    findings_key, columns_builder, empty_message = config
+    findings_key, columns_builder, empty_message, row_kind, key_for_row = config
 
     try:
         offset = max(0, int(req.query_params.get("offset", "0")))
@@ -882,11 +1184,22 @@ def report_section_fragment(req: Request, draft_id: str, section: str):
     if section == _SECTION_AFFECTED:
         batch = [{"_": True, **row} for row in batch]
 
+    # #619 PR-C: bulk-load the unresolved-count badges for just this
+    # paginated slice so the AnnotationButton renders with the right
+    # state when the user clicks "Näita rohkem".
+    draft_version_id = _fetch_latest_report_version_id(report_row[0]) or ""
+    batch_specs: list[tuple[str, str]] = []
+    for raw_row in batch:
+        key = key_for_row(raw_row)
+        if key:
+            batch_specs.append((row_kind, key))
+    counts = _load_unresolved_counts(draft_version_id, batch_specs) if draft_version_id else {}
+
     children: list = []
     if batch:
         children.append(
             DataTable(
-                columns=columns_builder(),
+                columns=columns_builder(draft_version_id, counts),
                 rows=batch,
                 empty_message=empty_message,
             )
