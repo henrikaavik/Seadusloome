@@ -31,7 +31,7 @@
 --     ALTER COLUMN content SET NOT NULL;
 --   DROP INDEX IF EXISTS idx_annotations_version_target;
 --   DROP INDEX IF EXISTS idx_annotations_stale;
---   DELETE FROM schema_migrations WHERE version = '029_annotations_extensions';
+--   DELETE FROM schema_migrations WHERE version = '031_annotations_extensions';
 -- No data loss — the content column is preserved throughout.
 --
 -- This migration is fully idempotent via IF NOT EXISTS / conditional ALTER.
