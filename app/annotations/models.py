@@ -18,12 +18,14 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
 from app.db_utils import coerce_uuid, parse_jsonb
+from app.storage import DecryptionError, decrypt_text
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +51,10 @@ class Annotation:
     resolved_at: datetime | None
     created_at: datetime
     updated_at: datetime
+    # Migration 029 extensions
+    draft_version_id: uuid.UUID | None = None
+    mentions: list[uuid.UUID] = field(default_factory=list)
+    stale: bool = False
 
 
 @dataclass
@@ -60,6 +66,8 @@ class AnnotationReply:
     user_id: uuid.UUID
     content: str
     created_at: datetime
+    # Migration 029 extensions
+    mentions: list[uuid.UUID] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -68,32 +76,95 @@ class AnnotationReply:
 
 _ANNOTATION_COLUMNS = (
     "id, user_id, org_id, target_type, target_id, target_metadata, "
-    "content, resolved, resolved_by, resolved_at, created_at, updated_at"
+    "content, resolved, resolved_by, resolved_at, created_at, updated_at, "
+    "content_encrypted, draft_version_id, mentions, stale"
 )
 
-_REPLY_COLUMNS = "id, annotation_id, user_id, content, created_at"
+_REPLY_COLUMNS = "id, annotation_id, user_id, content, created_at, content_encrypted, mentions"
+
+# Indices into the _ANNOTATION_COLUMNS tuple (zero-based)
+_ANN_IDX_ID = 0
+_ANN_IDX_USER_ID = 1
+_ANN_IDX_ORG_ID = 2
+_ANN_IDX_TARGET_TYPE = 3
+_ANN_IDX_TARGET_ID = 4
+_ANN_IDX_TARGET_METADATA = 5
+_ANN_IDX_CONTENT = 6
+_ANN_IDX_RESOLVED = 7
+_ANN_IDX_RESOLVED_BY = 8
+_ANN_IDX_RESOLVED_AT = 9
+_ANN_IDX_CREATED_AT = 10
+_ANN_IDX_UPDATED_AT = 11
+_ANN_IDX_CONTENT_ENCRYPTED = 12
+_ANN_IDX_DRAFT_VERSION_ID = 13
+_ANN_IDX_MENTIONS = 14
+_ANN_IDX_STALE = 15
+
+# Indices into the _REPLY_COLUMNS tuple (zero-based)
+_REPLY_IDX_ID = 0
+_REPLY_IDX_ANNOTATION_ID = 1
+_REPLY_IDX_USER_ID = 2
+_REPLY_IDX_CONTENT = 3
+_REPLY_IDX_CREATED_AT = 4
+_REPLY_IDX_CONTENT_ENCRYPTED = 5
+_REPLY_IDX_MENTIONS = 6
+
+
+def _decode_encrypted_text(ciphertext: bytes | memoryview | None) -> str | None:
+    """Decrypt a BYTEA column; return ``None`` on NULL or decrypt failure.
+
+    Fallback semantics: the caller uses ``None`` to signal "fall back to
+    the legacy plaintext column". Decrypt failures are logged loudly because
+    they can only mean the key rotated or the ciphertext got corrupted.
+    """
+    if ciphertext is None:
+        return None
+    raw = bytes(ciphertext) if isinstance(ciphertext, memoryview) else ciphertext
+    try:
+        return decrypt_text(raw)
+    except DecryptionError:
+        logger.exception("Failed to decrypt annotation column — falling back to plaintext")
+        return None
 
 
 def _row_to_annotation(row: tuple[Any, ...]) -> Annotation:
-    """Build an ``Annotation`` from a raw cursor row."""
-    (
-        ann_id,
-        user_id,
-        org_id,
-        target_type,
-        target_id,
-        target_metadata_raw,
-        content,
-        resolved,
-        resolved_by,
-        resolved_at,
-        created_at,
-        updated_at,
-    ) = row
+    """Build an ``Annotation`` from a raw cursor row selected with _ANNOTATION_COLUMNS.
+
+    Content is sourced from ``content_encrypted`` when present (migration 029
+    onwards), falling back to the legacy plaintext ``content`` column so that
+    existing rows created before the encryption rollout continue to decode.
+    """
+    ann_id = row[_ANN_IDX_ID]
+    user_id = row[_ANN_IDX_USER_ID]
+    org_id = row[_ANN_IDX_ORG_ID]
+    target_type = row[_ANN_IDX_TARGET_TYPE]
+    target_id = row[_ANN_IDX_TARGET_ID]
+    target_metadata_raw = row[_ANN_IDX_TARGET_METADATA]
+    content_plain = row[_ANN_IDX_CONTENT]
+    resolved = row[_ANN_IDX_RESOLVED]
+    resolved_by = row[_ANN_IDX_RESOLVED_BY]
+    resolved_at = row[_ANN_IDX_RESOLVED_AT]
+    created_at = row[_ANN_IDX_CREATED_AT]
+    updated_at = row[_ANN_IDX_UPDATED_AT]
+    content_encrypted = (
+        row[_ANN_IDX_CONTENT_ENCRYPTED] if len(row) > _ANN_IDX_CONTENT_ENCRYPTED else None
+    )
+    draft_version_id_raw = (
+        row[_ANN_IDX_DRAFT_VERSION_ID] if len(row) > _ANN_IDX_DRAFT_VERSION_ID else None
+    )
+    mentions_raw = row[_ANN_IDX_MENTIONS] if len(row) > _ANN_IDX_MENTIONS else []
+    stale = row[_ANN_IDX_STALE] if len(row) > _ANN_IDX_STALE else False
+
+    # Prefer decrypted content; fall back to plaintext for legacy rows.
+    content = _decode_encrypted_text(content_encrypted) or content_plain or ""
 
     target_metadata = parse_jsonb(target_metadata_raw)
     if target_metadata is not None and not isinstance(target_metadata, dict):
         target_metadata = None
+
+    mentions: list[uuid.UUID] = (
+        [coerce_uuid(m) for m in mentions_raw if m is not None] if mentions_raw else []
+    )
 
     return Annotation(
         id=coerce_uuid(ann_id),
@@ -108,18 +179,33 @@ def _row_to_annotation(row: tuple[Any, ...]) -> Annotation:
         resolved_at=resolved_at,
         created_at=created_at,
         updated_at=updated_at,
+        draft_version_id=coerce_uuid(draft_version_id_raw) if draft_version_id_raw else None,
+        mentions=mentions,
+        stale=bool(stale),
     )
 
 
 def _row_to_reply(row: tuple[Any, ...]) -> AnnotationReply:
-    """Build an ``AnnotationReply`` from a raw cursor row."""
-    (
-        reply_id,
-        annotation_id,
-        user_id,
-        content,
-        created_at,
-    ) = row
+    """Build an ``AnnotationReply`` from a raw cursor row selected with _REPLY_COLUMNS.
+
+    Content is sourced from ``content_encrypted`` when present (migration 029
+    onwards), falling back to the legacy plaintext ``content`` column.
+    """
+    reply_id = row[_REPLY_IDX_ID]
+    annotation_id = row[_REPLY_IDX_ANNOTATION_ID]
+    user_id = row[_REPLY_IDX_USER_ID]
+    content_plain = row[_REPLY_IDX_CONTENT]
+    created_at = row[_REPLY_IDX_CREATED_AT]
+    content_encrypted = (
+        row[_REPLY_IDX_CONTENT_ENCRYPTED] if len(row) > _REPLY_IDX_CONTENT_ENCRYPTED else None
+    )
+    mentions_raw = row[_REPLY_IDX_MENTIONS] if len(row) > _REPLY_IDX_MENTIONS else []
+
+    content = _decode_encrypted_text(content_encrypted) or content_plain or ""
+
+    mentions: list[uuid.UUID] = (
+        [coerce_uuid(m) for m in mentions_raw if m is not None] if mentions_raw else []
+    )
 
     return AnnotationReply(
         id=coerce_uuid(reply_id),
@@ -127,6 +213,7 @@ def _row_to_reply(row: tuple[Any, ...]) -> AnnotationReply:
         user_id=coerce_uuid(user_id),
         content=content,
         created_at=created_at,
+        mentions=mentions,
     )
 
 
@@ -321,3 +408,121 @@ def list_replies(
         )
         return []
     return [_row_to_reply(row) for row in rows]
+
+
+# ---------------------------------------------------------------------------
+# §9.4 Impact-report row annotations (read-only; writes in PR-B)
+# ---------------------------------------------------------------------------
+
+# Regex for @mention tokens.  Estonian usernames / display names may contain
+# dots and hyphens; we stop at whitespace and punctuation that cannot be part
+# of an identifier.
+_MENTION_RE = re.compile(r"@([\w.\-]+)")
+
+
+def parse_mentions(
+    conn: Any,
+    content: str,
+    org_id: uuid.UUID | str,
+) -> list[uuid.UUID]:
+    """Extract @token-style mentions and resolve them to user_ids in the same org.
+
+    Security: matches are looked up with ``AND org_id = %s`` so an attacker
+    cannot probe for the existence of users in other organisations.  Out-of-org
+    matches are silently dropped.  Duplicate mentions of the same user are
+    deduplicated in the returned list.
+
+    The lookup checks both ``email`` and ``full_name`` columns so that
+    ``@peeter.pärn`` and ``@Peeter Pärn`` both resolve (space replaced by
+    ``_`` is a common convention in Estonian government systems, but both
+    the raw token and the underscore-replaced form are tried).
+
+    Returns an empty list when *content* contains no ``@`` tokens, or when no
+    tokens resolve to users in the given org.
+    """
+    tokens = _MENTION_RE.findall(content)
+    if not tokens:
+        return []
+
+    seen: set[uuid.UUID] = set()
+    result: list[uuid.UUID] = []
+
+    for token in tokens:
+        # Normalise: treat underscores as spaces so @eesnimi_perenimi works too.
+        name_variant = token.replace("_", " ")
+        try:
+            row = conn.execute(
+                """
+                SELECT id FROM users
+                WHERE org_id = %s
+                  AND (
+                      email = %s
+                      OR email = %s
+                      OR full_name ILIKE %s
+                      OR full_name ILIKE %s
+                  )
+                LIMIT 1
+                """,
+                (
+                    str(org_id),
+                    token,  # exact email match e.g. peeter@min.ee
+                    token.lower(),  # case-insensitive email
+                    token,  # exact full_name
+                    name_variant,  # space-variant full_name
+                ),
+            ).fetchone()
+        except Exception:
+            logger.exception("parse_mentions: DB error resolving token %r", token)
+            continue
+
+        if row is None:
+            continue
+
+        user_id = coerce_uuid(row[0])
+        if user_id not in seen:
+            seen.add(user_id)
+            result.append(user_id)
+
+    return result
+
+
+def list_annotations_for_version_row(
+    conn: Any,
+    draft_version_id: uuid.UUID | str,
+    row_kind: str,
+    row_key: str,
+) -> list[Annotation]:
+    """Fetch all annotations on a specific impact-report row within a draft version.
+
+    Encodes the §9.4 target contract:
+        target_type = 'impact_report_item'
+        target_id   = '{row_kind}:{row_key}'
+    filtered on the ``draft_version_id`` FK column added in migration 029.
+
+    The composite index ``idx_annotations_version_target`` makes this O(log n)
+    even as the annotation table grows.
+
+    Returns an empty list when no annotations exist or on DB error.
+    """
+    target_id = f"{row_kind}:{row_key}"
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT {_ANNOTATION_COLUMNS}
+            FROM annotations
+            WHERE draft_version_id = %s
+              AND target_type = 'impact_report_item'
+              AND target_id = %s
+            ORDER BY created_at DESC
+            """,
+            (str(draft_version_id), target_id),
+        ).fetchall()
+    except Exception:
+        logger.exception(
+            "Failed to list annotations for version=%s row_kind=%s row_key=%s",
+            draft_version_id,
+            row_kind,
+            row_key,
+        )
+        return []
+    return [_row_to_annotation(row) for row in rows]
