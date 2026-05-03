@@ -28,7 +28,9 @@ from app.annotations.models import (
     delete_annotation,
     get_annotation,
     list_annotations_for_target,
+    list_annotations_for_version_row,
     list_replies,
+    parse_mentions,
     resolve_annotation,
 )
 
@@ -51,12 +53,16 @@ def _make_annotation_row(
     target_type: str = "draft",
     target_id: str = "44444444-4444-4444-4444-444444444444",
     target_metadata: str | None = None,
-    content: str = "See vajab muutmist",
+    content: str | None = "See vajab muutmist",
     resolved: bool = False,
     resolved_by: uuid.UUID | None = None,
     resolved_at: datetime | None = None,
+    content_encrypted: bytes | None = None,
+    draft_version_id: uuid.UUID | None = None,
+    mentions: list[uuid.UUID] | None = None,
+    stale: bool = False,
 ) -> tuple[Any, ...]:
-    """Build a raw cursor row matching _ANNOTATION_COLUMNS order."""
+    """Build a raw cursor row matching _ANNOTATION_COLUMNS order (migration 029)."""
     now = datetime.now(UTC)
     return (
         ann_id or uuid.uuid4(),
@@ -71,6 +77,10 @@ def _make_annotation_row(
         resolved_at,
         now,
         now,
+        content_encrypted,
+        draft_version_id,
+        mentions or [],
+        stale,
     )
 
 
@@ -79,9 +89,11 @@ def _make_reply_row(
     reply_id: uuid.UUID | None = None,
     annotation_id: uuid.UUID = _ANN_ID,
     user_id: uuid.UUID = _USER_ID,
-    content: str = "Noustun, parandame.",
+    content: str | None = "Noustun, parandame.",
+    content_encrypted: bytes | None = None,
+    mentions: list[uuid.UUID] | None = None,
 ) -> tuple[Any, ...]:
-    """Build a raw cursor row matching _REPLY_COLUMNS order."""
+    """Build a raw cursor row matching _REPLY_COLUMNS order (migration 029)."""
     now = datetime.now(UTC)
     return (
         reply_id or uuid.uuid4(),
@@ -89,6 +101,8 @@ def _make_reply_row(
         user_id,
         content,
         now,
+        content_encrypted,
+        mentions or [],
     )
 
 
@@ -383,3 +397,263 @@ class TestAuditLogAnnotationDelete:
         mock_log.assert_called_once()
         detail = mock_log.call_args[0][2]
         assert detail["annotation_id"] == str(_ANN_ID)
+
+
+# ---------------------------------------------------------------------------
+# Migration 029 extensions — TestRowAnnotationExtensions
+# ---------------------------------------------------------------------------
+
+_VERSION_ID = uuid.UUID("77777777-7777-7777-7777-777777777777")
+_OTHER_USER_ID = uuid.UUID("88888888-8888-8888-8888-888888888888")
+
+
+@pytest.fixture(autouse=False)
+def _fernet_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Install a fresh Fernet key for encryption tests in this class."""
+    from cryptography.fernet import Fernet
+
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv("STORAGE_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    import app.storage.encrypted as encrypted_module
+
+    monkeypatch.setattr(encrypted_module, "_fernet", None)
+
+
+class TestRowAnnotationExtensions:
+    """Tests for the migration 029 column extensions on _row_to_annotation
+    and the new read helpers parse_mentions / list_annotations_for_version_row."""
+
+    # ------------------------------------------------------------------
+    # _row_to_annotation: encrypted content
+    # ------------------------------------------------------------------
+
+    def test_row_reads_content_from_encrypted_column(self, _fernet_key):
+        """content_encrypted present and non-NULL → decrypted value is used."""
+        from app.storage import encrypt_text
+
+        plaintext = "See eelnõu § 3 vajab täpsustamist."
+        ciphertext = encrypt_text(plaintext)
+
+        row = _make_annotation_row(
+            content=None,  # plaintext column NULL (new write style)
+            content_encrypted=ciphertext,
+            draft_version_id=_VERSION_ID,
+        )
+
+        from app.annotations.models import _row_to_annotation
+
+        ann = _row_to_annotation(row)
+        assert ann.content == plaintext
+
+    def test_row_falls_back_to_plaintext_when_encrypted_null(self):
+        """Legacy row: content_encrypted is NULL, content has the plaintext."""
+        row = _make_annotation_row(
+            content="Vana rida ilma krüpteerimiseta",
+            content_encrypted=None,
+        )
+
+        from app.annotations.models import _row_to_annotation
+
+        ann = _row_to_annotation(row)
+        assert ann.content == "Vana rida ilma krüpteerimiseta"
+
+    def test_row_reads_draft_version_id(self):
+        """draft_version_id is hydrated from the row."""
+        row = _make_annotation_row(draft_version_id=_VERSION_ID)
+
+        from app.annotations.models import _row_to_annotation
+
+        ann = _row_to_annotation(row)
+        assert ann.draft_version_id == _VERSION_ID
+
+    def test_row_reads_mentions(self):
+        """mentions UUID list is hydrated from the row."""
+        row = _make_annotation_row(mentions=[_USER_ID, _OTHER_USER_ID])
+
+        from app.annotations.models import _row_to_annotation
+
+        ann = _row_to_annotation(row)
+        assert ann.mentions == [_USER_ID, _OTHER_USER_ID]
+
+    def test_row_reads_stale_flag(self):
+        """stale=True is preserved through _row_to_annotation."""
+        row = _make_annotation_row(stale=True)
+
+        from app.annotations.models import _row_to_annotation
+
+        ann = _row_to_annotation(row)
+        assert ann.stale is True
+
+    def test_row_defaults_for_legacy_row(self):
+        """A 12-column legacy row (pre-migration-029) uses safe defaults."""
+        now = datetime.now(UTC)
+        # Replicate what a pre-029 row looks like (12 columns, no new ones)
+        legacy_row = (
+            uuid.uuid4(),  # id
+            _USER_ID,  # user_id
+            _ORG_ID,  # org_id
+            "draft",  # target_type
+            "some-id",  # target_id
+            None,  # target_metadata
+            "Vana sisu",  # content
+            False,  # resolved
+            None,  # resolved_by
+            None,  # resolved_at
+            now,  # created_at
+            now,  # updated_at
+            # no content_encrypted, draft_version_id, mentions, stale columns
+        )
+
+        from app.annotations.models import _row_to_annotation
+
+        ann = _row_to_annotation(legacy_row)
+        assert ann.content == "Vana sisu"
+        assert ann.draft_version_id is None
+        assert ann.mentions == []
+        assert ann.stale is False
+
+    # ------------------------------------------------------------------
+    # _row_to_reply: encrypted content
+    # ------------------------------------------------------------------
+
+    def test_reply_row_reads_content_from_encrypted_column(self, _fernet_key):
+        """Reply: content_encrypted non-NULL → decrypted value used."""
+        from app.storage import encrypt_text
+
+        plaintext = "Vastus krüpteeritud kujul."
+        ciphertext = encrypt_text(plaintext)
+
+        row = _make_reply_row(content=None, content_encrypted=ciphertext)
+
+        from app.annotations.models import _row_to_reply
+
+        reply = _row_to_reply(row)
+        assert reply.content == plaintext
+
+    def test_reply_row_falls_back_to_plaintext(self):
+        """Reply legacy row: content_encrypted NULL → plaintext column used."""
+        row = _make_reply_row(content="Vana vastus", content_encrypted=None)
+
+        from app.annotations.models import _row_to_reply
+
+        reply = _row_to_reply(row)
+        assert reply.content == "Vana vastus"
+
+    def test_reply_row_reads_mentions(self):
+        """Reply mentions list is hydrated correctly."""
+        row = _make_reply_row(mentions=[_USER_ID])
+
+        from app.annotations.models import _row_to_reply
+
+        reply = _row_to_reply(row)
+        assert reply.mentions == [_USER_ID]
+
+    # ------------------------------------------------------------------
+    # parse_mentions
+    # ------------------------------------------------------------------
+
+    def test_parse_mentions_resolves_in_org_user(self):
+        """@token that matches a user in the same org is resolved to their UUID."""
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = (_USER_ID,)
+
+        result = parse_mentions(conn, "Vaata @peeter.pärn kommentaare.", _ORG_ID)
+
+        assert result == [_USER_ID]
+        # The query must include org_id to prevent cross-org probing.
+        sql = conn.execute.call_args.args[0]
+        assert "org_id" in sql
+
+    def test_parse_mentions_drops_out_of_org_user(self):
+        """@token that does NOT match any user in the org is silently dropped."""
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = None
+
+        result = parse_mentions(conn, "Vaata @võõras tulemusi.", _ORG_ID)
+
+        assert result == []
+
+    def test_parse_mentions_deduplicates_same_user(self):
+        """Mentioning the same user twice returns only one UUID."""
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = (_USER_ID,)
+
+        result = parse_mentions(conn, "@peeter.pärn ja ka @peeter.pärn uuesti.", _ORG_ID)
+
+        assert result == [_USER_ID]
+
+    def test_parse_mentions_empty_content(self):
+        """Content with no @ tokens returns an empty list without hitting the DB."""
+        conn = MagicMock()
+
+        result = parse_mentions(conn, "Lihtsalt tekst, pole mainimisi.", _ORG_ID)
+
+        assert result == []
+        conn.execute.assert_not_called()
+
+    def test_parse_mentions_db_error_is_swallowed(self):
+        """A DB error on a single token is logged and skipped; others proceed."""
+        conn = MagicMock()
+        conn.execute.side_effect = RuntimeError("DB error")
+
+        # Should not raise — returns empty list gracefully.
+        result = parse_mentions(conn, "@kasutaja kommenteerib.", _ORG_ID)
+        assert result == []
+
+    # ------------------------------------------------------------------
+    # list_annotations_for_version_row
+    # ------------------------------------------------------------------
+
+    def test_list_for_version_row_queries_correct_target(self):
+        """Helper builds target_id as '{row_kind}:{row_key}' and filters by version."""
+        conn = MagicMock()
+        row = _make_annotation_row(
+            target_type="impact_report_item",
+            target_id="conflict:abc123",
+            draft_version_id=_VERSION_ID,
+        )
+        conn.execute.return_value.fetchall.return_value = [row]
+
+        results = list_annotations_for_version_row(conn, _VERSION_ID, "conflict", "abc123")
+
+        assert len(results) == 1
+        assert results[0].target_id == "conflict:abc123"
+
+        sql, params = conn.execute.call_args.args
+        assert "impact_report_item" in sql
+        assert "draft_version_id" in sql
+        # target_id param must be the colon-delimited form
+        assert "conflict:abc123" in params
+
+    def test_list_for_version_row_returns_empty_on_db_error(self):
+        """DB errors are caught and an empty list is returned."""
+        conn = MagicMock()
+        conn.execute.side_effect = RuntimeError("DB error")
+
+        result = list_annotations_for_version_row(conn, _VERSION_ID, "gap", "some-key")
+        assert result == []
+
+    def test_list_for_version_row_empty_result(self):
+        """No matching rows → empty list, no exception."""
+        conn = MagicMock()
+        conn.execute.return_value.fetchall.return_value = []
+
+        result = list_annotations_for_version_row(
+            conn, _VERSION_ID, "entity", "http://example.org/Provision/1"
+        )
+        assert result == []
+
+    # ------------------------------------------------------------------
+    # §4.2-equivalent contract: new API surface is exported
+    # ------------------------------------------------------------------
+
+    def test_new_helpers_are_exported_from_module(self):
+        """Placeholder: asserts that PR-A exposes the helpers PR-B will call.
+
+        The actual write-path contract test (encryption mandatory on create)
+        lands in PR-B.
+        """
+        import app.annotations.models as m
+
+        assert callable(m.parse_mentions)
+        assert callable(m.list_annotations_for_version_row)
