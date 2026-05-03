@@ -104,9 +104,13 @@ class TestExportReportHappyPath:
         assert call.args[0] is draft
         assert call.args[1] == report_row
 
+        # #613: handler now echoes the chosen format in the result so the
+        # download route can pick the right artefact + MIME. Default is
+        # "docx" when the payload has no ``format`` key.
         assert result == {
             "draft_id": str(_DRAFT_ID),
             "report_id": str(_REPORT_ID),
+            "format": "docx",
             "docx_path": str(fake_path),
         }
 

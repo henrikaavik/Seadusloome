@@ -37,6 +37,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
+import subprocess
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -573,3 +575,62 @@ def build_impact_report_docx(
         out_path,
     )
     return out_path
+
+
+_SOFFICE_TIMEOUT_SECONDS = 60
+
+
+def convert_docx_to_pdf(docx_path: Path) -> Path:
+    """Convert an existing .docx into a sibling .pdf via headless LibreOffice (#613).
+
+    The .docx remains the single source of truth for content; PDF is a
+    pure visual rendering of the same file. This guarantees the two
+    formats can never diverge.
+
+    LibreOffice writes the PDF to ``--outdir`` with the same stem as
+    the input file. Returns the absolute path to the generated PDF.
+
+    ``HOME=/tmp`` is set in the subprocess env to silence the benign
+    ``dconf-CRITICAL`` warning that fires when the container's HOME
+    (e.g. ``/nonexistent``) is not writable. The warning does not
+    affect headless conversion but pollutes logs.
+
+    Raises:
+        FileNotFoundError: ``soffice`` not on PATH (dev environments
+            without LibreOffice installed). Callers must surface a
+            clear error rather than retry — installing LibreOffice is
+            an operator action, not a transient failure.
+        subprocess.TimeoutExpired: conversion exceeded
+            :data:`_SOFFICE_TIMEOUT_SECONDS`.
+        subprocess.CalledProcessError: ``soffice`` exited non-zero;
+            the captured stderr is included in the exception's output.
+    """
+    soffice = shutil.which("soffice")
+    if soffice is None:
+        raise FileNotFoundError("soffice not on PATH; LibreOffice is required for PDF export")
+    out_dir = docx_path.parent
+    env = {**os.environ, "HOME": "/tmp"}
+    subprocess.run(
+        [
+            soffice,
+            "--headless",
+            "--convert-to",
+            "pdf",
+            "--outdir",
+            str(out_dir),
+            str(docx_path),
+        ],
+        env=env,
+        check=True,
+        timeout=_SOFFICE_TIMEOUT_SECONDS,
+        capture_output=True,
+    )
+    pdf_path = out_dir / (docx_path.stem + ".pdf")
+    if not pdf_path.exists():
+        raise FileNotFoundError(f"LibreOffice did not produce expected PDF at {pdf_path}")
+    logger.info(
+        "docx_export: converted to pdf docx=%s pdf=%s",
+        docx_path,
+        pdf_path,
+    )
+    return pdf_path
