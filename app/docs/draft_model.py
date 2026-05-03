@@ -302,10 +302,50 @@ def touch_draft_access_conn(draft_id: uuid.UUID | str) -> bool:
 
 
 def get_draft(conn: Any, draft_id: uuid.UUID | str) -> Draft | None:
-    """Return a single draft by id, or ``None``."""
+    """Return a single draft by id, or ``None``.
+
+    §4.2 cutover (#618 PR-B):
+        The SELECT now JOINs ``drafts`` against the latest
+        ``draft_versions`` row so the returned :class:`Draft` reflects
+        the *current* version's pipeline state -- ``status``,
+        ``parsed_text_encrypted``, ``graph_uri``, and ``storage_path``
+        all come from ``draft_versions`` when a row is present.
+
+        ``COALESCE(version.col, drafts.col)`` keeps the legacy
+        ``drafts.*`` columns as a fallback so a draft that somehow
+        ended up without a v1 row still surfaces the old data.  Post
+        migration 030 every draft has at least one version, but the
+        defensive read keeps tests + integration fakes that pre-date
+        the cutover working without modification.
+
+        The ``Draft`` dataclass shape is unchanged so every existing
+        caller continues to read ``draft.status`` / ``draft.graph_uri``
+        / ``draft.parsed_text_encrypted`` against the version-backed
+        values without code change.
+    """
     try:
         row = conn.execute(
-            f"select {_DRAFT_COLUMNS} from drafts where id = %s",
+            """
+            select
+                d.id, d.user_id, d.org_id, d.title, d.filename,
+                d.content_type, d.file_size,
+                coalesce(v.storage_path, d.storage_path),
+                coalesce(v.graph_uri, d.graph_uri),
+                coalesce(v.status, d.status),
+                coalesce(v.parsed_text_encrypted, d.parsed_text_encrypted),
+                d.entity_count, d.error_message,
+                d.created_at, d.updated_at, d.last_accessed_at,
+                d.doc_type, d.parent_vtk_id, d.processing_completed_at
+            from drafts d
+            left join draft_versions v
+                on v.draft_id = d.id
+                and v.version_number = (
+                    select max(version_number)
+                    from draft_versions
+                    where draft_id = d.id
+                )
+            where d.id = %s
+            """,
             (str(draft_id),),
         ).fetchone()
     except Exception:
@@ -579,6 +619,40 @@ def list_vtks_for_org(
             ).fetchall()
     except Exception:
         logger.exception("Failed to list VTKs for org=%s", org_id)
+        return []
+    return [_row_to_draft(row) for row in rows]
+
+
+def list_versionable_drafts_for_org(
+    conn: Any,
+    org_id: uuid.UUID | str,
+) -> list[Draft]:
+    """Return drafts that may serve as the parent of a new version (#618 PR-B).
+
+    Used by the upload form to populate the "Versioon olemasolevast
+    eelnõust" picker.  Only drafts whose latest version is in the
+    terminal ``ready`` status are eligible: a parent that is still
+    parsing/extracting/analyzing has nothing meaningful to compare a
+    new version against, and a ``failed`` parent should be retried via
+    the retry path before getting a fresh version layered on top.
+
+    Org-scoped at the SQL layer so a cross-org draft can never appear
+    in the picker.  Newest-first ordering matches the rest of the
+    listing helpers in this module.
+    """
+    try:
+        rows = conn.execute(
+            f"""
+            select {_DRAFT_COLUMNS}
+            from drafts
+            where org_id = %s
+              and status = 'ready'
+            order by created_at desc
+            """,
+            (str(org_id),),
+        ).fetchall()
+    except Exception:
+        logger.exception("Failed to list versionable drafts for org=%s", org_id)
         return []
     return [_row_to_draft(row) for row in rows]
 

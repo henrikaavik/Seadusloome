@@ -2264,9 +2264,13 @@ class TestResetDraftForRetrySql:
 
         assert _reset_draft_for_retry("44444444-4444-4444-4444-444444444444") is True
 
-        update_call = conn.execute.call_args_list[0]
-        sql = update_call.args[0].lower()
-        assert "update drafts" in sql
+        # #618 PR-B: update_draft_status now writes to BOTH draft_versions
+        # AND drafts in the same call.  The drafts UPDATE owns the
+        # processing_completed_at clear.
+        drafts_call = next(
+            c for c in conn.execute.call_args_list if "update drafts" in c.args[0].lower()
+        )
+        sql = drafts_call.args[0].lower()
         assert "processing_completed_at = null" in sql
 
 

@@ -1,4 +1,4 @@
-"""Single source of truth for ``drafts.status`` (#625).
+"""Single source of truth for draft status (#625, #618 PR-B).
 
 Before this module existed, draft status semantics were scattered across
 seven sites:
@@ -25,12 +25,19 @@ records plus a typed :func:`update_draft_status` helper. Every read of
 :func:`update_draft_status` so an unknown value raises ``ValueError``
 in the application layer instead of waiting for the DB to reject it.
 
-§4.2 status semantics decision (locked):
-    Per the Eelnõud sprint plan §4.2, ``drafts.status`` is the canonical
-    write path for now. The version-aware cutover (writing to
-    ``draft_versions.status``) lands in #618 PR-B alongside the read
-    cutover. This module deliberately writes ONLY to ``drafts`` so the
-    sequencing is explicit and a bisect can pin the cutover point.
+§4.2 cutover sequence (locked):
+
+    1. #625 — ``update_draft_status`` writes ONLY to ``drafts.status``
+       (the previous state of this module).  Done.
+    2. #618 PR-A — ship ``draft_versions`` schema + backfill, but app
+       still reads/writes ``drafts.*``.  Done.
+    3. #618 PR-B (THIS PR) — atomic read+write cutover.  Reads JOIN
+       through ``draft_versions``; writes go to the latest
+       ``draft_versions`` row PLUS a same-transaction defensive mirror
+       to ``drafts.status`` so legacy callers still see the new state
+       and rollback to PR-A is trivial.
+    4. #618 PR-D (future) — drop ``drafts.status`` + the defensive
+       mirror.  Migration 03X.
 
 Cost-of-change rationale:
     The fixed signature ``update_draft_status(conn, draft_id, status,
@@ -174,6 +181,14 @@ PIPELINE_STAGES: tuple[DraftStatus, ...] = tuple(
     s for s in sorted(DRAFT_STATUSES, key=lambda d: d.order) if s.value != "failed"
 )
 
+# Columns that exist on BOTH ``drafts`` and ``draft_versions`` and
+# therefore should be mirrored to the version row when supplied via the
+# ``extras`` parameter to :func:`update_draft_status` (#618 PR-B).
+# ``entity_count`` is intentionally absent: the version row tracks
+# parse/extract output as a side effect of status transitions, not an
+# independent counter.
+_VERSION_MIRRORED_EXTRAS: frozenset[str] = frozenset({"parsed_text_encrypted"})
+
 
 def update_draft_status(
     conn: Any,
@@ -187,11 +202,22 @@ def update_draft_status(
 ) -> bool:
     """Typed UPDATE that validates ``status`` against :data:`DRAFT_STATUSES`.
 
-    §4.2 cutover: this writes ONLY to ``drafts``. The version-aware
-    ``draft_versions`` write lands in #618 PR-B alongside the read
-    cutover. The handler must NOT touch ``draft_versions`` here -- a
-    bisect on the version cutover relies on this file containing zero
-    references to the new table.
+    §4.2 cutover (#618 PR-B):
+        Writes the new ``status`` to BOTH the latest
+        ``draft_versions`` row AND ``drafts.status`` in the same
+        transaction.  The ``drafts.status`` write is a defensive mirror
+        kept for one release cycle so:
+
+        * Legacy readers that have not yet pivoted to the version-aware
+          read path still see the new state.
+        * A rollback to PR-A (drop the ``draft_versions`` write) is a
+          single-line revert with no schema change.
+
+        The version write goes to the latest ``draft_versions`` row
+        for the draft (``ORDER BY version_number DESC LIMIT 1``) so a
+        v3 upload's status updates do not bleed into v2.  PR-D will
+        drop the ``drafts.status`` mirror and the column itself
+        (migration 03X).
 
     Behaviour:
         * Always writes ``status``, ``updated_at = now()``,
@@ -205,14 +231,20 @@ def update_draft_status(
         * Always stamps ``processing_completed_at`` -- ``now()`` for
           terminal statuses (``ready`` / ``failed``), ``NULL`` otherwise.
           This preserves the #670 frozen-completion-timestamp invariant
-          without each caller having to remember it.
+          without each caller having to remember it.  Stamped ONLY on
+          ``drafts`` -- ``draft_versions`` does not have this column
+          (the per-version completion is implicit from the version's
+          own status transitions).
         * ``extras`` carries any additional column writes that must land
           in the SAME ``UPDATE`` for atomicity (e.g. ``entity_count``
           from the extract handler, ``parsed_text_encrypted`` from the
           parse handler). Keys are interpolated into the SQL so callers
           MUST only pass safe column names -- the only call sites in
           this package pass ``parsed_text_encrypted`` and
-          ``entity_count``.
+          ``entity_count``.  Extras are written to BOTH tables when the
+          column exists on both (``parsed_text_encrypted`` lives on
+          both); ``entity_count`` only exists on ``drafts`` so it is
+          written there only.
         * ``expected_status`` adds an ``AND status = %s`` predicate to
           the WHERE clause for optimistic-concurrency control (used by
           the retry path -- only flip ``failed`` -> ``uploaded`` when
@@ -240,9 +272,12 @@ def update_draft_status(
             status; ``rowcount == 0`` means another writer beat us.
 
     Returns:
-        ``True`` if a row was actually updated, ``False`` if the WHERE
-        clause matched nothing. Mirrors the previous
-        ``draft_model.update_draft_status`` contract.
+        ``True`` if a row was actually updated in ``drafts``, ``False``
+        if the WHERE clause matched nothing. The return value tracks
+        the legacy ``drafts`` write because that is the predicate the
+        retry path checks for optimistic-concurrency wins; the version
+        write is always best-effort (a draft pre-PR-A backfill that is
+        somehow missing a v1 row should not block a status update).
 
     Raises:
         ValueError: ``status`` (or ``expected_status``) is not a known
@@ -257,47 +292,82 @@ def update_draft_status(
     # on the executed SQL string remain stable across runs. Always
     # writes the same fixed prefix; ``extras`` are appended in sorted
     # column-name order at the tail.
-    set_parts: list[str] = [
+    drafts_set_parts: list[str] = [
         "status = %s",
         "error_message = %s",
         "error_debug = %s",
         "updated_at = now()",
     ]
-    params: list[Any] = [status, error_message, error_debug]
+    drafts_params: list[Any] = [status, error_message, error_debug]
 
     # #670: terminal transitions stamp the frozen completion timestamp;
     # non-terminal transitions clear it back to NULL so a retry path
     # (``failed`` -> ``uploaded``) doesn't carry stale completion time.
     if status in TERMINAL_STATUSES:
-        set_parts.append("processing_completed_at = now()")
+        drafts_set_parts.append("processing_completed_at = now()")
     else:
-        set_parts.append("processing_completed_at = null")
+        drafts_set_parts.append("processing_completed_at = null")
 
     # ``extras`` columns are interpolated by name; values are bound as
     # parameters. Sorted for deterministic SQL output.
     if extras:
         for column in sorted(extras):
-            set_parts.append(f"{column} = %s")
-            params.append(extras[column])
+            drafts_set_parts.append(f"{column} = %s")
+            drafts_params.append(extras[column])
 
-    set_clause = ",\n            ".join(set_parts)
+    drafts_set_clause = ",\n            ".join(drafts_set_parts)
 
     # WHERE clause -- always ``id = %s`` plus an optional optimistic
     # ``status = %s`` predicate for the retry path.
-    where_parts: list[str] = ["id = %s"]
-    params.append(str(draft_id))
+    drafts_where_parts: list[str] = ["id = %s"]
+    drafts_params.append(str(draft_id))
     if expected_status is not None:
-        where_parts.append("status = %s")
-        params.append(expected_status)
-    where_clause = " and ".join(where_parts)
+        drafts_where_parts.append("status = %s")
+        drafts_params.append(expected_status)
+    drafts_where_clause = " and ".join(drafts_where_parts)
 
-    # Note: deliberately writing to ``drafts`` only. Do NOT add a write
-    # to ``draft_versions`` here -- that cutover is owned by #618 PR-B
-    # and depends on the read path being version-aware first.
-    sql = f"""
-        update drafts
-        set {set_clause}
-        where {where_clause}
+    # ------------------------------------------------------------------
+    # Step 1: write the new status to the LATEST draft_versions row.
+    # ------------------------------------------------------------------
+    # The version write happens FIRST so that if it fails (e.g. a
+    # never-backfilled draft has no v1 row), the legacy ``drafts``
+    # update still runs as a safety net.  Conversely the legacy update
+    # is what determines our return value because the retry path's
+    # optimistic-concurrency check expects to see a 0-rowcount when
+    # another writer already flipped the row.
+    version_set_parts: list[str] = ["status = %s"]
+    version_params: list[Any] = [status]
+    if extras:
+        for column in sorted(extras):
+            if column not in _VERSION_MIRRORED_EXTRAS:
+                continue
+            version_set_parts.append(f"{column} = %s")
+            version_params.append(extras[column])
+    version_set_clause = ", ".join(version_set_parts)
+    version_params.append(str(draft_id))
+
+    version_sql = f"""
+        update draft_versions
+        set {version_set_clause}
+        where id = (
+            select id from draft_versions
+            where draft_id = %s
+            order by version_number desc
+            limit 1
+        )
     """
-    result = conn.execute(sql, tuple(params))
+    conn.execute(version_sql, tuple(version_params))
+
+    # ------------------------------------------------------------------
+    # Step 2: defensive mirror to ``drafts`` (legacy column).  Kept for
+    # one release cycle so PR-A rollback is a one-line revert and
+    # so any reader that has not yet pivoted to the version-aware path
+    # still observes the new status.  PR-D will drop this UPDATE.
+    # ------------------------------------------------------------------
+    drafts_sql = f"""
+        update drafts
+        set {drafts_set_clause}
+        where {drafts_where_clause}
+    """
+    result = conn.execute(drafts_sql, tuple(drafts_params))
     return (result.rowcount or 0) > 0

@@ -45,6 +45,7 @@ from app.docs.draft_model import (
     fetch_draft,
     list_drafts_for_org_filtered,
     list_eelnous_for_vtk,
+    list_versionable_drafts_for_org,
     list_vtks_for_org,
     touch_draft_access_conn,
     update_draft_parent_vtk,
@@ -1325,13 +1326,74 @@ def _vtk_picker(
     )
 
 
+def _version_picker(
+    versionable_drafts: list[Draft],
+    *,
+    selected: str | None = None,
+):
+    """Render the "Versioon olemasolevast eelnõust" picker (#618 PR-B).
+
+    Optional select that lets the uploader create a NEW version of an
+    existing ``ready``-status draft instead of a brand-new draft.  When
+    the picker is left at the default empty option, the upload follows
+    the legacy "new draft" branch.
+
+    Empty list -> the picker still renders but only shows the "Uus
+    eelnõu (pole versioon)" sentinel; this keeps the DOM structure
+    deterministic regardless of how many parents are eligible.
+    """
+    selected_str = str(selected) if selected else ""
+    options: list = [
+        Option(  # noqa: F405
+            "Uus eelnõu (pole versioon)",
+            value="",
+            selected=(selected_str == ""),
+        )
+    ]
+    for existing in versionable_drafts:
+        existing_id = str(existing.id)
+        # Truncate long titles so the dropdown stays readable.  60 chars
+        # matches the brief; the trailing ellipsis is added when truncation
+        # actually fires.
+        title = existing.title or existing.filename or existing_id
+        display_title = title if len(title) <= 60 else f"{title[:60]}…"
+        options.append(
+            Option(  # noqa: F405
+                f"Versioon eelnõust: {display_title}",
+                value=existing_id,
+                selected=(existing_id == selected_str),
+            )
+        )
+    return Div(  # noqa: F405
+        Label(  # noqa: F405
+            "Versioneerimine",
+            fr="field-parent-draft",
+            cls="form-field-label",
+        ),
+        Select(  # noqa: F405
+            *options,
+            name="parent_draft_id",
+            id="field-parent-draft",
+            cls="input input-select",
+        ),
+        Small(  # noqa: F405
+            "Kui valid olemasoleva eelnõu, salvestatakse fail uue versioonina, "
+            "mitte uue eelnõuna.",
+            cls="form-field-help",
+        ),
+        cls="form-field",
+    )
+
+
 def _upload_form(
     *,
     title_value: str = "",
     error: str | None = None,
     vtks: list[Draft] | None = None,
+    versionable_drafts: list[Draft] | None = None,
     doc_type_value: str = "eelnou",
     parent_vtk_id_value: str | None = None,
+    parent_draft_id_value: str | None = None,
 ):
     """Render the multipart upload form.
 
@@ -1343,10 +1405,18 @@ def _upload_form(
     #640: adds a "Dokumendi tüüp" radio group and a "Seotud VTK"
     ``<select>`` populated with the caller's org's VTKs. Validation of
     both fields happens server-side in ``create_draft_handler``.
+
+    #618 PR-B: adds the optional "Versioneerimine" picker so the
+    uploader can create a new version of an existing ``ready`` draft
+    instead of a brand-new draft.  When the picker is empty the form
+    behaves exactly like before; when populated the route handler
+    routes the upload through the new-version branch in
+    :func:`app.docs.upload.handle_upload`.
     """
     error_alert = Alert(error, variant="danger") if error else None
     picker_disabled = doc_type_value == "vtk"
     vtk_list = vtks or []
+    versionable_list = versionable_drafts or []
 
     return Form(  # noqa: F405
         Div(
@@ -1366,7 +1436,7 @@ def _upload_form(
                 cls="input",
             ),
             Small(  # noqa: F405
-                "Kuni 200 tähemärki.",
+                "Kuni 200 tähemärki. Uue versiooni puhul päritakse pealkiri vanemalt eelnõult.",
                 cls="form-field-help",
             ),
             cls="form-field",
@@ -1376,6 +1446,10 @@ def _upload_form(
             vtk_list,
             selected=parent_vtk_id_value,
             disabled=picker_disabled,
+        ),
+        _version_picker(
+            versionable_list,
+            selected=parent_draft_id_value,
         ),
         Div(
             Label(  # noqa: F405
@@ -1464,9 +1538,19 @@ def new_draft_page(req: Request):
     # caller's org's VTKs. Cross-org leaks are impossible because the
     # helper scopes the query to ``auth['org_id']``. The ``org_id``
     # check at the top of the handler guarantees a non-None value here.
+    #
+    # #618 PR-B: also populate the "Versioneerimine" picker with every
+    # ``ready``-status draft in the same org so the uploader can target
+    # an existing draft for a follow-on version.
     org_id_str = str(auth["org_id"])
     vtks = list_vtks_for_org(org_id_str)
-    form, error_alert = _upload_form(vtks=vtks)
+    try:
+        with _connect() as conn:
+            versionable = list_versionable_drafts_for_org(conn, org_id_str)
+    except Exception:
+        logger.exception("Failed to load versionable drafts for org=%s", org_id_str)
+        versionable = []
+    form, error_alert = _upload_form(vtks=vtks, versionable_drafts=versionable)
     card_children: list = []
     if error_alert is not None:
         card_children.append(error_alert)
@@ -1536,6 +1620,14 @@ async def create_draft_handler(req: Request):
     * A VTK upload cannot carry a ``parent_vtk_id`` (DB CHECK mirror).
     * A ``parent_vtk_id`` must exist, belong to the caller's org, and
       have ``doc_type = 'vtk'``.
+
+    #618 PR-B: additionally accepts an optional ``parent_draft_id`` --
+    when supplied the upload becomes a NEW VERSION of the targeted
+    draft (a new ``draft_versions`` row, no new ``drafts`` row).  The
+    full validation (existence, same-org ownership, ``status='ready'``)
+    happens inside :func:`app.docs.upload.handle_upload` and surfaces
+    as a Estonian :class:`DraftUploadError` -- this handler just parses
+    the form value and forwards it.
     """
     auth_or_redirect = _require_auth(req)
     if isinstance(auth_or_redirect, Response):
@@ -1557,6 +1649,15 @@ async def create_draft_handler(req: Request):
     parent_vtk_str = str(parent_vtk_raw).strip() if parent_vtk_raw else ""
     parent_vtk_uuid = _parse_uuid(parent_vtk_str) if parent_vtk_str else None
 
+    # #618 PR-B: parse the new "Versioneerimine" picker value.  Empty /
+    # missing means "create a new draft, not a version".  A malformed
+    # UUID is rejected up front so we never call ``handle_upload`` with
+    # garbage; same-org / status validation lives downstream because it
+    # needs the connection.
+    parent_draft_raw = form.get("parent_draft_id", "")
+    parent_draft_str = str(parent_draft_raw).strip() if parent_draft_raw else ""
+    parent_draft_uuid = _parse_uuid(parent_draft_str) if parent_draft_str else None
+
     error_message: str | None = None
     status_code = 200
 
@@ -1570,6 +1671,16 @@ async def create_draft_handler(req: Request):
     elif parent_vtk_uuid is not None and doc_type_value == "vtk":
         # A VTK cannot have a parent VTK — same rule as the DB CHECK.
         error_message = "VTK ei saa olla seotud teise VTKga."
+        status_code = 400
+    elif parent_draft_str and parent_draft_uuid is None:
+        # The user submitted something in the version picker but it wasn't
+        # a valid UUID -- reject before we touch the DB.
+        error_message = "Vanem-eelnõu ei ole kättesaadav."
+        status_code = 400
+    elif parent_draft_uuid is not None and doc_type_value == "vtk":
+        # A VTK cannot itself be a follow-on version of another draft --
+        # reading-stage progression is an eelnõu lifecycle concept.
+        error_message = "VTK ei saa olla teise eelnõu versioon."
         status_code = 400
     elif parent_vtk_uuid is not None:
         # FK target must exist, be in the same org, and be a VTK.
@@ -1603,9 +1714,14 @@ async def create_draft_handler(req: Request):
                     upload,  # type: ignore[arg-type]
                     doc_type=doc_type_value,
                     parent_vtk_id=parent_vtk_uuid,
+                    parent_draft_id=parent_draft_uuid,
                 )
             except DraftUploadError as exc:
                 error_message = str(exc)
+                # Keep the legacy 200-with-banner shape so existing
+                # tests (and the HTMX form rerender) continue to behave
+                # the same; only the upfront-validation branches above
+                # set 400.
             else:
                 log_draft_upload(
                     auth.get("id"),
@@ -1615,11 +1731,21 @@ async def create_draft_handler(req: Request):
                     file_size=draft.file_size,
                 )
                 # #598: queue a success toast for the detail page.
-                push_flash(
-                    req,
-                    "Eelnõu üles laaditud, analüüs algas.",
-                    kind="success",
-                )
+                # The Estonian copy differs slightly between the
+                # "new draft" and "new version" branches so users see
+                # the right narrative.
+                if parent_draft_uuid is not None:
+                    push_flash(
+                        req,
+                        "Uus versioon üles laaditud, analüüs algas.",
+                        kind="success",
+                    )
+                else:
+                    push_flash(
+                        req,
+                        "Eelnõu üles laaditud, analüüs algas.",
+                        kind="success",
+                    )
                 return RedirectResponse(url=f"/drafts/{draft.id}", status_code=303)
 
     # At this point we definitely have an error_message.
@@ -1629,13 +1755,23 @@ async def create_draft_handler(req: Request):
     # banner + toast pattern is consistent with the happy-path redirect.
     push_flash(req, error_message, kind="danger")
 
-    vtks = list_vtks_for_org(str(auth["org_id"])) if auth.get("org_id") else []
+    org_id_for_pickers = str(auth["org_id"]) if auth.get("org_id") else None
+    vtks = list_vtks_for_org(org_id_for_pickers) if org_id_for_pickers else []
+    versionable: list[Draft] = []
+    if org_id_for_pickers:
+        try:
+            with _connect() as conn:
+                versionable = list_versionable_drafts_for_org(conn, org_id_for_pickers)
+        except Exception:
+            logger.exception("Failed to load versionable drafts for org=%s", org_id_for_pickers)
     form_el, _ = _upload_form(
         title_value=title_value,
         error=error_message,
         vtks=vtks,
+        versionable_drafts=versionable,
         doc_type_value=doc_type_value if doc_type_value in _VALID_DOC_TYPES else "eelnou",
         parent_vtk_id_value=parent_vtk_str or None,
+        parent_draft_id_value=parent_draft_str or None,
     )
     page = PageShell(
         H1("Uus eelnõu", cls="page-title"),  # noqa: F405

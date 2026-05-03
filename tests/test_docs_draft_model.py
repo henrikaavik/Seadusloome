@@ -33,6 +33,7 @@ from app.docs.draft_model import (
     get_draft,
     list_drafts_for_org,
     list_eelnous_for_vtk,
+    list_versionable_drafts_for_org,
     list_vtks_for_org,
     update_draft_parent_vtk,
     update_draft_status,
@@ -519,6 +520,112 @@ class TestListVtksForOrg:
         assert len(vtks) == 1
         assert vtks[0].title == "Maanteeseaduse VTK"
         assert vtks[0].id == _VTK_ID
+
+
+# ---------------------------------------------------------------------------
+# list_versionable_drafts_for_org -- version picker helper (#618 PR-B)
+# ---------------------------------------------------------------------------
+
+
+class TestListVersionableDraftsForOrg:
+    def test_filters_to_org_and_ready_status(self):
+        """The picker only surfaces drafts that are (a) owned by the
+        caller's org and (b) in the terminal ``ready`` status.  In-flight
+        drafts (parsing/extracting/analyzing/failed) are excluded so the
+        uploader cannot version-fork an unstable parent.
+        """
+        conn = MagicMock()
+        conn.execute.return_value.fetchall.return_value = [
+            _make_raw_row(
+                draft_id=uuid.uuid4(),
+                status="ready",
+                title="Eelnõu A",
+            ),
+        ]
+        result = list_versionable_drafts_for_org(conn, _ORG_ID)
+
+        assert len(result) == 1
+        assert result[0].title == "Eelnõu A"
+
+        sql, params = conn.execute.call_args.args
+        sql_lower = sql.lower()
+        assert "where org_id = %s" in sql_lower
+        assert "status = 'ready'" in sql_lower
+        assert params == (str(_ORG_ID),)
+
+    def test_returns_empty_when_no_eligible_drafts(self):
+        conn = MagicMock()
+        conn.execute.return_value.fetchall.return_value = []
+        assert list_versionable_drafts_for_org(conn, _ORG_ID) == []
+
+    def test_db_error_returns_empty_list(self):
+        conn = MagicMock()
+        conn.execute.side_effect = RuntimeError("boom")
+        assert list_versionable_drafts_for_org(conn, _ORG_ID) == []
+
+    def test_orders_newest_first(self):
+        """Picker is ordered ``created_at DESC`` so the most recent
+        ``ready`` draft surfaces at the top of the dropdown.
+        """
+        conn = MagicMock()
+        conn.execute.return_value.fetchall.return_value = []
+        list_versionable_drafts_for_org(conn, _ORG_ID)
+        sql = conn.execute.call_args.args[0].lower()
+        assert "order by created_at desc" in sql
+
+
+# ---------------------------------------------------------------------------
+# get_draft -- §4.2 cutover (#618 PR-B): JOIN through draft_versions
+# ---------------------------------------------------------------------------
+
+
+class TestGetDraftJoinCutover:
+    """Post-PR-B ``get_draft`` JOINs through ``draft_versions`` so the
+    returned :class:`Draft` reflects the latest version's pipeline state
+    via ``COALESCE(version.col, drafts.col)``.
+
+    These tests pin the JOIN shape so a future PR-D can drop the legacy
+    fallback safely.
+    """
+
+    def test_select_uses_left_join_on_latest_version(self):
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = _make_raw_row()
+        get_draft(conn, _DRAFT_ID)
+
+        sql = conn.execute.call_args.args[0].lower()
+        assert "from drafts d" in sql
+        assert "left join draft_versions v" in sql
+        assert "select max(version_number)" in sql, (
+            "JOIN must select the LATEST version (MAX(version_number)) so "
+            "v3 status updates surface on get_draft, not v2"
+        )
+
+    def test_coalesces_version_columns_over_drafts_columns(self):
+        """Status / parsed_text_encrypted / graph_uri / storage_path
+        all come from the version row when one exists.  The COALESCE
+        falls back to drafts.* so a draft missing a v1 row (impossible
+        post migration 030 but defended-against) still returns data.
+        """
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = _make_raw_row()
+        get_draft(conn, _DRAFT_ID)
+
+        sql = conn.execute.call_args.args[0].lower()
+        for col in ("storage_path", "graph_uri", "status", "parsed_text_encrypted"):
+            assert f"coalesce(v.{col}, d.{col})" in sql, (
+                f"get_draft must COALESCE {col} from draft_versions over drafts"
+            )
+
+    def test_returns_none_when_no_row(self):
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = None
+        assert get_draft(conn, _DRAFT_ID) is None
+
+    def test_db_error_returns_none(self):
+        conn = MagicMock()
+        conn.execute.side_effect = RuntimeError("conn lost")
+        assert get_draft(conn, _DRAFT_ID) is None
 
 
 # ---------------------------------------------------------------------------

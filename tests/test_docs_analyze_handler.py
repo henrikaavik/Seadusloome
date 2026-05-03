@@ -20,9 +20,27 @@ import pytest
 from app.docs.analyze_handler import analyze_impact
 from app.docs.draft_model import Draft
 from app.docs.impact.analyzer import ImpactFindings
+from app.docs.version_model import DraftVersion
 
 _DRAFT_ID = uuid.UUID("77777777-7777-7777-7777-777777777777")
+_VERSION_ID = uuid.UUID("88888888-8888-8888-8888-888888888888")
 _GRAPH_URI = f"https://data.riik.ee/ontology/estleg/drafts/{_DRAFT_ID}"
+
+
+def _make_version() -> DraftVersion:
+    """Build a v1 :class:`DraftVersion` for analyze_handler patches."""
+    return DraftVersion(
+        id=_VERSION_ID,
+        draft_id=_DRAFT_ID,
+        version_number=1,
+        reading_stage="vtk",
+        parsed_text_encrypted=None,
+        storage_path="/tmp/cipher.enc",
+        graph_uri=_GRAPH_URI,
+        status="analyzing",
+        created_at=datetime.now(UTC),
+        created_by=uuid.UUID("55555555-5555-5555-5555-555555555555"),
+    )
 
 
 def _make_draft(status: str = "analyzing") -> Draft:
@@ -128,6 +146,7 @@ class TestAnalyzeImpactHappyPath:
         with (
             patch("app.docs.analyze_handler.get_connection") as mock_get_conn,
             patch("app.docs.analyze_handler.get_draft", return_value=draft),
+            patch("app.docs.analyze_handler.get_latest_version", return_value=_make_version()),
             patch(
                 "app.docs.analyze_handler.build_draft_graph",
                 return_value="# turtle",
@@ -173,9 +192,22 @@ class TestAnalyzeImpactHappyPath:
         calls = insert_conn.execute.call_args_list
         sql_texts = [c.args[0].lower() for c in calls]
         assert any("insert into impact_reports" in s for s in sql_texts)
-        update_calls = [c for c in calls if "update drafts" in c.args[0].lower()]
-        assert len(update_calls) == 1
-        assert update_calls[0].args[1][0] == "ready"
+        # #618 PR-B: the impact_reports INSERT must carry a
+        # ``draft_version_id`` column bound to the latest version.
+        insert_call = next(c for c in calls if "insert into impact_reports" in c.args[0].lower())
+        assert "draft_version_id" in insert_call.args[0]
+        # Param order: report_id, draft_id, draft_version_id, ...
+        assert insert_call.args[1][2] == str(_VERSION_ID)
+        # §4.2 cutover (#618 PR-B): update_draft_status now writes to BOTH
+        # tables, so we expect an UPDATE drafts AND an UPDATE draft_versions.
+        update_drafts_calls = [c for c in calls if "update drafts" in c.args[0].lower()]
+        update_versions_calls = [c for c in calls if "update draft_versions" in c.args[0].lower()]
+        assert len(update_drafts_calls) == 1
+        assert update_versions_calls, (
+            "analyze_handler must write status='ready' to draft_versions via the "
+            "version-aware update_draft_status (§4.2 cutover, #618 PR-B)"
+        )
+        assert update_drafts_calls[0].args[1][0] == "ready"
         insert_conn.commit.assert_called_once()
 
         # Return payload contains the critical summary fields.
@@ -198,6 +230,7 @@ class TestAnalyzeImpactHappyPath:
         with (
             patch("app.docs.analyze_handler.get_connection") as mock_get_conn,
             patch("app.docs.analyze_handler.get_draft", return_value=draft),
+            patch("app.docs.analyze_handler.get_latest_version", return_value=_make_version()),
             patch(
                 "app.docs.analyze_handler.build_draft_graph",
                 return_value="# ttl",
@@ -254,6 +287,7 @@ class TestAnalyzeImpactHappyPath:
         with (
             patch("app.docs.analyze_handler.get_connection") as mock_get_conn,
             patch("app.docs.analyze_handler.get_draft", return_value=draft),
+            patch("app.docs.analyze_handler.get_latest_version", return_value=_make_version()),
             patch(
                 "app.docs.analyze_handler.build_draft_graph",
                 return_value="# ttl",
@@ -320,6 +354,7 @@ class TestAnalyzeImpactFailurePaths:
         with (
             patch("app.docs.analyze_handler.get_connection") as mock_get_conn,
             patch("app.docs.analyze_handler.get_draft", return_value=draft),
+            patch("app.docs.analyze_handler.get_latest_version", return_value=_make_version()),
             patch("app.docs.analyze_handler.build_draft_graph", return_value="# t"),
             patch(
                 "app.docs.analyze_handler.put_named_graph",
@@ -349,6 +384,7 @@ class TestAnalyzeImpactFailurePaths:
         with (
             patch("app.docs.analyze_handler.get_connection") as mock_get_conn,
             patch("app.docs.analyze_handler.get_draft", return_value=draft),
+            patch("app.docs.analyze_handler.get_latest_version", return_value=_make_version()),
             patch("app.docs.analyze_handler.build_draft_graph", return_value="# t"),
             patch(
                 "app.docs.analyze_handler.put_named_graph",
@@ -385,6 +421,7 @@ class TestAnalyzeImpactFailurePaths:
         with (
             patch("app.docs.analyze_handler.get_connection") as mock_get_conn,
             patch("app.docs.analyze_handler.get_draft", return_value=draft),
+            patch("app.docs.analyze_handler.get_latest_version", return_value=_make_version()),
             patch("app.docs.analyze_handler.build_draft_graph", return_value="# t"),
             patch(
                 "app.docs.analyze_handler.put_named_graph",
@@ -450,6 +487,7 @@ class TestAnalyzeImpactLineageHook:
         with (
             patch("app.docs.analyze_handler.get_connection") as mock_get_conn,
             patch("app.docs.analyze_handler.get_draft", return_value=draft),
+            patch("app.docs.analyze_handler.get_latest_version", return_value=_make_version()),
             patch("app.docs.analyze_handler.build_draft_graph", return_value="# t"),
             patch("app.docs.analyze_handler.put_named_graph", return_value=True),
             patch(
@@ -505,6 +543,7 @@ class TestAnalyzeImpactLineageHook:
         with (
             patch("app.docs.analyze_handler.get_connection") as mock_get_conn,
             patch("app.docs.analyze_handler.get_draft", return_value=draft),
+            patch("app.docs.analyze_handler.get_latest_version", return_value=_make_version()),
             patch("app.docs.analyze_handler.build_draft_graph", return_value="# t"),
             patch("app.docs.analyze_handler.put_named_graph", return_value=True),
             patch(
@@ -559,6 +598,7 @@ class TestAnalyzeImpactLineageHook:
         with (
             patch("app.docs.analyze_handler.get_connection") as mock_get_conn,
             patch("app.docs.analyze_handler.get_draft", return_value=draft),
+            patch("app.docs.analyze_handler.get_latest_version", return_value=_make_version()),
             patch("app.docs.analyze_handler.build_draft_graph", return_value="# t"),
             patch("app.docs.analyze_handler.put_named_graph", return_value=True),
             patch(
