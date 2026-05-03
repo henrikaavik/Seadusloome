@@ -25,9 +25,15 @@ from datetime import datetime
 from typing import Any
 
 from app.db_utils import coerce_uuid, parse_jsonb
-from app.storage import DecryptionError, decrypt_text
+from app.storage import DecryptionError, decrypt_text, encrypt_text
 
 logger = logging.getLogger(__name__)
+
+
+# §9.4 row_kind whitelist — the four impact-report row types that can host
+# annotations. Validated at every write entry point so a malformed value
+# cannot poison the (target_type, target_id) composite index.
+VALID_ROW_KINDS: tuple[str, ...] = ("entity", "conflict", "eu", "gap")
 
 
 # ---------------------------------------------------------------------------
@@ -526,3 +532,182 @@ def list_annotations_for_version_row(
         )
         return []
     return [_row_to_annotation(row) for row in rows]
+
+
+# ---------------------------------------------------------------------------
+# §9.4 row-annotation write helpers (PR-B)
+# ---------------------------------------------------------------------------
+#
+# The "thread" abstraction is implicit: every row in ``annotations`` with the
+# same ``(draft_version_id, target_type='impact_report_item', target_id)``
+# triple is one message in the same thread. The first write creates the
+# thread; subsequent writes append messages to it.
+#
+# Resolution / reopen toggles are mirrored across every row in the thread so
+# a single SELECT on the latest row reflects the current resolved state. The
+# ``stale`` column is intentionally NEVER touched in this PR; that flag is
+# managed by the analyse re-run pipeline (PR-C territory).
+
+
+def _validate_row_kind(row_kind: str) -> None:
+    """Raise ValueError if *row_kind* is not in the §9.4 whitelist."""
+    if row_kind not in VALID_ROW_KINDS:
+        raise ValueError(f"Invalid row_kind: {row_kind!r}. Must be one of {VALID_ROW_KINDS!r}")
+
+
+def create_row_annotation(
+    conn: Any,
+    *,
+    user_id: uuid.UUID | str,
+    org_id: uuid.UUID | str,
+    draft_version_id: uuid.UUID | str,
+    row_kind: str,
+    row_key: str,
+    content: str,
+) -> Annotation:
+    """Insert a new message in a row-annotation thread (encrypted).
+
+    Encrypts ``content`` via Fernet and writes the ciphertext to
+    ``content_encrypted``; the legacy plaintext ``content`` column is left
+    NULL. Mentions are parsed from the plaintext and resolved against the
+    given ``org_id`` so the persisted UUID array only contains in-org
+    user IDs.
+
+    Args:
+        conn: Open psycopg connection. The caller commits.
+        user_id: Author of the message.
+        org_id: Author's organisation (used for mention resolution).
+        draft_version_id: The version this row annotation is scoped to.
+        row_kind: One of :data:`VALID_ROW_KINDS`.
+        row_key: The opaque per-kind identifier (entity URI, conflict id,
+            etc.). Composed with ``row_kind`` into ``target_id``.
+        content: Plaintext message body. Must be non-empty after stripping.
+
+    Returns:
+        The newly inserted :class:`Annotation` (with decrypted content).
+
+    Raises:
+        ValueError: If ``row_kind`` is not in the whitelist or if
+            ``content`` is empty after stripping.
+        RuntimeError: If the INSERT returns no row.
+    """
+    _validate_row_kind(row_kind)
+    stripped = content.strip()
+    if not stripped:
+        raise ValueError("content must not be empty")
+
+    target_id = f"{row_kind}:{row_key}"
+    ciphertext = encrypt_text(stripped)
+    mentions = parse_mentions(conn, stripped, org_id)
+
+    row = conn.execute(
+        f"""
+        INSERT INTO annotations
+            (user_id, org_id, target_type, target_id,
+             content, content_encrypted,
+             draft_version_id, mentions)
+        VALUES (%s, %s, 'impact_report_item', %s,
+                NULL, %s,
+                %s, %s)
+        RETURNING {_ANNOTATION_COLUMNS}
+        """,
+        (
+            str(user_id),
+            str(org_id),
+            target_id,
+            ciphertext,
+            str(draft_version_id),
+            [str(m) for m in mentions],
+        ),
+    ).fetchone()
+    if row is None:
+        raise RuntimeError("INSERT ... RETURNING annotations produced no row")
+    return _row_to_annotation(row)
+
+
+def resolve_row_thread(
+    conn: Any,
+    *,
+    draft_version_id: uuid.UUID | str,
+    row_kind: str,
+    row_key: str,
+    resolved_by_user_id: uuid.UUID | str,
+) -> int:
+    """Mark every message in the thread as resolved.
+
+    Resolution is thread-level: we flip ``resolved=TRUE`` on every annotation
+    row with the matching ``(draft_version_id, target_type, target_id)``
+    triple so subsequent SELECTs surface a consistent state regardless of
+    which row the UI samples. The ``stale`` column is left untouched.
+
+    Returns:
+        The number of rows updated (0 if the thread does not exist).
+    """
+    _validate_row_kind(row_kind)
+    target_id = f"{row_kind}:{row_key}"
+    try:
+        cursor = conn.execute(
+            """
+            UPDATE annotations
+            SET resolved = TRUE,
+                resolved_by = %s,
+                resolved_at = now(),
+                updated_at = now()
+            WHERE draft_version_id = %s
+              AND target_type = 'impact_report_item'
+              AND target_id = %s
+            """,
+            (str(resolved_by_user_id), str(draft_version_id), target_id),
+        )
+    except Exception:
+        logger.exception(
+            "Failed to resolve row thread version=%s row_kind=%s row_key=%s",
+            draft_version_id,
+            row_kind,
+            row_key,
+        )
+        return 0
+    return getattr(cursor, "rowcount", 0) or 0
+
+
+def reopen_row_thread(
+    conn: Any,
+    *,
+    draft_version_id: uuid.UUID | str,
+    row_kind: str,
+    row_key: str,
+) -> int:
+    """Flip a thread back to ``resolved=FALSE`` on every message.
+
+    Mirror of :func:`resolve_row_thread`. Clears ``resolved_by`` and
+    ``resolved_at`` so audit trails are honest about the current state.
+    The ``stale`` column is not touched.
+
+    Returns:
+        The number of rows updated (0 if the thread does not exist).
+    """
+    _validate_row_kind(row_kind)
+    target_id = f"{row_kind}:{row_key}"
+    try:
+        cursor = conn.execute(
+            """
+            UPDATE annotations
+            SET resolved = FALSE,
+                resolved_by = NULL,
+                resolved_at = NULL,
+                updated_at = now()
+            WHERE draft_version_id = %s
+              AND target_type = 'impact_report_item'
+              AND target_id = %s
+            """,
+            (str(draft_version_id), target_id),
+        )
+    except Exception:
+        logger.exception(
+            "Failed to reopen row thread version=%s row_kind=%s row_key=%s",
+            draft_version_id,
+            row_kind,
+            row_key,
+        )
+        return 0
+    return getattr(cursor, "rowcount", 0) or 0
