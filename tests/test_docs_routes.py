@@ -2630,3 +2630,398 @@ class TestMaskLeakedEnvErrorsMigration:
         assert "delete from drafts" not in sql
         assert "drop table" not in sql
         assert "drop column" not in sql
+
+
+# ===========================================================================
+# #618 PR-C — versioning UI: timeline section + diff route
+# ===========================================================================
+
+
+def _make_version(
+    *,
+    version_id: uuid.UUID | None = None,
+    draft_id: uuid.UUID | None = None,
+    user_id: str = _USER_ID,
+    version_number: int = 1,
+    reading_stage: str = "vtk",
+    parsed_text_encrypted: bytes | None = None,
+    status: str = "ready",
+    created_at: datetime | None = None,
+):
+    """Build a ``DraftVersion`` for the timeline + diff tests (#618 PR-C)."""
+    from app.docs.version_model import DraftVersion
+
+    resolved_draft_id = draft_id or uuid.UUID("44444444-4444-4444-4444-444444444444")
+    resolved_id = version_id or uuid.UUID(f"99999999-9999-9999-9999-{version_number:012d}")
+    return DraftVersion(
+        id=resolved_id,
+        draft_id=resolved_draft_id,
+        version_number=version_number,
+        reading_stage=reading_stage,
+        parsed_text_encrypted=parsed_text_encrypted,
+        storage_path=f"/tmp/v{version_number}.enc",
+        graph_uri=(
+            f"https://data.riik.ee/ontology/estleg/drafts/{resolved_draft_id}/v{version_number}"
+        ),
+        status=status,
+        created_at=created_at or datetime.now(UTC),
+        created_by=uuid.UUID(user_id),
+    )
+
+
+def _stub_connect(mock_connect: MagicMock) -> MagicMock:
+    """Wire a ``patch('app.docs.routes._connect')`` to behave as a
+    successful context manager handing back a MagicMock connection.
+
+    Used by the timeline tests because ``draft_detail_page`` opens a
+    ``with _connect() as conn`` block before invoking
+    ``_version_timeline_rows`` — without this stub the connection
+    fails and the helper mock never fires.
+    """
+    mock_conn = MagicMock()
+    mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+    mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+    return mock_conn
+
+
+class TestVersionTimelineOnDetailPage:
+    """The detail page renders a "Versioonide ajalugu" card with one row per version."""
+
+    @patch("app.docs.routes._version_timeline_rows")
+    @patch("app.docs.routes._connect")
+    @patch("app.docs.routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_renders_one_row_per_version_in_ascending_order(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_connect: MagicMock,
+        mock_timeline: MagicMock,
+    ):
+        mock_get_provider.return_value = _stub_provider()
+        draft = _make_draft(status="ready")
+        mock_fetch.return_value = draft
+        _stub_connect(mock_connect)
+        # Helper returns rows already in v1 → v3 order. The test
+        # asserts the order survives into the rendered markup so a
+        # later refactor can't silently flip the table direction.
+        mock_timeline.return_value = [
+            {
+                "version": _make_version(version_number=1, reading_stage="vtk"),
+                "uploader_label": "Mari Maasikas",
+                "is_first": True,
+            },
+            {
+                "version": _make_version(version_number=2, reading_stage="reading_1"),
+                "uploader_label": "Mari Maasikas",
+                "is_first": False,
+            },
+            {
+                "version": _make_version(version_number=3, reading_stage="reading_2"),
+                "uploader_label": "Jüri Mustikas",
+                "is_first": False,
+            },
+        ]
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{draft.id}")
+
+        assert resp.status_code == 200
+        body = resp.text
+        assert "Versioonide ajalugu" in body
+        # Each version number is rendered.
+        assert "v1" in body
+        assert "v2" in body
+        assert "v3" in body
+        # Ascending order: v1 must appear before v2, v2 before v3.
+        assert body.index("v1") < body.index("v2") < body.index("v3")
+        # Reading stage labels in Estonian.
+        assert "VTK" in body
+        assert "1. lugemine" in body
+        assert "2. lugemine" in body
+        # Uploader display names from the resolved row.
+        assert "Mari Maasikas" in body
+        assert "Jüri Mustikas" in body
+
+    @patch("app.docs.routes._version_timeline_rows")
+    @patch("app.docs.routes._connect")
+    @patch("app.docs.routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_first_version_has_no_diff_button(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_connect: MagicMock,
+        mock_timeline: MagicMock,
+    ):
+        """v1 has no predecessor — the "Erinevus" button must be absent on
+        v1 but present on every later version."""
+        mock_get_provider.return_value = _stub_provider()
+        draft = _make_draft(status="ready")
+        mock_fetch.return_value = draft
+        _stub_connect(mock_connect)
+        mock_timeline.return_value = [
+            {
+                "version": _make_version(version_number=1),
+                "uploader_label": "Mari",
+                "is_first": True,
+            },
+            {
+                "version": _make_version(version_number=2, reading_stage="reading_1"),
+                "uploader_label": "Mari",
+                "is_first": False,
+            },
+        ]
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{draft.id}")
+
+        assert resp.status_code == 200
+        body = resp.text
+        # Only ONE diff link rendered (v2 vs v1). v1 has no predecessor.
+        assert body.count(f"/drafts/{draft.id}/diff?from=1&amp;to=2") == 1
+        # No diff link starting at version 0 (would be a v1 button).
+        assert "from=0" not in body
+
+    @patch("app.docs.routes._version_timeline_rows")
+    @patch("app.docs.routes._connect")
+    @patch("app.docs.routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_every_version_has_open_button(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_connect: MagicMock,
+        mock_timeline: MagicMock,
+    ):
+        """The "Ava" link routes to /drafts/{id}/report?version=<v.id>
+        for every version in the timeline."""
+        mock_get_provider.return_value = _stub_provider()
+        draft = _make_draft(status="ready")
+        mock_fetch.return_value = draft
+        _stub_connect(mock_connect)
+        v1 = _make_version(version_number=1)
+        v2 = _make_version(version_number=2, reading_stage="reading_1")
+        mock_timeline.return_value = [
+            {"version": v1, "uploader_label": "Mari", "is_first": True},
+            {"version": v2, "uploader_label": "Mari", "is_first": False},
+        ]
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{draft.id}")
+
+        assert resp.status_code == 200
+        body = resp.text
+        # Each version's report link uses its own UUID.
+        assert f"/drafts/{draft.id}/report?version={v1.id}" in body
+        assert f"/drafts/{draft.id}/report?version={v2.id}" in body
+        # "Ava" button label appears at least twice (once per version).
+        assert body.count(">Ava<") >= 2
+
+
+class TestDraftDiffPage:
+    """GET /drafts/{draft_id}/diff?from=<v1>&to=<v2> — side-by-side diff page."""
+
+    @patch("app.docs.routes.list_versions_for_draft")
+    @patch("app.docs.routes._connect")
+    @patch("app.docs.routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_valid_request_renders_diff_table(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_connect: MagicMock,
+        mock_list_versions: MagicMock,
+    ):
+        from app.storage.encrypted import encrypt_text
+
+        mock_get_provider.return_value = _stub_provider()
+        draft = _make_draft(status="ready")
+        mock_fetch.return_value = draft
+        _stub_connect(mock_connect)
+        # Two versions with real Fernet ciphertext so decrypt_text
+        # round-trips inside the route.
+        v1 = _make_version(
+            version_number=1,
+            reading_stage="vtk",
+            parsed_text_encrypted=encrypt_text("§ 1. Vana sõnastus."),
+        )
+        v2 = _make_version(
+            version_number=2,
+            reading_stage="reading_1",
+            parsed_text_encrypted=encrypt_text("§ 1. Uus sõnastus."),
+        )
+        mock_list_versions.return_value = [v2, v1]  # DESC, like the real helper.
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{draft.id}/diff?from=1&to=2")
+
+        assert resp.status_code == 200
+        body = resp.text
+        # Page title carries the v1 → v2 hint so the user always sees
+        # which direction the diff runs in.
+        assert "Versioonide erinevus v1" in body
+        assert "v2" in body
+        # The diff table is mounted with its CSS hook.
+        assert "diff-table" in body
+        # Both versions' text lines surface in the side-by-side cells.
+        assert "Vana sõnastus" in body
+        assert "Uus sõnastus" in body
+        # Side-by-side column headers.
+        assert "Vana versioon" in body
+        assert "Uus versioon" in body
+        # Back-link to the parent draft.
+        assert f"/drafts/{draft.id}" in body
+
+    @patch("app.docs.routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_cross_org_returns_not_found_page(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+    ):
+        """Cross-org callers must hit the 404 page — never leak existence."""
+        mock_get_provider.return_value = _stub_provider()
+        # Draft belongs to a different org than the authed user.
+        foreign = _make_draft(org_id=_OTHER_ORG_ID)
+        mock_fetch.return_value = foreign
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{foreign.id}/diff?from=1&to=2")
+
+        assert resp.status_code == 200
+        assert "Eelnõu ei leitud" in resp.text
+        # The diff table must NOT render for an unauthorised viewer.
+        assert "diff-table" not in resp.text
+
+    @patch("app.docs.routes.list_versions_for_draft")
+    @patch("app.docs.routes._connect")
+    @patch("app.docs.routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_nonexistent_version_number_returns_not_found(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_connect: MagicMock,
+        mock_list_versions: MagicMock,
+    ):
+        """Asking for a version number that doesn't exist must 404."""
+        mock_get_provider.return_value = _stub_provider()
+        draft = _make_draft(status="ready")
+        mock_fetch.return_value = draft
+        _stub_connect(mock_connect)
+        # Only v1 exists; the request asks for v=99 → not found.
+        mock_list_versions.return_value = [_make_version(version_number=1)]
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{draft.id}/diff?from=1&to=99")
+
+        assert resp.status_code == 200
+        assert "Eelnõu ei leitud" in resp.text
+        assert "diff-table" not in resp.text
+
+    @patch("app.docs.routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_missing_query_params_returns_not_found(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+    ):
+        mock_get_provider.return_value = _stub_provider()
+        draft = _make_draft(status="ready")
+        mock_fetch.return_value = draft
+
+        client = _authed_client()
+        # Neither `from` nor `to` provided.
+        resp = client.get(f"/drafts/{draft.id}/diff")
+
+        assert resp.status_code == 200
+        assert "Eelnõu ei leitud" in resp.text
+
+    @patch("app.docs.routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_non_numeric_query_params_returns_not_found(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+    ):
+        mock_get_provider.return_value = _stub_provider()
+        draft = _make_draft(status="ready")
+        mock_fetch.return_value = draft
+
+        client = _authed_client()
+        # 'one' is not a valid int.
+        resp = client.get(f"/drafts/{draft.id}/diff?from=one&to=two")
+
+        assert resp.status_code == 200
+        assert "Eelnõu ei leitud" in resp.text
+
+    @patch("app.docs.routes.list_versions_for_draft")
+    @patch("app.docs.routes._connect")
+    @patch("app.docs.routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_swapped_from_to_pair_is_normalised(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_connect: MagicMock,
+        mock_list_versions: MagicMock,
+    ):
+        """from=2&to=1 is silently flipped to from=1&to=2 so old links
+        from the timeline-rendering refactor still work."""
+        from app.storage.encrypted import encrypt_text
+
+        mock_get_provider.return_value = _stub_provider()
+        draft = _make_draft(status="ready")
+        mock_fetch.return_value = draft
+        _stub_connect(mock_connect)
+        v1 = _make_version(
+            version_number=1,
+            reading_stage="vtk",
+            parsed_text_encrypted=encrypt_text("vana"),
+        )
+        v2 = _make_version(
+            version_number=2,
+            reading_stage="reading_1",
+            parsed_text_encrypted=encrypt_text("uus"),
+        )
+        mock_list_versions.return_value = [v2, v1]
+
+        client = _authed_client()
+        # Reversed pair — must still render the diff (not 404).
+        resp = client.get(f"/drafts/{draft.id}/diff?from=2&to=1")
+
+        assert resp.status_code == 200
+        body = resp.text
+        # Title is rendered with the normalised v1 → v2 direction.
+        assert "Versioonide erinevus v1" in body
+        assert "diff-table" in body
+
+    @patch("app.docs.routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_same_version_compared_to_itself_returns_not_found(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+    ):
+        """Diffing a version against itself is a no-op — return 404 so
+        the user lands back on the detail page rather than seeing an
+        all-unchanged table that wastes a page-load."""
+        mock_get_provider.return_value = _stub_provider()
+        draft = _make_draft(status="ready")
+        mock_fetch.return_value = draft
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{draft.id}/diff?from=2&to=2")
+
+        assert resp.status_code == 200
+        assert "Eelnõu ei leitud" in resp.text
+
+    def test_diff_route_redirects_unauthenticated(self):
+        """Unauthenticated callers get bounced to /auth/login."""
+        from app.main import app
+
+        client = TestClient(app, follow_redirects=False)
+        resp = client.get("/drafts/44444444-4444-4444-4444-444444444444/diff?from=1&to=2")
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/auth/login"

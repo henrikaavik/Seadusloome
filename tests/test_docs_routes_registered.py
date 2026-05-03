@@ -38,6 +38,8 @@ def test_draft_route_surface_is_stable() -> None:
         ("/drafts/{draft_id}/delete", ("POST",)),
         ("/drafts/{draft_id}/link-vtk", ("POST",)),
         ("/drafts/{draft_id}/retry", ("POST",)),
+        # #618 PR-C: side-by-side diff route (versioning UI).
+        ("/drafts/{draft_id}/diff", ("GET", "HEAD")),
         # report_routes.py — out of scope for #623, included as a tripwire
         ("/drafts/{draft_id}/report", ("GET", "HEAD")),
         ("/drafts/{draft_id}/report/reanalyze", ("POST",)),

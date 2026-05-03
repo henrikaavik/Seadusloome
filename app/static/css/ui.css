@@ -2544,3 +2544,89 @@ details.sync-error pre {
   margin: 0.5rem 0;
   line-height: 1.5;
 }
+
+/* ===========================================================================
+   Version diff (#618 PR-C)
+   ---------------------------------------------------------------------------
+   Side-by-side diff table for the /drafts/{id}/diff route.  Row classes
+   come from app/docs/version_diff.py::render_diff_table — never edit these
+   without re-running the diff renderer's tests.
+   =========================================================================== */
+
+.diff-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+  font-size: 0.85rem;
+  table-layout: fixed;
+}
+
+.diff-table thead th {
+  text-align: left;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+  font-weight: var(--font-medium);
+}
+
+.diff-table .diff-lineno-header {
+  width: 3.5em;
+  text-align: right;
+  color: var(--color-text-muted);
+}
+
+.diff-table td {
+  padding: 0.25rem 0.5rem;
+  vertical-align: top;
+  border-bottom: 1px solid var(--color-border);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.diff-row-unchanged {
+  background: var(--color-surface);
+}
+
+.diff-row-added {
+  background: rgba(21, 128, 61, 0.18);
+}
+
+.diff-row-removed {
+  background: rgba(185, 28, 28, 0.18);
+  text-decoration: line-through;
+}
+
+.diff-row-changed {
+  background: rgba(202, 138, 4, 0.18);
+}
+
+.diff-table .diff-lineno {
+  color: var(--color-text-muted);
+  user-select: none;
+  min-width: 3em;
+  width: 3.5em;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.diff-table .diff-empty {
+  padding: 1rem;
+  text-align: center;
+  color: var(--color-text-muted);
+  font-style: italic;
+}
+
+/* ---- Version timeline section on the draft detail page ---- */
+
+.version-timeline-card .version-timeline-empty {
+  color: var(--color-text-muted);
+  font-style: italic;
+  margin: 0;
+}
+
+.version-timeline-actions {
+  display: inline-flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
