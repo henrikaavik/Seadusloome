@@ -1,36 +1,43 @@
 """Pin the post-#704 patch-path contract.
 
 After the #704 routes/ split started extracting helpers into
-``_shared.py`` and ``_status_tracker.py``, ``app.docs.routes``
-re-exports the moved symbols for direct-import convenience but a
-``patch("app.docs.routes.X")`` only rebinds the package-level alias —
-NOT the bindings inside submodules that imported the symbol at module
-load time. This is the standard Python "patch where used, not where
-defined" rule.
+``_shared.py`` / ``_status_tracker.py`` / ``_upload.py``,
+``app.docs.routes`` re-exports the moved symbols for direct-import
+convenience but a ``patch("app.docs.routes.X")`` only rebinds the
+package-level alias — NOT the bindings inside submodules that
+imported the symbol at module load time. This is the standard Python
+"patch where used, not where defined" rule.
 
-These tests pin both halves of the contract:
+These tests pin both halves of the contract for each extracted
+submodule:
 
 1. Direct imports from ``app.docs.routes`` keep returning the moved
    symbol (back-compat for callers that aren't patching).
-2. Patching ``app.docs.routes._poll_interval_seconds`` does NOT
-   affect ``_status_tracker``'s internal call site — submodules use
-   their own globals.
-3. Patching ``app.docs.routes._status_tracker._poll_interval_seconds``
-   DOES intercept the tracker's call (the canonical "patch where
-   used" path).
+2. Patching ``app.docs.routes.<symbol>`` does NOT affect the
+   submodule's internal call site — submodules use their own globals.
+3. Patching ``app.docs.routes.<submodule>.<symbol>`` DOES intercept
+   the submodule's call (the canonical "patch where used" path).
 
 Reviewer note from PR #710 / #704 PR-B asked for this pin so future
-extractions in PR-C / D / E inherit the documented contract.
+extractions in PR-C / D / E inherit the documented contract. PR-C
+adds the matching three-test block for ``_upload._validate_parent_vtk_fk``.
 """
 
 from __future__ import annotations
 
 from unittest.mock import patch
 
-from app.docs.routes import _shared
+from app.docs.routes import _shared, _upload
 from app.docs.routes._status_tracker import (
     _poll_interval_seconds as _imported_at_module_load,
 )
+from app.docs.routes._upload import (
+    _validate_parent_vtk_fk as _upload_imported_at_module_load,
+)
+
+# ---------------------------------------------------------------------------
+# PR-B contract: _shared._poll_interval_seconds via _status_tracker
+# ---------------------------------------------------------------------------
 
 
 def test_direct_import_from_package_returns_moved_symbol() -> None:
@@ -82,6 +89,62 @@ def test_submodule_patch_intercepts_submodule_callers() -> None:
     with patch("app.docs.routes._status_tracker._poll_interval_seconds", stub):
         from app.docs.routes._status_tracker import (
             _poll_interval_seconds as patched_in_submodule,
+        )
+
+        assert patched_in_submodule is stub, (
+            "submodule-local binding must reflect the submodule-targeted patch"
+        )
+
+
+# ---------------------------------------------------------------------------
+# PR-C contract: _upload._validate_parent_vtk_fk via _upload callers
+# ---------------------------------------------------------------------------
+
+
+def test_upload_module_owns_its_local_binding() -> None:
+    """``_upload`` defines ``_validate_parent_vtk_fk`` at module scope;
+    its own ``create_draft_handler`` resolves the name through the
+    module-local global, not through the package re-export."""
+    assert _upload_imported_at_module_load is _upload._validate_parent_vtk_fk
+
+
+def test_package_level_patch_does_not_reach_upload_globals() -> None:
+    """``patch("app.docs.routes._validate_parent_vtk_fk")`` only rebinds
+    the package alias; ``_upload``'s local binding stays original.
+
+    Mirrors :func:`test_package_level_patch_does_not_reach_submodule_globals`
+    so PR-C extractions inherit the same documented contract: package
+    aliases are convenience back-compat re-exports, NOT patch points
+    that propagate into submodules.
+    """
+
+    def stub(_conn, _parent_vtk_id, _org_id):  # pragma: no cover — only on failure
+        return "stubbed"
+
+    with patch("app.docs.routes._validate_parent_vtk_fk", stub):
+        from app.docs.routes import _validate_parent_vtk_fk as patched_pkg
+        from app.docs.routes._upload import (
+            _validate_parent_vtk_fk as patched_in_submodule,
+        )
+
+        assert patched_pkg is stub, "package-level binding should be the stub"
+        assert patched_in_submodule is _upload._validate_parent_vtk_fk, (
+            "submodule binding must NOT see the package-level patch — "
+            "this is the documented post-#704 contract for _upload too"
+        )
+
+
+def test_upload_submodule_patch_intercepts_upload_callers() -> None:
+    """Patching where the symbol is USED (inside ``_upload``) DOES
+    intercept the handler's internal call. Canonical "patch where
+    used" recipe for the PR-C extraction."""
+
+    def stub(_conn, _parent_vtk_id, _org_id):  # pragma: no cover — only on failure
+        return "stubbed"
+
+    with patch("app.docs.routes._upload._validate_parent_vtk_fk", stub):
+        from app.docs.routes._upload import (
+            _validate_parent_vtk_fk as patched_in_submodule,
         )
 
         assert patched_in_submodule is stub, (
