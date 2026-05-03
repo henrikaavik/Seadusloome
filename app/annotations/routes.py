@@ -27,23 +27,36 @@ from app.annotations.audit import (
     log_annotation_delete,
     log_annotation_reply,
     log_annotation_resolve,
+    log_row_annotation_create,
+    log_row_annotation_message,
+    log_row_annotation_reopen,
+    log_row_annotation_resolve,
 )
 from app.annotations.models import (
+    VALID_ROW_KINDS,
     Annotation,
     create_annotation,
     create_reply,
+    create_row_annotation,
     delete_annotation,
     get_annotation,
     list_annotations_for_target,
+    list_annotations_for_version_row,
     list_replies,
+    reopen_row_thread,
     resolve_annotation,
+    resolve_row_thread,
 )
 from app.auth.helpers import require_auth as _require_auth
 from app.auth.provider import UserDict
 from app.auth.users import get_user
 from app.db import get_connection as _connect
 from app.notifications.wire import notify_annotation_reply
+from app.ui.primitives.badge import Badge
+from app.ui.primitives.button import Button as UiButton
+from app.ui.surfaces.alert import Alert
 from app.ui.surfaces.annotation_popover import AnnotationPopover
+from app.ui.surfaces.card import Card, CardBody, CardHeader
 from app.ui.time import format_tallinn
 
 logger = logging.getLogger(__name__)
@@ -555,6 +568,540 @@ def delete_annotation_handler(req: Request, id: str):
 
 
 # ---------------------------------------------------------------------------
+# §9.4 Version-scoped row-annotation routes (PR-B)
+# ---------------------------------------------------------------------------
+#
+# Route map:
+#   GET    /annotations/version/{draft_version_id}/{row_kind}/{row_key}
+#   POST   /annotations/version/{draft_version_id}/{row_kind}/{row_key}/messages
+#   POST   /annotations/version/{draft_version_id}/{row_kind}/{row_key}/resolve
+#   POST   /annotations/version/{draft_version_id}/{row_kind}/{row_key}/reopen
+#
+# All four handlers share an ACL preamble enforced by
+# ``_load_draft_version_or_404``: parse the ``draft_version_id`` UUID, JOIN
+# ``draft_versions`` → ``drafts`` to read the owning org_id, and assert it
+# matches the caller's ``auth['org_id']``. Any mismatch returns 404 (NOT
+# 403) so cross-org probing cannot enumerate version IDs.
+#
+# row_kind is validated against ``VALID_ROW_KINDS`` at the handler boundary
+# so a malformed value short-circuits before any DB call.
+# ---------------------------------------------------------------------------
+
+
+# Side-panel fragment container id; PR-C will render this once on the report
+# page and the routes below all swap into it.
+_SIDE_PANEL_ID = "annotation-side-panel"
+
+# Estonian labels for the four row_kind types — used in the panel header
+# and the PR-C wiring.
+_ROW_KIND_LABELS: dict[str, str] = {
+    "entity": "Olem",
+    "conflict": "Vastuolu",
+    "eu": "EL-i õigusakt",
+    "gap": "Õiguslünk",
+}
+
+
+def _validate_row_kind(row_kind: str) -> bool:
+    """Return True iff *row_kind* is one of the §9.4 whitelist values."""
+    return row_kind in VALID_ROW_KINDS
+
+
+def _load_draft_version_or_404(
+    draft_version_id: str,
+    auth: UserDict,
+) -> tuple[uuid.UUID, str] | Response:
+    """Resolve a draft_version_id to (uuid, org_id) or return a 404 Response.
+
+    Joins ``draft_versions`` → ``drafts`` to read ``drafts.org_id`` and
+    asserts equality with ``auth['org_id']``. The ACL pattern matches
+    ``app.docs._helpers.resolve_draft``: cross-org accesses return 404 so a
+    caller cannot probe for the existence of out-of-org versions.
+
+    Returns:
+        On success: ``(version_uuid, owning_org_id_str)``.
+        On any failure (parse error, missing row, cross-org): a 404
+        ``Response`` ready to return verbatim from the route handler.
+    """
+    parsed = _parse_uuid(draft_version_id)
+    if parsed is None:
+        return Response(status_code=404)
+
+    caller_org = str(auth.get("org_id") or "")
+    if not caller_org:
+        return Response(status_code=404)
+
+    try:
+        with _connect() as conn:
+            row = conn.execute(
+                """
+                SELECT d.org_id
+                FROM draft_versions dv
+                JOIN drafts d ON d.id = dv.draft_id
+                WHERE dv.id = %s
+                """,
+                (str(parsed),),
+            ).fetchone()
+    except Exception:
+        logger.exception("Failed to load draft_version=%s for ACL check", draft_version_id)
+        return Response(status_code=404)
+
+    if row is None:
+        return Response(status_code=404)
+
+    owning_org = str(row[0]) if row[0] is not None else ""
+    if owning_org != caller_org:
+        # 404 not 403 — never leak that the version exists.
+        return Response(status_code=404)
+
+    return parsed, owning_org
+
+
+async def _read_content(req: Request) -> tuple[str, str | None]:
+    """Pull the ``content`` field from JSON or form POST body.
+
+    Returns ``(content, error)`` where ``error`` is None on success and an
+    Estonian error string on parse failure. The content is returned with
+    surrounding whitespace preserved so the caller can decide whether
+    empty-after-strip is allowed.
+    """
+    content_type = req.headers.get("content-type", "")
+    if "application/json" in content_type:
+        try:
+            body = await req.json()
+        except Exception:
+            return "", "Vigane JSON."
+        return str(body.get("content", "")), None
+    form = await req.form()
+    return str(form.get("content", "")), None
+
+
+# ---------------------------------------------------------------------------
+# Side-panel fragment renderer
+# ---------------------------------------------------------------------------
+
+
+def _row_message_item(
+    ann: Annotation,
+    user_name: str,
+    mentions_resolved: dict[str, str],
+) -> Any:
+    """Render a single message inside the side-panel thread."""
+    # @mention badges — one per resolved user UUID.
+    mention_badges: list[Any] = []
+    for mention_uuid in ann.mentions:
+        display = mentions_resolved.get(str(mention_uuid), "—")
+        mention_badges.append(
+            Badge(  # noqa: F405
+                f"@{display}",
+                variant="primary",
+                cls="annotation-mention-badge",
+            )
+        )
+
+    header = Div(  # noqa: F405
+        Strong(user_name, cls="annotation-author"),  # noqa: F405
+        Span(  # noqa: F405
+            _format_timestamp(ann.created_at),
+            cls="annotation-timestamp",
+        ),
+        cls="annotation-header",
+    )
+
+    body_children: list[Any] = [P(ann.content, cls="annotation-content")]  # noqa: F405
+    if mention_badges:
+        body_children.append(
+            Div(*mention_badges, cls="annotation-mentions")  # noqa: F405
+        )
+
+    return Card(
+        CardHeader(header),
+        CardBody(*body_children),
+        variant="bordered",
+        cls="annotation-message",
+    )
+
+
+def _row_panel_fragment(
+    draft_version_id: uuid.UUID | str,
+    row_kind: str,
+    row_key: str,
+    messages: list[Annotation],
+    auth: UserDict,
+) -> Any:
+    """Render the full side-panel fragment for one row thread.
+
+    Layout (top to bottom):
+      - "Aegunud" warning banner if any message in the thread is stale
+      - Thread header with row_kind label + resolve/reopen toggle
+      - Reverse-chronological list of messages
+      - Compose form pinned to the bottom
+
+    The fragment carries its own outer ``id`` so HTMX swaps into the
+    side-panel container with ``hx_swap="innerHTML"`` (or replace the
+    whole inner fragment via ``outerHTML`` from the resolve/reopen
+    handlers).
+    """
+    base = f"/annotations/version/{draft_version_id}/{row_kind}/{row_key}"
+
+    # Resolve mention UUIDs → display names once per fragment so each
+    # message item can render badges without re-querying.
+    mention_uuids: set[str] = set()
+    for m in messages:
+        for u in m.mentions:
+            mention_uuids.add(str(u))
+    mentions_resolved = {u: _user_display_name(uuid.UUID(u)) for u in mention_uuids}
+
+    # Thread state: any row marks the thread resolved → all rows are
+    # resolved (mirror semantics in resolve_row_thread / reopen_row_thread).
+    is_resolved = bool(messages and all(m.resolved for m in messages))
+
+    # Stale banner if any row in the thread is flagged stale.
+    is_stale = any(m.stale for m in messages)
+    stale_banner = None
+    if is_stale:
+        stale_banner = Alert(
+            "See rida on aegunud — viimane analüüs ei leidnud enam vastavat sisu eelnõust.",
+            variant="warning",
+            cls="annotation-stale-banner",
+        )
+
+    # Header with toggle button.
+    if is_resolved:
+        toggle = UiButton(
+            "Ava uuesti",
+            variant="secondary",
+            size="sm",
+            hx_post=f"{base}/reopen",
+            hx_target=f"#{_SIDE_PANEL_ID}",
+            hx_swap="innerHTML",
+            cls="annotation-toggle-btn",
+        )
+    else:
+        toggle = UiButton(
+            "Lahenda",
+            variant="primary",
+            size="sm",
+            hx_post=f"{base}/resolve",
+            hx_target=f"#{_SIDE_PANEL_ID}",
+            hx_swap="innerHTML",
+            cls="annotation-toggle-btn",
+        )
+
+    kind_label = _ROW_KIND_LABELS.get(row_kind, row_kind)
+    header = Div(  # noqa: F405
+        Div(  # noqa: F405
+            H3(  # noqa: F405
+                f"{kind_label} märkused",
+                cls="annotation-panel-title",
+            ),
+            Badge(  # noqa: F405
+                str(len(messages)),
+                variant="primary" if not is_resolved else "default",
+                cls="annotation-count-badge",
+            ),
+            cls="annotation-panel-title-row",
+        ),
+        toggle,
+        cls="annotation-panel-header",
+    )
+
+    # Message list — newest first (matches the model query ORDER BY DESC).
+    if messages:
+        message_items = [
+            _row_message_item(
+                m,
+                _user_display_name(m.user_id),
+                mentions_resolved,
+            )
+            for m in messages
+        ]
+        message_list = Div(*message_items, cls="annotation-message-list")  # noqa: F405
+    else:
+        message_list = Div(  # noqa: F405
+            P(  # noqa: F405
+                "Märkuseid ei ole veel lisatud.",
+                cls="muted-text",
+            ),
+            cls="annotation-message-list annotation-message-list-empty",
+        )
+
+    # Compose form — disabled (visually) when the thread is resolved so
+    # the user has to reopen first.
+    compose_form = Form(  # noqa: F405
+        Textarea(  # noqa: F405
+            name="content",
+            placeholder=(
+                "Kirjuta märkus... Kasuta @nimi mainimiseks."
+                if not is_resolved
+                else "Lahendatud lõim — ava uuesti vastamiseks."
+            ),
+            rows="3",
+            cls="annotation-compose-input",
+            required=True,
+            disabled=is_resolved,
+        ),
+        UiButton(
+            "Saada",
+            type="submit",
+            variant="primary",
+            size="sm",
+            disabled=is_resolved,
+        ),
+        hx_post=f"{base}/messages",
+        hx_target=f"#{_SIDE_PANEL_ID}",
+        hx_swap="innerHTML",
+        cls="annotation-compose-form",
+    )
+
+    children: list[Any] = []
+    if stale_banner is not None:
+        children.append(stale_banner)
+    children.append(header)
+    children.append(message_list)
+    children.append(Hr(cls="annotation-divider"))  # noqa: F405
+    children.append(compose_form)
+
+    return Div(  # noqa: F405
+        *children,
+        # data attrs: useful for the PR-C JS when wiring AnnotationButton →
+        # side panel without a full page reload.
+        data_draft_version_id=str(draft_version_id),
+        data_row_kind=row_kind,
+        data_row_key=row_key,
+        cls="annotation-side-panel-fragment",
+    )
+
+
+def _load_panel_messages(
+    draft_version_id: uuid.UUID | str,
+    row_kind: str,
+    row_key: str,
+) -> list[Annotation]:
+    """Load every message in a row thread, swallowing DB errors.
+
+    Wrapper around :func:`list_annotations_for_version_row` so the route
+    handlers do not have to repeat the connection-context boilerplate.
+    Returns an empty list on any failure — the rendered panel will simply
+    show the "no messages yet" empty state, which is the correct UI even
+    if the thread does have messages but the DB transiently failed.
+    """
+    try:
+        with _connect() as conn:
+            return list_annotations_for_version_row(conn, draft_version_id, row_kind, row_key)
+    except Exception:
+        logger.exception(
+            "Failed to load row-annotation thread version=%s row_kind=%s row_key=%s",
+            draft_version_id,
+            row_kind,
+            row_key,
+        )
+        return []
+
+
+# ---------------------------------------------------------------------------
+# Handler: GET /annotations/version/{draft_version_id}/{row_kind}/{row_key}
+# ---------------------------------------------------------------------------
+
+
+def get_row_panel_handler(
+    req: Request,
+    draft_version_id: str,
+    row_kind: str,
+    row_key: str,
+):
+    """Return the side-panel fragment for one impact-report row thread."""
+    auth_or_redirect = _require_auth(req)
+    if isinstance(auth_or_redirect, Response):
+        return auth_or_redirect
+    auth = auth_or_redirect
+
+    if not _validate_row_kind(row_kind):
+        return Response(status_code=400)
+
+    resolved = _load_draft_version_or_404(draft_version_id, auth)
+    if isinstance(resolved, Response):
+        return resolved
+    version_uuid, _org_id = resolved
+
+    messages = _load_panel_messages(version_uuid, row_kind, row_key)
+    return _row_panel_fragment(version_uuid, row_kind, row_key, messages, auth)
+
+
+# ---------------------------------------------------------------------------
+# Handler: POST /annotations/version/{...}/messages
+# ---------------------------------------------------------------------------
+
+
+async def post_row_message_handler(
+    req: Request,
+    draft_version_id: str,
+    row_kind: str,
+    row_key: str,
+):
+    """Append a message to a row thread (or create the thread if empty).
+
+    Encrypts the body via Fernet, resolves @mentions to in-org user UUIDs,
+    and writes a new ``annotations`` row with ``target_type='impact_report_item'``
+    and ``target_id='{row_kind}:{row_key}'``. Returns the refreshed panel
+    fragment so the HTMX swap shows the new message at the top.
+    """
+    auth_or_redirect = _require_auth(req)
+    if isinstance(auth_or_redirect, Response):
+        return auth_or_redirect
+    auth = auth_or_redirect
+
+    if not _validate_row_kind(row_kind):
+        return Response(status_code=400)
+
+    resolved = _load_draft_version_or_404(draft_version_id, auth)
+    if isinstance(resolved, Response):
+        return resolved
+    version_uuid, org_id = resolved
+
+    raw_content, parse_error = await _read_content(req)
+    if parse_error is not None:
+        return Response(content=parse_error, status_code=400)
+
+    content = raw_content.strip()
+    if not content:
+        return Response(status_code=400)
+
+    # Pre-count to discriminate "first message in thread" (create audit)
+    # from "follow-up message" (message audit). The thread-level resolve
+    # state is read here so we can refuse a write into a resolved thread
+    # before touching the DB.
+    existing = _load_panel_messages(version_uuid, row_kind, row_key)
+    if existing and all(m.resolved for m in existing):
+        return Response(
+            content="Lõim on lahendatud — ava esmalt uuesti.",
+            status_code=409,
+        )
+
+    is_first_message = not existing
+
+    try:
+        with _connect() as conn:
+            annotation = create_row_annotation(
+                conn,
+                user_id=auth["id"],
+                org_id=org_id,
+                draft_version_id=version_uuid,
+                row_kind=row_kind,
+                row_key=row_key,
+                content=content,
+            )
+            conn.commit()
+    except ValueError as exc:
+        logger.warning("create_row_annotation rejected input: %s", exc)
+        return Response(content=str(exc), status_code=400)
+    except Exception:
+        logger.exception("Failed to create row annotation")
+        return Response(content="Märkuse loomine ebaõnnestus.", status_code=500)
+
+    if is_first_message:
+        log_row_annotation_create(auth["id"], annotation.id, version_uuid, row_kind, row_key)
+    else:
+        log_row_annotation_message(auth["id"], annotation.id, version_uuid, row_kind, row_key)
+
+    # Reload the thread so the fragment shows the message we just inserted
+    # plus everything that was already there.
+    messages = _load_panel_messages(version_uuid, row_kind, row_key)
+    return _row_panel_fragment(version_uuid, row_kind, row_key, messages, auth)
+
+
+# ---------------------------------------------------------------------------
+# Handler: POST /annotations/version/{...}/resolve
+# ---------------------------------------------------------------------------
+
+
+def post_row_resolve_handler(
+    req: Request,
+    draft_version_id: str,
+    row_kind: str,
+    row_key: str,
+):
+    """Mark every message in a row thread as resolved."""
+    auth_or_redirect = _require_auth(req)
+    if isinstance(auth_or_redirect, Response):
+        return auth_or_redirect
+    auth = auth_or_redirect
+
+    if not _validate_row_kind(row_kind):
+        return Response(status_code=400)
+
+    resolved = _load_draft_version_or_404(draft_version_id, auth)
+    if isinstance(resolved, Response):
+        return resolved
+    version_uuid, _org_id = resolved
+
+    try:
+        with _connect() as conn:
+            updated = resolve_row_thread(
+                conn,
+                draft_version_id=version_uuid,
+                row_kind=row_kind,
+                row_key=row_key,
+                resolved_by_user_id=auth["id"],
+            )
+            conn.commit()
+    except Exception:
+        logger.exception("Failed to resolve row thread")
+        return Response(status_code=500)
+
+    if updated > 0:
+        log_row_annotation_resolve(auth["id"], version_uuid, row_kind, row_key)
+
+    messages = _load_panel_messages(version_uuid, row_kind, row_key)
+    return _row_panel_fragment(version_uuid, row_kind, row_key, messages, auth)
+
+
+# ---------------------------------------------------------------------------
+# Handler: POST /annotations/version/{...}/reopen
+# ---------------------------------------------------------------------------
+
+
+def post_row_reopen_handler(
+    req: Request,
+    draft_version_id: str,
+    row_kind: str,
+    row_key: str,
+):
+    """Flip a previously resolved row thread back to ``resolved=FALSE``."""
+    auth_or_redirect = _require_auth(req)
+    if isinstance(auth_or_redirect, Response):
+        return auth_or_redirect
+    auth = auth_or_redirect
+
+    if not _validate_row_kind(row_kind):
+        return Response(status_code=400)
+
+    resolved = _load_draft_version_or_404(draft_version_id, auth)
+    if isinstance(resolved, Response):
+        return resolved
+    version_uuid, _org_id = resolved
+
+    try:
+        with _connect() as conn:
+            updated = reopen_row_thread(
+                conn,
+                draft_version_id=version_uuid,
+                row_kind=row_kind,
+                row_key=row_key,
+            )
+            conn.commit()
+    except Exception:
+        logger.exception("Failed to reopen row thread")
+        return Response(status_code=500)
+
+    if updated > 0:
+        log_row_annotation_reopen(auth["id"], version_uuid, row_kind, row_key)
+
+    messages = _load_panel_messages(version_uuid, row_kind, row_key)
+    return _row_panel_fragment(version_uuid, row_kind, row_key, messages, auth)
+
+
+# ---------------------------------------------------------------------------
 # Route registration
 # ---------------------------------------------------------------------------
 
@@ -566,3 +1113,12 @@ def register_annotation_routes(rt) -> None:  # type: ignore[no-untyped-def]
     rt("/api/annotations/{id}/reply", methods=["POST"])(reply_annotation_handler)
     rt("/api/annotations/{id}/resolve", methods=["POST"])(resolve_annotation_handler)
     rt("/api/annotations/{id}", methods=["DELETE"])(delete_annotation_handler)
+
+    # §9.4 row-annotation routes (PR-B).  The unprefixed ``/annotations``
+    # path matches the sprint plan §6 contract; PR-C wires it up from the
+    # impact-report side panel.
+    base = "/annotations/version/{draft_version_id}/{row_kind}/{row_key}"
+    rt(base, methods=["GET"])(get_row_panel_handler)
+    rt(f"{base}/messages", methods=["POST"])(post_row_message_handler)
+    rt(f"{base}/resolve", methods=["POST"])(post_row_resolve_handler)
+    rt(f"{base}/reopen", methods=["POST"])(post_row_reopen_handler)
