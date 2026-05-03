@@ -370,7 +370,7 @@ class TestKeepDraftRoute:
         assert "Eelnõu ei leitud" in resp.text
         mock_touch.assert_not_called()
 
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._lifecycle.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_missing_draft_returns_not_found(
         self,

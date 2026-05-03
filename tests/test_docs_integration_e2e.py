@@ -485,7 +485,7 @@ class TestDocsPipelineE2E:
         with (
             patch("app.auth.middleware._get_provider", return_value=_stub_provider()),
             patch("app.docs.upload._connect", side_effect=conn_factory),
-            patch("app.docs.routes._connect", side_effect=conn_factory),
+            patch("app.docs.routes._detail._connect", side_effect=conn_factory),
             patch("app.docs.report_routes._connect", side_effect=conn_factory),
             patch("app.docs.parse_handler.get_connection", side_effect=conn_factory),
             patch("app.docs.parse_handler.get_default_tika_client", return_value=fake_tika),

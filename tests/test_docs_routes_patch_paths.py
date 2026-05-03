@@ -1,7 +1,8 @@
 """Pin the post-#704 patch-path contract.
 
 After the #704 routes/ split started extracting helpers into
-``_shared.py`` / ``_status_tracker.py`` / ``_upload.py`` / ``_list.py``,
+``_shared.py`` / ``_status_tracker.py`` / ``_upload.py`` / ``_list.py`` /
+``_detail.py`` / ``_detail_modals.py`` / ``_detail_versions.py``,
 ``app.docs.routes`` re-exports the moved symbols for direct-import
 convenience but a ``patch("app.docs.routes.X")`` only rebinds the
 package-level alias — NOT the bindings inside submodules that
@@ -22,14 +23,18 @@ Reviewer note from PR #710 / #704 PR-B asked for this pin so future
 extractions in PR-C / D / E inherit the documented contract. PR-C
 adds the matching three-test block for ``_upload._validate_parent_vtk_fk``.
 PR-D adds the matching three-test block for
-``_list.list_drafts_for_org_filtered``.
+``_list.list_drafts_for_org_filtered``. PR-E adds the matching
+three-test block for ``_detail.fetch_draft``.
 """
 
 from __future__ import annotations
 
 from unittest.mock import patch
 
-from app.docs.routes import _list, _shared, _upload
+from app.docs.routes import _detail, _list, _shared, _upload
+from app.docs.routes._detail import (
+    fetch_draft as _detail_imported_at_module_load,
+)
 from app.docs.routes._list import (
     list_drafts_for_org_filtered as _list_imported_at_module_load,
 )
@@ -209,6 +214,67 @@ def test_list_submodule_patch_intercepts_list_callers() -> None:
         from app.docs.routes._list import (
             list_drafts_for_org_filtered as patched_in_submodule,
         )
+
+        assert patched_in_submodule is stub, (
+            "submodule-local binding must reflect the submodule-targeted patch"
+        )
+
+
+# ---------------------------------------------------------------------------
+# PR-E contract: _detail.fetch_draft via _detail callers
+# ---------------------------------------------------------------------------
+
+
+def test_detail_module_owns_its_local_binding() -> None:
+    """``_detail`` imports ``fetch_draft`` at module load time; its own
+    ``draft_detail_page`` resolves the name through the module-local
+    global, not through the package re-export."""
+    assert _detail_imported_at_module_load is _detail.fetch_draft
+
+
+def test_package_level_patch_does_not_reach_detail_globals() -> None:
+    """A ``_detail``-targeted patch does NOT propagate into sibling
+    submodules that imported ``fetch_draft`` independently.
+
+    Mirrors :func:`test_package_level_patch_does_not_reach_submodule_globals`
+    for the PR-E extraction. ``_detail.py`` and ``_detail_versions.py``
+    each import ``fetch_draft`` directly from
+    :mod:`app.docs.draft_model` at module load time, so a patch on one
+    submodule's binding must NOT be visible to the other. This is the
+    boundary that requires per-handler patch sites in test code rather
+    than a single package-level patch.
+    """
+
+    def stub(*_args, **_kwargs):  # pragma: no cover — only invoked on failure
+        return None
+
+    # Snapshot the canonical implementation BEFORE patching so we can
+    # assert the sibling submodule still resolves to it.
+    from app.docs.draft_model import fetch_draft as canonical_fetch_draft
+
+    with patch("app.docs.routes._detail.fetch_draft", stub):
+        from app.docs.routes._detail import fetch_draft as patched_in_detail
+        from app.docs.routes._detail_versions import (
+            fetch_draft as patched_in_versions,
+        )
+
+        assert patched_in_detail is stub, "_detail-local binding should be the stub"
+        assert patched_in_versions is canonical_fetch_draft, (
+            "sibling submodule binding must NOT see the _detail-targeted patch — "
+            "this is the documented post-#704 contract for _detail too"
+        )
+
+
+def test_detail_submodule_patch_intercepts_detail_callers() -> None:
+    """Patching where the symbol is USED (inside ``_detail``) DOES
+    intercept the handler's internal call. Canonical "patch where
+    used" recipe for the PR-E extraction."""
+
+    def stub(*_args, **_kwargs):  # pragma: no cover — only invoked on failure
+        return None
+
+    with patch("app.docs.routes._detail.fetch_draft", stub):
+        from app.docs.routes._detail import fetch_draft as patched_in_submodule
 
         assert patched_in_submodule is stub, (
             "submodule-local binding must reflect the submodule-targeted patch"
