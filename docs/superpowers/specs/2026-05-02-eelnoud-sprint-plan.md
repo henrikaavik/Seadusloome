@@ -1,7 +1,7 @@
 # Eelnõud Epic — 2-Sprint Closing Plan
 
-**Status:** Draft for discussion
-**Date:** 2026-05-02
+**Status:** ✅ Done — Sprints 1 + 2 shipped 2026-05-03; epic #597 closed
+**Date:** 2026-05-02 (planning) → 2026-05-03 (closed)
 **Epic:** [#597 — Eelnõud (Drafts) production polish sweep](https://github.com/henrikaavik/Seadusloome/issues/597)
 **Goal:** Close all 8 open Eelnõud subtasks in two 2-week sprints.
 
