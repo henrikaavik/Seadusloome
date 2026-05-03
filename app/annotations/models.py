@@ -711,3 +711,172 @@ def reopen_row_thread(
         )
         return 0
     return getattr(cursor, "rowcount", 0) or 0
+
+
+# ---------------------------------------------------------------------------
+# §9.4 row-annotation read aggregates (PR-C)
+# ---------------------------------------------------------------------------
+#
+# Two helpers used by the impact-report renderer + analyze pipeline:
+#
+#   - :func:`count_unresolved_for_version_row` powers the AnnotationButton
+#     badge ("3 unresolved messages on this row").
+#   - :func:`update_stale_flags_for_version` is invoked at the tail of the
+#     analyze handler to flip ``stale=true`` on annotations whose row no
+#     longer exists in the just-finished analyze.  Best-effort: any DB
+#     failure logs and returns 0 so a stale-flag glitch never derails an
+#     otherwise-successful analyze.
+# ---------------------------------------------------------------------------
+
+
+def count_unresolved_for_version_row(
+    conn: Any,
+    draft_version_id: uuid.UUID | str,
+    row_kind: str,
+    row_key: str,
+) -> int:
+    """Return the number of unresolved messages on a single impact-report row.
+
+    Used to render the badge on :func:`AnnotationButton` so the user sees
+    "5" before clicking.  ``stale`` rows still count — a stale-but-unresolved
+    annotation is the most important one to surface, not the least.
+
+    Returns:
+        Integer count (0 when no rows match or on any DB error so a
+        transient failure never crashes the report page).
+    """
+    if row_kind not in VALID_ROW_KINDS:
+        # The button MUST NOT raise on a malformed row_kind — that would
+        # crash the entire page render.  Treat it as "no annotations".
+        return 0
+    target_id = f"{row_kind}:{row_key}"
+    try:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) FROM annotations
+            WHERE draft_version_id = %s
+              AND target_type = 'impact_report_item'
+              AND target_id = %s
+              AND resolved = FALSE
+            """,
+            (str(draft_version_id), target_id),
+        ).fetchone()
+    except Exception:
+        logger.exception(
+            "count_unresolved_for_version_row failed version=%s row_kind=%s row_key=%s",
+            draft_version_id,
+            row_kind,
+            row_key,
+        )
+        return 0
+    if row is None or row[0] is None:
+        return 0
+    try:
+        return int(row[0])
+    except (TypeError, ValueError):
+        return 0
+
+
+def update_stale_flags_for_version(
+    conn: Any,
+    draft_version_id: uuid.UUID | str,
+    current_row_keys: set[tuple[str, str]],
+) -> int:
+    """Reconcile ``annotations.stale`` for one version against the latest analyze.
+
+    Walks every ``impact_report_item`` annotation for the given version and
+    flips:
+
+        - ``stale = FALSE`` when ``(row_kind, row_key)`` IS in
+          *current_row_keys* (the row reappeared, e.g. after a re-analyze
+          surfaced the same conflict again).
+        - ``stale = TRUE`` when ``(row_kind, row_key)`` is NOT in
+          *current_row_keys* (the row vanished — the latest analyze did not
+          produce that finding).
+
+    The reconciliation is idempotent: running this twice with the same
+    *current_row_keys* set leaves the DB in the same state.
+
+    Best-effort failure handling: any DB error logs an exception and
+    returns 0 so a stale-flag glitch never aborts the analyze pipeline.
+
+    Args:
+        conn: Open psycopg connection. The caller commits.
+        draft_version_id: The version this analyze run produced.
+        current_row_keys: Set of ``(row_kind, row_key)`` tuples for every
+            row in the new impact report.
+
+    Returns:
+        The number of rows whose ``stale`` flag actually changed (0 on
+        no-op or on any DB error).
+    """
+    try:
+        annotation_rows = conn.execute(
+            """
+            SELECT id, target_id, stale
+            FROM annotations
+            WHERE draft_version_id = %s
+              AND target_type = 'impact_report_item'
+            """,
+            (str(draft_version_id),),
+        ).fetchall()
+    except Exception:
+        logger.exception(
+            "update_stale_flags_for_version: lookup failed version=%s",
+            draft_version_id,
+        )
+        return 0
+
+    if not annotation_rows:
+        return 0
+
+    to_set_stale: list[uuid.UUID] = []
+    to_clear_stale: list[uuid.UUID] = []
+    for row in annotation_rows:
+        ann_id_raw = row[0]
+        target_id = str(row[1] or "")
+        currently_stale = bool(row[2])
+        # target_id format is "{row_kind}:{row_key}"; split on the FIRST
+        # colon only because row_key (sha256 hex / URI) may contain
+        # colons of its own.
+        if ":" not in target_id:
+            continue
+        row_kind, row_key = target_id.split(":", 1)
+        is_present = (row_kind, row_key) in current_row_keys
+        try:
+            ann_id = coerce_uuid(ann_id_raw)
+        except Exception:
+            continue
+        if is_present and currently_stale:
+            to_clear_stale.append(ann_id)
+        elif not is_present and not currently_stale:
+            to_set_stale.append(ann_id)
+
+    changed = 0
+    if to_set_stale:
+        try:
+            conn.execute(
+                "UPDATE annotations SET stale = TRUE, updated_at = now() WHERE id = ANY(%s)",
+                ([str(uid) for uid in to_set_stale],),
+            )
+            changed += len(to_set_stale)
+        except Exception:
+            logger.exception(
+                "update_stale_flags_for_version: SET stale failed version=%s count=%d",
+                draft_version_id,
+                len(to_set_stale),
+            )
+    if to_clear_stale:
+        try:
+            conn.execute(
+                "UPDATE annotations SET stale = FALSE, updated_at = now() WHERE id = ANY(%s)",
+                ([str(uid) for uid in to_clear_stale],),
+            )
+            changed += len(to_clear_stale)
+        except Exception:
+            logger.exception(
+                "update_stale_flags_for_version: CLEAR stale failed version=%s count=%d",
+                draft_version_id,
+                len(to_clear_stale),
+            )
+    return changed

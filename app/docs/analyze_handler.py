@@ -36,6 +36,8 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
+from app.annotations.models import update_stale_flags_for_version
+from app.annotations.row_keys import collect_row_specs
 from app.auth.audit import log_action
 from app.db import get_connection
 from app.docs.draft_model import fetch_draft, get_draft, update_draft_status
@@ -181,6 +183,39 @@ def analyze_impact(
             # ``status='ready'`` row without its report.
             update_draft_status(conn, draft_id, "ready")
             conn.commit()
+
+        # ------------------------------------------------------------------
+        # #619 PR-C: stale-flag automation.  After a fresh analyze writes
+        # the new impact_reports row, walk every annotation on the same
+        # draft_version_id and flip ``stale``:
+        #   - row reappeared in the new findings → stale=false
+        #   - row vanished from the new findings → stale=true
+        # Wrapped in its own try/except so a stale-flag glitch never
+        # fails the analyze job; this is a UX signal, not a correctness
+        # invariant.  Runs in its own transaction (separate connection)
+        # so the impact_reports commit above is durable regardless.
+        # ------------------------------------------------------------------
+        if draft_version_id is not None:
+            try:
+                findings_dict = dataclasses.asdict(findings)
+                row_specs = collect_row_specs(findings_dict)
+                current_keys: set[tuple[str, str]] = set(row_specs)
+                with get_connection() as conn:
+                    changed = update_stale_flags_for_version(conn, draft_version_id, current_keys)
+                    conn.commit()
+                if changed:
+                    logger.info(
+                        "analyze_impact: reconciled stale flags for version=%s changed=%d",
+                        draft_version_id,
+                        changed,
+                    )
+            except Exception:
+                logger.warning(
+                    "analyze_impact: stale-flag reconcile failed for draft=%s version=%s",
+                    draft_id,
+                    draft_version_id,
+                    exc_info=True,
+                )
 
         # ------------------------------------------------------------------
         # #621: "sarnased eelnõud" — best-effort similarity compute.
