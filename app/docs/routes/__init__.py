@@ -36,23 +36,21 @@ from app.auth.users import list_users
 from app.db import get_connection as _connect
 from app.docs._helpers import _not_found_page, _parse_uuid
 from app.docs.audit import (
-    log_draft_delete,
     log_draft_upload,
     log_draft_view,
 )
 from app.docs.draft_model import (
     DEFAULT_SORT,
     Draft,
-    delete_draft,
     fetch_draft,
     list_drafts_for_org_filtered,
     list_eelnous_for_vtk,
     list_vtks_for_org,
-    touch_draft_access,
     touch_draft_access_conn,
     update_draft_parent_vtk,
 )
 from app.docs.graph_builder import write_doc_lineage
+from app.docs.routes._lifecycle import delete_draft_handler, keep_draft_handler
 from app.docs.status import (
     PIPELINE_STAGES,
     STATUS_BY_VALUE,
@@ -64,8 +62,6 @@ from app.docs.status import (
     VALID_STATUSES as _VALID_STATUSES,
 )
 from app.docs.upload import DraftUploadError, handle_upload
-from app.jobs.queue import JobQueue
-from app.rag.retriever import delete_chunks_for_draft
 from app.ui.data.data_table import Column, DataTable
 from app.ui.data.pagination import Pagination
 from app.ui.feedback.empty_state import EmptyState
@@ -2272,193 +2268,6 @@ def draft_actions_fragment(req: Request, draft_id: str):
     # and ``body[-1]`` worked; adding the link-vtk modal trailing items
     # made the negative index unsafe.)
     return body[1]
-
-
-# ---------------------------------------------------------------------------
-# POST /drafts/{draft_id}/delete — delete handler
-# ---------------------------------------------------------------------------
-
-
-def delete_draft_handler(req: Request, draft_id: str):
-    """POST /drafts/{draft_id}/delete — remove the draft + encrypted file.
-
-    Owner-only per NFR §5 matrix (fixed by #568). Any same-org colleague
-    used to be able to delete another user's draft because the handler
-    authorized on ``org_id`` alone. The helper in ``app.auth.policy``
-    enforces the full rule: owner OR system admin.
-    """
-    auth_or_redirect = _require_auth(req)
-    if isinstance(auth_or_redirect, Response):
-        return auth_or_redirect
-    auth = auth_or_redirect
-
-    parsed = _parse_uuid(draft_id)
-    if parsed is None:
-        return _not_found_page(req)
-
-    draft = fetch_draft(parsed)
-    if draft is None:
-        return _not_found_page(req)
-    if not can_delete_draft(auth, draft):
-        # Return 404 rather than 403 so we don't leak existence of the
-        # draft to cross-org or non-owner callers.
-        return _not_found_page(req)
-
-    # #628: single transaction for every DB-side deletion. Previously
-    # the handler opened two separate ``_connect()`` contexts (row +
-    # rag_chunks, then background_jobs cancellation) and sandwiched
-    # two external calls (encrypted file + Jena graph) between them
-    # with no boundary. A failure partway through left the system in
-    # an inconsistent state: row gone but jobs still pending, or jobs
-    # cancelled but encrypted file still on disk. The refactor folds
-    # every DB mutation into ONE transactional block and hands the
-    # slow/flaky external cleanup off to a background ``draft_cleanup``
-    # job that can retry independently.
-    storage_path: str | None = None
-    try:
-        with _connect() as conn:
-            storage_path = delete_draft(conn, parsed)
-            # #576: polymorphic soft reference — clear any rag_chunks rows
-            # tied to this draft inside the same transaction as the row
-            # delete so either both land or neither does. Today no private
-            # draft ingestion exists so this is a no-op, but wiring it now
-            # means future ingestion code can't forget.
-            try:
-                delete_chunks_for_draft(conn, parsed)
-            except Exception:
-                logger.exception("Failed to delete rag_chunks for draft id=%s", parsed)
-            # #454/#478: cancel any pending/claimed/running/retrying
-            # background jobs that still reference this draft. Doing
-            # this in the SAME transaction as the row delete means a
-            # rollback doesn't strand orphaned jobs on the queue.
-            # #478 added ``running`` because a worker that picked up
-            # the job just before deletion would otherwise leave the
-            # row behind and produce a spurious failure.
-            conn.execute(
-                """
-                DELETE FROM background_jobs
-                WHERE payload->>'draft_id' = %s
-                  AND status IN ('pending', 'claimed', 'running', 'retrying')
-                """,
-                (str(parsed),),
-            )
-            conn.commit()
-    except Exception:
-        logger.exception("Failed to delete draft id=%s", parsed)
-        return _not_found_page(req)
-
-    # #628: enqueue an async cleanup job for the external effects that
-    # can fail independently of the user-visible delete. The job
-    # retries on its own schedule; a flaky Jena instance no longer
-    # blocks the user flow or leaves the DB inconsistent. Failure to
-    # enqueue is logged but non-fatal — the DB is already clean and
-    # the operator can always delete the file/graph manually.
-    cleanup_payload = {
-        "draft_id": str(parsed),
-        "storage_path": storage_path,
-        "graph_uri": draft.graph_uri,
-    }
-    try:
-        cleanup_job_id = JobQueue().enqueue("draft_cleanup", cleanup_payload, priority=0)
-        logger.info(
-            "Orphan cleanup job enqueued draft=%s job_id=%s storage_path=%s",
-            parsed,
-            cleanup_job_id,
-            storage_path,
-        )
-    except Exception:
-        logger.exception(
-            "Failed to enqueue draft_cleanup job for draft id=%s — "
-            "external resources may be orphaned",
-            parsed,
-        )
-
-    log_draft_delete(
-        auth.get("id"),
-        parsed,
-        filename=draft.filename,
-    )
-
-    # #598: queue a success toast for the drafts listing page.
-    push_flash(req, "Eelnõu kustutatud.", kind="success")
-
-    # #467: when the browser drives the delete via HTMX (the form has
-    # ``hx_post`` + ``hx_target='body'`` + ``hx_swap='outerHTML'`` — see
-    # ``_draft_detail_body``), returning a plain 303 here makes HTMX
-    # follow the redirect as an AJAX GET, fetch the drafts-list partial
-    # (whose first element is a ``<title>`` tag from ``PageShell``), and
-    # swap that entire partial into ``<body>``. The rendered page ends
-    # up with a ``<title>`` inside the body, which browsers treat as
-    # invalid HTML and render as visible text — corrupting the layout.
-    #
-    # The fix is to detect HTMX requests and return an empty 204 with an
-    # ``HX-Redirect`` header so HTMX performs a **real** browser
-    # navigation to ``/drafts`` instead of swapping. Non-HTMX clients
-    # (JS-disabled users hitting the native form action) still get the
-    # 303 redirect.
-    if req.headers.get("HX-Request") == "true":
-        return Response(
-            status_code=204,
-            headers={"HX-Redirect": "/drafts"},
-        )
-    return RedirectResponse(url="/drafts", status_code=303)
-
-
-# ---------------------------------------------------------------------------
-# POST /drafts/{draft_id}/keep — reset last_accessed_at (#572)
-# ---------------------------------------------------------------------------
-
-
-def keep_draft_handler(req: Request, draft_id: str):
-    """POST /drafts/{draft_id}/keep — reset the 90-day archive clock.
-
-    Owner-only per the same policy as delete — resetting the archive
-    clock is a governance action that re-commits the org to retaining
-    the draft for another 90 days. Same-org reviewers and admins MUST
-    NOT be able to bypass the owner's intent to let a stale draft
-    auto-warn.
-    """
-    auth_or_redirect = _require_auth(req)
-    if isinstance(auth_or_redirect, Response):
-        return auth_or_redirect
-    auth = auth_or_redirect
-
-    parsed = _parse_uuid(draft_id)
-    if parsed is None:
-        return _not_found_page(req)
-
-    draft = fetch_draft(parsed)
-    if draft is None:
-        return _not_found_page(req)
-    if not can_delete_draft(auth, draft):
-        # 404 (not 403) — see delete_draft_handler for the reasoning.
-        return _not_found_page(req)
-
-    try:
-        with _connect() as conn:
-            touch_draft_access(conn, parsed)
-            conn.commit()
-    except Exception:
-        logger.exception("Failed to reset last_accessed_at for draft=%s", parsed)
-        return _not_found_page(req)
-
-    log_action(
-        auth.get("id"),
-        "draft.keep",
-        {"draft_id": str(parsed)},
-    )
-
-    # #598: queue a success toast for the detail page redirect target.
-    push_flash(req, "90-päevane loendur lähtestatud.", kind="success")
-
-    # HTMX-driven submits get an HX-Redirect so the browser performs a
-    # real navigation rather than swapping a partial into <body>.
-    if req.headers.get("HX-Request") == "true":
-        return Response(
-            status_code=204,
-            headers={"HX-Redirect": f"/drafts/{parsed}"},
-        )
-    return RedirectResponse(url=f"/drafts/{parsed}", status_code=303)
 
 
 # ---------------------------------------------------------------------------

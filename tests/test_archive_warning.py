@@ -293,10 +293,10 @@ class TestTouchDraftAccess:
 
 
 class TestKeepDraftRoute:
-    @patch("app.docs.routes.log_action")
-    @patch("app.docs.routes.touch_draft_access")
-    @patch("app.docs.routes._connect")
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._lifecycle.log_action")
+    @patch("app.docs.routes._lifecycle.touch_draft_access")
+    @patch("app.docs.routes._lifecycle._connect")
+    @patch("app.docs.routes._lifecycle.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_owner_can_keep_resets_clock(
         self,
@@ -326,8 +326,8 @@ class TestKeepDraftRoute:
         action = mock_log.call_args.args[1]
         assert action == "draft.keep"
 
-    @patch("app.docs.routes.touch_draft_access")
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._lifecycle.touch_draft_access")
+    @patch("app.docs.routes._lifecycle.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_non_owner_same_org_is_rejected(
         self,
@@ -350,8 +350,8 @@ class TestKeepDraftRoute:
         assert "Eelnõu ei leitud" in resp.text
         mock_touch.assert_not_called()
 
-    @patch("app.docs.routes.touch_draft_access")
-    @patch("app.docs.routes.fetch_draft")
+    @patch("app.docs.routes._lifecycle.touch_draft_access")
+    @patch("app.docs.routes._lifecycle.fetch_draft")
     @patch("app.auth.middleware._get_provider")
     def test_cross_org_user_is_rejected(
         self,
