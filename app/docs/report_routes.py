@@ -39,7 +39,7 @@ from app.ui.forms.app_form import AppForm
 from app.ui.layout import PageShell
 from app.ui.primitives.annotation_button import AnnotationButton
 from app.ui.primitives.badge import Badge, BadgeVariant
-from app.ui.primitives.button import Button
+from app.ui.primitives.button import Button, ButtonVariant
 from app.ui.primitives.link_button import LinkButton
 from app.ui.surfaces.alert import Alert
 from app.ui.surfaces.card import Card, CardBody, CardHeader
@@ -51,6 +51,8 @@ logger = logging.getLogger(__name__)
 
 
 _DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+_PDF_MIME = "application/pdf"
+_VALID_EXPORT_FORMATS = ("docx", "pdf")
 
 # Cap how many rows we render inline. The full findings JSON is still
 # embedded in the impact_reports row and the .docx export contains
@@ -564,36 +566,56 @@ def _gaps_section(findings: dict[str, Any], draft_id: str = "") -> Any:
     )
 
 
+def _export_form(draft: Draft, *, fmt: str, label: str, variant: ButtonVariant) -> Any:
+    """Render one export-trigger form for a single output format (#613).
+
+    Both the .docx and .pdf forms POST to the same endpoint; the only
+    difference is the hidden ``format`` field. Both target the shared
+    ``#export-status`` div so the user can switch formats by clicking
+    the other button (the dedupe guard in
+    :func:`_find_active_export_job` keys on draft + report + format so
+    a .pdf request does not collide with an in-flight .docx job)."""
+    return AppForm(
+        Hidden(name="format", value=fmt),  # noqa: F405
+        Button(
+            label,
+            type="submit",
+            variant=variant,
+        ),
+        Span(  # noqa: F405
+            "",
+            cls=f"btn-spinner export-spinner export-spinner-{fmt}",
+            aria_hidden="true",
+        ),
+        method="post",
+        action=f"/drafts/{draft.id}/export",
+        hx_post=f"/drafts/{draft.id}/export",
+        hx_swap="innerHTML",
+        hx_target="#export-status",
+        hx_indicator=f".export-spinner-{fmt}",
+        cls=f"export-form export-form-{fmt}",
+    )
+
+
 def _export_section(draft: Draft) -> Any:
-    """Build the export action card with HTMX-driven status placeholder."""
+    """Build the export action card with HTMX-driven status placeholder.
+
+    Two buttons (#613): .docx (primary, default) and .pdf (secondary).
+    They share the ``#export-status`` div so progress + download UI
+    flips between the two as the user picks one or the other. Dedupe
+    of in-flight jobs is keyed on draft+report+format so the two
+    formats do not collide."""
     return Card(
         CardHeader(H3("Eksport", cls="card-title")),  # noqa: F405
         CardBody(
             P(  # noqa: F405
-                "Laadi alla terviklik mõjuaruanne .docx vormingus.",
+                "Laadi alla terviklik mõjuaruanne kas .docx või .pdf vormingus.",
                 cls="muted-text",
             ),
-            AppForm(
-                Button(
-                    "Laadi alla .docx",
-                    type="submit",
-                    variant="primary",
-                ),
-                # #599: spinner beside the submit so the form does not
-                # appear frozen while the export is generated. HTMX
-                # toggles ``.htmx-request`` on the indicator element.
-                Span(  # noqa: F405
-                    "",
-                    cls="btn-spinner export-spinner",
-                    aria_hidden="true",
-                ),
-                method="post",
-                action=f"/drafts/{draft.id}/export",
-                hx_post=f"/drafts/{draft.id}/export",
-                hx_swap="innerHTML",
-                hx_target="#export-status",
-                hx_indicator=".export-spinner",
-                cls="export-form",
+            Div(  # noqa: F405
+                _export_form(draft, fmt="docx", label="Laadi alla .docx", variant="primary"),
+                _export_form(draft, fmt="pdf", label="Laadi alla .pdf", variant="secondary"),
+                cls="export-actions",
             ),
             Div(id="export-status", cls="export-status"),
         ),
@@ -888,12 +910,19 @@ def report_section_fragment(req: Request, draft_id: str, section: str):
 # ---------------------------------------------------------------------------
 
 
-def _find_active_export_job(draft_id: uuid.UUID, report_id: str) -> int | None:
-    """Return an in-flight export_report job id for *draft_id* if one exists.
+def _find_active_export_job(draft_id: uuid.UUID, report_id: str, fmt: str) -> int | None:
+    """Return an in-flight export_report job id for *draft_id* + *fmt* if one exists.
 
     "In-flight" = status IN (pending, claimed, running, retrying). The
     caller uses this to dedupe #627: a repeated click should reuse the
-    job already running rather than queueing a second .docx render.
+    job already running rather than queueing a second render.
+
+    The dedupe key includes ``format`` (#613) so a click on .pdf does
+    not collide with an in-flight .docx render — they are separate
+    artefacts and a user may legitimately want both. Legacy jobs
+    written before #613 had no ``format`` key in the payload; we treat
+    them as "docx" via ``COALESCE(payload->>'format', 'docx')``.
+
     Returns ``None`` if nothing is in flight, or on any DB error (the
     fallback is to just enqueue a fresh job so we never block the user
     on a broken lookup).
@@ -907,16 +936,18 @@ def _find_active_export_job(draft_id: uuid.UUID, report_id: str) -> int | None:
                   AND status IN ('pending', 'claimed', 'running', 'retrying')
                   AND payload->>'draft_id' = %s
                   AND payload->>'report_id' = %s
+                  AND COALESCE(payload->>'format', 'docx') = %s
                 ORDER BY id DESC
                 LIMIT 1
                 """,
-                (str(draft_id), str(report_id)),
+                (str(draft_id), str(report_id), fmt),
             ).fetchone()
     except Exception:
         logger.exception(
-            "_find_active_export_job failed for draft=%s report=%s",
+            "_find_active_export_job failed for draft=%s report=%s format=%s",
             draft_id,
             report_id,
+            fmt,
         )
         return None
     return int(row[0]) if row else None
@@ -996,8 +1027,13 @@ def _export_status_spinner(
     )
 
 
-def export_draft_report_handler(req: Request, draft_id: str):
-    """POST /drafts/{draft_id}/export — enqueue an export_report job."""
+async def export_draft_report_handler(req: Request, draft_id: str):
+    """POST /drafts/{draft_id}/export — enqueue an export_report job.
+
+    Accepts an optional form/query field ``format=docx|pdf`` (#613).
+    Defaults to ``docx`` when missing or unrecognised so older clients
+    keep working unchanged.
+    """
     auth_or_redirect = _require_auth(req)
     if isinstance(auth_or_redirect, Response):
         return auth_or_redirect
@@ -1015,19 +1051,31 @@ def export_draft_report_handler(req: Request, draft_id: str):
     if report_row is None:
         return _not_found_page(req)
 
+    # Read ``format`` from form (HTMX hidden input) with query-string
+    # fallback (browser-native form submit). Anything outside the
+    # allow-list silently degrades to ``docx`` so a malformed request
+    # never errors out — the worst case is the user gets a .docx when
+    # they wanted a .pdf, which they can retry.
+    fmt = "docx"
+    try:
+        form = await req.form()
+        raw_fmt = form.get("format") or req.query_params.get("format")
+    except Exception:
+        raw_fmt = req.query_params.get("format")
+    if isinstance(raw_fmt, str) and raw_fmt.lower() in _VALID_EXPORT_FORMATS:
+        fmt = raw_fmt.lower()
+
     report_id = str(report_row[0])
-    # #627: dedupe. If an export job for this draft+report is already
-    # pending/claimed/running, reuse its id instead of enqueueing a new
-    # one. Without this guard a reviewer could spam-click the button
-    # (or the HTMX request could double-fire on flaky networks) and
-    # queue up a pile of redundant .docx renders.
-    existing_job_id = _find_active_export_job(parsed, report_id)
+    # #627: dedupe per (draft, report, format). A click on .pdf must
+    # not collide with an in-flight .docx and vice-versa.
+    existing_job_id = _find_active_export_job(parsed, report_id, fmt)
     if existing_job_id is not None:
         logger.info(
-            "Reusing existing export_report job %s for draft=%s report=%s",
+            "Reusing existing export_report job %s for draft=%s report=%s format=%s",
             existing_job_id,
             parsed,
             report_id,
+            fmt,
         )
         # #572: still counts as access.
         touch_draft_access_conn(parsed)
@@ -1036,7 +1084,11 @@ def export_draft_report_handler(req: Request, draft_id: str):
     try:
         job_id = JobQueue().enqueue(
             "export_report",
-            {"draft_id": str(parsed), "report_id": report_id},
+            {
+                "draft_id": str(parsed),
+                "report_id": report_id,
+                "format": fmt,
+            },
             priority=10,
         )
     except Exception:
@@ -1057,6 +1109,7 @@ def export_draft_report_handler(req: Request, draft_id: str):
             "draft_id": str(parsed),
             "report_id": report_id,
             "job_id": job_id,
+            "format": fmt,
         },
     )
     # #572: export counts as access; reset the archive clock.
@@ -1230,12 +1283,27 @@ def download_export_handler(req: Request, draft_id: str, job_id: str):
     if str(payload.get("draft_id")) != str(parsed_draft):
         return _not_found_page(req)
 
+    # #613: pick the artefact + MIME based on the job's stored format.
+    # Legacy jobs without a format key are treated as docx so any
+    # in-flight pre-#613 download links keep working.
+    fmt = str(payload.get("format") or "docx").lower()
+    if fmt not in _VALID_EXPORT_FORMATS:
+        fmt = "docx"
+
     result = job.result or {}
-    docx_path = result.get("docx_path")
-    if not docx_path or not Path(str(docx_path)).exists():
+    if fmt == "pdf":
+        artefact_path = result.get("pdf_path")
+        media_type = _PDF_MIME
+        suffix = "pdf"
+    else:
+        artefact_path = result.get("docx_path")
+        media_type = _DOCX_MIME
+        suffix = "docx"
+
+    if not artefact_path or not Path(str(artefact_path)).exists():
         return _not_found_page(req)
 
-    filename = f"impact_report_{_slugify(draft.title)}.docx"
+    filename = f"impact_report_{_slugify(draft.title)}.{suffix}"
     log_action(
         auth.get("id"),
         "draft.report.export.download",
@@ -1243,14 +1311,15 @@ def download_export_handler(req: Request, draft_id: str, job_id: str):
             "draft_id": str(parsed_draft),
             "job_id": parsed_job_id,
             "filename": filename,
+            "format": fmt,
         },
     )
     # #572: download counts as access; reset the archive clock.
     touch_draft_access_conn(parsed_draft)
 
     return FileResponse(
-        path=str(docx_path),
-        media_type=_DOCX_MIME,
+        path=str(artefact_path),
+        media_type=media_type,
         filename=filename,
     )
 

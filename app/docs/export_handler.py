@@ -5,6 +5,16 @@ handler loads the draft + the latest ``impact_reports`` row, calls the
 .docx builder in :mod:`app.docs.docx_export`, and returns the absolute
 path to the generated file in its result dict.
 
+The optional ``format`` payload key (#613) selects the output. For
+``"docx"`` (the default, also the implicit value for legacy jobs
+written before #613) the handler returns ``{"docx_path": ...}``. For
+``"pdf"`` the handler still builds the .docx (so PDF and .docx content
+can never diverge) and then shells out to LibreOffice headless via
+:func:`app.docs.docx_export.convert_docx_to_pdf` to convert it; the
+result dict gains a ``pdf_path`` and the ``format`` echo. The download
+handler in :mod:`app.docs.report_routes` picks the right artefact +
+MIME from the job payload.
+
 Unlike the other Phase 2 handlers (``parse_draft``, ``extract_entities``,
 ``analyze_impact``) this one never transitions ``drafts.status`` —
 exporting is a read-only user action and the draft row stays in
@@ -37,9 +47,11 @@ from uuid import UUID
 from psycopg.types.json import Jsonb
 
 from app.db import get_connection
-from app.docs.docx_export import build_impact_report_docx
+from app.docs.docx_export import build_impact_report_docx, convert_docx_to_pdf
 from app.docs.draft_model import get_draft
 from app.jobs.worker import register_handler
+
+_VALID_FORMATS = ("docx", "pdf")
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +139,12 @@ def export_report(
     if not raw_report_id:
         raise ValueError("export_report payload missing required 'report_id'")
 
+    fmt = str(payload.get("format") or "docx")
+    if fmt not in _VALID_FORMATS:
+        raise ValueError(
+            f"export_report: unsupported format {fmt!r}; expected one of {_VALID_FORMATS}"
+        )
+
     try:
         draft_id = UUID(str(raw_draft_id))
     except (TypeError, ValueError) as exc:
@@ -137,9 +155,10 @@ def export_report(
         raise ValueError(f"export_report: invalid report_id {raw_report_id!r}") from exc
 
     logger.info(
-        "export_report: starting for draft=%s report=%s job=%s",
+        "export_report: starting for draft=%s report=%s format=%s job=%s",
         draft_id,
         report_id,
+        fmt,
         job_id,
     )
 
@@ -184,11 +203,32 @@ def export_report(
         docx_path,
     )
 
-    return {
+    result: dict[str, Any] = {
         "draft_id": str(draft_id),
         "report_id": str(report_id),
+        "format": fmt,
         "docx_path": str(docx_path),
     }
+
+    if fmt == "pdf":
+        # The .docx is the source of truth for content; PDF is a pure
+        # visual rendering of the same file via headless LibreOffice.
+        # Conversion typically takes 2-3 s on the prod VPS for a typical
+        # 5-section report (verified during the §4.3 base-image probe).
+        # The progress channel is left at its terminal "1.0" tick from
+        # the docx render — adding a "converting…" sub-stage would mean
+        # invalidating the WS protocol and re-shaping the JS shim, which
+        # is more change than the user experience justifies.
+        pdf_path = convert_docx_to_pdf(docx_path)
+        result["pdf_path"] = str(pdf_path)
+        logger.info(
+            "export_report: wrote pdf draft=%s report=%s path=%s",
+            draft_id,
+            report_id,
+            pdf_path,
+        )
+
+    return result
 
 
 # ---------------------------------------------------------------------------

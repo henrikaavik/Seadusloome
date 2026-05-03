@@ -321,10 +321,16 @@ class TestExportDraftReportHandler:
         assert "Eksport käimas" in resp.text
         assert f"/drafts/{_DRAFT_ID}/export-status/99" in resp.text
         # Job was enqueued with the right type and payload.
+        # #613: payload now carries an explicit format (defaults to "docx"
+        # when the client doesn't post one).
         queue_instance.enqueue.assert_called_once()
         args, kwargs = queue_instance.enqueue.call_args
         assert args[0] == "export_report"
-        assert args[1] == {"draft_id": str(_DRAFT_ID), "report_id": str(_REPORT_ID)}
+        assert args[1] == {
+            "draft_id": str(_DRAFT_ID),
+            "report_id": str(_REPORT_ID),
+            "format": "docx",
+        }
         assert kwargs.get("priority") == 10
 
     @patch("app.docs.report_routes.JobQueue")
