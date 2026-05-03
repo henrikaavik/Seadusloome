@@ -51,6 +51,7 @@ from app.docs.draft_model import (
 )
 from app.docs.graph_builder import write_doc_lineage
 from app.docs.routes._lifecycle import delete_draft_handler, keep_draft_handler
+from app.docs.similarity import list_similar_drafts_for_view
 from app.docs.status import (
     PIPELINE_STAGES,
     STATUS_BY_VALUE,
@@ -1925,6 +1926,64 @@ def _vtk_children_card(
     )
 
 
+def _similar_drafts_card(similar: list[dict]) -> Any:
+    """Render the "Sarnased eelnõud" card from ``list_similar_drafts_for_view`` output.
+
+    Within-org rows show a link and a score badge.
+    Cross-org rows are masked: only an aggregate count is shown with no
+    titles or links.
+
+    The renderer asserts ``title is None`` before rendering masked rows
+    as a defence-in-depth guard (the DB already returns NULL for
+    cross-org titles, so this assertion should never fire).
+    """
+    within_org = [r for r in similar if not r.get("masked")]
+    cross_org = [r for r in similar if r.get("masked")]
+
+    items: list[Any] = []
+
+    for row in within_org:
+        # Sanity-check: the DB masking query should never give us a
+        # cross-org row with a title.  If it does, treat it as masked.
+        assert row["title"] is not None, (
+            "similar_drafts: expected title for within-org row but got None"
+        )
+        pct = f"{row['score'] * 100:.0f}%"
+        items.append(
+            Div(  # noqa: F405
+                A(  # noqa: F405
+                    row["title"],
+                    href=f"/drafts/{row['similar_draft_id']}",
+                    cls="similar-draft-link",
+                ),
+                Badge(pct, variant="default", cls="score-badge"),
+                cls="similar-draft-row",
+            )
+        )
+
+    if cross_org:
+        count = len(cross_org)
+        label = (
+            f"{count} sarnast eelnõu teistes ministeeriumites"
+            if count > 1
+            else "1 sarnane eelnõu teises ministeeriumis"
+        )
+        items.append(
+            P(  # noqa: F405
+                label,
+                cls="similar-draft-cross-org-note",
+            )
+        )
+
+    if not items:
+        return ""
+
+    return Card(
+        CardHeader(H3("Sarnased eelnõud", cls="card-title")),  # noqa: F405
+        CardBody(*items),
+    )
+
+
 def _draft_detail_body(
     draft: Draft,
     auth: Mapping[str, Any] | None = None,
@@ -2138,6 +2197,26 @@ def draft_detail_page(req: Request, draft_id: str):
     )
     tracker = _status_tracker(draft)
 
+    # #621: "Sarnased eelnõud" — best-effort; empty list on any DB error.
+    similar: list[dict] = []
+    viewer_org_id = auth.get("org_id") if auth else None
+    if viewer_org_id:
+        try:
+            with _connect() as conn:
+                similar = list_similar_drafts_for_view(conn, str(draft.id), str(viewer_org_id))
+            if similar:
+                log_action(
+                    str(auth.get("id")) if auth else None,
+                    "draft.similar.view",
+                    {"draft_id": str(draft.id), "count": len(similar)},
+                )
+        except Exception:
+            logger.warning(
+                "draft_detail_page: failed to load similar drafts for draft=%s",
+                draft.id,
+                exc_info=True,
+            )
+
     return PageShell(
         H1(draft.title, cls="page-title"),  # noqa: F405
         P(A("\u2190 Tagasi eeln\u00f5ude nimekirja", href="/drafts"), cls="back-link"),  # noqa: F405
@@ -2167,6 +2246,8 @@ def draft_detail_page(req: Request, draft_id: str):
             # user-facing detail page omits it.
             CardBody(*detail_body),
         ),
+        # #621: similar-drafts card; hidden (returns "") when no results.
+        _similar_drafts_card(similar),
         # #643: VTK-only card listing follow-on eelnõud. Skipped on
         # eelnõu detail since VTKs are the only doc_type that can have
         # children in our model.

@@ -36,6 +36,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
+from app.auth.audit import log_action
 from app.db import get_connection
 from app.docs.draft_model import fetch_draft, get_draft, update_draft_status
 from app.docs.entity_extractor import ExtractedRef
@@ -43,6 +44,13 @@ from app.docs.error_mapping import map_failure_to_user_message
 from app.docs.graph_builder import build_draft_graph, write_doc_lineage
 from app.docs.impact import ImpactAnalyzer, calculate_impact_score
 from app.docs.reference_resolver import ResolvedRef
+from app.docs.similarity import (
+    compute_entity_set_hash,
+    find_similar_drafts,
+    get_similarity_threshold,
+    persist_similarities,
+    update_uri_index,
+)
 from app.jobs.worker import register_handler
 from app.sync.jena_loader import put_named_graph
 
@@ -159,6 +167,60 @@ def analyze_impact(
             # ``status='ready'`` row without its report.
             update_draft_status(conn, draft_id, "ready")
             conn.commit()
+
+        # ------------------------------------------------------------------
+        # #621: "sarnased eelnõud" — best-effort similarity compute.
+        # Wrapped in its own try/except so a DB hiccup here never fails
+        # the analyze job; similarity is supplemental UX, not core analysis.
+        # ------------------------------------------------------------------
+        try:
+            uris = [str(row[1]) for row in entity_rows if row[1]]
+            with get_connection() as conn:
+                # Rebuild the inverted index for this draft so future
+                # analyze runs by OTHER drafts can find this one as a
+                # candidate.
+                update_uri_index(conn, str(draft_id), uris)
+                conn.commit()
+
+            new_hash = compute_entity_set_hash(uris)
+            with get_connection() as conn:
+                existing_hash_row = conn.execute(
+                    "SELECT DISTINCT entity_set_hash FROM draft_similarities"
+                    " WHERE draft_id = %s LIMIT 1",
+                    (str(draft_id),),
+                ).fetchone()
+
+                if existing_hash_row and existing_hash_row[0] == new_hash:
+                    logger.info(
+                        "similarity: skipping recompute for draft=%s (hash unchanged)",
+                        draft_id,
+                    )
+                else:
+                    threshold = get_similarity_threshold()
+                    similarities = find_similar_drafts(
+                        conn, str(draft_id), uris, threshold=threshold
+                    )
+                    persist_similarities(conn, str(draft_id), similarities, new_hash)
+                    conn.commit()
+                    log_action(
+                        None,
+                        "draft.similar.compute",
+                        {
+                            "draft_id": str(draft_id),
+                            "candidate_count": len(similarities),
+                        },
+                    )
+                    logger.info(
+                        "similarity: computed %d similar drafts for draft=%s",
+                        len(similarities),
+                        draft_id,
+                    )
+        except Exception:
+            logger.warning(
+                "similarity: non-critical failure for draft=%s, skipping",
+                draft_id,
+                exc_info=True,
+            )
 
         # #608: push the terminal status to subscribed WS clients first
         # (cheap; a notify_analysis_done failure shouldn't drop the WS
