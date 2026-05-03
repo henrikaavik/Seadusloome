@@ -138,8 +138,8 @@ class TestAuthRequired:
 
 
 class TestDraftsList:
-    @patch("app.docs.routes.list_users")
-    @patch("app.docs.routes.list_drafts_for_org_filtered")
+    @patch("app.docs.routes._list.list_users")
+    @patch("app.docs.routes._list.list_drafts_for_org_filtered")
     @patch("app.auth.middleware._get_provider")
     def test_empty_list_renders_empty_state(
         self,
@@ -162,8 +162,8 @@ class TestDraftsList:
         # Filter bar must always render so the user can recover.
         assert 'name="q"' in resp.text
 
-    @patch("app.docs.routes.list_users")
-    @patch("app.docs.routes.list_drafts_for_org_filtered")
+    @patch("app.docs.routes._list.list_users")
+    @patch("app.docs.routes._list.list_drafts_for_org_filtered")
     @patch("app.auth.middleware._get_provider")
     def test_populated_list_shows_rows(
         self,
@@ -226,8 +226,8 @@ def _make_uploader(
 class TestDraftsListFilterBar:
     """Filter bar UI + URL state round-trip (#642)."""
 
-    @patch("app.docs.routes.list_users")
-    @patch("app.docs.routes.list_drafts_for_org_filtered")
+    @patch("app.docs.routes._list.list_users")
+    @patch("app.docs.routes._list.list_drafts_for_org_filtered")
     @patch("app.auth.middleware._get_provider")
     def test_filter_bar_renders_all_controls(
         self,
@@ -271,8 +271,8 @@ class TestDraftsListFilterBar:
         # Reset link.
         assert "Lähtesta filtrid" in resp.text
 
-    @patch("app.docs.routes.list_users")
-    @patch("app.docs.routes.list_drafts_for_org_filtered")
+    @patch("app.docs.routes._list.list_users")
+    @patch("app.docs.routes._list.list_drafts_for_org_filtered")
     @patch("app.auth.middleware._get_provider")
     def test_querystring_round_trips_to_filter_helper(
         self,
@@ -308,8 +308,8 @@ class TestDraftsListFilterBar:
         assert kwargs["date_to"].isoformat() == "2026-04-01"
         assert kwargs["sort"] == "title_asc"
 
-    @patch("app.docs.routes.list_users")
-    @patch("app.docs.routes.list_drafts_for_org_filtered")
+    @patch("app.docs.routes._list.list_users")
+    @patch("app.docs.routes._list.list_drafts_for_org_filtered")
     @patch("app.auth.middleware._get_provider")
     def test_filter_bar_pre_fills_from_querystring(
         self,
@@ -338,8 +338,8 @@ class TestDraftsListFilterBar:
             'selected value="title_asc"' in resp.text
         )
 
-    @patch("app.docs.routes.list_users")
-    @patch("app.docs.routes.list_drafts_for_org_filtered")
+    @patch("app.docs.routes._list.list_users")
+    @patch("app.docs.routes._list.list_drafts_for_org_filtered")
     @patch("app.auth.middleware._get_provider")
     def test_unknown_sort_falls_back_to_default(
         self,
@@ -358,8 +358,8 @@ class TestDraftsListFilterBar:
         assert resp.status_code == 200
         assert mock_list_filtered.call_args.kwargs["sort"] == "created_desc"
 
-    @patch("app.docs.routes.list_users")
-    @patch("app.docs.routes.list_drafts_for_org_filtered")
+    @patch("app.docs.routes._list.list_users")
+    @patch("app.docs.routes._list.list_drafts_for_org_filtered")
     @patch("app.auth.middleware._get_provider")
     def test_invalid_uploader_uuid_silently_drops(
         self,
@@ -377,8 +377,8 @@ class TestDraftsListFilterBar:
         assert resp.status_code == 200
         assert mock_list_filtered.call_args.kwargs["uploader_id"] is None
 
-    @patch("app.docs.routes.list_users")
-    @patch("app.docs.routes.list_drafts_for_org_filtered")
+    @patch("app.docs.routes._list.list_users")
+    @patch("app.docs.routes._list.list_drafts_for_org_filtered")
     @patch("app.auth.middleware._get_provider")
     def test_unknown_status_value_dropped(
         self,
@@ -398,8 +398,8 @@ class TestDraftsListFilterBar:
 
 
 class TestDraftsListEmptyStates:
-    @patch("app.docs.routes.list_users")
-    @patch("app.docs.routes.list_drafts_for_org_filtered")
+    @patch("app.docs.routes._list.list_users")
+    @patch("app.docs.routes._list.list_drafts_for_org_filtered")
     @patch("app.auth.middleware._get_provider")
     def test_empty_with_filters_uses_filter_empty_state(
         self,
@@ -423,8 +423,8 @@ class TestDraftsListEmptyStates:
         # upload CTA copy.
         assert "ei ole veel ühtegi eelnõu üles laadinud" not in resp.text
 
-    @patch("app.docs.routes.list_users")
-    @patch("app.docs.routes.list_drafts_for_org_filtered")
+    @patch("app.docs.routes._list.list_users")
+    @patch("app.docs.routes._list.list_drafts_for_org_filtered")
     @patch("app.auth.middleware._get_provider")
     def test_empty_without_filters_uses_zero_state(
         self,
@@ -447,8 +447,8 @@ class TestDraftsListEmptyStates:
 
 
 class TestDraftsListPagination:
-    @patch("app.docs.routes.list_users")
-    @patch("app.docs.routes.list_drafts_for_org_filtered")
+    @patch("app.docs.routes._list.list_users")
+    @patch("app.docs.routes._list.list_drafts_for_org_filtered")
     @patch("app.auth.middleware._get_provider")
     def test_pagination_links_preserve_filter_querystring(
         self,
@@ -482,8 +482,8 @@ class TestDraftsListPagination:
 
 
 class TestDraftsListHtmxSwap:
-    @patch("app.docs.routes.list_users")
-    @patch("app.docs.routes.list_drafts_for_org_filtered")
+    @patch("app.docs.routes._list.list_users")
+    @patch("app.docs.routes._list.list_drafts_for_org_filtered")
     @patch("app.auth.middleware._get_provider")
     def test_htmx_request_returns_table_partial(
         self,
@@ -507,8 +507,8 @@ class TestDraftsListHtmxSwap:
         # But the table-wrapper id is present.
         assert 'id="drafts-table-wrapper"' in resp.text
 
-    @patch("app.docs.routes.list_users")
-    @patch("app.docs.routes.list_drafts_for_org_filtered")
+    @patch("app.docs.routes._list.list_users")
+    @patch("app.docs.routes._list.list_drafts_for_org_filtered")
     @patch("app.auth.middleware._get_provider")
     def test_full_page_request_returns_page_shell(
         self,
@@ -1269,8 +1269,8 @@ class TestUploadPrecheck:
 
 
 class TestFlashMessages:
-    @patch("app.docs.routes.list_users")
-    @patch("app.docs.routes.list_drafts_for_org_filtered")
+    @patch("app.docs.routes._list.list_users")
+    @patch("app.docs.routes._list.list_drafts_for_org_filtered")
     @patch("app.docs.routes._lifecycle.JobQueue")
     @patch("app.docs.routes._lifecycle.log_draft_delete")
     @patch("app.docs.routes._lifecycle.delete_draft")
@@ -1853,8 +1853,8 @@ class TestLinkVtkModalOnDetailPage:
 class TestDocTypeColumn:
     """Drafts list now renders a Tüüp badge as the leftmost column."""
 
-    @patch("app.docs.routes.list_users")
-    @patch("app.docs.routes.list_drafts_for_org_filtered")
+    @patch("app.docs.routes._list.list_users")
+    @patch("app.docs.routes._list.list_drafts_for_org_filtered")
     @patch("app.auth.middleware._get_provider")
     def test_doc_type_badge_per_row(
         self,

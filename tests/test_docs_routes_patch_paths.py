@@ -1,7 +1,7 @@
 """Pin the post-#704 patch-path contract.
 
 After the #704 routes/ split started extracting helpers into
-``_shared.py`` / ``_status_tracker.py`` / ``_upload.py``,
+``_shared.py`` / ``_status_tracker.py`` / ``_upload.py`` / ``_list.py``,
 ``app.docs.routes`` re-exports the moved symbols for direct-import
 convenience but a ``patch("app.docs.routes.X")`` only rebinds the
 package-level alias — NOT the bindings inside submodules that
@@ -21,13 +21,18 @@ submodule:
 Reviewer note from PR #710 / #704 PR-B asked for this pin so future
 extractions in PR-C / D / E inherit the documented contract. PR-C
 adds the matching three-test block for ``_upload._validate_parent_vtk_fk``.
+PR-D adds the matching three-test block for
+``_list.list_drafts_for_org_filtered``.
 """
 
 from __future__ import annotations
 
 from unittest.mock import patch
 
-from app.docs.routes import _shared, _upload
+from app.docs.routes import _list, _shared, _upload
+from app.docs.routes._list import (
+    list_drafts_for_org_filtered as _list_imported_at_module_load,
+)
 from app.docs.routes._status_tracker import (
     _poll_interval_seconds as _imported_at_module_load,
 )
@@ -145,6 +150,64 @@ def test_upload_submodule_patch_intercepts_upload_callers() -> None:
     with patch("app.docs.routes._upload._validate_parent_vtk_fk", stub):
         from app.docs.routes._upload import (
             _validate_parent_vtk_fk as patched_in_submodule,
+        )
+
+        assert patched_in_submodule is stub, (
+            "submodule-local binding must reflect the submodule-targeted patch"
+        )
+
+
+# ---------------------------------------------------------------------------
+# PR-D contract: _list.list_drafts_for_org_filtered via _list callers
+# ---------------------------------------------------------------------------
+
+
+def test_list_module_owns_its_local_binding() -> None:
+    """``_list`` imports ``list_drafts_for_org_filtered`` at module load
+    time; its own ``drafts_list_page`` resolves the name through the
+    module-local global, not through the package re-export."""
+    assert _list_imported_at_module_load is _list.list_drafts_for_org_filtered
+
+
+def test_package_level_patch_does_not_reach_list_globals() -> None:
+    """``patch("app.docs.routes.list_drafts_for_org_filtered")`` only
+    rebinds the package alias; ``_list``'s local binding stays original.
+
+    Mirrors :func:`test_package_level_patch_does_not_reach_submodule_globals`
+    so PR-D extractions inherit the same documented contract: package
+    aliases are convenience back-compat re-exports, NOT patch points
+    that propagate into submodules.
+    """
+
+    def stub(*_args, **_kwargs):  # pragma: no cover — only invoked on failure
+        return ([], 0)
+
+    with patch("app.docs.routes.list_drafts_for_org_filtered", stub):
+        from app.docs.routes import (
+            list_drafts_for_org_filtered as patched_pkg,
+        )
+        from app.docs.routes._list import (
+            list_drafts_for_org_filtered as patched_in_submodule,
+        )
+
+        assert patched_pkg is stub, "package-level binding should be the stub"
+        assert patched_in_submodule is _list.list_drafts_for_org_filtered, (
+            "submodule binding must NOT see the package-level patch — "
+            "this is the documented post-#704 contract for _list too"
+        )
+
+
+def test_list_submodule_patch_intercepts_list_callers() -> None:
+    """Patching where the symbol is USED (inside ``_list``) DOES
+    intercept the handler's internal call. Canonical "patch where
+    used" recipe for the PR-D extraction."""
+
+    def stub(*_args, **_kwargs):  # pragma: no cover — only invoked on failure
+        return ([], 0)
+
+    with patch("app.docs.routes._list.list_drafts_for_org_filtered", stub):
+        from app.docs.routes._list import (
+            list_drafts_for_org_filtered as patched_in_submodule,
         )
 
         assert patched_in_submodule is stub, (
