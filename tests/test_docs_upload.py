@@ -108,6 +108,38 @@ def _make_conn_factory(conn: MagicMock):
     return factory
 
 
+def _wire_upload_conn(
+    *,
+    draft_row: tuple[Any, ...],
+    version_row: tuple[Any, ...],
+) -> MagicMock:
+    """Build a mock connection that handles BOTH inserts in handle_upload.
+
+    Post-#618 PR-B the upload flow runs two ``INSERT ... RETURNING``
+    statements (drafts then draft_versions) plus a few ``UPDATE``s.
+    A single ``fetchone.return_value`` no longer works because the
+    drafts INSERT expects 19 columns while the version INSERT expects
+    10.  The side_effect routes each fetchone() based on the SQL
+    actually being executed.
+    """
+    mock_conn = MagicMock()
+
+    def _execute_side_effect(sql: str, _params: object = None):
+        cursor = MagicMock()
+        sql_lower = sql.lower()
+        if "into drafts" in sql_lower and "returning" in sql_lower:
+            cursor.fetchone.return_value = draft_row
+        elif "into draft_versions" in sql_lower and "returning" in sql_lower:
+            cursor.fetchone.return_value = version_row
+        else:
+            cursor.fetchone.return_value = None
+        cursor.rowcount = 1
+        return cursor
+
+    mock_conn.execute.side_effect = _execute_side_effect
+    return mock_conn
+
+
 # ---------------------------------------------------------------------------
 # Happy path
 # ---------------------------------------------------------------------------
@@ -117,14 +149,13 @@ class TestHandleUploadHappyPath:
     def test_happy_path_returns_draft_and_enqueues_job(self):
         import asyncio
 
-        mock_conn = MagicMock()
         draft_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
         user_uuid = uuid.UUID("22222222-2222-2222-2222-222222222222")
         org_uuid = uuid.UUID("33333333-3333-3333-3333-333333333333")
-        # First execute: INSERT ... RETURNING — return a tuple matching
-        # draft_model._DRAFT_COLUMNS order.
+        version_id = uuid.UUID("99999999-9999-9999-9999-999999999999")
         now = datetime.now(UTC)
-        insert_row = (
+        # _DRAFT_COLUMNS order (19 cols)
+        draft_row = (
             draft_id,
             user_uuid,
             org_uuid,
@@ -145,7 +176,46 @@ class TestHandleUploadHappyPath:
             None,  # parent_vtk_id (#639)
             None,  # processing_completed_at (#670)
         )
-        mock_conn.execute.return_value.fetchone.return_value = insert_row
+        # _VERSION_COLUMNS order (10 cols) for the v1 INSERT...RETURNING.
+        version_row = (
+            version_id,
+            draft_id,
+            1,
+            "vtk",
+            None,
+            "/tmp/encrypted.enc",
+            f"https://data.riik.ee/ontology/estleg/drafts/{draft_id}",
+            "uploaded",
+            now,
+            user_uuid,
+        )
+
+        # The handler calls execute() multiple times:
+        #   1. INSERT INTO drafts ... RETURNING -> draft_row (fetchone)
+        #   2. UPDATE drafts SET graph_uri ...  -> no fetch
+        #   3. INSERT INTO draft_versions ... RETURNING -> version_row (fetchone)
+        #
+        # We can't simply set fetchone.return_value because the SAME
+        # cursor mock is reused.  Instead, route fetchone via a side_effect
+        # that returns the right shape based on the SQL of the latest
+        # call.
+        mock_conn = MagicMock()
+        captured_sqls: list[str] = []
+
+        def _execute_side_effect(sql: str, _params: object = None):
+            captured_sqls.append(sql)
+            cursor = MagicMock()
+            sql_lower = sql.lower()
+            if "into drafts" in sql_lower and "returning" in sql_lower:
+                cursor.fetchone.return_value = draft_row
+            elif "into draft_versions" in sql_lower and "returning" in sql_lower:
+                cursor.fetchone.return_value = version_row
+            else:
+                cursor.fetchone.return_value = None
+            cursor.rowcount = 1
+            return cursor
+
+        mock_conn.execute.side_effect = _execute_side_effect
 
         stored = MagicMock(
             storage_path="/tmp/encrypted.enc",
@@ -183,6 +253,15 @@ class TestHandleUploadHappyPath:
 
         # DB transaction committed.
         mock_conn.commit.assert_called_once()
+
+        # #618 PR-B: a v1 draft_versions row must have been created in the
+        # SAME transaction as the drafts INSERT.
+        assert any(
+            "into draft_versions" in s.lower() and "returning" in s.lower() for s in captured_sqls
+        ), (
+            "handle_upload must INSERT into draft_versions for the v1 row of every "
+            "new draft (§4.2 cutover, #618 PR-B)"
+        )
 
         # Job was enqueued with the correct payload.
         mock_queue.enqueue.assert_called_once()
@@ -246,12 +325,13 @@ class TestHandleUploadValidation:
         # This test short-circuits before the DB insert because we mock
         # fetchone to return a row — so we only need to ensure no error
         # is raised during validation.
-        conn = MagicMock()
         now = datetime.now(UTC)
         draft_id = uuid.uuid4()
-        conn.execute.return_value.fetchone.return_value = (
+        version_id = uuid.uuid4()
+        user_uuid = uuid.UUID("44444444-4444-4444-4444-444444444444")
+        draft_row = (
             draft_id,
-            uuid.UUID("44444444-4444-4444-4444-444444444444"),
+            user_uuid,
             uuid.UUID("55555555-5555-5555-5555-555555555555"),
             "x" * 200,
             "eelnou.docx",
@@ -270,6 +350,19 @@ class TestHandleUploadValidation:
             None,  # parent_vtk_id (#639)
             None,  # processing_completed_at (#670)
         )
+        version_row = (
+            version_id,
+            draft_id,
+            1,
+            "vtk",
+            None,
+            "/tmp/x.enc",
+            f"https://data.riik.ee/ontology/estleg/drafts/{draft_id}",
+            "uploaded",
+            now,
+            user_uuid,
+        )
+        conn = _wire_upload_conn(draft_row=draft_row, version_row=version_row)
         import asyncio
 
         with patch("app.docs.upload.store_file") as mock_store:
@@ -366,12 +459,13 @@ class TestHandleUploadRollback:
         """
         import asyncio
 
-        mock_conn = MagicMock()
         draft_id = uuid.uuid4()
+        version_id = uuid.uuid4()
+        user_uuid = uuid.UUID("66666666-6666-6666-6666-666666666666")
         now = datetime.now(UTC)
-        mock_conn.execute.return_value.fetchone.return_value = (
+        draft_row = (
             draft_id,
-            uuid.UUID("66666666-6666-6666-6666-666666666666"),
+            user_uuid,
             uuid.UUID("77777777-7777-7777-7777-777777777777"),
             "Test eelnõu",
             "eelnou.docx",
@@ -390,6 +484,19 @@ class TestHandleUploadRollback:
             None,  # parent_vtk_id (#639)
             None,  # processing_completed_at (#670)
         )
+        version_row = (
+            version_id,
+            draft_id,
+            1,
+            "vtk",
+            None,
+            "/tmp/ok.enc",
+            f"https://data.riik.ee/ontology/estleg/drafts/{draft_id}",
+            "uploaded",
+            now,
+            user_uuid,
+        )
+        mock_conn = _wire_upload_conn(draft_row=draft_row, version_row=version_row)
 
         stored = MagicMock(
             storage_path="/tmp/ok.enc",

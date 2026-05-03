@@ -152,9 +152,10 @@ class TestHappyPath:
         }
 
         # Combined-transaction connection (index 2) receives:
-        #   1 DELETE + 3 INSERTs + 1 UPDATE = 5 execute calls total.
+        #   1 DELETE + 3 INSERTs + 2 UPDATEs (#618 PR-B: update_draft_status
+        #   writes to BOTH draft_versions and drafts in the same call) = 6.
         combined_exec = mock_conns[2].execute
-        assert combined_exec.call_count == 5
+        assert combined_exec.call_count == 6
 
         delete_calls = [
             call

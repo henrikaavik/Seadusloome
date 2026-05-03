@@ -154,7 +154,8 @@ class TestUpdateDraftStatusValidation:
         conn.execute.return_value.rowcount = 1
         # Must not raise.
         update_draft_status(conn, _DRAFT_ID, status)
-        conn.execute.assert_called_once()
+        # #618 PR-B: two UPDATEs fire — draft_versions then drafts mirror.
+        assert conn.execute.call_count == 2
 
 
 # ---------------------------------------------------------------------------
@@ -167,14 +168,25 @@ class TestUpdateDraftStatusSqlShape:
     §4.2 cutover invariant) stay accurate.
     """
 
-    def test_writes_to_drafts_only(self):
-        """§4.2 contract: this helper must NOT touch ``draft_versions``.
+    def test_writes_to_both_draft_versions_and_drafts(self):
+        """§4.2 cutover (#618 PR-B): the helper writes to BOTH tables.
 
-        The version-aware write lands in #618 PR-B. Until then, every
-        UPDATE produced by the helper must reference only the legacy
-        ``drafts`` table -- a regression that adds a stray
-        ``draft_versions`` write would defeat the bisect that pins the
-        cutover sequence.
+        Post-PR-B the version-aware status update lands first (so the
+        latest ``draft_versions`` row is the source of truth) and a
+        defensive mirror to ``drafts.status`` keeps legacy readers
+        working for one release cycle.  PR-D will drop the
+        ``drafts.status`` write and the column.
+
+        A regression that drops EITHER write breaks the cutover:
+
+            * Missing the ``draft_versions`` UPDATE means PR-C diff /
+              timeline UI sees a stale per-version status.
+            * Missing the ``drafts`` UPDATE means legacy readers (every
+              listing query that hasn't been pivoted yet) see a stale
+              status column.
+
+        The test asserts both UPDATE statements fire in the SAME
+        ``update_draft_status`` call so the contract is checked end-to-end.
         """
         conn = MagicMock()
         conn.execute.return_value.rowcount = 1
@@ -182,12 +194,16 @@ class TestUpdateDraftStatusSqlShape:
         for status in VALID_STATUSES:
             conn.reset_mock()
             update_draft_status(conn, _DRAFT_ID, status)
-            sql = conn.execute.call_args.args[0].lower()
-            assert "draft_versions" not in sql, (
-                f"update_draft_status({status!r}) must not write to draft_versions; "
-                f"§4.2 cutover lives in #618 PR-B. SQL was:\n{sql}"
+            sql_calls = [c.args[0].lower() for c in conn.execute.call_args_list]
+            joined = "\n".join(sql_calls)
+            assert "draft_versions" in joined, (
+                f"update_draft_status({status!r}) must write to draft_versions; "
+                f"§4.2 cutover (#618 PR-B). SQL was:\n{joined}"
             )
-            assert "update drafts" in sql
+            assert "update drafts" in joined, (
+                f"update_draft_status({status!r}) must defensive-mirror to drafts.status; "
+                f"§4.2 cutover (#618 PR-B). SQL was:\n{joined}"
+            )
 
     def test_default_call_writes_status_and_clears_errors(self):
         conn = MagicMock()
@@ -195,7 +211,12 @@ class TestUpdateDraftStatusSqlShape:
 
         update_draft_status(conn, _DRAFT_ID, "parsing")
 
-        sql, params = conn.execute.call_args.args
+        # Two UPDATEs: first to draft_versions, second to drafts.
+        # The drafts UPDATE owns the error-clearing + completion-stamp logic.
+        drafts_call = next(
+            c for c in conn.execute.call_args_list if "update drafts" in c.args[0].lower()
+        )
+        sql, params = drafts_call.args
         assert "status = %s" in sql
         assert "error_message = %s" in sql
         assert "error_debug = %s" in sql
@@ -208,7 +229,10 @@ class TestUpdateDraftStatusSqlShape:
             conn = MagicMock()
             conn.execute.return_value.rowcount = 1
             update_draft_status(conn, _DRAFT_ID, terminal)
-            sql = conn.execute.call_args.args[0]
+            drafts_call = next(
+                c for c in conn.execute.call_args_list if "update drafts" in c.args[0].lower()
+            )
+            sql = drafts_call.args[0]
             assert "processing_completed_at = now()" in sql, (
                 f"Terminal status {terminal!r} must stamp processing_completed_at = now()"
             )
@@ -220,7 +244,10 @@ class TestUpdateDraftStatusSqlShape:
             conn = MagicMock()
             conn.execute.return_value.rowcount = 1
             update_draft_status(conn, _DRAFT_ID, spec.value)
-            sql = conn.execute.call_args.args[0]
+            drafts_call = next(
+                c for c in conn.execute.call_args_list if "update drafts" in c.args[0].lower()
+            )
+            sql = drafts_call.args[0]
             assert "processing_completed_at = null" in sql, (
                 f"Non-terminal status {spec.value!r} must clear processing_completed_at"
             )
@@ -232,7 +259,10 @@ class TestUpdateDraftStatusSqlShape:
 
         update_draft_status(conn, _DRAFT_ID, "failed", "Boom")
 
-        params = conn.execute.call_args.args[1]
+        drafts_call = next(
+            c for c in conn.execute.call_args_list if "update drafts" in c.args[0].lower()
+        )
+        params = drafts_call.args[1]
         assert params[0] == "failed"
         assert params[1] == "Boom"
         assert params[2] is None  # error_debug
@@ -249,7 +279,10 @@ class TestUpdateDraftStatusSqlShape:
             error_debug="raw stack trace",
         )
 
-        params = conn.execute.call_args.args[1]
+        drafts_call = next(
+            c for c in conn.execute.call_args_list if "update drafts" in c.args[0].lower()
+        )
+        params = drafts_call.args[1]
         assert params == (
             "failed",
             "User-facing",
@@ -271,7 +304,10 @@ class TestUpdateDraftStatusSqlShape:
             extras={"parsed_text_encrypted": b"ciphertext"},
         )
 
-        sql, params = conn.execute.call_args.args
+        drafts_call = next(
+            c for c in conn.execute.call_args_list if "update drafts" in c.args[0].lower()
+        )
+        sql, params = drafts_call.args
         assert "parsed_text_encrypted = %s" in sql
         # status, error_message=None, error_debug=None, parsed_text_encrypted, draft_id
         assert params == (
@@ -296,7 +332,10 @@ class TestUpdateDraftStatusSqlShape:
             extras={"parsed_text_encrypted": b"x", "entity_count": 3},
         )
 
-        sql, params = conn.execute.call_args.args
+        drafts_call = next(
+            c for c in conn.execute.call_args_list if "update drafts" in c.args[0].lower()
+        )
+        sql, params = drafts_call.args
         # entity_count comes before parsed_text_encrypted alphabetically.
         ec_idx = sql.find("entity_count = %s")
         pte_idx = sql.find("parsed_text_encrypted = %s")
@@ -314,7 +353,10 @@ class TestUpdateDraftStatusSqlShape:
             expected_status="failed",
         )
 
-        sql, params = conn.execute.call_args.args
+        drafts_call = next(
+            c for c in conn.execute.call_args_list if "update drafts" in c.args[0].lower()
+        )
+        sql, params = drafts_call.args
         assert "where id = %s and status = %s" in sql.lower()
         # status=uploaded, error_message=None, error_debug=None, id, expected=failed
         assert params == ("uploaded", None, None, str(_DRAFT_ID), "failed")
@@ -333,3 +375,110 @@ class TestUpdateDraftStatusSqlShape:
         conn = MagicMock()
         conn.execute.return_value.rowcount = None
         assert update_draft_status(conn, _DRAFT_ID, "parsing") is False
+
+
+# ---------------------------------------------------------------------------
+# update_draft_status -- §4.2 cutover (#618 PR-B) version-aware write
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateDraftStatusVersionCutover:
+    """The PR-B cutover splits the UPDATE into two statements: first the
+    latest ``draft_versions`` row, then the defensive ``drafts`` mirror.
+
+    These tests pin the per-statement shape so a future PR-D can safely
+    drop the second UPDATE without losing the per-version semantics.
+    """
+
+    def test_version_update_targets_latest_version_row(self):
+        """The version UPDATE must use ``ORDER BY version_number DESC LIMIT 1``
+        so a v3 status flip never bleeds into v2.
+        """
+        conn = MagicMock()
+        conn.execute.return_value.rowcount = 1
+
+        update_draft_status(conn, _DRAFT_ID, "ready")
+
+        version_call = next(
+            c for c in conn.execute.call_args_list if "draft_versions" in c.args[0].lower()
+        )
+        sql = version_call.args[0].lower()
+        assert "update draft_versions" in sql
+        assert "order by version_number desc" in sql
+        assert "limit 1" in sql
+
+    def test_version_update_runs_before_drafts_mirror(self):
+        """Order matters: version write first, drafts mirror second.
+
+        If the drafts mirror runs first and then version fails (e.g. a
+        never-backfilled draft has no v1 row), the rowcount-based
+        return value would still be True even though no version state
+        was actually persisted.  Test that the call order matches the
+        documented contract.
+        """
+        conn = MagicMock()
+        conn.execute.return_value.rowcount = 1
+
+        update_draft_status(conn, _DRAFT_ID, "parsing")
+
+        sql_calls = [c.args[0].lower() for c in conn.execute.call_args_list]
+        version_idx = next(i for i, s in enumerate(sql_calls) if "draft_versions" in s)
+        drafts_idx = next(i for i, s in enumerate(sql_calls) if "update drafts" in s)
+        assert version_idx < drafts_idx, (
+            f"draft_versions UPDATE must run before drafts mirror; order was {sql_calls!r}"
+        )
+
+    def test_parsed_text_encrypted_extra_mirrors_to_version(self):
+        """``parsed_text_encrypted`` lives on BOTH tables and must mirror.
+
+        The parse handler writes ``parsed_text_encrypted`` via ``extras``
+        as part of the ``parsing -> extracting`` transition; the version
+        row needs the same payload so per-version reads pick up the
+        decrypted text.
+        """
+        conn = MagicMock()
+        conn.execute.return_value.rowcount = 1
+
+        update_draft_status(
+            conn,
+            _DRAFT_ID,
+            "extracting",
+            extras={"parsed_text_encrypted": b"ciphertext"},
+        )
+
+        version_call = next(
+            c for c in conn.execute.call_args_list if "draft_versions" in c.args[0].lower()
+        )
+        sql, params = version_call.args
+        assert "parsed_text_encrypted = %s" in sql
+        # status, parsed_text_encrypted, draft_id
+        assert params == ("extracting", b"ciphertext", str(_DRAFT_ID))
+
+    def test_entity_count_extra_does_not_mirror_to_version(self):
+        """``entity_count`` lives only on ``drafts`` -- the version row
+        does not have this column and must NOT receive an UPDATE for it.
+        """
+        conn = MagicMock()
+        conn.execute.return_value.rowcount = 1
+
+        update_draft_status(
+            conn,
+            _DRAFT_ID,
+            "analyzing",
+            extras={"entity_count": 12},
+        )
+
+        version_call = next(
+            c for c in conn.execute.call_args_list if "draft_versions" in c.args[0].lower()
+        )
+        sql = version_call.args[0]
+        assert "entity_count" not in sql, (
+            "entity_count must not appear in the draft_versions UPDATE; "
+            "the column does not exist on draft_versions."
+        )
+
+        # And the drafts mirror DOES include it.
+        drafts_call = next(
+            c for c in conn.execute.call_args_list if "update drafts" in c.args[0].lower()
+        )
+        assert "entity_count = %s" in drafts_call.args[0]

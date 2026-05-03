@@ -51,6 +51,7 @@ from app.docs.similarity import (
     persist_similarities,
     update_uri_index,
 )
+from app.docs.version_model import get_latest_version
 from app.jobs.worker import register_handler
 from app.sync.jena_loader import put_named_graph
 
@@ -141,16 +142,29 @@ def analyze_impact(
         report_data = json.dumps(dataclasses.asdict(findings))
 
         with get_connection() as conn:
+            # #618 PR-B: bind the impact report to the latest
+            # ``draft_versions`` row so per-version diff/timeline (PR-C)
+            # can join against the right report.  The lookup runs
+            # inside the same transaction as the INSERT so a v3
+            # parallel upload mid-analyze cannot retro-attach this
+            # report to the wrong version.  The column is NULLABLE
+            # via migration 032 so a missing v1 row (impossible
+            # post-migration but defended-against) does not block the
+            # insert.
+            latest_version = get_latest_version(conn, draft_id)
+            draft_version_id = str(latest_version.id) if latest_version is not None else None
             conn.execute(
                 """
                 insert into impact_reports
-                    (id, draft_id, affected_count, conflict_count,
-                     gap_count, impact_score, report_data, ontology_version)
-                values (%s, %s, %s, %s, %s, %s, %s, %s)
+                    (id, draft_id, draft_version_id, affected_count,
+                     conflict_count, gap_count, impact_score,
+                     report_data, ontology_version)
+                values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     str(report_id),
                     str(draft_id),
+                    draft_version_id,
                     findings.affected_count,
                     findings.conflict_count,
                     findings.gap_count,

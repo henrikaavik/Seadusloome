@@ -147,6 +147,10 @@ def _make_conn_factory(state: _State):
     def _execute(sql: str, params: tuple | None = None):
         sql_lower = " ".join(sql.split()).lower()
         cursor = MagicMock()
+        # Default rowcount=0 so callers using ``(rowcount or 0) > 0``
+        # get a usable boolean back.  Branches that simulate a real
+        # UPDATE override this to 1.
+        cursor.rowcount = 0
 
         # ----- drafts table -----
         if "insert into drafts" in sql_lower and "returning" in sql_lower:
@@ -208,8 +212,19 @@ def _make_conn_factory(state: _State):
             state.draft_row = tuple(row)
             return cursor
 
-        if "select" in sql_lower and "from drafts" in sql_lower and "where id" in sql_lower:
-            # get_draft / fetch_draft
+        if (
+            "select" in sql_lower
+            and "from drafts" in sql_lower
+            and ("where id" in sql_lower or "where d.id" in sql_lower)
+        ):
+            # get_draft / fetch_draft.  Post #618 PR-B the get_draft SELECT
+            # JOINs through ``draft_versions`` and aliases drafts as ``d``,
+            # so the WHERE predicate is ``where d.id`` rather than the
+            # legacy ``where id``.  Both shapes return the same draft row
+            # because the COALESCE in the new query falls back to the
+            # legacy ``drafts.*`` columns when no version row exists --
+            # which is the case in this in-memory stub since we never
+            # write a v1 row here.
             cursor.fetchone.return_value = state.draft_row
             return cursor
 
@@ -219,6 +234,56 @@ def _make_conn_factory(state: _State):
                 cursor.fetchone.return_value = (1 if state.draft_row else 0,)
             else:
                 cursor.fetchall.return_value = [state.draft_row] if state.draft_row else []
+            return cursor
+
+        if "insert into draft_versions" in sql_lower and "returning" in sql_lower:
+            # #618 PR-B: the upload handler now creates an explicit v1
+            # draft_versions row alongside the drafts INSERT.  Mint a
+            # synthetic version row so create_draft_version's
+            # RETURNING ... fetchone gets a usable tuple.  This stub
+            # doesn't otherwise track version state because
+            # update_draft_status's version write is a no-op below.
+            assert params is not None
+            (
+                v_draft_id,
+                version_number,
+                reading_stage,
+                _parsed_text_encrypted,
+                v_storage_path,
+                v_graph_uri,
+                v_status,
+                v_created_by,
+            ) = params
+            v_id = uuid.uuid4()
+            now = datetime.now(UTC)
+            cursor.fetchone.return_value = (
+                v_id,
+                uuid.UUID(v_draft_id) if isinstance(v_draft_id, str) else v_draft_id,
+                int(version_number),
+                str(reading_stage),
+                None,
+                str(v_storage_path),
+                str(v_graph_uri),
+                str(v_status),
+                now,
+                uuid.UUID(v_created_by) if isinstance(v_created_by, str) else v_created_by,
+            )
+            return cursor
+
+        if "update draft_versions" in sql_lower:
+            # #618 PR-B cutover: update_draft_status now writes to BOTH
+            # draft_versions AND drafts.  This stub doesn't model the
+            # draft_versions rows so the version UPDATE is a no-op --
+            # the legacy ``drafts`` mirror immediately following carries
+            # the actual state mutation that the test asserts on.
+            cursor.rowcount = 1
+            return cursor
+
+        if "select" in sql_lower and "max(version_number)" in sql_lower:
+            # get_next_version_number: handle the COALESCE(MAX, 0) query
+            # used by the v2+ upload branch.  We don't model real version
+            # rows here so always return 0 (caller adds 1).
+            cursor.fetchone.return_value = (0,)
             return cursor
 
         if "update drafts" in sql_lower and "status" in sql_lower:
@@ -284,21 +349,24 @@ def _make_conn_factory(state: _State):
 
         if "from impact_reports" in sql_lower:
             # report routes look up the latest report by draft_id.
+            # Post #618 PR-B the INSERT params layout is:
+            #   (id, draft_id, draft_version_id, affected_count,
+            #    conflict_count, gap_count, impact_score, report_data,
+            #    ontology_version)
+            # The legacy SELECT used by the report routes still
+            # expects the old shape (no draft_version_id), so we skip
+            # index 2 (draft_version_id) when reconstructing the row.
             if state.impact_reports:
                 report = state.impact_reports[-1]
-                # The query returns:
-                #   id, draft_id, affected_count, conflict_count,
-                #   gap_count, impact_score, report_data, ontology_version,
-                #   generated_at
                 cursor.fetchone.return_value = (
-                    report[0],
-                    report[1],
-                    report[2],
-                    report[3],
-                    report[4],
-                    report[5],
-                    report[6],
-                    report[7],
+                    report[0],  # id
+                    report[1],  # draft_id
+                    report[3],  # affected_count (params[2] is draft_version_id)
+                    report[4],  # conflict_count
+                    report[5],  # gap_count
+                    report[6],  # impact_score
+                    report[7],  # report_data
+                    report[8],  # ontology_version
                     datetime.now(UTC),
                 )
             else:
@@ -539,8 +607,10 @@ class TestDocsPipelineE2E:
             # has a valid JSON dict to deserialise — the analyzer wrote
             # the dataclass via dataclasses.asdict, but our state mock
             # stored the raw params tuple.
+            # #618 PR-B: the INSERT params now carry draft_version_id at
+            # index 2, so report_data lives at index 7 (was 6 pre-PR-B).
             report_row = list(state.impact_reports[-1])
-            report_row[6] = json.dumps(
+            report_row[7] = json.dumps(
                 {
                     "affected_entities": [],
                     "conflicts": [],

@@ -16,9 +16,12 @@ import pytest
 from app.docs.version_model import (
     READING_STAGES,
     DraftVersion,
+    create_draft_version,
     get_draft_version,
     get_latest_version,
+    get_next_version_number,
     list_versions_for_draft,
+    next_reading_stage,
 )
 
 # ---------------------------------------------------------------------------
@@ -294,6 +297,186 @@ class TestGetLatestVersion:
 # ---------------------------------------------------------------------------
 # DraftVersion dataclass immutability
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# next_reading_stage (#618 PR-B)
+# ---------------------------------------------------------------------------
+
+
+class TestNextReadingStage:
+    @pytest.mark.parametrize(
+        ("current", "expected"),
+        [
+            ("vtk", "reading_1"),
+            ("reading_1", "reading_2"),
+            ("reading_2", "reading_3"),
+            ("reading_3", "enacted"),
+        ],
+    )
+    def test_steps_one_stage_forward(self, current: str, expected: str):
+        assert next_reading_stage(current) == expected
+
+    def test_enacted_is_terminal_returns_self(self):
+        # Republishing an enacted law is allowed but does not advance.
+        assert next_reading_stage("enacted") == "enacted"
+
+    def test_unknown_stage_raises(self):
+        with pytest.raises(ValueError, match="Unknown reading stage"):
+            next_reading_stage("not-a-stage")
+
+    def test_chain_is_walkable_to_terminal(self):
+        seen: list[str] = []
+        cursor = "vtk"
+        while cursor != "enacted":
+            assert cursor not in seen, "next_reading_stage chain has a cycle"
+            seen.append(cursor)
+            cursor = next_reading_stage(cursor)
+        assert cursor == "enacted"
+        assert len(seen) == 4  # vtk, reading_1, reading_2, reading_3
+
+
+# ---------------------------------------------------------------------------
+# create_draft_version (#618 PR-B)
+# ---------------------------------------------------------------------------
+
+
+class TestCreateDraftVersion:
+    def test_inserts_with_returning_and_returns_dataclass(self):
+        conn = MagicMock()
+        row = _make_version_row(version_id=_VERSION_ID, version_number=2)
+        conn.execute.return_value.fetchone.return_value = row
+
+        result = create_draft_version(
+            conn,
+            draft_id=_DRAFT_ID,
+            version_number=2,
+            reading_stage="reading_1",
+            storage_path="/storage/v2.enc",
+            graph_uri="urn:draft:test/v2",
+            status="uploaded",
+            created_by=_USER_ID,
+        )
+
+        assert isinstance(result, DraftVersion)
+        assert result.id == _VERSION_ID
+        assert result.version_number == 2
+
+        sql = conn.execute.call_args.args[0]
+        params = conn.execute.call_args.args[1]
+        assert "INSERT INTO draft_versions" in sql
+        assert "RETURNING" in sql
+        # Param order: draft_id, version_number, reading_stage, parsed_text_encrypted,
+        # storage_path, graph_uri, status, created_by
+        assert params == (
+            str(_DRAFT_ID),
+            2,
+            "reading_1",
+            None,
+            "/storage/v2.enc",
+            "urn:draft:test/v2",
+            "uploaded",
+            str(_USER_ID),
+        )
+
+    def test_rejects_unknown_reading_stage_before_sql(self):
+        conn = MagicMock()
+        with pytest.raises(ValueError, match="Unknown reading stage"):
+            create_draft_version(
+                conn,
+                draft_id=_DRAFT_ID,
+                version_number=1,
+                reading_stage="bogus",
+                storage_path="/x",
+                graph_uri="urn:x",
+                status="uploaded",
+                created_by=_USER_ID,
+            )
+        conn.execute.assert_not_called()
+
+    def test_rejects_unknown_status_before_sql(self):
+        conn = MagicMock()
+        with pytest.raises(ValueError, match="Unknown draft status"):
+            create_draft_version(
+                conn,
+                draft_id=_DRAFT_ID,
+                version_number=1,
+                reading_stage="vtk",
+                storage_path="/x",
+                graph_uri="urn:x",
+                status="not-a-status",
+                created_by=_USER_ID,
+            )
+        conn.execute.assert_not_called()
+
+    def test_raises_when_returning_yields_no_row(self):
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = None
+        with pytest.raises(RuntimeError, match="produced no row"):
+            create_draft_version(
+                conn,
+                draft_id=_DRAFT_ID,
+                version_number=1,
+                reading_stage="vtk",
+                storage_path="/x",
+                graph_uri="urn:x",
+                status="uploaded",
+                created_by=_USER_ID,
+            )
+
+    def test_parsed_text_encrypted_round_trips(self):
+        conn = MagicMock()
+        encrypted = b"\x01\x02ciphertext"
+        row = _make_version_row(version_id=_VERSION_ID, parsed_text_encrypted=encrypted)
+        conn.execute.return_value.fetchone.return_value = row
+
+        result = create_draft_version(
+            conn,
+            draft_id=_DRAFT_ID,
+            version_number=1,
+            reading_stage="vtk",
+            storage_path="/x",
+            graph_uri="urn:x",
+            status="extracting",
+            created_by=_USER_ID,
+            parsed_text_encrypted=encrypted,
+        )
+
+        assert result.parsed_text_encrypted == encrypted
+        assert conn.execute.call_args.args[1][3] == encrypted
+
+
+# ---------------------------------------------------------------------------
+# get_next_version_number (#618 PR-B)
+# ---------------------------------------------------------------------------
+
+
+class TestGetNextVersionNumber:
+    def test_returns_one_when_no_versions_exist(self):
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = (0,)
+        assert get_next_version_number(conn, _DRAFT_ID) == 1
+
+    def test_returns_max_plus_one(self):
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = (3,)
+        assert get_next_version_number(conn, _DRAFT_ID) == 4
+
+    def test_handles_null_max_via_coalesce(self):
+        """The COALESCE in the SQL ensures we get 0 not NULL when empty."""
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = (None,)
+        # COALESCE(MAX, 0) at SQL level always returns 0; the helper still
+        # defends against a None to keep tests independent.
+        assert get_next_version_number(conn, _DRAFT_ID) == 1
+
+    def test_uses_coalesce_max_query(self):
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = (1,)
+        get_next_version_number(conn, _DRAFT_ID)
+        sql = conn.execute.call_args.args[0]
+        assert "COALESCE(MAX(version_number), 0)" in sql
+        assert "WHERE draft_id = %s" in sql
 
 
 class TestDraftVersionDataclass:

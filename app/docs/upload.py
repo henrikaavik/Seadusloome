@@ -4,14 +4,28 @@ This module owns the *validation + persistence* half of the document
 upload flow. It is deliberately kept outside ``routes.py`` so the logic
 can be unit-tested without spinning up a FastHTML ``TestClient``.
 
-Flow:
+Flow (new-draft branch):
     1. Validate title, filename, content-type, and size.
     2. Read the upload stream into memory.
     3. Encrypt and persist via ``app.storage.store_file``.
     4. Build a stable ``graph_uri`` for the draft's Jena named graph.
     5. Insert the ``drafts`` row with ``status='uploaded'``.
+    5b. Insert a v1 ``draft_versions`` row in the SAME transaction so
+        the read JOIN in :func:`app.docs.draft_model.get_draft` always
+        finds a backing version (#618 PR-B).
     6. Enqueue a ``parse_draft`` background job.
     7. Return the created ``Draft``.
+
+Flow (new-version branch, #618 PR-B):
+    When ``parent_draft_id`` is supplied, the handler creates a NEW
+    ``draft_versions`` row tied to the EXISTING parent draft instead
+    of a brand-new ``drafts`` row.  The new version inherits the
+    parent's ``owner_id`` / ``org_id`` (cross-org uploads are
+    rejected) and steps the parent's latest ``reading_stage`` one
+    notch forward via :func:`app.docs.version_model.next_reading_stage`.
+    The fresh encrypted file path becomes the version's
+    ``storage_path``; ``graph_uri`` is allocated per §9.5 as
+    ``...drafts/{parent_id}/v{version_number}``.
 
 Any failure after step 3 is caught so the encrypted file can be removed
 before the exception is re-raised — we never want ciphertext lying
@@ -22,11 +36,19 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
 from typing import Any, Protocol
 
+from app.auth.audit import log_action
 from app.auth.provider import UserDict
 from app.db import get_connection as _connect
-from app.docs.draft_model import Draft, create_draft
+from app.docs.draft_model import Draft, create_draft, get_draft
+from app.docs.version_model import (
+    create_draft_version,
+    get_latest_version,
+    get_next_version_number,
+    next_reading_stage,
+)
 from app.jobs import JobQueue
 from app.storage import delete_file, store_file
 
@@ -171,6 +193,7 @@ async def handle_upload(
     *,
     doc_type: str = "eelnou",
     parent_vtk_id: Any = None,
+    parent_draft_id: Any = None,
     job_queue: JobQueue | None = None,
     conn_factory: Any = None,
 ) -> Draft:
@@ -179,6 +202,10 @@ async def handle_upload(
     Args:
         user: Authenticated caller. Must carry a non-empty ``org_id``.
         title: Draft title supplied by the uploader (1-200 chars).
+            Ignored when ``parent_draft_id`` is set — a new version
+            inherits the parent's title because the legislative text
+            is what changes between readings, not the draft's
+            identity.
         upload: Starlette ``UploadFile`` (or any object matching
             :class:`_UploadLike`) pointing at the multipart stream.
         doc_type: Document classification — ``'eelnou'`` (default) or
@@ -190,6 +217,16 @@ async def handle_upload(
             the same org. The route handler validates FK existence and
             same-org ownership; this function persists whatever is
             passed in.
+        parent_draft_id: Optional foreign-key link to an existing
+            ``drafts`` row.  When supplied, the handler creates a NEW
+            ``draft_versions`` row tied to the parent (#618 PR-B
+            "version" branch) instead of a fresh ``drafts`` row.  The
+            parent must exist, belong to the caller's org, and have
+            ``status='ready'`` (cross-org / mid-pipeline parents are
+            rejected with a Estonian :class:`DraftUploadError`).  The
+            uploader inherits the parent's ``owner_id`` / ``org_id``
+            so a colleague uploading a v2 cannot orphan the version
+            from the original drafter's audit trail.
         job_queue: Optional ``JobQueue`` to enqueue the parse job.
             Defaults to a fresh :class:`app.jobs.JobQueue` instance —
             tests pass a stub to avoid hitting Postgres.
@@ -198,7 +235,11 @@ async def handle_upload(
             patch this to inject a mock.
 
     Returns:
-        The freshly-inserted :class:`Draft`.
+        The freshly-inserted :class:`Draft`.  When the version branch
+        runs, the returned dataclass reflects the PARENT draft id +
+        the new version's ``storage_path`` / ``graph_uri`` / ``status``
+        (because :func:`app.docs.draft_model.get_draft` JOINs through
+        ``draft_versions`` for those fields post-PR-B).
 
     Raises:
         DraftUploadError: Validation failed. Message is Estonian and
@@ -213,7 +254,13 @@ async def handle_upload(
         # handles the runtime case.
         raise DraftUploadError("Ainult organisatsiooni liikmed saavad eelnõusid üles laadida.")
 
-    cleaned_title = _validate_title(title)
+    # Title validation only matters for the new-draft branch — versions
+    # inherit the parent's title.  We still validate filename + bytes
+    # for both branches.
+    if parent_draft_id is None:
+        cleaned_title = _validate_title(title)
+    else:
+        cleaned_title = title.strip() if title else ""
     filename = _validate_filename(upload.filename)
     content_type = _validate_content_type(upload.content_type)
 
@@ -230,30 +277,39 @@ async def handle_upload(
     queue = job_queue or JobQueue()
     try:
         with factory() as conn:
-            draft = create_draft(
-                conn,
-                user_id=user_id,
-                org_id=org_id,
-                title=cleaned_title,
-                filename=filename,
-                content_type=content_type,
-                file_size=file_size,
-                storage_path=stored.storage_path,
-                # graph_uri must embed the freshly-minted draft id, but we
-                # only get the id after the INSERT. Use a stable placeholder
-                # based on the storage_path (which is already unique) then
-                # patch the real URI immediately afterwards.
-                graph_uri=f"{_GRAPH_URI_PREFIX}pending-{stored.storage_path}",
-                doc_type=doc_type,  # type: ignore[arg-type]
-                parent_vtk_id=parent_vtk_id,
-            )
-            final_graph_uri = f"{_GRAPH_URI_PREFIX}{draft.id}"
-            conn.execute(
-                "update drafts set graph_uri = %s where id = %s",
-                (final_graph_uri, str(draft.id)),
-            )
+            if parent_draft_id is not None:
+                draft = _create_new_version(
+                    conn,
+                    parent_draft_id=parent_draft_id,
+                    user=user,
+                    file_size=file_size,
+                    filename=filename,
+                    content_type=content_type,
+                    storage_path=stored.storage_path,
+                )
+            else:
+                draft = _create_new_draft(
+                    conn,
+                    user_id=user_id,
+                    org_id=org_id,
+                    title=cleaned_title,
+                    filename=filename,
+                    content_type=content_type,
+                    file_size=file_size,
+                    storage_path=stored.storage_path,
+                    doc_type=doc_type,
+                    parent_vtk_id=parent_vtk_id,
+                )
             conn.commit()
-        draft.graph_uri = final_graph_uri
+    except DraftUploadError:
+        # User-facing validation failure — clean up the orphan file
+        # before re-raising so the caller can render the error.
+        logger.info(
+            "Draft upload validation failed; cleaning up file path=%s",
+            stored.storage_path,
+        )
+        delete_file(stored.storage_path)
+        raise
     except Exception:
         logger.exception(
             "Draft insert failed after file was stored — cleaning up path=%s",
@@ -275,11 +331,213 @@ async def handle_upload(
         logger.exception("Failed to enqueue parse_draft job for draft_id=%s", draft.id)
 
     logger.info(
-        "Draft uploaded id=%s user=%s org=%s size=%d filename=%s",
+        "Draft uploaded id=%s user=%s org=%s size=%d filename=%s parent_draft=%s",
         draft.id,
         user_id,
         org_id,
         file_size,
         filename,
+        parent_draft_id,
     )
     return draft
+
+
+# ---------------------------------------------------------------------------
+# Branch implementations (new draft vs new version)
+# ---------------------------------------------------------------------------
+
+
+def _create_new_draft(
+    conn: Any,
+    *,
+    user_id: Any,
+    org_id: Any,
+    title: str,
+    filename: str,
+    content_type: str,
+    file_size: int,
+    storage_path: str,
+    doc_type: str,
+    parent_vtk_id: Any,
+) -> Draft:
+    """Insert a brand-new ``drafts`` row + its v1 ``draft_versions`` row.
+
+    Both rows land in the same transaction so a partial commit can
+    never leave a draft without a backing version.  The post-insert
+    ``graph_uri`` patch (which now embeds the freshly-minted draft id)
+    is also part of the same transaction.
+    """
+    draft = create_draft(
+        conn,
+        user_id=user_id,
+        org_id=org_id,
+        title=title,
+        filename=filename,
+        content_type=content_type,
+        file_size=file_size,
+        storage_path=storage_path,
+        # graph_uri must embed the freshly-minted draft id, but we
+        # only get the id after the INSERT. Use a stable placeholder
+        # based on the storage_path (which is already unique) then
+        # patch the real URI immediately afterwards.
+        graph_uri=f"{_GRAPH_URI_PREFIX}pending-{storage_path}",
+        doc_type=doc_type,  # type: ignore[arg-type]
+        parent_vtk_id=parent_vtk_id,
+    )
+    final_graph_uri = f"{_GRAPH_URI_PREFIX}{draft.id}"
+    conn.execute(
+        "update drafts set graph_uri = %s where id = %s",
+        (final_graph_uri, str(draft.id)),
+    )
+    draft.graph_uri = final_graph_uri
+
+    # #618 PR-B: explicit v1 row in the SAME transaction.  Migration
+    # 030's backfill handled every PRE-PR-A draft; new uploads need
+    # an in-code insert because the migration only runs once.
+    create_draft_version(
+        conn,
+        draft_id=draft.id,
+        version_number=1,
+        reading_stage="vtk",
+        storage_path=storage_path,
+        graph_uri=final_graph_uri,
+        status="uploaded",
+        created_by=user_id,
+    )
+    log_action(
+        str(user_id),
+        "draft.version.create",
+        {
+            "draft_id": str(draft.id),
+            "version_number": 1,
+            "reading_stage": "vtk",
+        },
+    )
+    return draft
+
+
+def _create_new_version(
+    conn: Any,
+    *,
+    parent_draft_id: Any,
+    user: UserDict,
+    file_size: int,
+    filename: str,
+    content_type: str,
+    storage_path: str,
+) -> Draft:
+    """Insert a NEW ``draft_versions`` row tied to *parent_draft_id*.
+
+    The parent must exist, belong to the caller's org, and be in the
+    terminal ``ready`` status.  Any other state surfaces as a
+    user-facing :class:`DraftUploadError` so the route handler can
+    re-render the form with a banner.
+
+    The new version inherits the parent's ``owner_id`` (NOT the
+    uploader's id, because the audit trail of ownership stays with
+    the original drafter) and is allocated the next free
+    ``version_number``.  Reading stage steps one notch forward in the
+    legislative pipeline.
+
+    Returns the parent :class:`Draft` (re-fetched through
+    :func:`get_draft` so the JOIN surfaces the new version's
+    ``storage_path`` / ``graph_uri`` / ``status`` to the caller).
+    """
+    if not isinstance(parent_draft_id, uuid.UUID):
+        try:
+            parent_draft_id = uuid.UUID(str(parent_draft_id))
+        except (TypeError, ValueError) as exc:
+            raise DraftUploadError("Vanem-eelnõu ei ole kättesaadav.") from exc
+
+    parent = get_draft(conn, parent_draft_id)
+    if parent is None:
+        # 404-equivalent: the parent does not exist.  We do NOT
+        # disclose existence vs cross-org separately so the same
+        # message covers both branches.
+        raise DraftUploadError("Vanem-eelnõu ei ole kättesaadav.")
+
+    user_org_id = user.get("org_id")
+    if user_org_id is None or str(parent.org_id) != str(user_org_id):
+        # Cross-org parent — same indistinguishable message as above so
+        # we never confirm the existence of another org's draft.
+        raise DraftUploadError("Vanem-eelnõu ei ole kättesaadav.")
+
+    # The parent's status is read through the version-aware JOIN so a
+    # parent whose latest version is mid-pipeline is correctly rejected.
+    if parent.status != "ready":
+        raise DraftUploadError("Uue versiooni saab luua ainult eelnõust, mille analüüs on valmis.")
+
+    # Allocate the next version slot.  The SELECT runs against the open
+    # connection so two concurrent uploads against the same parent will
+    # serialise on the row-level lock the subsequent INSERT takes.
+    next_version = get_next_version_number(conn, parent_draft_id)
+    latest = get_latest_version(conn, parent_draft_id)
+    base_stage = latest.reading_stage if latest is not None else "vtk"
+    next_stage = next_reading_stage(base_stage)
+
+    # §9.5 per-version graph URI scheme.
+    graph_uri = f"{_GRAPH_URI_PREFIX}{parent_draft_id}/v{next_version}"
+
+    create_draft_version(
+        conn,
+        draft_id=parent_draft_id,
+        version_number=next_version,
+        reading_stage=next_stage,
+        storage_path=storage_path,
+        graph_uri=graph_uri,
+        status="uploaded",
+        # Inherit ownership from the parent draft so the audit trail
+        # stays attached to the original drafter.  The acting user is
+        # captured in the audit log_action call below.
+        created_by=parent.user_id,
+    )
+
+    # Touch ``drafts.updated_at`` + flip the legacy status mirror back
+    # to ``uploaded`` so the listing UI reflects the in-flight pipeline
+    # for the new version.  Also bump file metadata so the latest
+    # filename / size matches the new bytes.
+    conn.execute(
+        """
+        update drafts
+        set status = %s,
+            filename = %s,
+            content_type = %s,
+            file_size = %s,
+            storage_path = %s,
+            graph_uri = %s,
+            updated_at = now(),
+            error_message = null,
+            error_debug = null,
+            processing_completed_at = null
+        where id = %s
+        """,
+        (
+            "uploaded",
+            filename,
+            content_type,
+            file_size,
+            storage_path,
+            graph_uri,
+            str(parent_draft_id),
+        ),
+    )
+
+    log_action(
+        str(user["id"]),
+        "draft.version.create",
+        {
+            "draft_id": str(parent_draft_id),
+            "version_number": next_version,
+            "reading_stage": next_stage,
+            "uploader_id": str(user["id"]),
+        },
+    )
+
+    # Re-fetch the parent so the returned Draft reflects the new
+    # version's status / graph_uri / storage_path via the JOIN.
+    refreshed = get_draft(conn, parent_draft_id)
+    if refreshed is None:
+        # Should be impossible given we just wrote both rows, but
+        # defend against it so the caller doesn't get a None back.
+        raise RuntimeError(f"Failed to re-fetch draft {parent_draft_id} after version insert")
+    return refreshed
