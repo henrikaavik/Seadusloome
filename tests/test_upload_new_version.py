@@ -149,9 +149,13 @@ class _StubUpload:
         ),
         contents: bytes = b"v2 contents",
     ):
-        self.filename = filename
-        self.content_type = content_type
-        self.size = len(contents)
+        # Annotated as ``... | None`` so pyright treats the stub as a
+        # structural match for ``app.docs.upload._UploadLike`` (which
+        # mirrors Starlette's ``UploadFile`` where these attributes are
+        # nullable).
+        self.filename: str | None = filename
+        self.content_type: str | None = content_type
+        self.size: int | None = len(contents)
         self._contents = contents
 
     async def read(self) -> bytes:
