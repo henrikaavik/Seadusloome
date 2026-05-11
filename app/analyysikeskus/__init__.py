@@ -1,11 +1,12 @@
 """Analüüsikeskus — the legal-analysis workflow hub (#714).
 
-This package currently exposes only a placeholder landing page; the
-workflow directory and the individual analysis workflows land in the
-follow-up issues (#720 landing page, #722 Normi mõjuahel, #723 EL
-ülevõtt).
+Exposes the workflow directory (#720), the reusable analysis-result
+shell (#721), and two stub workflows — ``Normi mõjuahel`` (#722 fills it
+in) and ``EL ülevõtt ja harmoneerimine`` (#723 fills it in). The other
+six Section-7 workflows are deferred to a follow-up epic.
 """
 
+from app.analyysikeskus.result_shell import analysis_result_shell
 from app.analyysikeskus.routes import register_analyysikeskus_routes
 
-__all__ = ["register_analyysikeskus_routes"]
+__all__ = ["analysis_result_shell", "register_analyysikeskus_routes"]
