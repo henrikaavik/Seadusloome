@@ -67,6 +67,19 @@ svg#canvas { width: 100%; height: 100vh; display: block; }
   background: rgba(100,116,139,0.25);
 }
 
+/* ------- "Vaate seaded" disclosure (#714 / #718) -------
+   Holds the technical layout controls (reheat, label toggle, grouping)
+   so the main bar reads in legal-work language. Expands inline within
+   the vertical #controls column. */
+.ctrl-settings { display: flex; flex-direction: column; gap: 6px; }
+summary.ctrl-settings-summary { list-style: none; }
+summary.ctrl-settings-summary::-webkit-details-marker { display: none; }
+.ctrl-settings-menu {
+  display: flex; flex-direction: column; gap: 6px;
+  margin-left: 12px; padding-left: 8px;
+  border-left: 2px solid rgba(100,116,139,0.3);
+}
+
 /* ------- Navigation buttons / links (override design-system .btn) ------- */
 /* Match both <button class="nav-btn"> (legacy) and <a class="nav-btn"> (current). */
 #controls a.nav-btn,

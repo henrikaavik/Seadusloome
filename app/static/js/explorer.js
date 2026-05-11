@@ -1291,7 +1291,7 @@ function resetTimeline() {
   if (slider) slider.value = '2026';
 
   var valueEl = document.getElementById('timeline-value');
-  if (valueEl) valueEl.textContent = 'Keelatud';
+  if (valueEl) valueEl.textContent = 'Väljas';
 
   // Reload default overview
   init();
