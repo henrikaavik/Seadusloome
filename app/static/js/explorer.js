@@ -961,18 +961,30 @@ function centerOnNode(d, duration) {
   svg.transition().duration(duration).call(zoomBehavior.transform, transform);
 }
 
+function _entityHasContent(d) {
+  if (!d) return false;
+  var hasMeta = d.metadata && typeof d.metadata === 'object' &&
+    Object.keys(d.metadata).length > 0;
+  var hasOut = Array.isArray(d.outgoing) && d.outgoing.length > 0;
+  var hasIn = Array.isArray(d.incoming) && d.incoming.length > 0;
+  return !!(hasMeta || hasOut || hasIn);
+}
+
 async function focusOnEntity(uri) {
   if (!uri) return;
-  // Pre-flight: confirm the entity exists before touching the panel.
-  // Raw fetch (not apiFetch) so a stale URI from an old report link
-  // doesn't console.error — #719 DoD: unknown URI → toast + the plain
-  // overview, no console noise.
+  // Pre-flight: confirm the entity actually exists in the graph before
+  // touching the panel. /api/explorer/entity/{uri} returns a (non-null)
+  // data object for *any* syntactically valid URI, with everything empty
+  // when the URI isn't in the ontology — so "found" means the response
+  // carries some metadata / a relation, not just HTTP 200. Raw fetch (not
+  // apiFetch) so a stale URI from an old report link doesn't console.error.
+  // #719 DoD: unknown URI → toast + the plain overview, no console noise.
   var found = false;
   try {
     var resp = await fetch('/api/explorer/entity/' + encodeURIComponent(uri));
     if (resp.ok) {
       var j = await resp.json();
-      found = !!(j && j.data);
+      found = !!(j && _entityHasContent(j.data));
     }
   } catch (e) {
     found = false;
