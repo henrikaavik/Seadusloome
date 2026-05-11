@@ -38,11 +38,11 @@ class Step(IntEnum):
 
 STEP_LABELS_ET: dict[Step, str] = {
     Step.INTENT: "Kavatsus",
-    Step.CLARIFY: "Tapsustamine",
+    Step.CLARIFY: "Täpsustamine",
     Step.RESEARCH: "Uurimine",
     Step.STRUCTURE: "Struktuur",
     Step.DRAFT: "Koostamine",
-    Step.REVIEW: "Ulevaade",
+    Step.REVIEW: "Ülevaade",
     Step.EXPORT: "Eksport",
 }
 

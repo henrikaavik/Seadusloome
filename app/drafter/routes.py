@@ -159,7 +159,7 @@ def _not_found_page(req: Request):
     return PageShell(
         H1("Koostamissessioon ei leitud", cls="page-title"),  # noqa: F405
         Alert(
-            "Otsitud koostamissessioon ei ole olemas voi Te ei oma selle vaatamise oigust.",
+            "Otsitud koostamissessioon ei ole olemas või Te ei oma selle vaatamise õigust.",
             variant="warning",
         ),
         P(A("< Tagasi koostaja nimekirja", href="/drafter"), cls="back-link"),  # noqa: F405
@@ -214,13 +214,13 @@ def _session_list_columns() -> list[Column]:
 
     def _actions_cell(row: dict[str, Any]):
         return A(  # noqa: F405
-            "Jatka",
+            "Jätka",
             href=f"/drafter/{row['id']}",
             cls="btn btn-secondary btn-sm",
         )
 
     return [
-        Column(key="workflow_type", label="Toovoog", sortable=False, render=_workflow_cell),
+        Column(key="workflow_type", label="Töövoog", sortable=False, render=_workflow_cell),
         Column(key="current_step_label", label="Samm", sortable=False, render=_step_cell),
         Column(key="status", label="Staatus", sortable=False, render=_status_cell),
         Column(key="created_at", label="Loodud", sortable=False),
@@ -246,7 +246,7 @@ def drafter_list_page(req: Request):
 
     if not org_id or not user_id:
         body: Any = Alert(
-            "Te ei kuulu uhtegi organisatsiooni.",
+            "Te ei kuulu ühtegi organisatsiooni.",
             variant="warning",
         )
         pagination = None
@@ -258,7 +258,7 @@ def drafter_list_page(req: Request):
         if total == 0:
             body = Div(  # noqa: F405
                 P(  # noqa: F405
-                    "Teil ei ole veel uhtegi koostamissessiooni.",
+                    "Teil ei ole veel ühtegi koostamissessiooni.",
                     cls="muted-text",
                 ),
                 A(  # noqa: F405
@@ -335,7 +335,7 @@ def _workflow_form(*, error: str | None = None):
 
     return AppForm(
         Div(  # noqa: F405
-            Label("Toovoo tyyp", cls="form-field-label"),  # noqa: F405
+            Label("Töövoo tüüp", cls="form-field-label"),  # noqa: F405
             Div(  # noqa: F405
                 Label(  # noqa: F405
                     Input(  # noqa: F405
@@ -345,9 +345,9 @@ def _workflow_form(*, error: str | None = None):
                         checked=True,
                         cls="radio-input",
                     ),
-                    Span("Taielik seadus", cls="radio-label"),  # noqa: F405
+                    Span("Täielik seadus", cls="radio-label"),  # noqa: F405
                     P(  # noqa: F405
-                        "Koostab terve seaduse kavatsusest kuni valmis eelnouks.",
+                        "Koostab terve seaduse kavatsusest kuni valmis eelnõuks.",
                         cls="radio-description muted-text",
                     ),
                     cls="radio-option",
@@ -359,9 +359,9 @@ def _workflow_form(*, error: str | None = None):
                         value="vtk",
                         cls="radio-input",
                     ),
-                    Span("VTK eelanaluus", cls="radio-label"),  # noqa: F405
+                    Span("VTK eelanalüüs", cls="radio-label"),  # noqa: F405
                     P(  # noqa: F405
-                        "Koostab vabariigi valitsuse korralduse eelanaluusi dokumendi.",
+                        "Koostab vabariigi valitsuse korralduse eelanalüüsi dokumendi.",
                         cls="radio-description muted-text",
                     ),
                     cls="radio-option",
@@ -372,7 +372,7 @@ def _workflow_form(*, error: str | None = None):
         ),
         Div(  # noqa: F405
             Button("Alusta koostamist", type="submit", variant="primary"),
-            A("Tuhista", href="/drafter", cls="btn btn-ghost btn-md"),  # noqa: F405
+            A("Tühista", href="/drafter", cls="btn btn-ghost btn-md"),  # noqa: F405
             cls="form-actions",
         ),
         method="post",
@@ -391,7 +391,7 @@ def new_session_page(req: Request):
         return PageShell(
             H1("Uus koostamine", cls="page-title"),  # noqa: F405
             Alert(
-                "Te ei kuulu uhtegi organisatsiooni.",
+                "Te ei kuulu ühtegi organisatsiooni.",
                 variant="warning",
             ),
             title="Uus koostamine",
@@ -441,7 +441,7 @@ async def create_session_handler(req: Request):
     if not org_id or not user_id:
         return PageShell(
             H1("Uus koostamine", cls="page-title"),  # noqa: F405
-            Alert("Te ei kuulu uhtegi organisatsiooni.", variant="warning"),
+            Alert("Te ei kuulu ühtegi organisatsiooni.", variant="warning"),
             title="Uus koostamine",
             user=auth,
             active_nav="/drafter",
@@ -473,10 +473,10 @@ async def create_session_handler(req: Request):
             conn.commit()
     except Exception:
         logger.exception("Failed to create drafting session")
-        form, _ = _workflow_form(error="Sessiooni loomine ebaonnestus. Palun proovige uuesti.")
+        form, _ = _workflow_form(error="Sessiooni loomine ebaõnnestus. Palun proovige uuesti.")
         return PageShell(
             H1("Uus koostamine", cls="page-title"),  # noqa: F405
-            Alert("Sessiooni loomine ebaonnestus.", variant="danger"),
+            Alert("Sessiooni loomine ebaõnnestus.", variant="danger"),
             Card(CardBody(form)),
             title="Uus koostamine",
             user=auth,
@@ -566,18 +566,18 @@ def _step_1_content(
                 placeholder=(
                     "Nt: Soovin koostada seaduse, mis reguleerib tehisintellekti "
                     "kasutamist avalikus sektoris, sealhulgas andmekaitse "
-                    "noudeid ja labi\u00adpaistvuse kohustust."
+                    "n\u00f5udeid ja l\u00e4bi\u00adpaistvuse kohustust."
                 ),
                 cls="input textarea",
             ),
             Small(  # noqa: F405
-                f"Kuni {_INTENT_MAX_LENGTH} tahemarki.",
+                f"Kuni {_INTENT_MAX_LENGTH} tähemärki.",
                 cls="form-field-help",
             ),
             cls="form-field",
         ),
         Div(  # noqa: F405
-            Button("Jatka tapsustamisega", type="submit", variant="primary"),
+            Button("Jätka täpsustamisega", type="submit", variant="primary"),
             A("Tagasi", href="/drafter", cls="btn btn-ghost btn-md"),  # noqa: F405
             cls="form-actions",
         ),
@@ -680,17 +680,17 @@ def _step_2_page(session: DraftingSession, auth: UserDict):
         job = _find_latest_job(session.id, "drafter_clarify")
         if job is None:
             # No job enqueued yet — shouldn't happen, but show a waiting state
-            return _step_waiting_page(session, 2, auth, "Kusimuste genereerimine...")
+            return _step_waiting_page(session, 2, auth, "Küsimuste genereerimine...")
 
         if job["status"] in ("pending", "claimed", "running"):
-            return _step_waiting_page(session, 2, auth, "Kusimuste genereerimine...")
+            return _step_waiting_page(session, 2, auth, "Küsimuste genereerimine...")
 
         if job["status"] == "failed":
             return _step_error_page(
                 session,
                 2,
                 auth,
-                job.get("error_message") or "Kusimuste genereerimine ebaonnestus.",
+                job.get("error_message") or "Küsimuste genereerimine ebaõnnestus.",
             )
 
     # Find the first unanswered question
@@ -726,12 +726,12 @@ def _step_2_page(session: DraftingSession, auth: UserDict):
             AppForm(
                 Div(  # noqa: F405
                     P(  # noqa: F405
-                        Strong(f"Kusimus {unanswered_idx + 1}/{len(clarifications)}: "),  # noqa: F405
+                        Strong(f"Küsimus {unanswered_idx + 1}/{len(clarifications)}: "),  # noqa: F405
                         q,
                         cls="clarification-question current",
                     ),
                     Small(  # noqa: F405
-                        f"{remaining} kusimust vastamata",
+                        f"{remaining} küsimust vastamata",
                         cls="form-field-help",
                     ),
                     Textarea(  # noqa: F405
@@ -759,11 +759,11 @@ def _step_2_page(session: DraftingSession, auth: UserDict):
         children.append(
             Div(  # noqa: F405
                 Alert(
-                    "Koik kusimused on vastatud. Voite jatkata uurimise sammuga.",
+                    "Kõik küsimused on vastatud. Võite jätkata uurimise sammuga.",
                     variant="success",
                 ),
                 AppForm(
-                    Button("Jatka uurimisega", type="submit", variant="primary"),
+                    Button("Jätka uurimisega", type="submit", variant="primary"),
                     Input(type="hidden", name="action", value="advance"),  # noqa: F405
                     method="post",
                     action=f"/drafter/{session.id}/step/2",
@@ -773,7 +773,7 @@ def _step_2_page(session: DraftingSession, auth: UserDict):
         )
 
     return PageShell(
-        H1("Tapsustamine", cls="page-title"),  # noqa: F405
+        H1("T\u00e4psustamine", cls="page-title"),  # noqa: F405
         _step_tracker(session.current_step),
         InfoBox(
             P(
@@ -784,15 +784,15 @@ def _step_2_page(session: DraftingSession, auth: UserDict):
             dismissible=True,
         ),
         Card(
-            CardHeader(H3("2. samm: Tapsustamine", cls="card-title")),  # noqa: F405
+            CardHeader(H3("2. samm: T\u00e4psustamine", cls="card-title")),  # noqa: F405
             CardBody(*children)
             if children
             else CardBody(
-                P("Kusimusi ei leitud.", cls="muted-text")  # noqa: F405
+                P("K\u00fcsimusi ei leitud.", cls="muted-text")  # noqa: F405
             ),
         ),
         P(A("\u2190 Tagasi koostaja nimekirja", href="/drafter"), cls="back-link"),  # noqa: F405
-        title="Tapsustamine",
+        title="T\u00e4psustamine",
         user=auth,
         active_nav="/drafter",
     )
@@ -815,7 +815,7 @@ def _step_3_page(session: DraftingSession, auth: UserDict):
                 session,
                 3,
                 auth,
-                job.get("error_message") or "Uurimine ebaonnestus.",
+                job.get("error_message") or "Uurimine ebaõnnestus.",
             )
 
     # Decrypt and show research results
@@ -834,14 +834,14 @@ def _step_3_page(session: DraftingSession, auth: UserDict):
     cards: list[Any] = []
 
     # Summary cards for each category
-    cards.append(_research_category_card("Oigusaktide satted", provisions, "provision"))
-    cards.append(_research_category_card("EL-i oigusaktid", eu_directives, "eu"))
+    cards.append(_research_category_card("Õigusaktide sätted", provisions, "provision"))
+    cards.append(_research_category_card("EL-i õigusaktid", eu_directives, "eu"))
     cards.append(_research_category_card("Kohtulahendid", court_decisions, "court"))
     cards.append(_research_category_card("Teemaklastrid", topic_clusters, "cluster"))
 
     # Advance button
     advance_form = AppForm(
-        Button("Jatka struktuuriga", type="submit", variant="primary"),
+        Button("Jätka struktuuriga", type="submit", variant="primary"),
         Input(type="hidden", name="action", value="advance"),  # noqa: F405
         method="post",
         action=f"/drafter/{session.id}/step/3",
@@ -911,7 +911,7 @@ def _step_4_page(session: DraftingSession, auth: UserDict):
                 session,
                 4,
                 auth,
-                job.get("error_message") or "Struktuuri genereerimine ebaonnestus.",
+                job.get("error_message") or "Struktuuri genereerimine ebaõnnestus.",
             )
 
     structure = session.proposed_structure or {}
@@ -985,7 +985,7 @@ def _step_4_page(session: DraftingSession, auth: UserDict):
         Input(type="hidden", name="chapter_count", value=str(len(chapters))),  # noqa: F405
         Div(*tree_items, cls="structure-tree"),  # noqa: F405
         Div(  # noqa: F405
-            Button("Salvesta ja jatka koostamisega", type="submit", variant="primary"),
+            Button("Salvesta ja jätka koostamisega", type="submit", variant="primary"),
             cls="form-actions",
         ),
         method="post",
@@ -1032,7 +1032,7 @@ def _step_5_page(session: DraftingSession, auth: UserDict):
                 session,
                 5,
                 auth,
-                job.get("error_message") or "Koostamine ebaonnestus.",
+                job.get("error_message") or "Koostamine ebaõnnestus.",
             )
 
     # Decrypt clauses
@@ -1068,13 +1068,13 @@ def _step_5_page(session: DraftingSession, auth: UserDict):
         clause_items.append(
             Div(  # noqa: F405
                 H4(f"{para} {title}", cls="clause-heading"),  # noqa: F405
-                Small(f"Peatukk: {chapter} {chapter_title}", cls="clause-chapter-ref muted-text"),  # noqa: F405
+                Small(f"Peatükk: {chapter} {chapter_title}", cls="clause-chapter-ref muted-text"),  # noqa: F405
                 Div(  # noqa: F405
                     P(text, cls="clause-text") if text else P("(Sisu puudub)", cls="muted-text"),  # noqa: F405
                     cls="clause-body",
                 ),
                 Div(*citation_links, cls="clause-citations") if citation_links else None,  # noqa: F405
-                P(Em(f"Markus: {notes}"), cls="clause-notes muted-text") if notes else None,  # noqa: F405
+                P(Em(f"Märkus: {notes}"), cls="clause-notes muted-text") if notes else None,  # noqa: F405
                 Div(  # noqa: F405
                     Button(  # noqa: F405
                         "Muuda",
@@ -1102,7 +1102,7 @@ def _step_5_page(session: DraftingSession, auth: UserDict):
 
     # Advance form
     advance_form = AppForm(
-        Button("Jatka ulevaatega", type="submit", variant="primary"),
+        Button("Jätka ülevaatega", type="submit", variant="primary"),
         Input(type="hidden", name="action", value="advance"),  # noqa: F405
         method="post",
         action=f"/drafter/{session.id}/step/5",
@@ -1148,7 +1148,7 @@ def _step_6_page(session: DraftingSession, auth: UserDict):
     if session.integrated_draft_id is None:
         # Not yet triggered — show the trigger button
         return PageShell(
-            H1("Integreeritud ulevaade", cls="page-title"),  # noqa: F405
+            H1("Integreeritud \u00fclevaade", cls="page-title"),  # noqa: F405
             _step_tracker(session.current_step),
             InfoBox(
                 P(
@@ -1160,23 +1160,29 @@ def _step_6_page(session: DraftingSession, auth: UserDict):
                 dismissible=True,
             ),
             Card(
-                CardHeader(H3("6. samm: Ulevaade", cls="card-title")),  # noqa: F405
+                CardHeader(H3("6. samm: \u00dclevaade", cls="card-title")),  # noqa: F405
                 CardBody(
                     P(  # noqa: F405
-                        "Selles sammus labitakse koostatud eelnou Phase 2 mojuanaluusi "
-                        "torustiku kaudu. See loob eelnou (.docx), parsib selle, "
-                        "tuvastab viited ja kuvab mojuanaluusi.",
+                        "Selles sammus l\u00e4bitakse koostatud "
+                        "eeln\u00f5u Phase 2 m\u00f5juanal\u00fc\u00fcsi torustiku "
+                        "kaudu. See loob eeln\u00f5u (.docx), parsib "
+                        "selle, tuvastab viited ja kuvab "
+                        "m\u00f5juanal\u00fc\u00fcsi.",
                         cls="page-lead",
                     ),
                     AppForm(
-                        Button("Kaivita mojuanaluus", type="submit", variant="primary"),
+                        Button(
+                            "K\u00e4ivita m\u00f5juanal\u00fc\u00fcs",
+                            type="submit",
+                            variant="primary",
+                        ),
                         method="post",
                         action=f"/drafter/{session.id}/step/6",
                     ),
                 ),
             ),
             P(A("\u2190 Tagasi koostaja nimekirja", href="/drafter"), cls="back-link"),  # noqa: F405
-            title="Ulevaade",
+            title="\u00dclevaade",
             user=auth,
             active_nav="/drafter",
         )
@@ -1185,7 +1191,7 @@ def _step_6_page(session: DraftingSession, auth: UserDict):
     draft_id = str(session.integrated_draft_id)
 
     return PageShell(
-        H1("Integreeritud ulevaade", cls="page-title"),  # noqa: F405
+        H1("Integreeritud \u00fclevaade", cls="page-title"),  # noqa: F405
         _step_tracker(session.current_step),
         InfoBox(
             P(
@@ -1197,12 +1203,12 @@ def _step_6_page(session: DraftingSession, auth: UserDict):
             dismissible=True,
         ),
         Card(
-            CardHeader(H3("6. samm: Ulevaade", cls="card-title")),  # noqa: F405
+            CardHeader(H3("6. samm: \u00dclevaade", cls="card-title")),  # noqa: F405
             CardBody(
-                Alert("Mojuanaluus on seotud eelnouga.", variant="success"),
+                Alert("M\u00f5juanal\u00fc\u00fcs on seotud eeln\u00f5uga.", variant="success"),
                 P(  # noqa: F405
                     A(  # noqa: F405
-                        "Vaata mojuanaluusi aruannet",
+                        "Vaata m\u00f5juanal\u00fc\u00fcsi aruannet",
                         href=f"/drafts/{draft_id}/report",
                         cls="btn btn-secondary btn-md",
                     ),
@@ -1215,7 +1221,7 @@ def _step_6_page(session: DraftingSession, auth: UserDict):
                 ),
                 Div(  # noqa: F405
                     AppForm(
-                        Button("Jatka ekspordiga", type="submit", variant="primary"),
+                        Button("J\u00e4tka ekspordiga", type="submit", variant="primary"),
                         Input(type="hidden", name="action", value="advance"),  # noqa: F405
                         method="post",
                         action=f"/drafter/{session.id}/step/6",
@@ -1225,7 +1231,7 @@ def _step_6_page(session: DraftingSession, auth: UserDict):
             ),
         ),
         P(A("< Tagasi koostaja nimekirja", href="/drafter"), cls="back-link"),  # noqa: F405
-        title="Ulevaade",
+        title="\u00dclevaade",
         user=auth,
         active_nav="/drafter",
     )
@@ -1254,7 +1260,7 @@ def _step_7_page(session: DraftingSession, auth: UserDict):
             CardHeader(H3("7. samm: Eksport", cls="card-title")),  # noqa: F405
             CardBody(
                 P(  # noqa: F405
-                    "Teie eelnou on valmis. Laadige alla .docx fail.",
+                    "Teie eelnõu on valmis. Laadige alla .docx fail.",
                     cls="page-lead",
                 ),
                 A(  # noqa: F405
@@ -1429,7 +1435,7 @@ async def submit_intent(req: Request, session_id: str):
             auth,
             error=(
                 f"Kavatsuse kirjeldus on liiga pikk "
-                f"(maksimaalselt {_INTENT_MAX_LENGTH} tahemarki)."
+                f"(maksimaalselt {_INTENT_MAX_LENGTH} tähemärki)."
             ),
             intent_value=intent,
         )
@@ -1456,7 +1462,7 @@ async def submit_intent(req: Request, session_id: str):
         return _step_1_content(
             session,
             auth,
-            error="Kavatsuse salvestamine ebaonnestus. Palun proovige uuesti.",
+            error="Kavatsuse salvestamine ebaõnnestus. Palun proovige uuesti.",
             intent_value=intent,
         )
 
@@ -1528,7 +1534,7 @@ def step_status_fragment(req: Request, session_id: str, n: str):
                 headers={"HX-Redirect": f"/drafter/{session_id}/step/{step_num}"},
             )
         if job and job["status"] == "failed":
-            error_msg = job.get("error_message") or "Tootlus ebaonnestus."
+            error_msg = job.get("error_message") or "Töötlus ebaõnnestus."
             return Div(  # noqa: F405
                 Alert(error_msg, variant="danger"),
                 id="step-status",
@@ -1536,7 +1542,7 @@ def step_status_fragment(req: Request, session_id: str, n: str):
 
     # Still running — keep polling
     _step_messages = {
-        2: "Kusimuste genereerimine...",
+        2: "Küsimuste genereerimine...",
         3: "Ontoloogia uurimine...",
         4: "Struktuuri genereerimine...",
         5: "Seaduseteksti koostamine...",
@@ -1907,17 +1913,17 @@ async def submit_review(req: Request, session_id: str):
     except Exception:
         logger.exception("Failed to trigger integrated review for session %s", session_id)
         return PageShell(
-            H1("Integreeritud ulevaade", cls="page-title"),  # noqa: F405
+            H1("Integreeritud ülevaade", cls="page-title"),  # noqa: F405
             _step_tracker(session.current_step),
             Card(
                 CardBody(
                     Alert(
-                        "Mojuanaluusi kaivitamine ebaonnestus. Palun proovige uuesti.",
+                        "Mõjuanalüüsi käivitamine ebaõnnestus. Palun proovige uuesti.",
                         variant="danger",
                     ),
                 ),
             ),
-            title="Ulevaade",
+            title="Ülevaade",
             user=auth,
             active_nav="/drafter",
         )
@@ -1943,7 +1949,7 @@ def _trigger_integrated_review(session: DraftingSession, auth: UserDict) -> uuid
         clauses = data.get("clauses", [])
 
     structure = session.proposed_structure or {}
-    title = structure.get("title", session.intent or "Eelnou")
+    title = structure.get("title", session.intent or "Eelnõu")
 
     # Build .docx
     docx_path = build_drafter_docx(
@@ -2035,7 +2041,7 @@ def export_docx(req: Request, session_id: str):
             logger.warning("Could not decrypt draft content for export, session %s", session.id)
 
     structure = session.proposed_structure or {}
-    title = structure.get("title", session.intent or "Eelnou")
+    title = structure.get("title", session.intent or "Eelnõu")
 
     # Try to get impact summary if available
     impact_summary: dict[str, Any] | None = None
@@ -2148,7 +2154,7 @@ def clause_edit_form(req: Request, session_id: str, clause_idx: str):
             Div(  # noqa: F405
                 Button("Salvesta", type="submit", variant="primary", size="sm"),
                 Button(  # noqa: F405
-                    "Tuhista",
+                    "Tühista",
                     hx_get=f"/drafter/{session_id}/step/5",
                     hx_target="body",
                     hx_swap="outerHTML",
@@ -2281,7 +2287,7 @@ def regenerate_clause(req: Request, session_id: str, clause_idx: str):
             idx,
         )
         return Div(  # noqa: F405
-            Alert("Uuesti genereerimine ebaonnestus.", variant="danger"),
+            Alert("Uuesti genereerimine ebaõnnestus.", variant="danger"),
             id=f"clause-{clause_idx}",
         )
 
@@ -2356,7 +2362,7 @@ def regenerate_clause_status(req: Request, session_id: str, clause_idx: str):
                     cls="clause-heading",
                 ),  # noqa: F405
                 Small(  # noqa: F405
-                    f"Peatukk: {clause.get('chapter', '')} {clause.get('chapter_title', '')}",
+                    f"Peatükk: {clause.get('chapter', '')} {clause.get('chapter_title', '')}",
                     cls="clause-chapter-ref muted-text",
                 ),
                 Div(  # noqa: F405
@@ -2371,7 +2377,7 @@ def regenerate_clause_status(req: Request, session_id: str, clause_idx: str):
 
     if job and job["status"] == "failed":
         return Div(  # noqa: F405
-            Alert("Uuesti genereerimine ebaonnestus.", variant="danger"),
+            Alert("Uuesti genereerimine ebaõnnestus.", variant="danger"),
             id=f"clause-{clause_idx}",
         )
 

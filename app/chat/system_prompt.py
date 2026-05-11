@@ -52,7 +52,7 @@ def build_system_prompt(
     parts = [_BASE_SYSTEM_PROMPT]
 
     if draft_context_id:
-        summary_text = impact_summary or "Moju-analuusi aruanne pole saadaval."
+        summary_text = impact_summary or "Mõjuanalüüsi aruanne pole saadaval."
         parts.append(
             _DRAFT_CONTEXT_TEMPLATE.format(
                 draft_id=draft_context_id,

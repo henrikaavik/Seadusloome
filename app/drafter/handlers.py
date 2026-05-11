@@ -350,13 +350,13 @@ def drafter_clarify(
     if not questions:
         # Fallback: generate minimal questions
         questions = [
-            {"question": "Milliseid asutusi see seadus mojutab?", "rationale": "scope"},
+            {"question": "Milliseid asutusi see seadus mõjutab?", "rationale": "scope"},
             {
-                "question": "Kas see taiendab voi asendab olemasolevat seadust?",
+                "question": "Kas see täiendab või asendab olemasolevat seadust?",
                 "rationale": "relationship",
             },
             {
-                "question": "Kas on EL-i noudeid, mida tuleb arvestada?",
+                "question": "Kas on EL-i nõudeid, mida tuleb arvestada?",
                 "rationale": "EU compliance",
             },
         ]

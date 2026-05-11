@@ -161,10 +161,10 @@ def admin_analytics_page(req: Request):
 
         summary_dl = Dl(  # noqa: F405
             Dt("Perioodi pikkus"),  # noqa: F405
-            Dd(Badge(f"{summary['days']} paeva", variant="default")),  # noqa: F405
-            Dt("Uleslaadimisi kokku"),  # noqa: F405
+            Dd(Badge(f"{summary['days']} päeva", variant="default")),  # noqa: F405
+            Dt("Üleslaadimisi kokku"),  # noqa: F405
             Dd(Badge(str(summary["total_uploads"]), variant="primary")),  # noqa: F405
-            Dt("Vestluse sonumeid kokku"),  # noqa: F405
+            Dt("Vestluse sõnumeid kokku"),  # noqa: F405
             Dd(Badge(str(summary["total_chat_messages"]), variant="primary")),  # noqa: F405
             Dt("Koostamise seansse kokku"),  # noqa: F405
             Dd(Badge(str(summary["total_drafter_sessions"]), variant="primary")),  # noqa: F405
@@ -172,18 +172,18 @@ def admin_analytics_page(req: Request):
         )
 
         # Charts
-        uploads_chart = _svg_bar_chart(data, "uploads", "Uleslaadimised paevas", "#0066cc")
-        chat_chart = _svg_bar_chart(data, "chat_messages", "Vestluse sonumid paevas", "#2e8b57")
+        uploads_chart = _svg_bar_chart(data, "uploads", "Üleslaadimised päevas", "#0066cc")
+        chat_chart = _svg_bar_chart(data, "chat_messages", "Vestluse sõnumid päevas", "#2e8b57")
         drafter_chart = _svg_bar_chart(
-            data, "drafter_sessions", "Koostamise seansid paevas", "#9b59b6"
+            data, "drafter_sessions", "Koostamise seansid päevas", "#9b59b6"
         )
 
         # Detail table
         if data:
             columns = [
-                Column(key="day", label="Kuupaev", sortable=False),
-                Column(key="uploads", label="Uleslaadimised", sortable=False),
-                Column(key="chat_messages", label="Vestluse sonumid", sortable=False),
+                Column(key="day", label="Kuupäev", sortable=False),
+                Column(key="uploads", label="Üleslaadimised", sortable=False),
+                Column(key="chat_messages", label="Vestluse sõnumid", sortable=False),
                 Column(key="drafter_sessions", label="Koostamise seansid", sortable=False),
             ]
             rows = [
@@ -204,12 +204,13 @@ def admin_analytics_page(req: Request):
             table = P("Kasutusandmed puuduvad.", cls="muted-text")  # noqa: F405
 
         content = (
-            H1("Kasutusanaluutika", cls="page-title"),  # noqa: F405
+            H1("Kasutusanal\u00fc\u00fctika", cls="page-title"),  # noqa: F405
             P(A("\u2190 Tagasi adminipaneelile", href="/admin"), cls="back-link"),  # noqa: F405
             InfoBox(
                 P(  # noqa: F405
-                    "Kasutusanaluutika naitab uleslaadimiste, vestluse sonumite "
-                    "ja koostamise seansside statistikat paevade kaupa."
+                    "Kasutusanal\u00fc\u00fctika n\u00e4itab \u00fcleslaadimiste, "
+                    "vestluse s\u00f5numite ja koostamise seansside "
+                    "statistikat p\u00e4evade kaupa."
                 ),
                 variant="info",
                 dismissible=True,
@@ -217,8 +218,8 @@ def admin_analytics_page(req: Request):
             Card(
                 CardHeader(
                     H3(  # noqa: F405
-                        "Kokkuvote",
-                        _tooltip(f"Viimased {days} paeva"),
+                        "Kokkuv\u00f5te",
+                        _tooltip(f"Viimased {days} p\u00e4eva"),
                         cls="card-title",
                     )
                 ),

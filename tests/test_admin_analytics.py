@@ -139,8 +139,8 @@ class TestAnalyticsPageRender:
         result = admin_analytics_page(req)
         html = to_xml(result)
 
-        assert "Kasutusanaluutika" in html
-        assert "Kokkuvote" in html
+        assert "Kasutusanalüütika" in html
+        assert "Kokkuvõte" in html
         assert "Trendid" in html
         assert "Detailne tabel" in html
 
@@ -172,7 +172,7 @@ class TestAnalyticsPageRender:
         result = admin_analytics_page(req)
         html = to_xml(result)
 
-        assert "Kasutusanaluutika" in html
+        assert "Kasutusanalüütika" in html
         assert "puuduvad" in html.lower()
 
 

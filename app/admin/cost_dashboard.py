@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 # Feature labels in Estonian for the cost breakdown.
 _FEATURE_LABELS: dict[str, str] = {
-    "drafter_clarify": "Koostaja tapsustamine",
+    "drafter_clarify": "Koostaja täpsustamine",
     "drafter_draft": "Koostaja mustand",
     "chat": "Nõustaja",
     "extraction": "Eraldamine",
@@ -337,8 +337,8 @@ def admin_cost_page(req: Request):
             ),
             InfoBox(
                 P(  # noqa: F405
-                    "LLM kulude ulevaade naitab jooksva kuu kulusid organisatsioonide, "
-                    "funktsioonide ja mudelite loikes ning igakuist trendi."
+                    "LLM kulude ülevaade näitab jooksva kuu kulusid organisatsioonide, "
+                    "funktsioonide ja mudelite lõikes ning igakuist trendi."
                 ),
                 variant="info",
                 dismissible=True,
