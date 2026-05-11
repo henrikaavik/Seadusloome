@@ -34,7 +34,55 @@ Notes on the simplification:
 
 from __future__ import annotations
 
+from typing import Literal
+
 from app.docs.impact.analyzer import ImpactFindings
+
+#: Impact band identifier — the four severity tiers described in the module
+#: docstring.  Surfaced to the UI as Estonian labels via :data:`IMPACT_BAND_LABELS_ET`.
+ImpactBand = Literal["low", "medium", "high", "critical"]
+
+#: Estonian labels for each :data:`ImpactBand`. The dashboard's "Kõrge riskiga
+#: leiud" widget renders these as Badges; only ``high`` / ``critical`` rows
+#: surface there.
+IMPACT_BAND_LABELS_ET: dict[ImpactBand, str] = {
+    "low": "Madal mõju",
+    "medium": "Keskmine mõju",
+    "high": "Kõrge risk",
+    "critical": "Kriitiline",
+}
+
+
+def impact_band(score: int) -> ImpactBand:
+    """Map a 0-100 impact score to its severity band.
+
+    The thresholds mirror the module docstring (and the Phase 2 spec §8.5):
+
+        0-20    -> ``"low"``     (routine amendment)
+        21-50   -> ``"medium"``  (requires review)
+        51-80   -> ``"high"``    (significant review needed)
+        81-100  -> ``"critical"`` (major legislative change)
+
+    This is the single source of truth for the band logic — callers that
+    need to know whether a report is "high-risk" (the dashboard work queue,
+    list-page colour coding) should use this rather than re-deriving the
+    cut-offs.
+
+    Args:
+        score: The integer stored in ``impact_reports.impact_score``. Values
+            outside ``[0, 100]`` are clamped before banding.
+
+    Returns:
+        One of the four :data:`ImpactBand` literals.
+    """
+    clamped = min(100, max(0, int(score)))
+    if clamped <= 20:
+        return "low"
+    if clamped <= 50:
+        return "medium"
+    if clamped <= 80:
+        return "high"
+    return "critical"
 
 
 def calculate_impact_score(findings: ImpactFindings) -> int:

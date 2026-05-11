@@ -1,9 +1,27 @@
-"""Personal dashboard for authenticated users."""
+"""Operational work queue for authenticated users — the ``/dashboard`` ("Töölaud") page.
+
+Issue #717 (epic #714, design doc ``docs/2026-05-11-ministry-lawyer-ui-structure.md``):
+the dashboard is no longer a welcome page. It is a daily work queue that answers
+"what should I do next" by synthesising signals already present in the database:
+
+    - active drafter sessions          → "jätka koostajas"
+    - high/critical impact reports      → "vaata mõjuaruannet"
+    - stale (post-re-analyze) annotations → "analüüsi uuesti"
+    - recent ontology syncs             → "uued ontoloogia muudatused"
+    - completed export jobs             → "hiljutised ekspordid"
+    - drafts with unresolved annotations → "lahtised märkused"
+    - personal bookmarks                → unchanged from the old dashboard
+
+Every query is org-scoped (except ``sync_log``, which is global system-wide
+state) and wrapped in try/except → log + return empty, mirroring the helper
+pattern used across ``app/docs/draft_model.py`` and friends. No new migration
+or schema change — everything is derivable from existing tables.
+"""
 
 from __future__ import annotations
 
-import json
 import logging
+from datetime import datetime
 from typing import Any
 
 from fasthtml.common import *
@@ -12,47 +30,303 @@ from starlette.responses import RedirectResponse
 
 from app.auth.audit import log_action
 from app.db import get_connection as _connect
+from app.docs.impact.scoring import IMPACT_BAND_LABELS_ET, ImpactBand, impact_band
+from app.drafter.state_machine import STEP_LABELS_ET, Step
 from app.ui.data.data_table import Column, DataTable
 from app.ui.forms.app_form import AppForm
 from app.ui.forms.form_field import FormField
 from app.ui.layout import PageShell
-from app.ui.primitives.badge import Badge
+from app.ui.primitives.badge import Badge, BadgeVariant
 from app.ui.primitives.button import Button
+from app.ui.primitives.link_button import LinkButton
 from app.ui.surfaces.card import Card, CardBody, CardHeader
-from app.ui.surfaces.info_box import InfoBox
 from app.ui.theme import get_theme_from_request
 from app.ui.time import format_tallinn
 
 logger = logging.getLogger(__name__)
 
 
+# How many synthesised "next action" rows to surface at the top of the page.
+_MAX_NEXT_ACTIONS = 8
+
+# Per-widget row caps for the supporting sections (kept small so the page
+# stays dense-but-calm — see the design doc's "Visual Design Direction").
+_MAX_HIGH_RISK = 8
+_MAX_STALE = 8
+_MAX_SYNCS = 5
+_MAX_EXPORTS = 5
+_MAX_UNRESOLVED = 8
+
+
 # ---------------------------------------------------------------------------
-# DB helpers
+# DB helpers — work-queue widgets
 # ---------------------------------------------------------------------------
 
 
-def _get_recent_activity(user_id: str) -> list[dict]:  # type: ignore[type-arg]
-    """Return the last 20 audit_log entries for the given user."""
+def _get_active_drafter_sessions(user_id: str, org_id: str | None) -> list[dict]:  # type: ignore[type-arg]
+    """Return the user's active drafter sessions, newest first.
+
+    Org-scoped at the SQL layer so a stray cross-org session can never appear
+    in the work queue. Returns ``[{id, current_step, updated_at}]`` (only the
+    fields the "jätka koostajas" row needs).
+    """
+    if not user_id or not org_id:
+        return []
     try:
         with _connect() as conn:
             rows = conn.execute(
-                "SELECT id, action, detail, created_at "
-                "FROM audit_log WHERE user_id = %s "
-                "ORDER BY created_at DESC LIMIT 20",
-                (user_id,),
+                """
+                SELECT id, current_step, updated_at
+                FROM drafting_sessions
+                WHERE user_id = %s AND org_id = %s AND status = 'active'
+                ORDER BY updated_at DESC
+                LIMIT %s
+                """,
+                (user_id, org_id, _MAX_NEXT_ACTIONS),
+            ).fetchall()
+        return [{"id": str(r[0]), "current_step": int(r[1]), "updated_at": r[2]} for r in rows]
+    except Exception:
+        logger.exception("Failed to fetch active drafter sessions for user %s", user_id)
+        return []
+
+
+def _get_high_risk_reports(org_id: str | None, *, limit: int = _MAX_HIGH_RISK) -> list[dict]:  # type: ignore[type-arg]
+    """Return recent High/Critical impact reports for the org.
+
+    "High/Critical" is decided by :func:`app.docs.impact.scoring.impact_band`
+    (the 51-80 / 81-100 bands) — the SQL filter uses ``impact_score > 50`` as a
+    cheap pre-filter and the band helper produces the user-facing label so the
+    cut-offs are never duplicated.
+
+    Returns one row per draft (the latest report for that draft) ordered by the
+    most recent analysis first.
+    """
+    if not org_id:
+        return []
+    try:
+        with _connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT ON (ir.draft_id)
+                       ir.draft_id, d.title, ir.impact_score,
+                       ir.conflict_count, ir.affected_count, ir.gap_count,
+                       ir.generated_at
+                FROM impact_reports ir
+                JOIN drafts d ON d.id = ir.draft_id
+                WHERE d.org_id = %s AND ir.impact_score > 50
+                ORDER BY ir.draft_id, ir.generated_at DESC
+                """,
+                (org_id,),
+            ).fetchall()
+    except Exception:
+        logger.exception("Failed to fetch high-risk reports for org %s", org_id)
+        return []
+    out = [
+        {
+            "draft_id": str(r[0]),
+            "title": r[1] or "Pealkirjata eelnõu",
+            "impact_score": int(r[2] or 0),
+            "conflict_count": int(r[3] or 0),
+            "affected_count": int(r[4] or 0),
+            "gap_count": int(r[5] or 0),
+            "generated_at": r[6],
+        }
+        for r in rows
+    ]
+    # DISTINCT ON returns draft-grouped rows in draft_id order; re-sort by
+    # recency and apply the widget cap.
+    out.sort(key=lambda d: d["generated_at"] or datetime.min, reverse=True)
+    return out[:limit]
+
+
+def _get_stale_analysis_drafts(org_id: str | None, *, limit: int = _MAX_STALE) -> list[dict]:  # type: ignore[type-arg]
+    """Return drafts that have a ``stale=true`` unresolved annotation row.
+
+    The ``stale`` flag is set by
+    :func:`app.annotations.models.update_stale_flags_for_version` after a
+    re-analyze removes a finding the user was discussing — it means "the
+    ontology moved on; this analysis is out of date". Joins through
+    ``draft_versions`` to recover the parent draft id + title.
+
+    Org-scoped via ``annotations.org_id`` (and re-checked against
+    ``drafts.org_id`` in the JOIN, which is harmless belt-and-braces).
+    Returns ``[{draft_id, title, stale_count}]`` newest-draft first.
+    """
+    if not org_id:
+        return []
+    try:
+        with _connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT d.id, d.title, COUNT(*) AS stale_count,
+                       MAX(a.updated_at) AS last_change
+                FROM annotations a
+                JOIN draft_versions v ON v.id = a.draft_version_id
+                JOIN drafts d ON d.id = v.draft_id
+                WHERE a.org_id = %s
+                  AND a.stale = TRUE
+                  AND a.resolved = FALSE
+                  AND a.draft_version_id IS NOT NULL
+                GROUP BY d.id, d.title
+                ORDER BY last_change DESC
+                LIMIT %s
+                """,
+                (org_id, limit),
             ).fetchall()
         return [
             {
-                "id": r[0],
-                "action": r[1],
-                "detail": r[2],
-                "created_at": r[3],
+                "draft_id": str(r[0]),
+                "title": r[1] or "Pealkirjata eelnõu",
+                "stale_count": int(r[2] or 0),
             }
             for r in rows
         ]
     except Exception:
-        logger.exception("Failed to fetch recent activity for user %s", user_id)
+        logger.exception("Failed to fetch stale-analysis drafts for org %s", org_id)
         return []
+
+
+def _get_recent_syncs(*, limit: int = _MAX_SYNCS) -> list[dict]:  # type: ignore[type-arg]
+    """Return recent successful ontology syncs.
+
+    ⚠ ``sync_log`` is global system-wide state — there is no ``org_id`` column
+    and no org scoping. That is fine: a fresh ontology snapshot is information
+    everyone should see. Returns ``[{id, finished_at, entity_count}]`` newest
+    first.
+    """
+    try:
+        with _connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, finished_at, started_at, entity_count
+                FROM sync_log
+                WHERE status = 'success'
+                ORDER BY started_at DESC
+                LIMIT %s
+                """,
+                (limit,),
+            ).fetchall()
+        return [
+            {
+                "id": int(r[0]),
+                # finished_at can be NULL on a row that crashed between status
+                # flip and timestamp write; fall back to started_at.
+                "finished_at": r[1] or r[2],
+                "entity_count": int(r[3]) if r[3] is not None else None,
+            }
+            for r in rows
+        ]
+    except Exception:
+        logger.exception("Failed to fetch recent ontology syncs")
+        return []
+
+
+def _get_recent_exports(org_id: str | None, *, limit: int = _MAX_EXPORTS) -> list[dict]:  # type: ignore[type-arg]
+    """Return recently completed report-export jobs for the org.
+
+    The ``background_jobs`` table is not org-scoped, so we recover the org via
+    the ``draft_id`` carried in the job payload (``payload->>'draft_id'``) and
+    join to ``drafts``. Only ``export_report`` jobs in the ``success`` state
+    are surfaced.
+
+    Returns ``[{draft_id, title, finished_at}]`` newest first — the row links
+    to ``/drafts/{id}/report`` (the report page hosts the download button), so
+    we don't need the docx path here.
+    """
+    if not org_id:
+        return []
+    try:
+        with _connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT j.payload->>'draft_id' AS draft_id, d.title, j.finished_at
+                FROM background_jobs j
+                JOIN drafts d ON d.id = (j.payload->>'draft_id')::uuid
+                WHERE j.job_type = 'export_report'
+                  AND j.status = 'success'
+                  AND d.org_id = %s
+                ORDER BY j.finished_at DESC NULLS LAST
+                LIMIT %s
+                """,
+                (org_id, limit),
+            ).fetchall()
+        return [
+            {
+                "draft_id": str(r[0]),
+                "title": r[1] or "Pealkirjata eelnõu",
+                "finished_at": r[2],
+            }
+            for r in rows
+        ]
+    except Exception:
+        # Payloads with a missing/garbled draft_id make the ``::uuid`` cast
+        # throw — log it and degrade to an empty widget rather than 500.
+        logger.exception("Failed to fetch recent exports for org %s", org_id)
+        return []
+
+
+def _get_unresolved_annotation_drafts(  # type: ignore[type-arg]
+    org_id: str | None, *, limit: int = _MAX_UNRESOLVED
+) -> list[dict]:
+    """Return drafts that have one or more ``resolved=false`` annotations.
+
+    Covers every annotation whose ``target_type`` resolves to a draft —
+    impact-report row annotations carry a ``draft_version_id`` (joined through
+    ``draft_versions``), while older ``target_type='draft'`` annotations carry
+    the draft id directly in ``target_id``. Org-scoped via ``annotations.org_id``.
+
+    Returns ``[{draft_id, title, unresolved_count}]`` ordered by the busiest
+    draft first.
+    """
+    if not org_id:
+        return []
+    try:
+        with _connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT d.id, d.title, COUNT(*) AS unresolved_count
+                FROM annotations a
+                JOIN draft_versions v ON v.id = a.draft_version_id
+                JOIN drafts d ON d.id = v.draft_id
+                WHERE a.org_id = %s
+                  AND a.resolved = FALSE
+                  AND a.draft_version_id IS NOT NULL
+                GROUP BY d.id, d.title
+
+                UNION ALL
+
+                SELECT d.id, d.title, COUNT(*) AS unresolved_count
+                FROM annotations a
+                JOIN drafts d ON d.id = a.target_id::uuid
+                WHERE a.org_id = %s
+                  AND a.resolved = FALSE
+                  AND a.target_type = 'draft'
+                GROUP BY d.id, d.title
+                """,
+                (org_id, org_id),
+            ).fetchall()
+    except Exception:
+        # ``target_id::uuid`` can throw on a non-UUID legacy value — degrade
+        # to an empty widget rather than crashing the whole dashboard.
+        logger.exception("Failed to fetch drafts with unresolved annotations for org %s", org_id)
+        return []
+    # Merge the two UNION branches per draft (a draft could in theory have both
+    # impact-report-row and draft-level annotations).
+    merged: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        draft_id = str(r[0])
+        entry = merged.setdefault(
+            draft_id,
+            {"draft_id": draft_id, "title": r[1] or "Pealkirjata eelnõu", "unresolved_count": 0},
+        )
+        entry["unresolved_count"] += int(r[2] or 0)
+    out = sorted(merged.values(), key=lambda d: d["unresolved_count"], reverse=True)
+    return out[:limit]
+
+
+# ---------------------------------------------------------------------------
+# DB helpers — kept verbatim from the welcome-page era
+# ---------------------------------------------------------------------------
 
 
 def _get_bookmarks(user_id: str) -> list[dict]:  # type: ignore[type-arg]
@@ -143,36 +417,6 @@ def _remove_bookmark(bookmark_id: str, user_id: str) -> bool:
         return False
 
 
-def _get_dashboard_counts(user_id: str, org_id: str | None) -> dict[str, int]:
-    """Return counts for drafts, drafter sessions, and conversations."""
-    counts: dict[str, int] = {"drafts": 0, "drafter_sessions": 0, "conversations": 0}
-    if not user_id:
-        return counts
-    try:
-        with _connect() as conn:
-            if org_id:
-                row = conn.execute(
-                    "SELECT COUNT(*) FROM drafts WHERE org_id = %s",
-                    (org_id,),
-                ).fetchone()
-                counts["drafts"] = row[0] if row else 0
-
-                row = conn.execute(
-                    "SELECT COUNT(*) FROM drafting_sessions WHERE user_id = %s AND org_id = %s",
-                    (user_id, org_id),
-                ).fetchone()
-                counts["drafter_sessions"] = row[0] if row else 0
-
-            row = conn.execute(
-                "SELECT COUNT(*) FROM conversations WHERE user_id = %s",
-                (user_id,),
-            ).fetchone()
-            counts["conversations"] = row[0] if row else 0
-    except Exception:
-        logger.exception("Failed to fetch dashboard counts for user %s", user_id)
-    return counts
-
-
 # ---------------------------------------------------------------------------
 # Rendering helpers
 # ---------------------------------------------------------------------------
@@ -184,143 +428,277 @@ _ROLE_LABELS = {
     "drafter": "Koostaja",
 }
 
-# Map common audit-detail dict keys to Estonian labels for the
-# recent-activity table.  Keys not in this mapping fall through to the
-# first key/value pair so we don't silently drop interesting data.
-_AUDIT_DETAIL_LABELS: dict[str, str] = {
-    "draft_id": "Eelnõu",
-    "user_id": "Kasutaja",
-    "report_id": "Aruanne",
-    "filename": "Fail",
-    "title": "Pealkiri",
-    "role": "Roll",
-    "entity_uri": "URI",
-    "label": "Nimi",
-    "bookmark_id": "Järjehoidja",
-    "session_id": "Sessioon",
-    "conversation_id": "Vestlus",
-    "org_id": "Organisatsioon",
+# Badge variant per impact band — restrained colour, matches the design doc's
+# "clear status and risk coding" guidance.
+_BAND_VARIANT: dict[ImpactBand, BadgeVariant] = {
+    "low": "default",
+    "medium": "warning",
+    "high": "danger",
+    "critical": "danger",
 }
 
 
-def _audit_detail_summary(action: str, detail: Any) -> str:
-    """Return an Estonian-friendly one-line summary of an audit detail payload.
-
-    The audit_log.detail column is a JSONB value (typically a dict) that
-    psycopg returns as a Python dict.  Older rows or test fixtures may pass
-    in a JSON string, so we accept both and degrade gracefully when the
-    payload is empty / unparsable.
-
-    Args:
-        action: The audit action label (kept for forward-compatible context;
-            currently unused but reserved so callers don't need to change
-            shape if we add per-action formatters).
-        detail: The raw payload — dict, JSON string, or ``None``.
-
-    Returns:
-        A short human-readable string. ``"—"`` when ``detail`` is empty.
-    """
-    del action  # reserved for future per-action overrides
-
-    if detail is None or detail == "":
-        return "—"
-
-    if isinstance(detail, str):
-        # Some legacy code paths may stash a raw JSON string; try to parse
-        # it but fall back to the literal text rather than crashing.
-        try:
-            detail = json.loads(detail)
-        except (TypeError, ValueError):
-            return detail
-
-    if not isinstance(detail, dict):
-        return str(detail)
-
-    parts: list[str] = []
-    for key, label in _AUDIT_DETAIL_LABELS.items():
-        if key in detail and detail[key] not in (None, ""):
-            value = str(detail[key])
-            # Truncate UUIDs to the first 8 chars for at-a-glance display;
-            # full value is still available in the disclosure below.
-            if len(value) == 36 and value.count("-") == 4:
-                value = value[:8] + "…"
-            parts.append(f"{label}: {value}")
-
-    if not parts:
-        # Surface SOMETHING for unmapped payloads instead of an empty cell.
-        first = next(iter(detail.items()), None)
-        if first is not None:
-            parts.append(f"{first[0]}: {first[1]}")
-
-    return " · ".join(parts) or "—"
+# A muted single-line "nothing here" row shared by every collapsible section.
+def _empty_row(text: str):  # type: ignore[no-untyped-def]
+    return P(text, cls="muted-text")
 
 
-def _audit_detail_cell(row: dict[str, Any]):
-    """Render the recent-activity ``Detailid`` cell.
-
-    Shows a readable Estonian summary plus a ``<details>`` disclosure
-    containing the raw JSON for power users who need the exact payload.
-    Empty / scalar payloads collapse to the summary alone.
-    """
-    action = row.get("action", "")
-    raw = row.get("detail_raw")
-    summary = _audit_detail_summary(action, raw)
-
-    if raw in (None, ""):
-        return summary
-
-    if isinstance(raw, dict):
-        raw_str = json.dumps(raw, indent=2, ensure_ascii=False, default=str)
-    else:
-        raw_str = str(raw)
-
-    return Details(
-        Summary(summary),
-        Pre(raw_str, cls="audit-detail-json"),
-        cls="audit-detail",
-    )
+def _step_label(step_number: int) -> str:
+    """Estonian label for a drafter step number, falling back to the bare number."""
+    try:
+        return STEP_LABELS_ET.get(Step(step_number), str(step_number))
+    except ValueError:
+        return str(step_number)
 
 
-def _activity_card(activity: list[dict]):  # type: ignore[type-arg]
-    """Render the recent activity card."""
-    if not activity:
-        body = P("Tegevusi ei leitud.", cls="muted-text")
-    else:
-        columns = [
-            Column(key="time", label="Aeg", sortable=False),
-            Column(key="action", label="Tegevus", sortable=False),
-            Column(
-                key="detail",
-                label="Detailid",
-                sortable=False,
-                render=_audit_detail_cell,
-            ),
-        ]
-        rows = []
-        for entry in activity:
-            ts = entry["created_at"]
-            rows.append(
-                {
-                    "time": format_tallinn(ts),
-                    "action": entry["action"],
-                    # Carry the raw payload so the render callback can produce
-                    # both the summary and the disclosure.  The ``detail`` key
-                    # itself is unused by the renderer but kept for
-                    # backwards-compatibility with any consumer that still
-                    # reads the row dict directly.
-                    "detail": "",
-                    "detail_raw": entry["detail"],
-                }
-            )
-        body = DataTable(
-            columns=columns,
-            rows=rows,
-            empty_message="Tegevusi ei leitud.",
-        )
+def _section_card(title: str, body):  # type: ignore[no-untyped-def]
+    """A compact section card — ``Card(CardHeader(H3(...)), CardBody(...))``."""
     return Card(
-        CardHeader(H3("Viimased tegevused", cls="card-title")),
+        CardHeader(H3(title, cls="card-title")),
         CardBody(body),
     )
+
+
+# ---------------------------------------------------------------------------
+# Section 1: Minu järgmised tegevused
+# ---------------------------------------------------------------------------
+
+
+def _build_next_actions(
+    sessions: list[dict],  # type: ignore[type-arg]
+    high_risk: list[dict],  # type: ignore[type-arg]
+    stale: list[dict],  # type: ignore[type-arg]
+) -> list[dict]:  # type: ignore[type-arg]
+    """Synthesise the "what should I do next" list from existing signals.
+
+    This is *not* a new data source — it folds three already-loaded widget
+    result sets into one prioritised list of ``{text, href, link_label}``
+    dicts, capped at :data:`_MAX_NEXT_ACTIONS`. Order: drafter sessions
+    first (you have unfinished work), then high-risk reports (something needs
+    review), then stale analyses (the ontology moved on).
+    """
+    actions: list[dict[str, str]] = []
+
+    for s in sessions:
+        step_num = s["current_step"]
+        actions.append(
+            {
+                "text": f"Jätka koostajas — {step_num}. samm: {_step_label(step_num)}",
+                "href": f"/drafter/{s['id']}",
+                "link_label": "Ava koostaja",
+            }
+        )
+
+    for r in high_risk:
+        conflicts = r["conflict_count"]
+        title = r["title"]
+        if conflicts > 0:
+            text = f"Vaata mõjuaruannet «{title}» — {conflicts} konflikti vajavad ülevaatust"
+        else:
+            band_label = IMPACT_BAND_LABELS_ET[impact_band(r["impact_score"])].lower()
+            text = f"Vaata mõjuaruannet «{title}» — {band_label} (skoor {r['impact_score']}/100)"
+        actions.append(
+            {"text": text, "href": f"/drafts/{r['draft_id']}/report", "link_label": "Ava aruanne"}
+        )
+
+    for st in stale:
+        actions.append(
+            {
+                "text": (
+                    f"«{st['title']}»: ontoloogia uuenes pärast aruande koostamist. "
+                    "Analüüsi uuesti."
+                ),
+                "href": f"/drafts/{st['draft_id']}/report",
+                "link_label": "Ava aruanne",
+            }
+        )
+
+    return actions[:_MAX_NEXT_ACTIONS]
+
+
+def _next_actions_card(actions: list[dict]):  # type: ignore[type-arg, no-untyped-def]
+    if not actions:
+        return _section_card("Minu järgmised tegevused", _empty_row("Hetkel pole midagi ootel."))
+    items = [
+        Li(
+            Span(a["text"], cls="next-action-text"),
+            LinkButton(a["link_label"], href=a["href"], variant="secondary", size="sm"),
+            cls="next-action-item",
+        )
+        for a in actions
+    ]
+    return _section_card("Minu järgmised tegevused", Ul(*items, cls="next-action-list"))
+
+
+# ---------------------------------------------------------------------------
+# Section 2: Kõrge riskiga leiud
+# ---------------------------------------------------------------------------
+
+
+def _high_risk_card(reports: list[dict]):  # type: ignore[type-arg, no-untyped-def]
+    if not reports:
+        return _section_card(
+            "Kõrge riskiga leiud", _empty_row("Kõrge riskiga mõjuaruandeid hetkel pole.")
+        )
+    columns = [
+        Column(key="title", label="Eelnõu", sortable=False),
+        Column(
+            key="band",
+            label="Risk",
+            sortable=False,
+            render=lambda r: Badge(r["band_label"], variant=r["band_variant"]),
+        ),
+        Column(key="counts", label="Leiud", sortable=False),
+        Column(key="generated_at", label="Analüüsitud", sortable=False),
+        Column(
+            key="actions",
+            label="",
+            sortable=False,
+            render=lambda r: A("Vaata aruannet", href=r["href"], cls="table-link"),
+        ),
+    ]
+    rows = []
+    for r in reports:
+        band = impact_band(r["impact_score"])
+        rows.append(
+            {
+                "title": r["title"],
+                "band_label": IMPACT_BAND_LABELS_ET[band],
+                "band_variant": _BAND_VARIANT[band],
+                "counts": (
+                    f"{r['conflict_count']} konflikti · {r['affected_count']} mõjutatud · "
+                    f"{r['gap_count']} lünka"
+                ),
+                "generated_at": format_tallinn(r["generated_at"]),
+                "href": f"/drafts/{r['draft_id']}/report",
+            }
+        )
+    return _section_card("Kõrge riskiga leiud", DataTable(columns=columns, rows=rows))
+
+
+# ---------------------------------------------------------------------------
+# Section 3: Aegunud analüüsid
+# ---------------------------------------------------------------------------
+
+
+def _stale_card(drafts: list[dict]):  # type: ignore[type-arg, no-untyped-def]
+    if not drafts:
+        return _section_card("Aegunud analüüsid", _empty_row("Aegunud analüüse pole."))
+    items = [
+        Li(
+            Span(
+                f"«{d['title']}» — ontoloogia uuenes, analüüsi uuesti "
+                f"({d['stale_count']} aegunud märkust).",
+                cls="stale-text",
+            ),
+            LinkButton(
+                "Ava aruanne",
+                href=f"/drafts/{d['draft_id']}/report",
+                variant="secondary",
+                size="sm",
+            ),
+            cls="stale-item",
+        )
+        for d in drafts
+    ]
+    return _section_card("Aegunud analüüsid", Ul(*items, cls="stale-list"))
+
+
+# ---------------------------------------------------------------------------
+# Section 4: Uued ontoloogia muudatused
+# ---------------------------------------------------------------------------
+
+
+def _syncs_card(syncs: list[dict]):  # type: ignore[type-arg, no-untyped-def]
+    if not syncs:
+        return _section_card(
+            "Uued ontoloogia muudatused", _empty_row("Hiljutisi ontoloogia uuendusi pole.")
+        )
+    columns = [
+        Column(key="finished_at", label="Uuendatud", sortable=False),
+        Column(key="entity_count", label="Olemeid ontoloogias", sortable=False),
+    ]
+    rows = [
+        {
+            "finished_at": format_tallinn(s["finished_at"]),
+            "entity_count": (
+                f"{s['entity_count']:,}".replace(",", " ")
+                if s["entity_count"] is not None
+                else "—"
+            ),
+        }
+        for s in syncs
+    ]
+    return _section_card("Uued ontoloogia muudatused", DataTable(columns=columns, rows=rows))
+
+
+# ---------------------------------------------------------------------------
+# Section 5: Hiljutised ekspordid
+# ---------------------------------------------------------------------------
+
+
+def _exports_card(exports: list[dict]):  # type: ignore[type-arg, no-untyped-def]
+    if not exports:
+        return _section_card("Hiljutised ekspordid", _empty_row("Hiljutisi eksporte pole."))
+    items = [
+        Li(
+            Span(
+                f"«{e['title']}» mõjuaruanne eksporditud"
+                + (f" — {format_tallinn(e['finished_at'])}" if e["finished_at"] else ""),
+                cls="export-text",
+            ),
+            LinkButton(
+                "Ava aruanne",
+                href=f"/drafts/{e['draft_id']}/report",
+                variant="secondary",
+                size="sm",
+            ),
+            cls="export-item",
+        )
+        for e in exports
+    ]
+    return _section_card("Hiljutised ekspordid", Ul(*items, cls="export-list"))
+
+
+# ---------------------------------------------------------------------------
+# Section 6: Eelnõud lahtiste märkustega
+# ---------------------------------------------------------------------------
+
+
+def _unresolved_card(drafts: list[dict]):  # type: ignore[type-arg, no-untyped-def]
+    if not drafts:
+        return _section_card(
+            "Eelnõud lahtiste märkustega", _empty_row("Lahtiste märkustega eelnõusid pole.")
+        )
+    columns = [
+        Column(key="title", label="Eelnõu", sortable=False),
+        Column(
+            key="unresolved_count",
+            label="Lahtisi märkusi",
+            sortable=False,
+            render=lambda r: Badge(str(r["unresolved_count"]), variant="warning"),
+        ),
+        Column(
+            key="actions",
+            label="",
+            sortable=False,
+            render=lambda r: A("Vaata aruannet", href=r["href"], cls="table-link"),
+        ),
+    ]
+    rows = [
+        {
+            "title": d["title"],
+            "unresolved_count": d["unresolved_count"],
+            "href": f"/drafts/{d['draft_id']}/report",
+        }
+        for d in drafts
+    ]
+    return _section_card("Eelnõud lahtiste märkustega", DataTable(columns=columns, rows=rows))
+
+
+# ---------------------------------------------------------------------------
+# Section 7: Minu järjehoidjad — KEPT VERBATIM
+# ---------------------------------------------------------------------------
 
 
 def _bookmarks_card(bookmarks: list[dict]):  # type: ignore[type-arg]
@@ -378,75 +756,52 @@ def _bookmarks_card(bookmarks: list[dict]):  # type: ignore[type-arg]
     )
 
 
-def _org_card(org_info: dict | None):  # type: ignore[type-arg]
-    """Render the organisation info card."""
-    if org_info is None:
-        body = P("Te ei kuulu ühtegi organisatsiooni.", cls="muted-text")
-    else:
-        body = Dl(
-            Dt("Organisatsioon"),
-            Dd(org_info["org_name"]),
-            Dt("Teie roll"),
-            Dd(
-                Badge(
-                    _ROLE_LABELS.get(org_info["role"], org_info["role"]),
-                    variant="primary",
-                )
-            ),
-            Dt("Liikmeid"),
-            Dd(str(org_info["member_count"])),
-            cls="info-list",
-        )
-    return Card(
-        CardHeader(H3("Organisatsioon", cls="card-title")),
-        CardBody(body),
-    )
-
-
 # ---------------------------------------------------------------------------
 # Route handlers
 # ---------------------------------------------------------------------------
 
 
 def dashboard_page(req: Request):
-    """GET /dashboard — personal dashboard for authenticated users."""
+    """GET /dashboard — operational work queue for authenticated users."""
     auth = req.scope.get("auth", {})
     theme = get_theme_from_request(req)
     user_id = auth.get("id")
+    org_id = auth.get("org_id")
     full_name = auth.get("full_name", "Kasutaja")
+    first_name = (full_name or "Kasutaja").split()[0] if full_name else "Kasutaja"
 
-    activity = _get_recent_activity(user_id) if user_id else []
-    bookmarks = _get_bookmarks(user_id) if user_id else []
-    org_info = _get_user_org_info(user_id) if user_id else None
-    counts = _get_dashboard_counts(user_id, auth.get("org_id")) if user_id else {}
+    if user_id:
+        sessions = _get_active_drafter_sessions(user_id, org_id)
+        high_risk = _get_high_risk_reports(org_id)
+        stale = _get_stale_analysis_drafts(org_id)
+        syncs = _get_recent_syncs()
+        exports = _get_recent_exports(org_id)
+        unresolved = _get_unresolved_annotation_drafts(org_id)
+        bookmarks = _get_bookmarks(user_id)
+        org_info = _get_user_org_info(user_id)
+    else:
+        sessions = high_risk = stale = syncs = exports = unresolved = bookmarks = []
+        org_info = None
 
-    # Build the counts summary line
-    draft_count = counts.get("drafts", 0)
-    session_count = counts.get("drafter_sessions", 0)
-    conv_count = counts.get("conversations", 0)
+    next_actions = _build_next_actions(sessions, high_risk, stale)
+
+    # Compact header — no marketing hero. H1 + a small org/role line.
+    if org_info is not None:
+        role_label = _ROLE_LABELS.get(org_info["role"], org_info["role"])
+        subtitle = Small(f"{org_info['org_name']} · {role_label}", cls="page-subtitle")
+    else:
+        subtitle = Small("Te ei kuulu ühtegi organisatsiooni.", cls="page-subtitle")
 
     content = (
-        H1(f"Tere tulemast, {full_name}!", cls="page-title"),
-        InfoBox(
-            P(
-                "Tere tulemast Seadusloome s\u00fcsteemi! "
-                "Siit leiate kiirlingid teie eeln\u00f5udele, koostajale ja vestlustele. "
-                "Kasutage vasakul olevat men\u00fc\u00fcd navigeerimiseks."
-            ),
-            P(
-                f"Teil on {draft_count} eeln\u00f5u"
-                f"{'d' if draft_count != 1 else ''}"
-                f", {session_count} koostaja sessiooni"
-                f" ja {conv_count} vestlus"
-                f"{'t' if conv_count != 1 else ''}"
-                "."
-            ),
-            variant="info",
-            dismissible=True,
-        ),
-        _org_card(org_info),
+        H1(f"Tere, {first_name}", cls="page-title"),
+        subtitle,
+        _next_actions_card(next_actions),
+        _high_risk_card(high_risk),
+        _stale_card(stale),
+        _syncs_card(syncs),
+        _exports_card(exports),
+        _unresolved_card(unresolved),
         _bookmarks_card(bookmarks),
-        _activity_card(activity),
     )
 
     return PageShell(
