@@ -150,3 +150,46 @@ def test_el_ulevott_stub_renders(mock_provider: MagicMock, mock_recent: MagicMoc
     for heading in ("Sisend", "Ulatus", "Tulemused", "Tõendid", "Soovitatud tegevused"):
         assert heading in body, heading
     assert "32016R0679" in body
+
+
+# ---------------------------------------------------------------------------
+# Result-shell _block_body: empty list → fallback, non-empty list → wrapped
+# ---------------------------------------------------------------------------
+
+
+def test_result_shell_empty_list_block_renders_fallback():
+    from fasthtml.common import P, to_xml
+
+    from app.analyysikeskus.result_shell import analysis_result_shell
+
+    page = analysis_result_shell(
+        workflow_title="Normi mõjuahel",
+        input_summary=P("Sisestasite: «AvTS § 35»"),
+        results_block=[],  # an empty findings list must NOT render as "[]"
+        evidence_block=[],
+        actions=[{"label": "Tagasi", "href": "/analyysikeskus"}],
+        user={"id": "u-1", "email": "u@x.ee", "full_name": "U", "role": "drafter", "org_id": None},
+    )
+    html = to_xml(page)
+    assert "Tulemusi ei leitud." in html
+    assert "Tõendeid ei leitud." in html
+    assert "[]" not in html
+
+
+def test_result_shell_nonempty_list_block_renders_all_items():
+    from fasthtml.common import P, to_xml
+
+    from app.analyysikeskus.result_shell import analysis_result_shell
+
+    page = analysis_result_shell(
+        workflow_title="Normi mõjuahel",
+        input_summary=P("Sisestasite: «AvTS § 35»"),
+        results_block=[P("Leid üks"), P("Leid kaks")],
+        evidence_block=P("Tõend"),
+        actions=[{"label": "Tagasi", "href": "/analyysikeskus"}],
+        user={"id": "u-1", "email": "u@x.ee", "full_name": "U", "role": "drafter", "org_id": None},
+    )
+    html = to_xml(page)
+    assert "Leid üks" in html
+    assert "Leid kaks" in html
+    assert "Tulemusi ei leitud." not in html

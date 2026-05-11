@@ -68,15 +68,20 @@ def _muted_missing_row(text: str) -> Any:
 
 
 def _block_body(content: Any, *, empty_text: str) -> Any:
-    """Render *content*, or a one-line muted fallback when it's falsy.
+    """Render *content*, or a one-line muted fallback when it's empty.
 
     Keeps an empty block from rendering as an empty card body (per the
-    #721 spec). For the stub workflows ``content`` is always the
-    "koostamisel" placeholder so this mostly matters once #722/#723 start
-    passing real (and occasionally empty) findings.
+    #721 spec). ``None``, a blank string, and an empty list/tuple all
+    count as empty; a non-empty list/tuple is wrapped in a ``Div`` so it
+    nests cleanly inside ``CardBody`` rather than rendering as a bare
+    Python list. Matters once #722/#723 pass computed finding lists here.
     """
-    if content is None or (isinstance(content, str) and not content.strip()):
+    if content is None:
         return _muted_missing_row(empty_text)
+    if isinstance(content, str):
+        return content if content.strip() else _muted_missing_row(empty_text)
+    if isinstance(content, (list, tuple)):
+        return Div(*content) if content else _muted_missing_row(empty_text)  # noqa: F405
     return content
 
 
