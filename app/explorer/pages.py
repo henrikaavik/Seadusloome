@@ -237,7 +237,7 @@ def explorer_page(req: Request):
                 aria_hidden="true",
             ),
             Div(
-                "See on Eesti õiguse ontoloogia uurija. "
+                "See on õiguskaart — Eesti õiguse ontoloogia visuaalne vaade. "
                 "Klõpsake kategooriatele, et uurida seadusi, kohtuotsuseid "
                 "ja EL-i õigusakte. Kasutage otsingut konkreetsete "
                 "sätete leidmiseks.",
@@ -320,8 +320,8 @@ def explorer_page(req: Request):
             # ----- Top bar (banner landmark) -----
             Header(
                 Div(
-                    H1("Eesti õiguse ontoloogia"),
-                    Span("Õiguskaart", cls="badge"),
+                    H1("Õiguskaart"),
+                    Span("Eesti õiguse ontoloogia", cls="explorer-tagline"),
                     Span("D3.js", cls="badge"),
                     # Search box
                     Div(

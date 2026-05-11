@@ -926,7 +926,7 @@ def _render_search_results(conversations: list[Conversation], term: str) -> Any:
         items.append(
             Li(
                 A(
-                    conv.title or "Vestlus",
+                    conv.title or "Nõustamine",
                     href=f"/chat/{conv.id}",
                     cls="chat-search-result-link",
                 ),

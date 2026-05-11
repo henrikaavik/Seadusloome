@@ -6,6 +6,16 @@ Scope: Product and UI structure for Seadusloome as a legal advisory workbench fo
 
 Reference context: Section 7 of `eesti-oigusontoloogia-ulevaade.pdf` describes ministry use cases: norm impact chains, EU coordination, KOV policy comparison, competence audits, sanctions comparison, legislative burden management, crisis/internal-security legal mapping, and public-service full views.
 
+## Status — 2026-05-11 (epic [#714](https://github.com/henrikaavik/Seadusloome/issues/714))
+
+This document is the design rationale; the scope **actually committed** for the first round is narrower than everything described below. Read the rest of the doc as the long-term direction, but note:
+
+- **In scope now:** the *Phase A* framing changes (nav reframe in place, `Töölaud` → work queue, `Õiguskaart` control relabel + `?focus=` wiring, diacritics) **and** *Phase B done honestly* — the **two** `Analüüsikeskus` workflows that have backing ontology data today: `Normi mõjuahel` and `EL ülevõtt ja harmoneerimine`.
+- **Workflows 3–8 (`Pädevused`, `Sanktsioonid`, `Halduskoormus`, `KOV võrdlus`, `Avaliku teenuse tervikvaade`, `Kriisikaart`) are deferred** to a follow-up epic — **including the one this doc's Phase B list names (`Pädevused`)**. Their *ontology data* largely already exists in the `estonian-legal-ontology` source repo (`Sanction` nodes with structured penalty values, institution-authority nodes, KOV, …, well ahead of `estonian-legal-ontology-plan.md`); what's missing is the **app-side SPARQL + UI integration**. The follow-up epic should re-audit the ontology repo, not the plan doc. No placeholder cards for these workflows in the meantime.
+- **`EL ülevõtt` MVP is act/provision-level, not the article/obligation matrix** described under "Workflow 2" / "Concrete Page Recommendations" below: the ontology models `transposesDirective` / `transposedBy` / `transpositionStatus` at the act (and, where present, provision via `harmonisedWith`) level — there is no EU Article/Obligation entity model. The article-level matrix is its own ontology-enrichment ticket.
+- **Also deferred:** `Ülevaatus` review queue (Phase E), the LLM advice / suggested-fix engine (Phase D — `Soovitatud tegevused` is a *static* action set for now), the `Koostaja` `Lahendusvariandid` step, a light reading theme.
+- **URLs are relabelled in place** — `/explorer`, `/chat`, `/drafts`, `/drafter` keep their paths; only nav text, page titles, and headings change. The new `Analüüsikeskus` page gets a fresh route (`/analyysikeskus`).
+
 ## Executive Direction
 
 Seadusloome should be structured around legal work, not around technical modules.

@@ -271,11 +271,16 @@ class TestChatNew:
         mock_connect.return_value.__exit__ = MagicMock(return_value=False)
 
         conv = _make_conversation()
-        with patch("app.chat.routes.create_conversation", return_value=conv):
+        with patch("app.chat.routes.create_conversation", return_value=conv) as mock_create:
             client = _authed_client()
             resp = client.get("/chat/new")
             assert resp.status_code == 303
             assert f"/chat/{conv.id}" in resp.headers["location"]
+
+            # #714: the generated title uses the "Nõustaja" framing, not "Vestlus".
+            generated_title = mock_create.call_args.kwargs.get("title", "")
+            assert generated_title.startswith("Nõustamine")
+            assert "Vestlus" not in generated_title
 
         mock_audit.assert_called_once()
 
@@ -300,6 +305,8 @@ class TestChatNew:
             # Verify draft_id was passed to create_conversation
             call_args = mock_create.call_args
             assert call_args.kwargs.get("context_draft_id") == _DRAFT_ID
+            # #714: title is "Nõustamine — <draft>", not "Vestlus — <draft>".
+            assert call_args.kwargs.get("title") == "Nõustamine — Eelnou X"
 
 
 # ---------------------------------------------------------------------------
