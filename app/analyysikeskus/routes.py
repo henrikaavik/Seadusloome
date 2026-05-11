@@ -979,6 +979,65 @@ def _build_results_block(findings: ImpactFindings, score: int, scope: _Scope) ->
 # Normi mõjuahel — Tõendid block
 # ---------------------------------------------------------------------------
 
+# #724: cap the phrased-finding seed length so a pathological label/relation
+# can't bloat the hidden input. The seed goes through the server-side token
+# table (POST /chat/seed) so this is purely a sanity bound on the form body.
+_EVIDENCE_SEED_MAX_LEN = 600
+
+
+def _evidence_seed_text(*, source_label: str, relation: str, target_label: str) -> str:
+    """Phrase a single ``Tõendid`` finding as a question for the Nõustaja.
+
+    Deliberately short and URL-free — the chat-seed travels through a
+    server-side token (POST /chat/seed), never the URL, but keeping it terse
+    keeps the textarea readable. The «…» quoting mirrors the input-summary
+    style used elsewhere on the result page.
+    """
+    src = (source_label or "").strip()
+    rel = (relation or "").strip()
+    tgt = (target_label or "").strip()
+    if rel and rel != "—" and tgt:
+        finding = f"«{src}» {rel} «{tgt}»"
+    elif rel and rel != "—":
+        finding = f"«{src}» {rel}"
+    else:
+        finding = f"«{src}»"
+    text = f"Selgita seda mõjuanalüüsi leidu: {finding}. Mida peaksin selle puhul tähele panema?"
+    return text[:_EVIDENCE_SEED_MAX_LEN]
+
+
+def _evidence_seed_form(seed_text: str, *, draft_id: str | None) -> Any:
+    """Render the inline "Küsi nõustajalt" form for one ``Tõendid`` row (#724).
+
+    A tiny ``<form method="post" action="/chat/seed">`` with the phrased
+    finding in a ``seed_text`` hidden input plus, on a draft-backed analysis,
+    a ``draft_id`` hidden input so the new conversation gets the draft's
+    impact context. The submit is rendered as a ghost/small button so it sits
+    quietly alongside the row's other affordances ("Ava allikas", "Ava
+    õiguskaardil →"). The seed text never travels through the URL — it's
+    stashed server-side and the redirect carries only an opaque token.
+    """
+    # Use FastHTML's ``Hidden`` helper (from the wildcard import) — the
+    # project's ``Input`` primitive's ``InputType`` literal doesn't include
+    # ``"hidden"``, and the rest of this module already uses ``Hidden(...)``.
+    inputs: list[Any] = [
+        Hidden(name="seed_text", value=seed_text),  # noqa: F405
+    ]
+    if draft_id:
+        inputs.append(Hidden(name="draft_id", value=str(draft_id)))  # noqa: F405
+    return Form(  # noqa: F405
+        *inputs,
+        Button(
+            "Küsi nõustajalt",
+            type="submit",
+            variant="ghost",
+            size="sm",
+        ),
+        method="post",
+        action="/chat/seed",
+        cls="analyysikeskus-evidence-seed-form inline-form",
+    )
+
 
 def _evidence_row(
     *,
@@ -989,13 +1048,17 @@ def _evidence_row(
     why: str,
     snippet: str = "",
     when: str = "",
+    draft_id: str | None = None,
 ) -> Any:
     """One row in the ``Tõendid`` card.
 
     Carries the source label, the relation **in legal language**, an
     optional snippet/date, an "Ava allikas" link, a "miks see on oluline"
-    line, and an "Ava õiguskaardil →" deep link (URL-encoded by
-    :func:`explorer_focus_url`).
+    line, an "Ava õiguskaardil →" deep link (URL-encoded by
+    :func:`explorer_focus_url`), and — #724 — a small "Küsi nõustajalt"
+    form that pre-fills the chat input with this finding phrased as a
+    question. ``draft_id`` (when this is a draft-backed analysis) is threaded
+    into that form's hidden input so the chat picks up the draft context.
     """
     bits: list[Any] = [
         P(  # noqa: F405
@@ -1017,8 +1080,16 @@ def _evidence_row(
         link_bits.append(
             A("Ava õiguskaardil →", href=explorer_focus_url(uri), cls="data-table-link")  # noqa: F405
         )
+    # #724: the "Küsi nõustajalt" affordance sits at the end of the row's
+    # action line. Rendered as a sibling block (it's a <form>, not an <a>)
+    # so it can't nest inside the link <p>.
+    seed_text = _evidence_seed_text(
+        source_label=source_label, relation=relation, target_label=target_label
+    )
+    seed_form = _evidence_seed_form(seed_text, draft_id=draft_id)
     if link_bits:
         bits.append(P(*link_bits))  # noqa: F405
+    bits.append(seed_form)
     return Div(*bits, cls="analyysikeskus-evidence-row")  # noqa: F405
 
 
@@ -1027,6 +1098,7 @@ def _build_evidence_block(
     *,
     analysed_label: str,
     scope: _Scope,
+    draft_id: str | None = None,
 ) -> list[Any]:
     """Assemble the ``Tõendid`` rows from the findings.
 
@@ -1037,6 +1109,11 @@ def _build_evidence_block(
     row per EU link ("võtab üle direktiivi"). Court rows are filtered
     out when ``Kaasa kohtupraktika`` is off; EU rows when ``Kaasa EL
     õigus`` is off — same scope wiring as :func:`_build_results_block`.
+
+    #724: ``draft_id`` (when this is a draft-backed analysis) is threaded
+    into every row's "Küsi nõustajalt" form so the chat picks up the draft
+    context. ``None`` on an ad-hoc analysis — the form then carries only the
+    phrased finding.
     """
     rows: list[Any] = []
 
@@ -1058,6 +1135,7 @@ def _build_evidence_block(
                     f"See {type_word} on analüüsitava üksusega otseses seoses, "
                     "seega võib muudatus seda mõjutada."
                 ),
+                draft_id=draft_id,
             )
         )
 
@@ -1073,6 +1151,7 @@ def _build_evidence_block(
                 target_label="",
                 uri=uri,
                 why=str(r.get("reason") or "Seotud üksus, mis võib põhjustada vastuolu."),
+                draft_id=draft_id,
             )
         )
 
@@ -1091,6 +1170,7 @@ def _build_evidence_block(
                         "Muudatus võib mõjutada EL õiguse ülevõtmist — kontrolli "
                         "vastavust enne menetlust."
                     ),
+                    draft_id=draft_id,
                 )
             )
 
@@ -1461,7 +1541,11 @@ def _render_adhoc_result(
     )
 
     results_block = _build_results_block(findings, score, scope)
-    evidence_block = _build_evidence_block(findings, analysed_label=label, scope=scope)
+    # #724: ad-hoc analysis has no backing draft → the per-row "Küsi
+    # nõustajalt" forms carry only the phrased finding (draft_id=None).
+    evidence_block = _build_evidence_block(
+        findings, analysed_label=label, scope=scope, draft_id=None
+    )
     actions = _result_actions(focus_uri=entity_uri, adhoc=True)
 
     return analysis_result_shell(
@@ -1509,7 +1593,11 @@ def _render_draft_backed_result(
     )
 
     results_block = _build_results_block(findings, impact_score, scope)
-    evidence_block = _build_evidence_block(findings, analysed_label=draft_title, scope=scope)
+    # #724: draft-backed analysis → thread the draft_id into the per-row
+    # "Küsi nõustajalt" forms so the chat picks up the draft context.
+    evidence_block = _build_evidence_block(
+        findings, analysed_label=draft_title, scope=scope, draft_id=draft_id
+    )
     actions = _result_actions(focus_uri=None, draft_id=draft_id, adhoc=False)
     # Draft-backed: also offer the explorer view of the whole draft.
     actions.insert(0, {"label": "Ava õiguskaardil", "href": f"/explorer?draft={draft_id}"})
@@ -1830,9 +1918,13 @@ def _eu_evidence_block(rows: list[dict[str, Any]]) -> list[Any]:
     level); target = the EU act label + CELEX. Includes the raw
     ``transpositionStatus`` literal where present (the row's mapped
     bucket label), an "Ava allikas" link to the EE act/provision plus an
-    "Ava õiguskaardil →" deep link, and a "miks see on oluline" line.
-    A ``puudub`` row (no transposing act) becomes one evidence row
-    flagging the gap. Empty → a muted "—".
+    "Ava õiguskaardil →" deep link, a "miks see on oluline" line, and —
+    #724 — a small "Küsi nõustajalt" form. A ``puudub`` row (no transposing
+    act) becomes one evidence row flagging the gap. Empty → a muted "—".
+
+    The EL ülevõtt workflow is entity-centered on an EU act with no backing
+    draft, so the per-row forms carry only the phrased finding (no
+    ``draft_id``).
     """
     out: list[Any] = []
     for r in rows or []:
@@ -1857,6 +1949,7 @@ def _eu_evidence_block(rows: list[dict[str, Any]]) -> list[Any]:
                         "kontrolli, kas ülevõte on vajalik või veel pooleli."
                     ),
                     when=_TRANSPOSITION_STATUS_LABEL_ET.get(status, status),
+                    draft_id=None,
                 )
             )
             continue
@@ -1885,6 +1978,7 @@ def _eu_evidence_block(rows: list[dict[str, Any]]) -> list[Any]:
                 uri=link_uri,
                 why=why,
                 when=_TRANSPOSITION_STATUS_LABEL_ET.get(status, status),
+                draft_id=None,
             )
         )
     return out

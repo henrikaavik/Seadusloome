@@ -211,6 +211,11 @@ class TestDraftReportPage:
         assert f"/drafts/{_DRAFT_ID}" in resp.text
         # Open-in-explorer link with draft overlay param
         assert f"/explorer?draft={_DRAFT_ID}" in resp.text
+        # #724: cross-links into Analüüsikeskus + Nõustaja from the header.
+        assert f"/analyysikeskus/normi-mojuahel?sisend={_DRAFT_ID}" in resp.text
+        assert "Ava analüüsikeskuses" in resp.text
+        assert f"/chat/new?draft={_DRAFT_ID}" in resp.text
+        assert "Küsi nõustajalt selle eelnõu kohta" in resp.text
         # Export action
         assert "Laadi alla .docx" in resp.text
 

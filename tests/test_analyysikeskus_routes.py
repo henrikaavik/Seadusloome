@@ -382,6 +382,53 @@ def test_normi_mojuahel_draft_uuid_reuses_impact_report(
         assert sub in body, sub
     # No ephemeral synthetic graph for the draft-backed path.
     mock_put.assert_not_called()
+    # #724: the draft-backed Tõendid rows carry a per-row "Küsi nõustajalt"
+    # form posting to /chat/seed, with the draft_id threaded into a hidden
+    # input so the chat picks up the draft context.
+    assert 'action="/chat/seed"' in body
+    assert 'name="seed_text"' in body
+    assert "Küsi nõustajalt" in body
+    assert 'name="draft_id"' in body
+    assert f'value="{draft_id}"' in body
+
+
+# ---------------------------------------------------------------------------
+# #724 — per-row "Küsi nõustajalt" affordance on the Normi Tõendid rows
+# ---------------------------------------------------------------------------
+
+
+@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.adhoc_analysis.delete_named_graph", return_value=True)
+@patch("app.analyysikeskus.adhoc_analysis.put_named_graph", return_value=True)
+@patch("app.analyysikeskus.adhoc_analysis.ImpactAnalyzer")
+@patch("app.docs.reference_resolver.ReferenceResolver.resolve")
+@patch("app.auth.middleware._get_provider")
+def test_normi_mojuahel_evidence_rows_have_ask_advisor_form(
+    mock_provider: MagicMock,
+    mock_resolve: MagicMock,
+    mock_analyzer_cls: MagicMock,
+    mock_put: MagicMock,
+    mock_delete: MagicMock,
+    mock_recent: MagicMock,
+):
+    mock_provider.return_value = _stub_provider()
+    mock_resolve.return_value = [_canned_resolved_ref()]
+    mock_analyzer_cls.return_value.analyze.return_value = _canned_findings()
+
+    client = _authed_client()
+    resp = client.get("/analyysikeskus/normi-mojuahel?sisend=AvTS+%C2%A7+35")
+    assert resp.status_code == 200
+    body = resp.text
+    # Each Tõendid row has a "Küsi nõustajalt" form posting to /chat/seed.
+    assert 'action="/chat/seed"' in body
+    assert 'method="post"' in body
+    assert 'name="seed_text"' in body
+    assert "Küsi nõustajalt" in body
+    # The seed text references the finding (the analysed entity's label).
+    assert "Selgita seda mõjuanalüüsi leidu" in body
+    # An ad-hoc analysis has no draft, so no draft_id hidden input on the
+    # per-row forms (there's no `name="draft_id"` anywhere on the page).
+    assert 'name="draft_id"' not in body
 
 
 def test_normi_mojuahel_blank_input_redirects():

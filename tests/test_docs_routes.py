@@ -718,8 +718,32 @@ class TestDraftDetailPage:
         assert resp.status_code == 200
         assert "Vaata mõjuaruannet" in resp.text
         assert f"/drafts/{draft.id}/report" in resp.text
+        # #724: a ready draft also offers an "Ava analüüsikeskuses" cross-link
+        # into the Normi mõjuahel workflow (which reuses this draft's report).
+        assert "Ava analüüsikeskuses" in resp.text
+        assert f"/analyysikeskus/normi-mojuahel?sisend={draft.id}" in resp.text
         # No polling for terminal statuses.
         assert "every 3s" not in resp.text
+
+    @patch("app.docs.routes._detail.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_non_ready_draft_has_no_analyysikeskus_link(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+    ):
+        """#724: the Analüüsikeskus cross-link is gated on ``status == ready``
+        (same guard as the "Vaata mõjuaruannet" CTA)."""
+        mock_get_provider.return_value = _stub_provider()
+        draft = _make_draft(status="parsing")
+        mock_fetch.return_value = draft
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{draft.id}")
+
+        assert resp.status_code == 200
+        assert "Ava analüüsikeskuses" not in resp.text
+        assert f"/analyysikeskus/normi-mojuahel?sisend={draft.id}" not in resp.text
 
     @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
