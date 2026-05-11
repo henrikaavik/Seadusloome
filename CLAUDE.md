@@ -26,14 +26,15 @@ The architecture plan is in `estonian-legal-ontology-plan.md`. The ontology sour
 ## Modules
 
 1. **Core Infrastructure** [IMPLEMENTED] — FastHTML scaffolding, PostgreSQL schema (10 migrations), Jena Fuseki, GitHub-to-Jena sync pipeline, JWT auth + RBAC, Coolify deployment with Traefik, background job queue
-2. **Ontology Explorer** [IMPLEMENTED] — D3.js interactive graph with SPARQL-backed lazy-loading, category drill-down, entity detail pages, WebSocket live updates
+2. **Ontology Explorer** [IMPLEMENTED] — D3.js interactive graph with SPARQL-backed lazy-loading, category drill-down, entity detail pages, WebSocket live updates; user-facing as **`Õiguskaart`** (`/explorer`); a `?focus=<uri>` param opens the graph centred on an entity (linked from impact reports / analyses)
 3. **Document Upload** [IMPLEMENTED] — Encrypted .docx/.pdf storage (Fernet), Apache Tika parsing, Claude-powered entity extraction, background job pipeline (parse → extract → analyze → export)
 4. **Impact Analysis** [IMPLEMENTED] — SPARQL traversal, conflict detection, EU compliance checking, gap analysis, impact scoring, .docx report export
-5. **AI Advisory Chat** [IMPLEMENTED] — Streaming WebSocket chat with tool use (SPARQL queries), RAG-grounded responses (Voyage AI + pgvector HNSW), per-user/per-org rate limiting, cost tracking
+5. **AI Advisory Chat** [IMPLEMENTED] — Streaming WebSocket chat with tool use (SPARQL queries), RAG-grounded responses (Voyage AI + pgvector HNSW), per-user/per-org rate limiting, cost tracking; user-facing as **`Nõustaja`** (`/chat`); a single-use `pending_chat_seed` token pre-fills the input with a finding from an analysis ("Küsi nõustajalt selle leiu kohta")
 6. **AI Law Drafter** [IMPLEMENTED] — 7-step wizard pipeline: intent capture → clarification interview → ontology research → structure generation → clause-by-clause drafting → integrated review → .docx export
 7. **User Management** [PLANNED] — Roles (drafter/reviewer/admin), shared workspaces, audit logging
 8. **Public API + MCP Server** [PLANNED] — REST API + MCP protocol for third-party integrations
 9. **Monitoring & Admin** [PLANNED] — Health dashboard, usage analytics, cost tracking (admin dashboard scaffolding exists with LLM cost/rate limit display)
+10. **Analüüsikeskus (legal-analysis workflow hub)** [IMPLEMENTED — MVP] — `/analyysikeskus` directory + the `Sisend → Ulatus → Tulemused → Tõendid → Soovitatud tegevused` result shell; **`Normi mõjuahel`** (impact-chain over a provision/draft/CELEX/case-number/NL reference — resolves the input, runs the Module-4 impact engine via an ephemeral synthetic Jena graph, or reuses a draft's stored `impact_reports` row) and **`EL ülevõtt ja harmoneerimine`** (act/provision-level transposition table over `estleg:transposesDirective`/`transposedBy`/`transpositionStatus`/`harmonisedWith`). `Soovitatud tegevused` is a *static* action set (no LLM advice yet). The other six Section-7 workflows (Pädevused, Sanktsioonid, Halduskoormus, KOV võrdlus, Avaliku teenuse tervikvaade, Kriisikaart) are deferred — their ontology data largely exists in the source repo; the gap is app-side SPARQL + UI. Also: `Töölaud` (`/dashboard`) is now an operational work queue, not a welcome page. (Design doc: `docs/2026-05-11-ministry-lawyer-ui-structure.md`.)
 
 ## Technology Stack
 
@@ -79,4 +80,5 @@ The architecture plan is in `estonian-legal-ontology-plan.md`. The ontology sour
 | 2 | Document Upload + Impact Analysis (Modules 3-4) | COMPLETE |
 | 3 | AI Advisory Chat + AI Law Drafter (Modules 5-6) | COMPLETE |
 | 4 | Collaboration + Admin (Modules 7, 9) | Planned — depends on Phase 1 auth; annotations require Phase 2 and Phase 3 targets |
+| 4.7 | Ministry-lawyer UI reframe + Analüüsikeskus MVP (epic #714, Module 10) | COMPLETE — nav reframe in place, `Töölaud` work queue, `Õiguskaart` relabel + `?focus=`, diacritics, `Analüüsikeskus` directory + result shell + `Normi mõjuahel` + `EL ülevõtt`, cross-links. Section-7 workflows 3-8, `Ülevaatus` review queue, the LLM advice/suggested-fix layer, and the `Koostaja` `Lahendusvariandid` step are deferred to a follow-up epic (TBD) |
 | 5 | Public API + MCP Server (Module 8) | Planned — depends on Phases 1-4 |
