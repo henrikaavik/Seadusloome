@@ -66,3 +66,26 @@ def test_explorer_page_timeline_is_clearly_labelled():
     assert "timeline-slider" in html
     # "Keelatud" was a confusing label for "no time filter active".
     assert "Keelatud" not in html
+
+
+def test_explorer_page_focus_param_is_handed_to_js():
+    from app.explorer.pages import explorer_page
+
+    uri = "https://data.riik.ee/ontology/estleg#KarS_par_133"
+    # ``focus`` arrives already URL-decoded in req.query_params.
+    html = to_xml(explorer_page(_req(f"focus={uri}")))
+    assert "window.__explorerFocus" in html
+    assert uri in html
+    # The "?draft=ID …" tip is suppressed when the user came here to
+    # look at a specific entity.
+    assert "?draft=ID" not in html
+    # The back-link element is in the DOM (explorer.js unhides it).
+    assert 'id="panel-back"' in html
+
+
+def test_explorer_page_no_focus_keeps_the_draft_tip():
+    from app.explorer.pages import explorer_page
+
+    html = to_xml(explorer_page(_req()))
+    assert "window.__explorerFocus" not in html
+    assert "?draft=ID" in html

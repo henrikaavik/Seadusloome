@@ -22,6 +22,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from fasthtml.common import *  # noqa: F403
 from starlette.requests import Request
@@ -127,6 +128,20 @@ def _short_type(uri: str) -> str:
         return "—"
     short = uri.rsplit("#", 1)[-1] if "#" in uri else uri.rsplit("/", 1)[-1]
     return _TYPE_LABELS_ET.get(short, short)
+
+
+def explorer_focus_url(uri: str, draft_id: str | None = None) -> str:
+    """Build an ``/explorer?focus=…`` link with the entity URI URL-encoded (#719).
+
+    ``estleg:`` URIs contain ``#``, so interpolating them raw makes the
+    browser treat everything after ``#`` as a fragment and the ``focus``
+    param ends up truncated. ``quote(..., safe="")`` percent-encodes the
+    ``#`` (and ``/``, ``:``) so the whole URI survives the round-trip.
+    """
+    qs = f"focus={quote(uri, safe='')}"
+    if draft_id:
+        qs += f"&draft={quote(str(draft_id), safe='')}"
+    return f"/explorer?{qs}"
 
 
 # ---------------------------------------------------------------------------
@@ -495,7 +510,7 @@ def _affected_columns(
             return "—"
         return A(  # noqa: F405
             uri,
-            href=f"/explorer?focus={uri}",
+            href=explorer_focus_url(uri),
             cls="data-table-link",
         )
 
@@ -525,7 +540,7 @@ def _conflicts_columns(
             return label
         return A(  # noqa: F405
             label,
-            href=f"/explorer?focus={uri}",
+            href=explorer_focus_url(uri),
             cls="data-table-link",
         )
 
@@ -560,7 +575,7 @@ def _eu_columns(
             return label
         return A(  # noqa: F405
             label,
-            href=f"/explorer?focus={uri}",
+            href=explorer_focus_url(uri),
             cls="data-table-link",
         )
 
