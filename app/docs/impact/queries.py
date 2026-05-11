@@ -46,10 +46,12 @@ from __future__ import annotations
 # #465/#476: every ``graph_uri`` value interpolated into a SPARQL
 # template must match the allowlist. The format mirrors the URIs we
 # generate server-side: ``https://data.riik.ee/ontology/estleg/drafts/
-# <uuid>``. #476 tightened this from a generic ``https?://...`` shape
-# to the exact production host + path so any future code path handing
-# us a user-supplied URI is rejected loudly rather than slipping
-# through on a lexical match.
+# <uuid>`` (and, since #722, the ephemeral ``…/estleg/adhoc/<uuid>``
+# graphs the Analüüsikeskus "Normi mõjuahel" workflow mints + deletes
+# per request). #476 tightened this from a generic ``https?://...``
+# shape to the exact production host + path so any future code path
+# handing us a user-supplied URI is rejected loudly rather than
+# slipping through on a lexical match.
 #
 # #479: the regex is deliberately strict about the characters we allow
 # in the path. We do NOT permit ``#`` (fragment) or ``?`` (query)
