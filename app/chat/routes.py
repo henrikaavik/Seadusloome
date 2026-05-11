@@ -3,9 +3,17 @@
 Route map:
 
     GET  /chat                -- conversation list
-    GET  /chat/new            -- create new conversation, redirect to view
-    GET  /chat/{conv_id}      -- conversation view (message history + input)
+    POST /chat/seed           -- stash a single-use chat-seed, redirect to /chat/new?seed=<token>
+    GET  /chat/new            -- create new conversation (?draft= and/or ?seed=), redirect to view
+    GET  /chat/{conv_id}      -- conversation view (?seed=<token> pre-fills the input textarea)
     POST /chat/{conv_id}/delete -- delete conversation
+
+``?seed=<token>`` (#714 PR-J / #724): an opaque single-use token minted by
+``POST /chat/seed`` for the "Küsi nõustajalt selle leiu kohta" affordance.
+The seed text (which may quote draft/finding content) never travels through
+the URL — only the token does. ``GET /chat/new`` peeks the token to bind the
+new conversation's draft context; ``GET /chat/{id}`` consumes it and renders
+the input textarea pre-filled. An invalid/expired token degrades silently.
 
 All routes require authentication (they are NOT in ``SKIP_PATHS``).
 Cross-org access returns 404 to avoid leaking conversation existence.
@@ -37,6 +45,11 @@ from app.chat.models import (
     list_conversations_for_user,
     list_messages,
 )
+from app.chat.pending_seed import (
+    consume_pending_seed,
+    create_pending_seed,
+    peek_pending_seed,
+)
 from app.chat.sanitize import render_markdown_safe, render_plaintext_safe
 from app.db import get_connection as _connect
 from app.ui.data.data_table import Column, DataTable
@@ -54,6 +67,11 @@ from app.ui.time import format_tallinn
 logger = logging.getLogger(__name__)
 
 _PAGE_SIZE = 25
+
+# #724: cap the chat-seed length so a pathological finding/quote can't bloat
+# the encrypted blob (or the textarea). Generous enough for a multi-sentence
+# finding phrased as a question.
+_MAX_SEED_LEN = 2000
 
 
 # ---------------------------------------------------------------------------
@@ -571,6 +589,84 @@ def chat_list_page(req: Request):
 
 
 # ---------------------------------------------------------------------------
+# POST /chat/seed -- stash a single-use chat-seed token (#724)
+# ---------------------------------------------------------------------------
+
+
+async def seed_chat_handler(req: Request):
+    """POST /chat/seed -- stash a chat-seed and redirect to ``/chat/new?seed=<token>``.
+
+    Wired to the "Küsi nõustajalt selle leiu kohta" affordance on
+    Analüüsikeskus result rows (#724). Form fields:
+
+      * ``seed_text`` (required) -- the question/finding text to pre-fill the
+        chat input with. May quote draft/finding content, which is exactly why
+        it goes through a server-side token instead of the URL. Truncated to
+        :data:`_MAX_SEED_LEN`.
+      * ``draft_id`` (optional, UUID) -- bind the new conversation to this
+        draft. Validated against the caller's org via :func:`_get_draft_title`;
+        a draft the caller can't see is silently dropped (the seed is still
+        stashed, just without a draft context).
+
+    A blank ``seed_text`` short-circuits to a plain ``/chat/new`` redirect.
+    """
+    auth_or_redirect = _require_auth(req)
+    if isinstance(auth_or_redirect, Response):
+        return auth_or_redirect
+    auth = auth_or_redirect
+
+    user_id = auth.get("id")
+    org_id = auth.get("org_id")
+    if not user_id or not org_id:
+        return RedirectResponse(url="/chat/new", status_code=303)
+
+    try:
+        form = await req.form()
+        raw_seed = form.get("seed_text") or ""
+        raw_draft = form.get("draft_id") or ""
+    except ClientDisconnect:
+        return RedirectResponse(url="/chat/new", status_code=303)
+    except Exception:
+        logger.warning("seed_chat_handler: failed to read form body", exc_info=True)
+        return RedirectResponse(url="/chat/new", status_code=303)
+
+    seed_text = str(raw_seed).strip()[:_MAX_SEED_LEN]
+    if not seed_text:
+        # Nothing to seed — behave like a plain "Uus vestlus" click.
+        return RedirectResponse(url="/chat/new", status_code=303)
+
+    # Validate the optional draft context against the caller's org. A draft
+    # they can't see is dropped, not an error — the seed alone is still useful.
+    draft_id: uuid.UUID | None = None
+    raw_draft_str = str(raw_draft).strip() if raw_draft else ""
+    if raw_draft_str:
+        parsed_draft = _parse_uuid(raw_draft_str)
+        if parsed_draft and _get_draft_title(str(parsed_draft), org_id) is not None:
+            draft_id = parsed_draft
+
+    try:
+        with _connect() as conn:
+            token = create_pending_seed(
+                conn,
+                user_id=user_id,
+                org_id=org_id,
+                draft_id=draft_id,
+                seed_text=seed_text,
+            )
+            conn.commit()
+    except Exception:
+        logger.exception("seed_chat_handler: failed to stash pending chat seed")
+        token = None
+
+    if not token:
+        # Couldn't persist the seed — fall back to a plain new conversation
+        # rather than 500ing on the user.
+        return RedirectResponse(url="/chat/new", status_code=303)
+
+    return RedirectResponse(url=f"/chat/new?seed={token}", status_code=303)
+
+
+# ---------------------------------------------------------------------------
 # GET /chat/new -- create new conversation
 # ---------------------------------------------------------------------------
 
@@ -579,7 +675,13 @@ def new_conversation(req: Request):
     """GET /chat/new -- create a new conversation and redirect to it.
 
     Optionally accepts ``?draft=<draft_id>`` to bind the conversation
-    to a specific draft. The title is auto-generated.
+    to a specific draft, and/or ``?seed=<token>`` (a single-use token
+    minted by :func:`seed_chat_handler`). When a ``?seed=`` token is
+    present and valid, its ``draft_id`` (if any) overrides ``?draft=``
+    for the new conversation's context — the same context the chat view
+    will then surface from the seed. The token is *not* consumed here;
+    it's passed through to ``/chat/{id}?seed=<token>`` where the view
+    page consumes it and pre-fills the input. The title is auto-generated.
     """
     auth_or_redirect = _require_auth(req)
     if isinstance(auth_or_redirect, Response):
@@ -594,6 +696,7 @@ def new_conversation(req: Request):
 
     # Optional draft context
     draft_param = req.query_params.get("draft")
+    seed_param = req.query_params.get("seed")
     context_draft_id: uuid.UUID | None = None
     # #714: conversations live under the "Nõustaja" section, so generated
     # titles use that framing rather than the old "Vestlus" prefix.
@@ -614,6 +717,24 @@ def new_conversation(req: Request):
                     parsed_draft,
                     org_id,
                 )
+
+    # #724: a ?seed= token may carry its own draft_id. If it does, it wins
+    # over ?draft= (the seed is the more specific intent). Peek -- don't
+    # consume -- so the /chat/{id}?seed= view can still read & pre-fill it.
+    if seed_param:
+        try:
+            with _connect() as conn:
+                peeked = peek_pending_seed(conn, token=seed_param, user_id=user_id)
+        except Exception:
+            logger.warning("new_conversation: pending-seed peek failed", exc_info=True)
+            peeked = None
+        if peeked is not None:
+            _seed_text, seed_draft_id = peeked
+            if seed_draft_id is not None:
+                seed_draft_title = _get_draft_title(str(seed_draft_id), org_id)
+                if seed_draft_title is not None:
+                    context_draft_id = seed_draft_id
+                    title = f"N\u00f5ustamine \u2014 {seed_draft_title}"
 
     if not context_draft_id:
         from app.ui.time import now_tallinn
@@ -640,6 +761,11 @@ def new_conversation(req: Request):
         context_draft_id,
     )
 
+    # Carry the seed token through to the view page (which consumes it and
+    # pre-fills the input). A blank/absent token just redirects to the bare
+    # conversation view.
+    if seed_param:
+        return RedirectResponse(url=f"/chat/{conversation.id}?seed={seed_param}", status_code=303)
     return RedirectResponse(url=f"/chat/{conversation.id}", status_code=303)
 
 
@@ -955,6 +1081,25 @@ def conversation_view_page(req: Request, conv_id: str):
     visible_messages = [m for m in messages if m.role != "system"]
     message_bubbles = [_render_message(m) for m in visible_messages]
 
+    # #724: a ?seed=<token> means we arrived here from a "Küsi nõustajalt
+    # selle leiu kohta" affordance — consume the single-use token and
+    # pre-fill the input textarea with the stashed finding/question. The
+    # token is single-use, so a refresh shows an empty textarea (fine). An
+    # invalid/expired token degrades silently to the normal empty textarea.
+    seed_param = req.query_params.get("seed")
+    prefill_text = ""
+    if seed_param:
+        try:
+            with _connect() as conn:
+                consumed = consume_pending_seed(
+                    conn, token=seed_param, user_id=str(auth.get("id"))
+                )
+        except Exception:
+            logger.warning("conversation_view_page: pending-seed consume failed", exc_info=True)
+            consumed = None
+        if consumed is not None:
+            prefill_text = consumed[0] or ""
+
     # Empty-state — only shown on the initial render with no user/assistant turns.
     prompts = _DRAFT_EXAMPLE_PROMPTS if conversation.context_draft_id else _DEFAULT_EXAMPLE_PROMPTS
     empty_state = _empty_state(prompts) if not visible_messages else ""
@@ -1036,6 +1181,11 @@ def conversation_view_page(req: Request, conv_id: str):
         # Input area
         Div(  # noqa: F405
             Textarea(  # noqa: F405
+                # #724: ``prefill_text`` (from a consumed ?seed= token) becomes
+                # the textarea's text content; FastHTML renders a single
+                # positional string child as the element's body. Empty string \u2192
+                # an empty textarea, exactly as before.
+                prefill_text,
                 id="chat-input",
                 name="content",
                 placeholder=(
@@ -1248,6 +1398,10 @@ def register_chat_routes(rt) -> None:  # type: ignore[no-untyped-def]
     register_chat_handler_routes(rt)
 
     rt("/chat", methods=["GET"])(chat_list_page)
+    # #724: static paths (/chat/seed, /chat/new) are registered before the
+    # dynamic /chat/{conv_id} catch-all so the dispatcher resolves them
+    # correctly (same ordering invariant the handlers module relies on).
+    rt("/chat/seed", methods=["POST"])(seed_chat_handler)
     rt("/chat/new", methods=["GET"])(new_conversation)
     rt("/chat/{conv_id}", methods=["GET"])(conversation_view_page)
     rt("/chat/{conv_id}/delete", methods=["POST"])(delete_conversation_handler)

@@ -363,6 +363,18 @@ def _draft_detail_body(
                 href=f"/drafts/{draft.id}/report",
             )
         )
+        # #724: cross-link into the Analüüsikeskus "Normi mõjuahel" workflow,
+        # which accepts a draft UUID as ``sisend`` and reuses this draft's
+        # ``impact_reports`` row (no recomputation). Same ``ready`` guard as
+        # the "Vaata mõjuaruannet" CTA above.
+        actions.append(
+            LinkButton(
+                "Ava analüüsikeskuses →",
+                href=f"/analyysikeskus/normi-mojuahel?sisend={draft.id}",
+                variant="secondary",
+                title="Ava selle eelnõu mõjuahel Analüüsikeskuses.",
+            )
+        )
 
     # #572: stale drafts (not accessed for 90+ days) get a "Hoia alles"
     # button so the owner can reset the archive clock. The owner-only

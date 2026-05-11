@@ -151,6 +151,16 @@ def explorer_focus_url(uri: str, draft_id: str | None = None) -> str:
 # Row-key formulas live in :mod:`app.annotations.row_keys` (the §9.4
 # contract) so both the renderer and the analyze handler share the SAME
 # code path.  Helpers below glue those keys to the side-panel UI.
+#
+# #724 scoping note: the per-row "Küsi nõustajalt selle leiu kohta"
+# affordance from epic #714 PR-J was deliberately NOT added to the
+# impact-report tables here. These rows are already dense (annotation
+# button + multiple columns), and the page-level "Küsi nõustajalt selle
+# eelnõu kohta →" link in the report header (→ /chat/new?draft=<id>)
+# covers the same need at the right granularity. The Analüüsikeskus
+# ``Tõendid`` rows (app/analyysikeskus/routes.py::_evidence_row) DO carry
+# the per-row affordance — those rows are sparser and lack a draft-scoped
+# page-level link.
 
 # Container ID matches ``app/annotations/routes.py::_SIDE_PANEL_ID`` so the
 # PR-B GET handler can swap its fragment in via hx_target.  Rendered ONCE per
@@ -1003,6 +1013,23 @@ def draft_report_page(req: Request, draft_id: str):
                     href=f"/explorer?draft={draft.id}",
                     variant="secondary",
                     title="Visualiseeri eelnõu ja mõjutatud sätted graafil.",
+                ),
+                # #724: cross-link into the Analüüsikeskus "Normi mõjuahel"
+                # workflow (accepts the draft UUID as ``sisend`` and reuses
+                # this draft's ``impact_reports`` row), and into the Nõustaja
+                # chat scoped to this draft (``?draft=`` already wires the
+                # draft's impact summary into the system prompt).
+                LinkButton(
+                    "Ava analüüsikeskuses →",
+                    href=f"/analyysikeskus/normi-mojuahel?sisend={draft.id}",
+                    variant="secondary",
+                    title="Ava selle eelnõu mõjuahel Analüüsikeskuses.",
+                ),
+                LinkButton(
+                    "Küsi nõustajalt selle eelnõu kohta →",
+                    href=f"/chat/new?draft={draft.id}",
+                    variant="secondary",
+                    title="Ava nõustaja vestlus selle eelnõu kontekstis.",
                 ),
                 # #614: one-line helper below the button so reviewers
                 # know what "Ava õiguskaardil" actually does before clicking.

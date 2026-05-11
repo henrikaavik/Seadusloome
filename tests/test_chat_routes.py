@@ -923,3 +923,271 @@ class TestChatRouteOrdering:
         resp = client.get("/chat/search?q=foo", headers={"HX-Request": "true"})
         assert resp.status_code == 200
         assert "chat-search-results" in resp.text
+
+
+# ---------------------------------------------------------------------------
+# #724 — POST /chat/seed (stash a single-use chat-seed token)
+# ---------------------------------------------------------------------------
+
+_SEED_TOKEN = uuid.UUID("77777777-7777-7777-7777-777777777777")
+
+
+class TestChatSeedPost:
+    def test_unauthenticated_redirects_to_login(self):
+        from starlette.testclient import TestClient
+
+        from app.main import app
+
+        client = TestClient(app, follow_redirects=False)
+        resp = client.post("/chat/seed", data={"seed_text": "Selgita seda leidu"})
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/auth/login"
+
+    @patch("app.chat.routes.create_pending_seed", return_value=str(_SEED_TOKEN))
+    @patch("app.chat.routes._connect")
+    @patch("app.auth.middleware._get_provider")
+    def test_seed_text_redirects_to_chat_new_with_token(
+        self, mock_provider, mock_connect, mock_create
+    ):
+        mock_provider.return_value = _stub_provider()
+        conn = MagicMock()
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        client = _authed_client()
+        resp = client.post("/chat/seed", data={"seed_text": "Selgita seda mõjuanalüüsi leidu"})
+        assert resp.status_code == 303
+        assert resp.headers["location"] == f"/chat/new?seed={_SEED_TOKEN}"
+        # create_pending_seed was called with the seed text + the user's org.
+        kwargs = mock_create.call_args.kwargs
+        assert kwargs["seed_text"] == "Selgita seda mõjuanalüüsi leidu"
+        assert kwargs["org_id"] == _ORG_ID
+        assert kwargs["draft_id"] is None
+
+    @patch("app.chat.routes.create_pending_seed", return_value=str(_SEED_TOKEN))
+    @patch("app.chat.routes._get_draft_title", return_value="Minu eelnõu")
+    @patch("app.chat.routes._connect")
+    @patch("app.auth.middleware._get_provider")
+    def test_seed_with_valid_draft_id_threads_it_through(
+        self, mock_provider, mock_connect, mock_draft_title, mock_create
+    ):
+        mock_provider.return_value = _stub_provider()
+        conn = MagicMock()
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        client = _authed_client()
+        resp = client.post(
+            "/chat/seed",
+            data={"seed_text": "Selgita seda leidu", "draft_id": str(_DRAFT_ID)},
+        )
+        assert resp.status_code == 303
+        assert resp.headers["location"] == f"/chat/new?seed={_SEED_TOKEN}"
+        assert mock_create.call_args.kwargs["draft_id"] == _DRAFT_ID
+
+    @patch("app.chat.routes.create_pending_seed", return_value=str(_SEED_TOKEN))
+    @patch("app.chat.routes._get_draft_title", return_value=None)
+    @patch("app.chat.routes._connect")
+    @patch("app.auth.middleware._get_provider")
+    def test_seed_with_unvisible_draft_id_is_dropped(
+        self, mock_provider, mock_connect, mock_draft_title, mock_create
+    ):
+        """A draft the caller can't see is dropped — the seed is still stashed."""
+        mock_provider.return_value = _stub_provider()
+        conn = MagicMock()
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        client = _authed_client()
+        resp = client.post(
+            "/chat/seed",
+            data={"seed_text": "Selgita seda leidu", "draft_id": str(_DRAFT_ID)},
+        )
+        assert resp.status_code == 303
+        assert resp.headers["location"] == f"/chat/new?seed={_SEED_TOKEN}"
+        # The draft was dropped because _get_draft_title returned None.
+        assert mock_create.call_args.kwargs["draft_id"] is None
+
+    @patch("app.chat.routes.create_pending_seed")
+    @patch("app.chat.routes._connect")
+    @patch("app.auth.middleware._get_provider")
+    def test_blank_seed_text_redirects_to_chat_new_without_token(
+        self, mock_provider, mock_connect, mock_create
+    ):
+        mock_provider.return_value = _stub_provider()
+        client = _authed_client()
+        resp = client.post("/chat/seed", data={"seed_text": "   "})
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/chat/new"
+        # No seed was stashed.
+        mock_create.assert_not_called()
+
+    @patch("app.chat.routes.create_pending_seed", return_value=None)
+    @patch("app.chat.routes._connect")
+    @patch("app.auth.middleware._get_provider")
+    def test_failed_stash_falls_back_to_plain_chat_new(
+        self, mock_provider, mock_connect, mock_create
+    ):
+        """When create_pending_seed returns None we redirect to a plain /chat/new."""
+        mock_provider.return_value = _stub_provider()
+        conn = MagicMock()
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        client = _authed_client()
+        resp = client.post("/chat/seed", data={"seed_text": "Selgita seda leidu"})
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/chat/new"
+
+
+# ---------------------------------------------------------------------------
+# #724 — GET /chat/new?seed=<token> (peek the token, bind draft context)
+# ---------------------------------------------------------------------------
+
+
+class TestChatNewWithSeed:
+    @patch("app.chat.routes.log_chat_conversation_create")
+    @patch("app.chat.routes._get_draft_title", return_value="Eelnõu seest leid")
+    @patch("app.chat.routes.peek_pending_seed")
+    @patch("app.chat.routes._connect")
+    @patch("app.auth.middleware._get_provider")
+    def test_seed_token_binds_draft_context_and_redirects_with_token(
+        self, mock_provider, mock_connect, mock_peek, mock_draft_title, mock_audit
+    ):
+        mock_provider.return_value = _stub_provider()
+        conn = MagicMock()
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+        # The peeked token carries a draft_id.
+        mock_peek.return_value = ("Selgita seda leidu", _DRAFT_ID)
+
+        conv = _make_conversation(context_draft_id=_DRAFT_ID)
+        with patch("app.chat.routes.create_conversation", return_value=conv) as mock_create:
+            client = _authed_client()
+            resp = client.get(f"/chat/new?seed={_SEED_TOKEN}")
+            assert resp.status_code == 303
+            # Redirects to the view page, carrying the token through.
+            assert resp.headers["location"] == f"/chat/{conv.id}?seed={_SEED_TOKEN}"
+            # context_draft_id was set from the token's draft_id.
+            assert mock_create.call_args.kwargs["context_draft_id"] == _DRAFT_ID
+            # Title reflects the draft.
+            assert mock_create.call_args.kwargs["title"] == "Nõustamine — Eelnõu seest leid"
+
+    @patch("app.chat.routes.log_chat_conversation_create")
+    @patch("app.chat.routes.peek_pending_seed", return_value=None)
+    @patch("app.chat.routes._connect")
+    @patch("app.auth.middleware._get_provider")
+    def test_invalid_seed_token_still_creates_conversation(
+        self, mock_provider, mock_connect, mock_peek, mock_audit
+    ):
+        """An expired/invalid token doesn't block conversation creation."""
+        mock_provider.return_value = _stub_provider()
+        conn = MagicMock()
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        conv = _make_conversation()
+        with patch("app.chat.routes.create_conversation", return_value=conv) as mock_create:
+            client = _authed_client()
+            resp = client.get(f"/chat/new?seed={_SEED_TOKEN}")
+            assert resp.status_code == 303
+            # Still carries the (useless) token through — the view page just
+            # ignores it.
+            assert resp.headers["location"] == f"/chat/{conv.id}?seed={_SEED_TOKEN}"
+            # No draft context (peek returned None).
+            assert mock_create.call_args.kwargs["context_draft_id"] is None
+
+    @patch("app.chat.routes.log_chat_conversation_create")
+    @patch("app.chat.routes.peek_pending_seed")
+    @patch("app.chat.routes._get_draft_title", return_value="Seemnest eelnõu")
+    @patch("app.chat.routes._connect")
+    @patch("app.auth.middleware._get_provider")
+    def test_seed_draft_wins_over_query_draft(
+        self, mock_provider, mock_connect, mock_draft_title, mock_peek, mock_audit
+    ):
+        """When both ?draft= and ?seed= are present, the seed's draft_id wins."""
+        mock_provider.return_value = _stub_provider()
+        conn = MagicMock()
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+        seed_draft_id = uuid.UUID("88888888-8888-8888-8888-888888888888")
+        mock_peek.return_value = ("Selgita seda leidu", seed_draft_id)
+
+        conv = _make_conversation(context_draft_id=seed_draft_id)
+        with patch("app.chat.routes.create_conversation", return_value=conv) as mock_create:
+            client = _authed_client()
+            resp = client.get(f"/chat/new?draft={_DRAFT_ID}&seed={_SEED_TOKEN}")
+            assert resp.status_code == 303
+            # The seed's draft_id (not the query ?draft=) is what's bound.
+            assert mock_create.call_args.kwargs["context_draft_id"] == seed_draft_id
+
+
+# ---------------------------------------------------------------------------
+# #724 — GET /chat/{conv_id}?seed=<token> (consume the token, pre-fill input)
+# ---------------------------------------------------------------------------
+
+
+class TestChatViewWithSeed:
+    @patch("app.chat.routes.consume_pending_seed")
+    @patch("app.chat.routes.list_messages", return_value=[])
+    @patch("app.chat.routes._connect")
+    @patch("app.auth.middleware._get_provider")
+    def test_valid_seed_token_prefills_textarea(
+        self, mock_provider, mock_connect, mock_list_msgs, mock_consume
+    ):
+        mock_provider.return_value = _stub_provider()
+        conn = MagicMock()
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+        mock_consume.return_value = ("seleta seda leidu", None)
+
+        conv = _make_conversation()
+        with patch("app.chat.routes.get_conversation", return_value=conv):
+            client = _authed_client()
+            resp = client.get(f"/chat/{_CONV_ID}?seed={_SEED_TOKEN}")
+            assert resp.status_code == 200
+            # The textarea body contains the seed text.
+            assert "seleta seda leidu" in resp.text
+            # The token was consumed with the caller's user id.
+            assert mock_consume.call_args.kwargs["user_id"] == _USER_ID
+
+    @patch("app.chat.routes.consume_pending_seed", return_value=None)
+    @patch("app.chat.routes.list_messages", return_value=[])
+    @patch("app.chat.routes._connect")
+    @patch("app.auth.middleware._get_provider")
+    def test_invalid_seed_token_empty_textarea_no_crash(
+        self, mock_provider, mock_connect, mock_list_msgs, mock_consume
+    ):
+        mock_provider.return_value = _stub_provider()
+        conn = MagicMock()
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        conv = _make_conversation()
+        with patch("app.chat.routes.get_conversation", return_value=conv):
+            client = _authed_client()
+            resp = client.get(f"/chat/{_CONV_ID}?seed=bad-token")
+            assert resp.status_code == 200
+            assert "chat-container" in resp.text
+            # The textarea is the normal empty one.
+            assert '<textarea id="chat-input"' in resp.text or 'id="chat-input"' in resp.text
+
+    @patch("app.chat.routes.consume_pending_seed")
+    @patch("app.chat.routes.list_messages", return_value=[])
+    @patch("app.chat.routes._connect")
+    @patch("app.auth.middleware._get_provider")
+    def test_no_seed_param_does_not_consume(
+        self, mock_provider, mock_connect, mock_list_msgs, mock_consume
+    ):
+        mock_provider.return_value = _stub_provider()
+        conn = MagicMock()
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        conv = _make_conversation()
+        with patch("app.chat.routes.get_conversation", return_value=conv):
+            client = _authed_client()
+            resp = client.get(f"/chat/{_CONV_ID}")
+            assert resp.status_code == 200
+        # No ?seed= → consume_pending_seed must not be called.
+        mock_consume.assert_not_called()
