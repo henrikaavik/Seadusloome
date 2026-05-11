@@ -39,12 +39,25 @@ JENA_ADMIN_PASSWORD = os.environ.get("FUSEKI_ADMIN_PASSWORD", "localdev")
 # #480: the same allowlist that ``app.docs.impact.queries`` uses for
 # SPARQL interpolation applies at the Graph Store Protocol layer too —
 # ``put_named_graph`` / ``delete_named_graph`` must reject any URI that
-# isn't one of our generated ``drafts/<uuid>`` shapes before the HTTP
-# request even goes out. Keeping the canonical definition here (and
-# re-exporting from ``app.docs.impact.queries``) means the validator
-# lives next to the GSP transport, which is conceptually where the
-# named-graph contract is enforced.
-_SAFE_GRAPH_URI = re.compile(r"^https://data\.riik\.ee/ontology/estleg/drafts/[0-9a-f-]{36}$")
+# isn't one of our generated ``drafts/<uuid>`` / ``adhoc/<uuid>`` shapes
+# before the HTTP request even goes out. Keeping the canonical definition
+# here (and re-exporting from ``app.docs.impact.queries``) means the
+# validator lives next to the GSP transport, which is conceptually where
+# the named-graph contract is enforced.
+#
+# #722 (epic #714): the Analüüsikeskus "Normi mõjuahel" workflow runs
+# the impact analyser against an *ephemeral* synthetic named graph it
+# mints per request (``…/estleg/adhoc/<uuid4>``) holding a single
+# ``estleg:references`` triple, then ``delete_named_graph``-s it in a
+# ``finally``. That graph URI must pass the same allowlist as a draft
+# graph, so the regex carries a ``(?:drafts|adhoc)`` alternation. Both
+# arms still require a literal 36-char UUID — user input never reaches
+# this regex (the UUID is server-generated), but the allowlist stays a
+# defence-in-depth guard against any future code path assembling a URI
+# from user-supplied data.
+_SAFE_GRAPH_URI = re.compile(
+    r"^https://data\.riik\.ee/ontology/estleg/(?:drafts|adhoc)/[0-9a-f-]{36}$"
+)
 
 
 def _validate_graph_uri(uri: str) -> str:

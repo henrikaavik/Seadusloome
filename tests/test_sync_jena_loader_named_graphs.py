@@ -133,6 +133,59 @@ class TestGraphUriValidation:
             jena_loader.delete_named_graph("not a uri at all")
         mock_delete.assert_not_called()
 
+    # --- #722 (epic #714): the allowlist widening to ``adhoc/<uuid>`` -------
+    #
+    # The Analüüsikeskus "Normi mõjuahel" workflow mints an ephemeral
+    # ``…/estleg/adhoc/<uuid4>`` graph, PUTs one ``estleg:references``
+    # triple into it, runs the impact analyser, then deletes it. That
+    # graph URI must pass ``_validate_graph_uri`` — but a ``urn:…`` /
+    # arbitrary URI must still raise.
+
+    _ADHOC_URI = "https://data.riik.ee/ontology/estleg/adhoc/22222222-2222-2222-2222-222222222222"
+
+    def test_validate_accepts_adhoc_uri(self):
+        """An ``adhoc/<uuid>`` URI must pass ``_validate_graph_uri`` unchanged."""
+        assert jena_loader._validate_graph_uri(self._ADHOC_URI) == self._ADHOC_URI
+        # And the regex itself fullmatches it.
+        assert jena_loader._SAFE_GRAPH_URI.fullmatch(self._ADHOC_URI)
+
+    def test_validate_still_accepts_drafts_uri(self):
+        """The pre-existing ``drafts/<uuid>`` arm must keep working."""
+        assert jena_loader._validate_graph_uri(_GRAPH_URI) == _GRAPH_URI
+
+    def test_validate_rejects_urn_uri(self):
+        """A ``urn:…`` URI is outside both arms and must raise ``ValueError``."""
+        with pytest.raises(ValueError, match="Unsafe graph URI"):
+            jena_loader._validate_graph_uri("urn:estleg:adhoc:not-a-uuid")
+
+    def test_validate_rejects_arbitrary_uri(self):
+        """An arbitrary HTTPS URI that isn't a drafts/adhoc graph must raise."""
+        with pytest.raises(ValueError, match="Unsafe graph URI"):
+            jena_loader._validate_graph_uri("https://example.com/whatever/123")
+        # A near-miss (right host + path prefix, but a non-UUID tail) too.
+        with pytest.raises(ValueError, match="Unsafe graph URI"):
+            jena_loader._validate_graph_uri(
+                "https://data.riik.ee/ontology/estleg/adhoc/not-a-uuid"
+            )
+
+    @patch("app.sync.jena_loader.httpx.put")
+    def test_put_accepts_adhoc_uri(self, mock_put: MagicMock):
+        """``put_named_graph`` must accept an ``adhoc/<uuid>`` graph (it reaches httpx)."""
+        response = MagicMock()
+        response.status_code = 204
+        mock_put.return_value = response
+        assert jena_loader.put_named_graph(self._ADHOC_URI, "# turtle") is True
+        mock_put.assert_called_once()
+
+    @patch("app.sync.jena_loader.httpx.delete")
+    def test_delete_accepts_adhoc_uri(self, mock_delete: MagicMock):
+        """``delete_named_graph`` must accept an ``adhoc/<uuid>`` graph."""
+        response = MagicMock()
+        response.status_code = 204
+        mock_delete.return_value = response
+        assert jena_loader.delete_named_graph(self._ADHOC_URI) is True
+        mock_delete.assert_called_once()
+
     def test_validator_re_exported_from_queries(self):
         """#480: ``app.docs.impact.queries`` must re-export the validator.
 
