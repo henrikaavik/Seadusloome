@@ -186,169 +186,306 @@ class TestAdminDashboard:
 
 
 # ---------------------------------------------------------------------------
-# Recent-activity detail cell formatting (P3 UI fix)
+# Dashboard work-queue page (#717) — render the new operational sections
 # ---------------------------------------------------------------------------
 
-
-class TestAuditDetailSummary:
-    """``_audit_detail_summary`` produces an Estonian one-line preview of
-    audit-log payloads. It must never crash on weird inputs (empty, plain
-    string, non-dict) and should map common keys to friendly labels."""
-
-    def test_returns_dash_for_none(self):
-        from app.templates.dashboard import _audit_detail_summary
-
-        assert _audit_detail_summary("draft.upload", None) == "—"
-
-    def test_returns_dash_for_empty_string(self):
-        from app.templates.dashboard import _audit_detail_summary
-
-        assert _audit_detail_summary("draft.upload", "") == "—"
-
-    def test_maps_known_keys_to_estonian_labels(self):
-        from app.templates.dashboard import _audit_detail_summary
-
-        result = _audit_detail_summary(
-            "draft.upload",
-            {"draft_id": "abc-uuid-123", "filename": "akt.docx"},
-        )
-        assert "Eelnõu:" in result
-        assert "Fail: akt.docx" in result
-        # Two parts joined with a middle dot separator
-        assert " · " in result
-
-    def test_truncates_uuid_values(self):
-        from app.templates.dashboard import _audit_detail_summary
-
-        uuid = "11111111-2222-3333-4444-555555555555"
-        result = _audit_detail_summary("draft.upload", {"draft_id": uuid})
-        # First 8 chars + ellipsis, full UUID NOT in summary
-        assert "11111111" in result
-        assert "…" in result
-        assert uuid not in result
-
-    def test_falls_back_to_first_key_for_unknown_keys(self):
-        from app.templates.dashboard import _audit_detail_summary
-
-        result = _audit_detail_summary("custom.event", {"custom_field": "value-x"})
-        assert "custom_field" in result
-        assert "value-x" in result
-
-    def test_parses_json_string_payload(self):
-        """Legacy or weird code paths may pass a JSON-encoded string."""
-        from app.templates.dashboard import _audit_detail_summary
-
-        result = _audit_detail_summary("draft.upload", '{"filename": "test.docx"}')
-        assert "Fail: test.docx" in result
-
-    def test_returns_string_payload_verbatim_on_parse_failure(self):
-        from app.templates.dashboard import _audit_detail_summary
-
-        result = _audit_detail_summary("draft.upload", "not json at all")
-        assert result == "not json at all"
-
-    def test_handles_non_dict_non_string(self):
-        from app.templates.dashboard import _audit_detail_summary
-
-        # Lists, ints — should not crash; convert to str
-        assert _audit_detail_summary("x", [1, 2, 3]) == "[1, 2, 3]"
-        assert _audit_detail_summary("x", 42) == "42"
+# Helper names patched at ``app.templates.dashboard.<name>`` per the
+# patch-where-used contract — these are the DB-touching widget loaders the
+# page calls; mocking them lets us render ``dashboard_page`` with a fake
+# Request and no live DB.
+_WIDGET_HELPERS = (
+    "_get_active_drafter_sessions",
+    "_get_high_risk_reports",
+    "_get_unviewed_reports",
+    "_get_stale_analysis_drafts",
+    "_get_recent_syncs",
+    "_get_recent_exports",
+    "_get_unresolved_annotation_drafts",
+    "_get_bookmarks",
+    "_get_user_org_info",
+)
 
 
-class TestAuditDetailCell:
-    """``_audit_detail_cell`` renders the table cell.  Empty payloads
-    collapse to a plain string; non-empty payloads wrap the summary in a
-    ``<details>`` element with the raw JSON inside ``<pre>``."""
+def _make_dashboard_request():
+    """Build a minimal ASGI ``Request`` carrying an ``auth`` scope.
 
-    def test_empty_detail_returns_plain_string(self):
-        from app.templates.dashboard import _audit_detail_cell
+    Mirrors the pattern in ``tests/test_admin_analytics.py`` — the
+    Beforeware that normally populates ``req.scope['auth']`` is bypassed by
+    constructing the scope directly, so ``dashboard_page(req)`` can be
+    invoked without a TestClient round-trip.
+    """
+    from starlette.requests import Request
 
-        assert _audit_detail_cell({"action": "x", "detail_raw": None}) == "—"
-
-    def test_non_empty_detail_renders_details_disclosure(self):
-        from fasthtml.common import to_xml
-
-        from app.templates.dashboard import _audit_detail_cell
-
-        cell = _audit_detail_cell(
-            {
-                "action": "draft.upload",
-                "detail_raw": {"draft_id": "abc-uuid", "filename": "akt.docx"},
-            }
-        )
-        html = to_xml(cell)
-        assert "<details" in html
-        assert "audit-detail" in html
-        # Summary visible up-front
-        assert "<summary>" in html
-        assert "Fail: akt.docx" in html
-        # Raw JSON in the disclosure
-        assert "<pre" in html
-        assert '"draft_id"' in html
-        assert "audit-detail-json" in html
-
-    def test_raw_json_uses_unicode_friendly_dump(self):
-        """Estonian characters in JSON payloads must NOT render as
-        \\u escapes inside the disclosure."""
-        from fasthtml.common import to_xml
-
-        from app.templates.dashboard import _audit_detail_cell
-
-        cell = _audit_detail_cell(
-            {"action": "draft.upload", "detail_raw": {"title": "Eelnõu õigusakt"}}
-        )
-        html = to_xml(cell)
-        # FastHTML escapes ``õ`` to its HTML entity but the raw JSON should
-        # NOT contain the \u-escape form ensure_ascii=True would emit.
-        assert "\\u" not in html
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/dashboard",
+        "headers": [],
+        "query_string": b"",
+        "scheme": "http",
+        "server": ("testserver", 80),
+        "client": ("127.0.0.1", 12345),
+        "auth": {
+            "id": "33333333-3333-3333-3333-333333333333",
+            "email": "kasutaja@seadusloome.ee",
+            "full_name": "Test Kasutaja",
+            "role": "drafter",
+            "org_id": "11111111-1111-1111-1111-111111111111",
+        },
+    }
+    return Request(scope)
 
 
-class TestActivityCardRenderUsesDisclosure:
-    """End-to-end: the activity card columns wire ``_audit_detail_cell``
-    into the DataTable so the rendered HTML contains the disclosure for
-    rows whose detail payload is non-empty."""
+def _render_dashboard(returns: dict[str, object]) -> str:
+    """Render ``dashboard_page`` with every widget helper patched.
 
-    def test_card_renders_details_for_dict_detail(self):
+    ``returns`` maps a subset of :data:`_WIDGET_HELPERS` names to their
+    return value; unspecified helpers default to ``[]`` (or ``None`` for
+    ``_get_user_org_info``).
+    """
+    from contextlib import ExitStack
+
+    from fasthtml.common import to_xml
+
+    from app.templates.dashboard import dashboard_page
+
+    with ExitStack() as stack:
+        for name in _WIDGET_HELPERS:
+            default: object = None if name == "_get_user_org_info" else []
+            stack.enter_context(
+                patch(f"app.templates.dashboard.{name}", return_value=returns.get(name, default))
+            )
+        result = dashboard_page(_make_dashboard_request())
+    return to_xml(result)
+
+
+_ORG_INFO = {"org_name": "Justiitsministeerium", "role": "drafter", "member_count": 4}
+
+
+class TestDashboardWorkQueue:
+    """``/dashboard`` is now an operational work queue, not a welcome page."""
+
+    def test_dropped_welcome_hero(self):
+        """The marketing-style 'Tere tulemast Seadusloome süsteemi' InfoBox
+        is gone — replaced by a plain H1 + a small org/role line."""
+        html = _render_dashboard({"_get_user_org_info": _ORG_INFO})
+        assert "Tere tulemast Seadusloome" not in html
+        # Compact greeting + org line instead.
+        assert "Tere, Test" in html
+        assert "Justiitsministeerium" in html
+
+    def test_all_section_headers_render(self):
+        html = _render_dashboard({"_get_user_org_info": _ORG_INFO})
+        for header in (
+            "Minu järgmised tegevused",
+            "Kõrge riskiga leiud",
+            "Aegunud analüüsid",
+            "Uued ontoloogia muudatused",
+            "Hiljutised ekspordid",
+            "Eelnõud lahtiste märkustega",
+            "Järjehoidjad",
+        ):
+            assert header in html, header
+
+    def test_empty_data_shows_calm_empty_states(self):
+        html = _render_dashboard({})
+        # The synthesised next-action list collapses to the calm one-liner.
+        assert "Hetkel pole midagi ootel." in html
+        # Supporting widgets each show their own muted empty row, never a
+        # leftover hero or scary banner.
+        assert "Kõrge riskiga mõjuaruandeid hetkel pole." in html
+        assert "Aegunud analüüse pole." in html
+        assert "Hiljutisi ontoloogia uuendusi pole." in html
+
+    def test_next_actions_synthesised_from_signals(self):
         from datetime import UTC, datetime
 
-        from fasthtml.common import to_xml
-
-        from app.templates.dashboard import _activity_card
-
-        activity = [
+        now = datetime(2026, 5, 11, 9, 0, tzinfo=UTC)
+        html = _render_dashboard(
             {
-                "id": 1,
-                "action": "draft.upload",
-                "detail": {"draft_id": "abc-uuid", "filename": "akt.docx"},
-                "created_at": datetime(2026, 4, 29, 10, 0, tzinfo=UTC),
+                "_get_user_org_info": _ORG_INFO,
+                "_get_active_drafter_sessions": [
+                    {
+                        "id": "aaaa1111-0000-0000-0000-000000000001",
+                        "current_step": 3,
+                        "updated_at": now,
+                    },
+                ],
+                "_get_high_risk_reports": [
+                    {
+                        "draft_id": "bbbb2222-0000-0000-0000-000000000002",
+                        "title": "Andmekaitse eelnõu",
+                        "impact_score": 75,
+                        "conflict_count": 2,
+                        "affected_count": 18,
+                        "gap_count": 1,
+                        "generated_at": now,
+                    },
+                ],
+                "_get_stale_analysis_drafts": [
+                    {
+                        "draft_id": "cccc3333-0000-0000-0000-000000000003",
+                        "title": "Jäätmeseaduse muudatus",
+                        "stale_count": 1,
+                    },
+                ],
             }
-        ]
-        html = to_xml(_activity_card(activity))
-        assert "<details" in html
-        assert "audit-detail" in html
-        # The raw Python dict ``str()`` (with single quotes, "{'k': 'v'}")
-        # must NOT appear — that was the pre-fix behaviour.
-        assert "{'draft_id'" not in html
+        )
+        # Drafter-session row with the resolved step label.
+        assert "Jätka koostajas — 3. samm: Uurimine" in html
+        assert "/drafter/aaaa1111-0000-0000-0000-000000000001" in html
+        # High-risk report row, conflict-count phrasing + report link.
+        assert "2 konflikti vajavad ülevaatust" in html
+        assert "/drafts/bbbb2222-0000-0000-0000-000000000002/report" in html
+        # Stale-analysis row → "analüüsi uuesti" copy + report link.
+        assert "Analüüsi uuesti." in html
+        assert "/drafts/cccc3333-0000-0000-0000-000000000003/report" in html
 
-    def test_card_renders_dash_for_empty_detail(self):
+    def test_next_actions_include_unviewed_reports(self):
         from datetime import UTC, datetime
 
-        from fasthtml.common import to_xml
-
-        from app.templates.dashboard import _activity_card
-
-        activity = [
+        now = datetime(2026, 5, 11, 9, 0, tzinfo=UTC)
+        html = _render_dashboard(
             {
-                "id": 1,
-                "action": "user.login",
-                "detail": None,
-                "created_at": datetime(2026, 4, 29, 10, 0, tzinfo=UTC),
+                "_get_user_org_info": _ORG_INFO,
+                "_get_unviewed_reports": [
+                    {
+                        "draft_id": "dddd4444-0000-0000-0000-000000000004",
+                        "title": "Liiklusseaduse muudatus",
+                        "impact_score": 25,
+                        "conflict_count": 0,
+                        "generated_at": now,
+                        "reanalyzed": False,
+                    },
+                    {
+                        "draft_id": "eeee5555-0000-0000-0000-000000000005",
+                        "title": "Maksuseadus",
+                        "impact_score": 40,
+                        "conflict_count": 0,
+                        "generated_at": now,
+                        "reanalyzed": True,
+                    },
+                ],
             }
-        ]
-        html = to_xml(_activity_card(activity))
-        # No disclosure for an empty payload
-        assert "<details" not in html
-        assert "—" in html
+        )
+        # A never-opened low/medium report still surfaces as a next action…
+        assert "Mõjuaruanne valmis: «Liiklusseaduse muudatus»." in html
+        assert "/drafts/dddd4444-0000-0000-0000-000000000004/report" in html
+        # …and a re-analysed-since-last-view one gets the "uuesti" framing.
+        assert "Maksuseadus»: eelnõu analüüsiti uuesti" in html
+        assert "/drafts/eeee5555-0000-0000-0000-000000000005/report" in html
+
+    def test_next_actions_dedupe_by_draft(self):
+        """A draft that qualifies for several sources gets one row — the
+        most-urgent framing wins (stale > high-risk > unviewed)."""
+        from datetime import UTC, datetime
+
+        now = datetime(2026, 5, 11, 9, 0, tzinfo=UTC)
+        did = "ffff6666-0000-0000-0000-000000000006"
+        html = _render_dashboard(
+            {
+                "_get_user_org_info": _ORG_INFO,
+                "_get_high_risk_reports": [
+                    {
+                        "draft_id": did,
+                        "title": "Topelt eelnõu",
+                        "impact_score": 80,
+                        "conflict_count": 3,
+                        "affected_count": 10,
+                        "gap_count": 0,
+                        "generated_at": now,
+                    },
+                ],
+                "_get_stale_analysis_drafts": [
+                    {"draft_id": did, "title": "Topelt eelnõu", "stale_count": 1},
+                ],
+                "_get_unviewed_reports": [
+                    {
+                        "draft_id": did,
+                        "title": "Topelt eelnõu",
+                        "impact_score": 80,
+                        "conflict_count": 3,
+                        "generated_at": now,
+                        "reanalyzed": False,
+                    },
+                ],
+            }
+        )
+        # Stale wins → "analüüsi uuesti" copy appears…
+        assert "Topelt eelnõu»: ontoloogia uuenes" in html
+        # …and the high-risk / unviewed framings for the same draft do NOT.
+        assert "3 konflikti vajavad ülevaatust" not in html
+        assert "Mõjuaruanne valmis: «Topelt eelnõu»." not in html
+
+    def test_high_risk_widget_renders_band_badge_and_link(self):
+        from datetime import UTC, datetime
+
+        now = datetime(2026, 5, 11, 9, 0, tzinfo=UTC)
+        html = _render_dashboard(
+            {
+                "_get_user_org_info": _ORG_INFO,
+                "_get_high_risk_reports": [
+                    {
+                        "draft_id": "dddd4444-0000-0000-0000-000000000004",
+                        "title": "Karistusseadustiku muudatus",
+                        "impact_score": 90,
+                        "conflict_count": 0,
+                        "affected_count": 40,
+                        "gap_count": 0,
+                        "generated_at": now,
+                    },
+                ],
+            }
+        )
+        assert "Karistusseadustiku muudatus" in html
+        # 90 → critical band label.
+        assert "Kriitiline" in html
+        assert "/drafts/dddd4444-0000-0000-0000-000000000004/report" in html
+
+    def test_sync_widget_shows_date_and_entity_count(self):
+        from datetime import UTC, datetime
+
+        html = _render_dashboard(
+            {
+                "_get_user_org_info": _ORG_INFO,
+                "_get_recent_syncs": [
+                    {
+                        "id": 7,
+                        "finished_at": datetime(2026, 5, 10, 6, 30, tzinfo=UTC),
+                        "entity_count": 90123,
+                    },
+                ],
+            }
+        )
+        # Entity count rendered with a thin-space thousands separator.
+        assert "90 123" in html
+        # The sync card no longer shows the calm empty row when data exists.
+        assert "Hiljutisi ontoloogia uuendusi pole." not in html
+
+    def test_unresolved_annotations_widget_renders_count_and_link(self):
+        html = _render_dashboard(
+            {
+                "_get_user_org_info": _ORG_INFO,
+                "_get_unresolved_annotation_drafts": [
+                    {
+                        "draft_id": "eeee5555-0000-0000-0000-000000000005",
+                        "title": "Sotsiaalhoolekande eelnõu",
+                        "unresolved_count": 4,
+                    },
+                ],
+            }
+        )
+        assert "Sotsiaalhoolekande eelnõu" in html
+        assert ">4<" in html  # the Badge with the unresolved count
+        assert "/drafts/eeee5555-0000-0000-0000-000000000005/report" in html
+
+    def test_renders_when_user_has_no_org(self):
+        """A user with no organisation still gets the page (no crash) — the
+        org-scoped widgets just come back empty."""
+        html = _render_dashboard({"_get_user_org_info": None})
+        assert "Töölaud" in html
+        assert "Te ei kuulu ühtegi organisatsiooni." in html
+        assert "Hetkel pole midagi ootel." in html
 
 
 # ---------------------------------------------------------------------------
