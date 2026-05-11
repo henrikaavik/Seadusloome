@@ -984,13 +984,13 @@ def draft_report_page(req: Request, draft_id: str):
             ),
             Div(
                 LinkButton(
-                    "Ava uurijas →",
+                    "Ava õiguskaardil →",
                     href=f"/explorer?draft={draft.id}",
                     variant="secondary",
                     title="Visualiseeri eelnõu ja mõjutatud sätted graafil.",
                 ),
                 # #614: one-line helper below the button so reviewers
-                # know what "Ava uurijas" actually does before clicking.
+                # know what "Ava õiguskaardil" actually does before clicking.
                 Small(  # noqa: F405
                     "Visualiseeri eelnõu ja mõjutatud sätted graafil.",
                     cls="muted-text explorer-cta-hint",

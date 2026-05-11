@@ -237,7 +237,7 @@ def explorer_page(req: Request):
                 aria_hidden="true",
             ),
             Div(
-                "See on Eesti õiguse ontoloogia uurija. "
+                "See on õiguskaart — Eesti õiguse ontoloogia visuaalne vaade. "
                 "Klõpsake kategooriatele, et uurida seadusi, kohtuotsuseid "
                 "ja EL-i õigusakte. Kasutage otsingut konkreetsete "
                 "sätete leidmiseks.",
@@ -296,7 +296,7 @@ def explorer_page(req: Request):
         Head(
             Meta(charset="UTF-8"),
             Meta(name="viewport", content="width=device-width, initial-scale=1.0"),
-            Title("Eesti õiguse ontoloogia — Explorer"),
+            Title("Õiguskaart — Eesti õiguse ontoloogia"),
             # D3.js v7
             Script(
                 src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js",
@@ -320,8 +320,8 @@ def explorer_page(req: Request):
             # ----- Top bar (banner landmark) -----
             Header(
                 Div(
-                    H1("Eesti õiguse ontoloogia"),
-                    Span("Uurija", cls="badge"),
+                    H1("Õiguskaart"),
+                    Span("Eesti õiguse ontoloogia", cls="explorer-tagline"),
                     Span("D3.js", cls="badge"),
                     # Search box
                     Div(
@@ -380,6 +380,12 @@ def explorer_page(req: Request):
                         role="link",
                     ),
                     A(
+                        "Analüüsikeskus",
+                        href="/analyysikeskus",
+                        cls="nav-btn",
+                        role="link",
+                    ),
+                    A(
                         "Eelnõud",
                         href="/drafts",
                         cls="nav-btn",
@@ -392,7 +398,7 @@ def explorer_page(req: Request):
                         role="link",
                     ),
                     A(
-                        "Vestlus",
+                        "Nõustaja",
                         href="/chat",
                         cls="nav-btn",
                         role="link",

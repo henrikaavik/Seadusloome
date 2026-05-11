@@ -115,7 +115,7 @@ def conversation_to_markdown(
     System messages are skipped. Assistant content is emitted verbatim
     (already markdown from the LLM).
     """
-    title = (conversation.title or "Vestlus").strip() or "Vestlus"
+    title = (conversation.title or "Nõustamine").strip() or "Nõustamine"
     parts: list[str] = [
         f"# {title}",
         "",
@@ -223,7 +223,7 @@ def conversation_to_docx_bytes(
     The returned bytes are a valid ZIP archive (.docx is a zipped OOXML
     bundle) so the caller can stream them directly as a file download.
     """
-    title = (conversation.title or "Vestlus").strip() or "Vestlus"
+    title = (conversation.title or "Nõustamine").strip() or "Nõustamine"
 
     doc = Document()
     doc.add_heading(title, level=0)

@@ -146,7 +146,7 @@ def _sync_explainer():
                 rel="noopener",
             ),
             ") ja laadib selle Apache Jena Fuseki triplestore'i. "
-            "P\u00e4rast l\u00f5ppemist kajastab Uurija ja AI-vestlus "
+            "P\u00e4rast l\u00f5ppemist kajastavad \u00d5iguskaart ja N\u00f5ustaja "
             "uusimaid seaduseid, kohtuotsuseid ja EL-i \u00f5igusakte.",
         ),
         Details(  # noqa: F405

@@ -42,7 +42,7 @@ def test_link_button_custom_cls_is_appended():
 def test_link_button_kwargs_pass_through():
     html = to_xml(
         LinkButton(
-            "Ava uurijas",
+            "Ava õiguskaardil",
             href="/explorer?draft=1",
             title="Visualiseeri eelnõu",
             hx_boost="true",

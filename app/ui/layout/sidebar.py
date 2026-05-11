@@ -6,12 +6,18 @@ from app.auth.provider import UserDict
 
 # Navigation items with required roles.
 # Each item: (label, href, icon, allowed_roles)
+#
+# #714: the user-facing labels are framed around legal work, not internal
+# module names. URLs are unchanged (relabel-in-place) — ``/explorer`` is
+# still ``/explorer`` even though it now reads "Õiguskaart", etc.
+_ALL_ROLES = {"drafter", "reviewer", "org_admin", "admin"}
 NAV_ITEMS: list[tuple[str, str, str, set[str]]] = [
-    ("Töölaud", "/dashboard", "home", {"drafter", "reviewer", "org_admin", "admin"}),
-    ("Uurija", "/explorer", "graph", {"drafter", "reviewer", "org_admin", "admin"}),
-    ("Eelnõud", "/drafts", "file-text", {"drafter", "reviewer", "org_admin", "admin"}),
-    ("Koostaja", "/drafter", "edit", {"drafter", "reviewer", "org_admin", "admin"}),
-    ("Vestlus", "/chat", "message-circle", {"drafter", "reviewer", "org_admin", "admin"}),
+    ("Töölaud", "/dashboard", "home", _ALL_ROLES),
+    ("Analüüsikeskus", "/analyysikeskus", "search", _ALL_ROLES),
+    ("Eelnõud", "/drafts", "file-text", _ALL_ROLES),
+    ("Õiguskaart", "/explorer", "graph", _ALL_ROLES),
+    ("Koostaja", "/drafter", "edit", _ALL_ROLES),
+    ("Nõustaja", "/chat", "message-circle", _ALL_ROLES),
     ("Kasutajad", "/org/users", "users", {"org_admin", "admin"}),
     ("Administraator", "/admin", "shield", {"admin"}),
 ]

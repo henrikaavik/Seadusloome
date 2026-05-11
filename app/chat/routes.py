@@ -507,7 +507,7 @@ def chat_list_page(req: Request):
         cls="chat-list-toolbar",
     )
 
-    header_children: list = [H1("Vestlused", cls="page-title")]  # noqa: F405
+    header_children: list = [H1("Nõustaja", cls="page-title")]  # noqa: F405
     header_children.append(
         InfoBox(
             P(
@@ -563,7 +563,7 @@ def chat_list_page(req: Request):
             CardHeader(H3("Minu vestlused", cls="card-title")),  # noqa: F405
             CardBody(*card_body_children),
         ),
-        title="Vestlused",
+        title="Nõustaja",
         user=auth,
         theme=theme,
         active_nav="/chat",
@@ -595,7 +595,9 @@ def new_conversation(req: Request):
     # Optional draft context
     draft_param = req.query_params.get("draft")
     context_draft_id: uuid.UUID | None = None
-    title = "Vestlus"
+    # #714: conversations live under the "Nõustaja" section, so generated
+    # titles use that framing rather than the old "Vestlus" prefix.
+    title = "Nõustamine"
 
     if draft_param:
         parsed_draft = _parse_uuid(draft_param)
@@ -604,7 +606,7 @@ def new_conversation(req: Request):
             draft_title = _get_draft_title(str(parsed_draft), org_id)
             if draft_title is not None:
                 context_draft_id = parsed_draft
-                title = f"Vestlus \u2014 {draft_title}"
+                title = f"N\u00f5ustamine \u2014 {draft_title}"
             else:
                 # Draft not found or belongs to another org — ignore it
                 logger.warning(
@@ -616,7 +618,7 @@ def new_conversation(req: Request):
     if not context_draft_id:
         from app.ui.time import now_tallinn
 
-        title = f"Vestlus \u2014 {now_tallinn().strftime('%d.%m.%Y %H:%M')}"
+        title = f"N\u00f5ustamine \u2014 {now_tallinn().strftime('%d.%m.%Y %H:%M')}"
 
     try:
         with _connect() as conn:
