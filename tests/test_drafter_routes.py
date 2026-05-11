@@ -329,7 +329,7 @@ class TestStepPage:
         resp = client.get(f"/drafter/{_SESSION_ID}/step/2")
 
         assert resp.status_code == 200
-        assert "Kusimuste genereerimine" in resp.text
+        assert "Küsimuste genereerimine" in resp.text
 
     @patch("app.drafter.routes._find_latest_job")
     @patch("app.drafter.routes.fetch_session")
@@ -380,7 +380,7 @@ class TestStepPage:
         resp = client.get(f"/drafter/{_SESSION_ID}/step/2")
 
         assert resp.status_code == 200
-        assert "Jatka uurimisega" in resp.text
+        assert "Jätka uurimisega" in resp.text
 
     @patch("app.drafter.routes.fetch_session")
     @patch("app.auth.middleware._get_provider")
@@ -616,7 +616,7 @@ class TestStep3Page:
 
         assert resp.status_code == 200
         assert "TsiviilS" in resp.text
-        assert "Jatka struktuuriga" in resp.text
+        assert "Jätka struktuuriga" in resp.text
 
 
 # ---------------------------------------------------------------------------
@@ -730,7 +730,7 @@ class TestStep6Page:
         resp = client.get(f"/drafter/{_SESSION_ID}/step/6")
 
         assert resp.status_code == 200
-        assert "Kaivita mojuanaluus" in resp.text
+        assert "Käivita mõjuanalüüs" in resp.text
 
     @patch("app.drafter.routes.fetch_session")
     @patch("app.auth.middleware._get_provider")
@@ -749,7 +749,7 @@ class TestStep6Page:
         resp = client.get(f"/drafter/{_SESSION_ID}/step/6")
 
         assert resp.status_code == 200
-        assert "Vaata mojuanaluusi" in resp.text
+        assert "Vaata mõjuanalüüsi" in resp.text
         assert str(draft_id) in resp.text
 
 

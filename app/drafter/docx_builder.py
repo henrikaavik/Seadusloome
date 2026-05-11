@@ -167,13 +167,13 @@ def build_drafter_docx(
     # Appendix B: Impact summary (if available)
     if impact_summary:
         doc.add_section(WD_SECTION.NEW_PAGE)
-        doc.add_heading("Lisa B: Mojuanaluusi kokkuvote", level=1)
+        doc.add_heading("Lisa B: Mõjuanalüüsi kokkuvõte", level=1)
 
         score = impact_summary.get("impact_score", "N/A")
-        doc.add_paragraph(f"Mojuskoor: {score}/100")
-        doc.add_paragraph(f"Mojutatud uksuste arv: {impact_summary.get('affected_count', 0)}")
+        doc.add_paragraph(f"Mõjuskoor: {score}/100")
+        doc.add_paragraph(f"Mõjutatud üksuste arv: {impact_summary.get('affected_count', 0)}")
         doc.add_paragraph(f"Tuvastatud konfliktide arv: {impact_summary.get('conflict_count', 0)}")
-        doc.add_paragraph(f"Tuvastatud lunkade arv: {impact_summary.get('gap_count', 0)}")
+        doc.add_paragraph(f"Tuvastatud lünkade arv: {impact_summary.get('gap_count', 0)}")
 
     _add_page_number_footer(doc)
 
