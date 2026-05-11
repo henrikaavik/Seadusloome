@@ -345,30 +345,44 @@ def explorer_page(req: Request):
             # ----- Controls (navigation landmark) -----
             Nav(
                 Div(
+                    # Primary view actions — legal-work language, not
+                    # force-simulation jargon (#714 / #718).
                     Button(
-                        "Taaskäivita simulatsioon",
+                        "Ülevaade",
                         cls="ctrl-btn",
-                        onclick="explorerReheat()",
-                    ),
-                    Button(
-                        "Lülita silte",
-                        cls="ctrl-btn",
-                        onclick="explorerToggleLabels()",
-                    ),
-                    Button(
-                        "Rühm. kategooria järgi",
-                        cls="ctrl-btn",
-                        onclick="explorerGroupByCategory()",
+                        onclick="explorerCollapseToOverview()",
+                        title="Näita kõigi liikide ülevaadet",
                     ),
                     Button(
                         "Lähtesta vaade",
                         cls="ctrl-btn",
                         onclick="explorerResetView()",
+                        title="Lähtesta suum ja valik",
                     ),
-                    Button(
-                        "Ülevaade",
-                        cls="ctrl-btn",
-                        onclick="explorerCollapseToOverview()",
+                    # Technical layout controls live behind a disclosure so the
+                    # bar isn't cluttered with simulation vocabulary.
+                    Details(
+                        Summary("Vaate seaded ▾", cls="ctrl-btn ctrl-settings-summary"),
+                        Div(
+                            Button(
+                                "Lähtesta paigutus",
+                                cls="ctrl-btn",
+                                onclick="explorerReheat()",
+                                title="Arvuta sõlmpunktide paigutus uuesti",
+                            ),
+                            Button(
+                                "Näita/peida seosenimed",
+                                cls="ctrl-btn",
+                                onclick="explorerToggleLabels()",
+                            ),
+                            Button(
+                                "Rühmita liigi järgi",
+                                cls="ctrl-btn",
+                                onclick="explorerGroupByCategory()",
+                            ),
+                            cls="ctrl-settings-menu",
+                        ),
+                        cls="ctrl-settings",
                     ),
                     # ----- Divider -----
                     Div(cls="ctrl-divider"),
@@ -470,7 +484,7 @@ def explorer_page(req: Request):
                     Div(cls="spinner"),
                     id="loading-overlay",
                 ),
-                # ----- Timeline slider -----
+                # ----- Timeline / "ajaline vaade" slider -----
                 Div(
                     Div(
                         Span("1990", cls="tl-label"),
@@ -481,14 +495,14 @@ def explorer_page(req: Request):
                             max=str(datetime.now().year + 1),
                             value=str(datetime.now().year + 1),
                             step="1",
-                            aria_label="Ajafilter aastaid",
+                            aria_label="Ajaline vaade — aasta valik",
                         ),
                         Span(str(datetime.now().year + 1), cls="tl-label"),
                         cls="tl-slider-row",
                     ),
                     Div(
-                        Span("Ajafilter: ", cls="tl-prefix"),
-                        Span("Keelatud", id="timeline-value", cls="tl-value"),
+                        Span("Ajaline vaade: ", cls="tl-prefix"),
+                        Span("Väljas", id="timeline-value", cls="tl-value"),
                         Button(
                             "Lähtesta",
                             id="timeline-reset",
