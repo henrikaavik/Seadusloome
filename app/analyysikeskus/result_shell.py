@@ -10,9 +10,12 @@ result page is the same five cards, in this order:
     4. ``Tõendid``              — sources, relations, dates, links
     5. ``Soovitatud tegevused`` — a *static* action set (no LLM advice — Phase D)
 
-For the stub workflows (#722 Normi mõjuahel, #723 EL ülevõtt) ``results_block``
-and ``evidence_block`` carry a "koostamisel — tulekul" placeholder; those
-issues replace the placeholders with real computed findings + evidence.
+Both wired workflows pass computed content here: #722 Normi mõjuahel
+(impact findings against an ephemeral synthetic graph) and #723 EL
+ülevõtt ja harmoneerimine (an act/provision-level transposition table).
+``results_block`` / ``evidence_block`` accept either a single FT node or
+a list (the list gets ``Div``-wrapped); empties fall back to a one-line
+muted row rather than rendering an empty card body.
 
 Critically — per the design doc — the ``Ulatus`` controls read as
 legal/policy scope, never as query configuration. No SPARQL, RDF,
