@@ -945,8 +945,44 @@ function _showBackLink() {
   };
 }
 
+// Pan/zoom so *d* sits at the centre of the viewport (#719 — the generic
+// zoomToFit() only frames the bounding box of *all* nodes, which won't
+// centre the focused entity when overview/neighbour nodes are present).
+function centerOnNode(d, duration) {
+  if (!d) return;
+  duration = duration || 500;
+  var x = (d.x != null) ? d.x : 0;
+  var y = (d.y != null) ? d.y : 0;
+  var scale = 1.1;
+  var transform = d3.zoomIdentity
+    .translate(width / 2, height / 2)
+    .scale(scale)
+    .translate(-x, -y);
+  svg.transition().duration(duration).call(zoomBehavior.transform, transform);
+}
+
 async function focusOnEntity(uri) {
   if (!uri) return;
+  // Pre-flight: confirm the entity exists before touching the panel.
+  // Raw fetch (not apiFetch) so a stale URI from an old report link
+  // doesn't console.error — #719 DoD: unknown URI → toast + the plain
+  // overview, no console noise.
+  var found = false;
+  try {
+    var resp = await fetch('/api/explorer/entity/' + encodeURIComponent(uri));
+    if (resp.ok) {
+      var j = await resp.json();
+      found = !!(j && j.data);
+    }
+  } catch (e) {
+    found = false;
+  }
+  if (!found) {
+    showToast('Üksust ei leitud — kuvan ülevaate.', 'warning');
+    closeDetail();
+    return;
+  }
+
   // Reuse an existing overview node if it's already on the graph.
   var datum = state.nodes.find(function(n) { return (n.uri || n.id) === uri; });
   if (!datum) {
@@ -967,12 +1003,7 @@ async function focusOnEntity(uri) {
       render();
     }
   }
-  try {
-    await showEntityDetail(datum);
-  } catch (e) {
-    showToast('Üksust ei õnnestunud avada — kuvan ülevaate.', 'warning');
-    return;
-  }
+  await showEntityDetail(datum);
   // Upgrade the panel title from real metadata when we have it (the
   // datum's fallback label is just the URI fragment).
   var meta = (state.selectedEntityData && state.selectedEntityData.metadata) || null;
@@ -989,7 +1020,9 @@ async function focusOnEntity(uri) {
     }
   }
   _showBackLink();
-  setTimeout(function() { zoomToFit(600); }, 400);
+  // Centre on the focused node once the simulation has placed neighbours
+  // (mirrors init()'s 800ms settle wait).
+  setTimeout(function() { centerOnNode(datum, 600); }, 800);
 }
 
 function collapseToOverview(resetView) {
