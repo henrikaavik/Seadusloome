@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 _FEATURE_LABELS: dict[str, str] = {
     "drafter_clarify": "Koostaja tapsustamine",
     "drafter_draft": "Koostaja mustand",
-    "chat": "Vestlus",
+    "chat": "Nõustaja",
     "extraction": "Eraldamine",
 }
 

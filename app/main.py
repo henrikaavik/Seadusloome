@@ -10,6 +10,7 @@ from starlette.staticfiles import StaticFiles
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app.admin import register_admin_routes
+from app.analyysikeskus import register_analyysikeskus_routes
 from app.annotations.routes import register_annotation_routes
 from app.auth.middleware import SKIP_PATHS, auth_before
 from app.auth.organizations import register_org_routes
@@ -239,6 +240,7 @@ register_explorer_pages(rt)
 register_ws_routes(app)
 register_webhook_routes(app)
 register_dashboard_routes(rt)
+register_analyysikeskus_routes(rt)
 register_admin_routes(rt)
 register_validation_routes(rt)
 register_design_system_routes(rt)

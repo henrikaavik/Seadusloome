@@ -507,7 +507,7 @@ def chat_list_page(req: Request):
         cls="chat-list-toolbar",
     )
 
-    header_children: list = [H1("Vestlused", cls="page-title")]  # noqa: F405
+    header_children: list = [H1("Nõustaja", cls="page-title")]  # noqa: F405
     header_children.append(
         InfoBox(
             P(
@@ -563,7 +563,7 @@ def chat_list_page(req: Request):
             CardHeader(H3("Minu vestlused", cls="card-title")),  # noqa: F405
             CardBody(*card_body_children),
         ),
-        title="Vestlused",
+        title="Nõustaja",
         user=auth,
         theme=theme,
         active_nav="/chat",

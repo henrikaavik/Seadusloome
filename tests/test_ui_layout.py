@@ -65,12 +65,16 @@ def test_sidebar_drafter_sees_subset():
     sidebar = Sidebar(user=_user("drafter"))
     assert sidebar is not None
     html = to_xml(sidebar)
-    # Drafter visible items
+    # Drafter visible items (#714: legal-work labels, URLs unchanged)
     assert "Töölaud" in html
-    assert "Uurija" in html
+    assert "Analüüsikeskus" in html
     assert "Eelnõud" in html
+    assert "Õiguskaart" in html
     assert "Koostaja" in html
-    assert "Vestlus" in html
+    assert "Nõustaja" in html
+    # Old module names no longer used as nav labels
+    assert "Uurija" not in html
+    assert "Vestlus" not in html
     # Hidden from drafter
     assert "Kasutajad" not in html
     assert "Administraator" not in html
@@ -151,11 +155,12 @@ def test_topbar_with_user_shows_user_menu_and_nav():
     assert "user-menu" in html
     # Logout form posts to /auth/logout
     assert 'action="/auth/logout"' in html
-    # Top nav links visible
-    assert "Uurija" in html
+    # Top nav links visible (#714 labels)
+    assert "Analüüsikeskus" in html
     assert "Eelnõud" in html
+    assert "Õiguskaart" in html
     assert "Koostaja" in html
-    assert "Vestlus" in html
+    assert "Nõustaja" in html
     # Notification bell rendered
     assert "notification-bell" in html
 
