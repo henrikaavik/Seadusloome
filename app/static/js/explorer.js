@@ -909,6 +909,89 @@ function closeDetail() {
   detailPanel.classList.remove('open');
 }
 
+// ---------------------------------------------------------------------------
+// #719: open the explorer focused on a specific entity (from ?focus=<uri>,
+// e.g. a link in an impact report / analysis). Loads the entity's
+// neighbourhood, opens the detail panel on it, centers the view, and
+// reveals the "back" link.
+// ---------------------------------------------------------------------------
+function _fallbackLabel(uri) {
+  try {
+    return decodeURIComponent(String(uri)).split('/').pop().split('#').pop() || String(uri);
+  } catch (e) {
+    return String(uri);
+  }
+}
+
+function _showBackLink() {
+  var back = document.getElementById('panel-back');
+  if (!back) return;
+  var ref = document.referrer || '';
+  if (ref.indexOf('/report') !== -1) {
+    back.textContent = '← Tagasi aruandesse';
+  } else if (ref.indexOf('/analyysikeskus') !== -1) {
+    back.textContent = '← Tagasi analüüsi';
+  } else {
+    back.textContent = '← Tagasi';
+  }
+  back.style.display = '';
+  back.onclick = function(e) {
+    e.preventDefault();
+    if (document.referrer) {
+      window.location.href = document.referrer;
+    } else {
+      window.history.back();
+    }
+  };
+}
+
+async function focusOnEntity(uri) {
+  if (!uri) return;
+  // Reuse an existing overview node if it's already on the graph.
+  var datum = state.nodes.find(function(n) { return (n.uri || n.id) === uri; });
+  if (!datum) {
+    datum = {
+      id: uri,
+      uri: uri,
+      label: _fallbackLabel(uri),
+      category: categoryFromUri(uri),
+      desc: '',
+      count: 0,
+      r: 16,
+      isCategory: false,
+      x: (window.innerWidth || 1200) / 2,
+      y: (window.innerHeight || 800) / 2,
+    };
+    if (state.nodes.length < MAX_NODES) {
+      state.nodes.push(datum);
+      render();
+    }
+  }
+  try {
+    await showEntityDetail(datum);
+  } catch (e) {
+    showToast('Üksust ei õnnestunud avada — kuvan ülevaate.', 'warning');
+    return;
+  }
+  // Upgrade the panel title from real metadata when we have it (the
+  // datum's fallback label is just the URI fragment).
+  var meta = (state.selectedEntityData && state.selectedEntityData.metadata) || null;
+  if (meta) {
+    var labelKey = Object.keys(meta).find(function(k) {
+      var kl = k.toLowerCase();
+      return kl.indexOf('label') !== -1 || kl.indexOf('title') !== -1 ||
+        kl.indexOf('pealkiri') !== -1 || kl.indexOf('nimetus') !== -1;
+    });
+    if (labelKey && meta[labelKey]) {
+      var titleEl = document.getElementById('panel-title');
+      if (titleEl) titleEl.textContent = String(meta[labelKey]);
+      datum.label = String(meta[labelKey]);
+    }
+  }
+  _showBackLink();
+  setTimeout(function() { zoomToFit(600); }, 400);
+}
+
 function collapseToOverview(resetView) {
   // Remove all non-category nodes and their links
   state.nodes = state.nodes.filter(n => n.isCategory);
@@ -1544,8 +1627,20 @@ async function init() {
   updateBreadcrumb();
   render();
 
-  // Center the graph once the simulation settles
-  setTimeout(function() { zoomToFit(600); }, 800);
+  // #719: arrived via ?focus=<uri> (e.g. a link from an impact report)?
+  // Jump straight to that entity instead of leaving the user on the
+  // generic overview.
+  var focusUri = window.__explorerFocus;
+  if (!focusUri) {
+    try { focusUri = new URLSearchParams(window.location.search).get('focus'); }
+    catch (e) { focusUri = null; }
+  }
+  if (focusUri) {
+    await focusOnEntity(focusUri);
+  } else {
+    // Center the graph once the simulation settles
+    setTimeout(function() { zoomToFit(600); }, 800);
+  }
 
   // Start WebSocket connection once
   if (!wsInitialized) {

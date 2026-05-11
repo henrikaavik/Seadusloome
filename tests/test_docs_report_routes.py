@@ -799,3 +799,41 @@ class TestOntologyDriftBanner:
         resp = client.post(f"/drafts/{_DRAFT_ID}/report/reanalyze")
         assert resp.status_code == 200
         assert "Eelnõu ei leitud" in resp.text
+
+
+# ---------------------------------------------------------------------------
+# explorer_focus_url — URL-encoding of estleg URIs in ?focus= links (#719)
+# ---------------------------------------------------------------------------
+
+
+class TestExplorerFocusUrl:
+    def test_encodes_hash_so_uri_is_not_truncated(self):
+        from app.docs.report_routes import explorer_focus_url
+
+        uri = "https://data.riik.ee/ontology/estleg#KarS_par_133"
+        url = explorer_focus_url(uri)
+        # The fragment-marker must be percent-encoded, otherwise the
+        # browser treats "#KarS_par_133" as a fragment and ``focus`` is
+        # silently truncated to ".../estleg".
+        assert "#" not in url
+        assert url.startswith("/explorer?focus=")
+        assert "%23" in url  # encoded '#'
+        # Round-trips back to the original URI.
+        from urllib.parse import parse_qs, urlsplit
+
+        q = parse_qs(urlsplit(url).query)
+        assert q["focus"] == [uri]
+
+    def test_encodes_slashes_and_colons(self):
+        from app.docs.report_routes import explorer_focus_url
+
+        url = explorer_focus_url("https://example.org/a/b")
+        assert "%2F" in url or "%2f" in url
+        assert "%3A" in url or "%3a" in url
+
+    def test_appends_draft_id_when_given(self):
+        from app.docs.report_routes import explorer_focus_url
+
+        url = explorer_focus_url("https://data.riik.ee/ontology/estleg#X", draft_id="abc-123")
+        assert "&draft=abc-123" in url
+        assert url.index("focus=") < url.index("draft=")

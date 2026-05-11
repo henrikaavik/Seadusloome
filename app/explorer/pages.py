@@ -169,15 +169,28 @@ def explorer_page(req: Request):
     ``d3-node-highlighted`` class to matching nodes. Cross-org or
     malformed draft params are silently dropped (no error UI) so the
     page stays usable as a generic ontology browser even when the
-    overlay can't be applied. The page itself requires authentication
-    via the global ``auth_before`` middleware (see #442).
+    overlay can't be applied.
+
+    When called with ``?focus=<uri>`` (URL-encoded — see
+    :func:`app.docs.report_routes.explorer_focus_url`) the JS loads that
+    entity's neighbourhood and opens the detail panel on it. ``focus``
+    and ``draft`` may be combined. The page itself requires
+    authentication via the global ``auth_before`` middleware (see #442).
     """
     draft_param = req.query_params.get("draft", "").strip()
+    focus_param = req.query_params.get("focus", "").strip()
     overlay_uris: list[str] = []
     if draft_param:
         overlay_uris = _fetch_draft_overlay(req, draft_param)
 
     overlay_tags: list = []
+    # #719: hand the focus URI to the JS. We don't resolve it here — the
+    # ``/api/explorer/entity/{uri}`` endpoint validates it server-side —
+    # but embedding it (escaped) keeps the contract explicit and lets the
+    # JS read it without re-parsing ``location.search``.
+    if focus_param.startswith("http"):
+        focus_payload = json.dumps(focus_param).replace("</", "<\\/")
+        overlay_tags.append(Script(f"window.__explorerFocus={focus_payload};"))
     if overlay_uris:
         # #464: escape any closing-tag and Unicode line-separator
         # sequences in the JSON payload before embedding in a
@@ -262,7 +275,7 @@ def explorer_page(req: Request):
 
     # Optional draft tip
     draft_tip = None
-    if not overlay_uris and not draft_param:
+    if not overlay_uris and not draft_param and not focus_param:
         draft_tip = Div(
             Div(
                 Span(
@@ -517,6 +530,16 @@ def explorer_page(req: Request):
                 Div(id="toast-container"),
                 # ----- Detail panel (right sidebar) -----
                 Div(
+                    # #719: shown only when the page was opened via
+                    # ?focus= (i.e. from an impact report / analysis) —
+                    # explorer.js unhides it and sets the label/target.
+                    A(
+                        "← Tagasi",
+                        id="panel-back",
+                        href="#",
+                        cls="panel-back",
+                        style="display:none;",
+                    ),
                     Div(
                         H2(id="panel-title"),
                         Button(
