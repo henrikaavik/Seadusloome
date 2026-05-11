@@ -472,22 +472,193 @@ def test_run_adhoc_impact_analysis_blank_uri_short_circuits():
 
 
 # ---------------------------------------------------------------------------
-# #721 / #723 — EL ülevõtt stub result shell
+# #723 — EL ülevõtt ja harmoneerimine
 # ---------------------------------------------------------------------------
+
+_GDPR_URI = "https://data.riik.ee/ontology/estleg#EU-32016R0679"
+_AVTS_ACT_URI = "https://data.riik.ee/ontology/estleg#avaliku-teabe-seadus"
+_AVTS_P35_URI = "https://data.riik.ee/ontology/estleg#AvTS-p35"
+_AML_ACT_URI = "https://data.riik.ee/ontology/estleg#rahapesu-tokestamise-seadus"
+
+
+def _canned_eu_transposition_rows():
+    """A canned ``run_eu_transposition`` result — covers covered/partial + a ``puudub`` row."""
+    return [
+        {
+            "eu_act": _GDPR_URI,
+            "eu_label": "Isikuandmete kaitse üldmäärus",
+            "celex": "32016R0679",
+            "ee_act": _AVTS_ACT_URI,
+            "ee_act_label": "Avaliku teabe seadus",
+            "ee_provision": _AVTS_P35_URI,
+            "ee_provision_label": "AvTS § 35",
+            "status": "kaetud",
+            "authority": None,
+            "authority_label": None,
+        },
+        {
+            "eu_act": _GDPR_URI,
+            "eu_label": "Isikuandmete kaitse üldmäärus",
+            "celex": "32016R0679",
+            "ee_act": _AML_ACT_URI,
+            "ee_act_label": "Rahapesu tõkestamise seadus",
+            "ee_provision": None,
+            "ee_provision_label": None,
+            "status": "osaline",
+            "authority": None,
+            "authority_label": None,
+        },
+        {
+            "eu_act": _GDPR_URI,
+            "eu_label": "Isikuandmete kaitse üldmäärus",
+            "celex": "32016R0679",
+            "ee_act": None,
+            "ee_act_label": None,
+            "ee_provision": None,
+            "ee_provision_label": None,
+            "status": "puudub",
+            "authority": None,
+            "authority_label": None,
+        },
+    ]
+
+
+def _canned_eu_resolved_ref(entity_uri: str = _GDPR_URI):
+    from app.docs.entity_extractor import ExtractedRef
+    from app.docs.reference_resolver import ResolvedRef
+
+    return ResolvedRef(
+        extracted=ExtractedRef(
+            ref_text="32016R0679",
+            ref_type="eu_act",
+            confidence=1.0,
+            location={"source": "analyysikeskus_input"},
+        ),
+        entity_uri=entity_uri,
+        matched_label="Isikuandmete kaitse üldmäärus",
+        match_score=1.0,
+    )
 
 
 @patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.routes.run_eu_transposition")
+@patch("app.docs.reference_resolver.ReferenceResolver.resolve")
 @patch("app.auth.middleware._get_provider")
-def test_el_ulevott_stub_renders(mock_provider: MagicMock, mock_recent: MagicMock):
+def test_el_ulevott_celex_renders_transposition_table(
+    mock_provider: MagicMock,
+    mock_resolve: MagicMock,
+    mock_run: MagicMock,
+    mock_recent: MagicMock,
+):
     mock_provider.return_value = _stub_provider()
+    mock_resolve.return_value = [_canned_eu_resolved_ref()]
+    mock_run.return_value = _canned_eu_transposition_rows()
+
     client = _authed_client()
     resp = client.get("/analyysikeskus/el-ulevott?sisend=32016R0679")
     assert resp.status_code == 200
     body = resp.text
+
     assert "EL ülevõtt" in body
+    # All five Core-UI-Pattern block headings.
     for heading in ("Sisend", "Ulatus", "Tulemused", "Tõendid", "Soovitatud tegevused"):
         assert heading in body, heading
+    # The transposition table headers.
+    for header in ("EL õigusakt", "Eesti õigusakt", "Staatus", "Soovitatud tegevus"):
+        assert header in body, header
+    # A status Badge (the covered row → success variant).
+    assert "badge badge-success" in body
+    # The one-line summary line, templated from the row counts.
+    assert "ülevõte:" in body
+    assert "Eesti õigusakti seotud" in body
+    # The resolved EU act's label shows in the Sisend block + CELEX.
+    assert "Isikuandmete kaitse üldmäärus" in body
     assert "32016R0679" in body
+    # "Ava õiguskaardil" link with the focus param %23-encoded (the
+    # estleg: URI's "#" must survive into the query string).
+    assert "/explorer?focus=" in body
+    assert "%23" in body
+    # "Küsi nõustajalt" → /chat/new.
+    assert "Küsi nõustajalt" in body
+    assert "/chat/new" in body
+    # The enabled scope form's submit must NOT be disabled (the result
+    # shell's default disabled "Tulekul" stub button is replaced here).
+    assert 'class="btn btn-secondary btn-sm">Uuenda ulatust</button>' in body
+    # A "puudub" row → the danger-band recommendation + the "Lisa puuduv säte" action.
+    assert "Lisa puuduv säte" in body
+    assert "Kõrge risk" in body
+    # No "Vastutav asutus" column — no authority predicate is wired.
+    assert "Vastutav asutus" not in body
+    # run_eu_transposition was called with the resolved EU act URI.
+    mock_run.assert_called_once()
+    assert mock_run.call_args.args[0] == _GDPR_URI
+
+
+@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.routes.search_eu_acts_by_label", return_value=[])
+@patch("app.docs.reference_resolver.ReferenceResolver.resolve", return_value=[])
+@patch("app.auth.middleware._get_provider")
+def test_el_ulevott_unrecognised_input_shows_warning(
+    mock_provider: MagicMock,
+    mock_resolve: MagicMock,
+    mock_search: MagicMock,
+    mock_recent: MagicMock,
+):
+    mock_provider.return_value = _stub_provider()
+    client = _authed_client()
+    resp = client.get("/analyysikeskus/el-ulevott?sisend=mingi+suvaline+jutt")
+    assert resp.status_code == 200
+    body = resp.text
+    # The friendly "no EU act recognised" warning.
+    assert "Ei tuvastanud EL õigusakti" in body
+    # Still a full result shell.
+    for heading in ("Sisend", "Ulatus", "Tulemused", "Tõendid", "Soovitatud tegevused"):
+        assert heading in body, heading
+    # The scope form is still rendered (enabled).
+    assert "Uuenda ulatust" in body
+
+
+@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.routes.search_eu_acts_by_label")
+@patch("app.docs.reference_resolver.ReferenceResolver.resolve", return_value=[])
+@patch("app.auth.middleware._get_provider")
+def test_el_ulevott_label_search_multiple_candidates(
+    mock_provider: MagicMock,
+    mock_resolve: MagicMock,
+    mock_search: MagicMock,
+    mock_recent: MagicMock,
+):
+    mock_provider.return_value = _stub_provider()
+    mock_search.return_value = [
+        {"uri": _GDPR_URI, "label": "Isikuandmete kaitse üldmäärus", "celex": "32016R0679"},
+        {
+            "uri": "https://data.riik.ee/ontology/estleg#EU-32018L1972",
+            "label": "Isikuandmete kaitse direktiiv",
+            "celex": "32018L1972",
+        },
+    ]
+    client = _authed_client()
+    resp = client.get("/analyysikeskus/el-ulevott?sisend=isikuandmete+kaitse")
+    assert resp.status_code == 200
+    body = resp.text
+    # The disambiguation prompt + both candidate links (re-running the
+    # workflow with each candidate's CELEX).
+    assert "Mitu vastet — valige üks:" in body
+    assert "sisend=32016R0679" in body
+    assert "sisend=32018L1972" in body
+    # Still a full result shell with an enabled scope form.
+    for heading in ("Sisend", "Ulatus", "Tulemused", "Tõendid", "Soovitatud tegevused"):
+        assert heading in body, heading
+    assert "Uuenda ulatust" in body
+
+
+def test_el_ulevott_blank_input_redirects():
+    with patch("app.auth.middleware._get_provider") as mock_provider:
+        mock_provider.return_value = _stub_provider()
+        client = _authed_client()
+        resp = client.get("/analyysikeskus/el-ulevott")
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/analyysikeskus"
 
 
 # ---------------------------------------------------------------------------

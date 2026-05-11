@@ -6,7 +6,7 @@ This module hosts:
 
     GET  /analyysikeskus                         — workflow directory (#720)
     GET  /analyysikeskus/normi-mojuahel          — Normi mõjuahel (#722)
-    GET  /analyysikeskus/el-ulevott              — EL ülevõtt stub (#723 fills it in)
+    GET  /analyysikeskus/el-ulevott              — EL ülevõtt ja harmoneerimine (#723)
 
 Only the two workflows with backing ontology data today (``Normi
 mõjuahel`` and ``EL ülevõtt ja harmoneerimine``) are wired here; the
@@ -27,12 +27,27 @@ draft's persisted ``impact_reports`` row instead. Ad-hoc analyses are
 ephemeral — recomputed on every GET, never persisted (C-lite). Nothing
 on the page uses SPARQL / RDF / named-graph / "graph URI" language —
 the ``Ulatus`` controls read purely as legal/policy scope.
+
+**#723 — EL ülevõtt ja harmoneerimine.** The workflow resolves the
+user's input to one ``estleg:EULegislation`` URI — a CELEX number via
+:class:`app.docs.reference_resolver.ReferenceResolver`, or a free-text
+title / policy area via a label search
+(:func:`app.analyysikeskus.eu_lookup.search_eu_acts_by_label`); several
+matches are surfaced as clickable candidates, never silently picked —
+then runs an **entity-centered, act/provision-level transposition
+query** (:func:`app.docs.impact.eu_transposition.run_eu_transposition`,
+no synthetic graph) and renders the transposition table + risk band
+through the same result shell. There is no EU Article/Obligation entity
+model in the ontology, so the article-by-article matrix is a separate
+ontology-enrichment ticket. Same legal/policy-only ``Ulatus`` framing
+as Normi.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -42,11 +57,13 @@ from starlette.requests import Request
 from starlette.responses import RedirectResponse
 
 from app.analyysikeskus.adhoc_analysis import run_adhoc_impact_analysis
+from app.analyysikeskus.eu_lookup import search_eu_acts_by_label
 from app.analyysikeskus.input_parser import parse_user_reference
 from app.analyysikeskus.result_shell import analysis_result_shell
 from app.db import get_connection as _connect
 from app.docs.entity_extractor import ExtractedRef
 from app.docs.impact.analyzer import ImpactFindings
+from app.docs.impact.eu_transposition import run_eu_transposition
 from app.docs.impact.scoring import IMPACT_BAND_LABELS_ET, ImpactBand, impact_band
 from app.docs.labels import TYPE_LABELS_ET as _TYPE_LABELS_ET
 from app.docs.reference_resolver import ReferenceResolver
@@ -359,72 +376,82 @@ def analyysikeskus_page(req: Request):
 
 
 # ---------------------------------------------------------------------------
-# EL ülevõtt — still a stub (#723 fills it in)
+# Shared between Normi mõjuahel (#722) and EL ülevõtt (#723)
 # ---------------------------------------------------------------------------
 
-# Stub copy reused by the EL ülevõtt result page until #723 lands the
-# real computation.
-_RESULTS_STUB_TEXT = "Selle töövoo tulemuste arvutus on koostamisel — tulekul."
-_EVIDENCE_STUB_TEXT = (
-    "Tõendid (allikad, seosed, kuupäevad, lingid) kuvatakse siin, kui tulemused on arvutatud."
-)
-_STUB_ACTIONS: list[dict[str, str]] = [
-    {"label": "Küsi nõustajalt", "href": "/chat/new"},
-    {"label": "Tagasi analüüsikeskusesse", "href": "/analyysikeskus"},
-]
+# Workflow identifiers — drive which ``Ulatus`` checkboxes/defaults apply
+# in :class:`_Scope` and which action URL the scope form posts back to.
+_WORKFLOW_NORMI = "normi"
+_WORKFLOW_EL = "el_ulevott"
+
+_WORKFLOW_ACTION: dict[str, str] = {
+    _WORKFLOW_NORMI: "/analyysikeskus/normi-mojuahel",
+    _WORKFLOW_EL: "/analyysikeskus/el-ulevott",
+}
+
+# CELEX shape — mirrors :data:`app.docs.reference_resolver._CELEX_RE`
+# (``32016R0679``-style). Used by the EL ülevõtt route to pick the best
+# ``sisend`` value for a candidate's deep-link (CELEX if known, else
+# the exact label).
+_CELEX_TOKEN_RE = re.compile(r"^\d{5}[A-Z]\d{1,4}$", re.IGNORECASE)
 
 
-def el_ulevott_page(req: Request):
-    """GET /analyysikeskus/el-ulevott?sisend=<text> — EL ülevõtt ja harmoneerimine (stub)."""
-    sisend = (req.query_params.get("sisend") or "").strip()
-    if not sisend:
-        return RedirectResponse(url="/analyysikeskus", status_code=303)
-
-    auth = req.scope.get("auth") or None
-    theme = get_theme_from_request(req)
-    return analysis_result_shell(
-        workflow_title="EL ülevõtt ja harmoneerimine",
-        input_summary=P(f"Sisestasite: «{sisend}»"),  # noqa: F405
-        results_block=Alert(_RESULTS_STUB_TEXT, variant="info"),
-        evidence_block=P(_EVIDENCE_STUB_TEXT, cls="muted-text"),  # noqa: F405
-        actions=_STUB_ACTIONS,
-        user=auth,
-        theme=theme,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Normi mõjuahel (#722) — helpers
-# ---------------------------------------------------------------------------
-
-
-# Scope state read off the query string. Booleans default per the design
-# note: EU + court practice on, org-wide drafts off.
+# Scope state read off the query string. The set of boolean controls —
+# and their defaults — depends on the workflow (the design note: Normi
+# defaults EU + court practice on / org-wide drafts off; EL ülevõtt
+# defaults court practice on / transposing-provision drafts off, and
+# treats EU law as always in scope since the whole workflow is
+# EU-centric, so it has no "Kaasa EL õigus" toggle).
 class _Scope:
     """Parsed ``Ulatus`` scope from the GET query params.
 
     ``oigus`` is informational only (temporal redactions aren't wired —
-    the second select option is disabled). ``include_eu`` /
-    ``include_court`` actually filter the analysis output;
-    ``org_wide_drafts`` only changes the ``Seotud eelnõud`` framing
-    (the underlying query returns what it returns).
+    the second select option is disabled). The boolean flags are
+    workflow-specific:
+
+    * **Normi mõjuahel** — ``include_eu`` / ``include_court`` actually
+      filter the analysis output; ``org_wide_drafts`` only re-frames the
+      ``Seotud eelnõud`` block.
+    * **EL ülevõtt** — ``include_eu`` is always ``True`` (no toggle);
+      ``include_court`` toggles the "Kaasa kohtupraktika" control and
+      ``include_transposing_drafts`` the "Kaasa eelnõud, mis puudutavad
+      ülevõtvaid sätteid" control. In the act/provision-level MVP
+      neither currently *filters* the transposition table (the data to
+      do so honestly isn't surfaced by the act-level query yet — see
+      :func:`el_ulevott_page`); the controls are kept for UX parity with
+      Normi and the params ride through so the page stays shareable.
     """
 
-    def __init__(self, params: Any) -> None:
-        # Checkboxes: present in the query string ⇒ checked. The default
-        # form has EU + court checked, so on a *first* GET (no scope
-        # params at all) we want both ON; we detect "the form was
-        # submitted" by the presence of the marker hidden input
-        # ``ulatus_submitted``.
+    def __init__(self, params: Any, *, workflow: str = _WORKFLOW_NORMI) -> None:
+        # Checkboxes: present in the query string ⇒ checked. We detect
+        # "the form was submitted" by the marker hidden input
+        # ``ulatus_submitted`` — on a *first* GET (no scope params) we
+        # apply the workflow's defaults instead of treating every box as
+        # unchecked.
+        self.workflow = workflow
         submitted = params.get("ulatus_submitted") == "1"
-        if submitted:
-            self.include_eu = params.get("kaasa_el") is not None
-            self.include_court = params.get("kaasa_kohtupraktika") is not None
-            self.org_wide_drafts = params.get("kogu_organisatsioon") is not None
-        else:
-            self.include_eu = True
-            self.include_court = True
+        if workflow == _WORKFLOW_EL:
+            self.include_eu = True  # EU-centric workflow — always in scope, no toggle
+            if submitted:
+                self.include_court = params.get("kaasa_kohtupraktika") is not None
+                self.include_transposing_drafts = params.get("kaasa_eelnoud") is not None
+            else:
+                self.include_court = True
+                self.include_transposing_drafts = False
+            # ``org_wide_drafts`` is unused by EL ülevõtt; kept as a
+            # harmless alias so any shared helper that reads it doesn't
+            # need to special-case the workflow.
             self.org_wide_drafts = False
+        else:
+            self.include_transposing_drafts = False
+            if submitted:
+                self.include_eu = params.get("kaasa_el") is not None
+                self.include_court = params.get("kaasa_kohtupraktika") is not None
+                self.org_wide_drafts = params.get("kogu_organisatsioon") is not None
+            else:
+                self.include_eu = True
+                self.include_court = True
+                self.org_wide_drafts = False
         self.oigus = params.get("oigus") or "current"
         self.ajavahemik_algus = params.get("ajavahemik_algus") or ""
         self.ajavahemik_lopp = params.get("ajavahemik_lopp") or ""
@@ -432,12 +459,18 @@ class _Scope:
     def query_pairs(self, sisend: str) -> list[tuple[str, str]]:
         """Return the ``(key, value)`` pairs to carry the scope through links."""
         pairs: list[tuple[str, str]] = [("sisend", sisend), ("ulatus_submitted", "1")]
-        if self.include_eu:
-            pairs.append(("kaasa_el", "1"))
-        if self.include_court:
-            pairs.append(("kaasa_kohtupraktika", "1"))
-        if self.org_wide_drafts:
-            pairs.append(("kogu_organisatsioon", "1"))
+        if self.workflow == _WORKFLOW_EL:
+            if self.include_court:
+                pairs.append(("kaasa_kohtupraktika", "1"))
+            if self.include_transposing_drafts:
+                pairs.append(("kaasa_eelnoud", "1"))
+        else:
+            if self.include_eu:
+                pairs.append(("kaasa_el", "1"))
+            if self.include_court:
+                pairs.append(("kaasa_kohtupraktika", "1"))
+            if self.org_wide_drafts:
+                pairs.append(("kogu_organisatsioon", "1"))
         if self.oigus and self.oigus != "current":
             pairs.append(("oigus", self.oigus))
         if self.ajavahemik_algus:
@@ -445,6 +478,11 @@ class _Scope:
         if self.ajavahemik_lopp:
             pairs.append(("ajavahemik_lopp", self.ajavahemik_lopp))
         return pairs
+
+    def workflow_link(self, sisend: str) -> str:
+        """Build the workflow's ``…?sisend=…`` URL with the scope params attached."""
+        action = _WORKFLOW_ACTION.get(self.workflow, _WORKFLOW_ACTION[_WORKFLOW_NORMI])
+        return f"{action}?{_split_link_query(self.query_pairs(sisend))}"
 
 
 def _type_localname(uri: str) -> str:
@@ -477,17 +515,36 @@ def _split_link_query(pairs: list[tuple[str, str]]) -> str:
     return urlencode(pairs)
 
 
+def _workflow_link(sisend: str, *, workflow: str, scope: _Scope | None = None) -> str:
+    """Build a ``/analyysikeskus/<workflow>?sisend=…`` link (scope-carrying when given).
+
+    Shared by Normi mõjuahel (#722) and EL ülevõtt (#723) — both render
+    clickable candidate / disambiguation links that re-run the workflow.
+    """
+    if scope is not None:
+        return scope.workflow_link(sisend)
+    action = _WORKFLOW_ACTION.get(workflow, _WORKFLOW_ACTION[_WORKFLOW_NORMI])
+    return f"{action}?{_split_link_query([('sisend', sisend)])}"
+
+
 def _normi_link(sisend: str, *, scope: _Scope | None = None) -> str:
     """Build a ``/analyysikeskus/normi-mojuahel?sisend=…`` link (scope-carrying)."""
-    pairs: list[tuple[str, str]] = (
-        scope.query_pairs(sisend) if scope is not None else [("sisend", sisend)]
-    )
-    return f"/analyysikeskus/normi-mojuahel?{_split_link_query(pairs)}"
+    return _workflow_link(sisend, workflow=_WORKFLOW_NORMI, scope=scope)
 
 
 # ---------------------------------------------------------------------------
-# Normi mõjuahel — scope form (the design note overrides result_shell's stub)
+# Shared ``Ulatus`` scope form (overrides result_shell's disabled stub)
 # ---------------------------------------------------------------------------
+#
+# Both workflows render the same shape of GET form back to their own
+# route, carrying ``sisend`` + ``ulatus_submitted=1`` hidden + a set of
+# legal-language scope checkboxes + the disabled "tulekul" controls
+# (temporal redactions, KOV regulations, time range) + an enabled
+# "Uuenda ulatust" submit. Only the per-workflow checkbox set differs,
+# so the builder below takes that as a parameter — Normi and EL ülevõtt
+# share everything else. **All copy is legal/policy language — no
+# SPARQL / RDF / named-graph / embedding vocabulary anywhere; these are
+# *scope* words.**
 
 _LAW_SCOPE_OPTIONS: list[tuple[str, str]] = [
     ("current", "Kehtiv õigus"),
@@ -495,21 +552,33 @@ _LAW_SCOPE_OPTIONS: list[tuple[str, str]] = [
 ]
 
 
-def _normi_scope_block(sisend: str, scope: _Scope) -> Any:
-    """The enabled ``Ulatus`` scope form for Normi mõjuahel.
+def _scope_form(
+    *,
+    sisend: str,
+    workflow: str,
+    intro_text: str,
+    checkboxes: list[Any],
+    checkbox_help: str | None = None,
+) -> Any:
+    """Render the enabled ``Ulatus`` scope form for a workflow.
 
-    A ``GET`` form back to ``/analyysikeskus/normi-mojuahel`` carrying
-    ``sisend`` as a hidden input + the legal-language scope controls.
-    Submitting re-runs the analysis with the chosen scope. All copy is
-    legal/policy language — there is no SPARQL / RDF / named-graph
-    vocabulary anywhere (these are *scope* words).
+    Args:
+        sisend: The analysed input — carried through as a hidden field.
+        workflow: One of :data:`_WORKFLOW_NORMI` / :data:`_WORKFLOW_EL`;
+            selects the form's ``action`` URL.
+        intro_text: The muted explanatory sentence above the controls
+            (states the default scope in legal terms).
+        checkboxes: The workflow-specific scope ``Checkbox`` controls,
+            already constructed with their checked state. Disabled
+            "tulekul" controls (temporal redactions, KOV, time range)
+            are appended by this builder, so callers pass only the
+            enabled ones.
+        checkbox_help: Optional muted ``Small`` note rendered right
+            after the workflow checkboxes (e.g. what an opt-in does).
     """
-    return Form(  # noqa: F405
-        P(  # noqa: F405
-            "Analüüsin vaikimisi kehtivat õigust, seotud eelnõusid, Riigikohtu "
-            "praktikat ja EL õigusakte. Võite ulatust muuta ja analüüsi uuesti käivitada.",
-            cls="muted-text",
-        ),
+    action = _WORKFLOW_ACTION.get(workflow, _WORKFLOW_ACTION[_WORKFLOW_NORMI])
+    parts: list[Any] = [
+        P(intro_text, cls="muted-text"),  # noqa: F405
         # Carry the analysed input through unchanged.
         Hidden(name="sisend", value=sisend),  # noqa: F405
         # Marker so the handler can tell "form submitted" from "first GET".
@@ -529,57 +598,117 @@ def _normi_scope_block(sisend: str, scope: _Scope) -> Any:
             ),
             cls="form-field",
         ),
-        # Toggles that actually affect the analysis output.
-        Checkbox("kaasa_el", checked=scope.include_eu, label="Kaasa EL õigus"),
-        Checkbox(
-            "kaasa_kohtupraktika",
-            checked=scope.include_court,
-            label="Kaasa kohtupraktika",
-        ),
-        Checkbox(
-            "kogu_organisatsioon",
-            checked=scope.org_wide_drafts,
-            label="Kaasa kogu organisatsiooni eelnõud",
-        ),
-        Small(  # noqa: F405
-            "Vaikimisi näitan otseseid eelnõuseoseid; märkige see, et "
-            "kaasata kogu organisatsiooni eelnõud.",
-            cls="muted-text",
-        ),
-        # KOV regulations — not wired yet; disabled with a "Tulekul" tooltip.
-        Checkbox(
-            "kaasa_kov",
-            checked=False,
-            label="Kaasa KOV regulatsioonid",
-            disabled=True,
-            title="Tulekul",
-        ),
-        # Optional time range — disabled ("tulekul"); temporal scoping
-        # isn't backed by data yet.
-        Div(  # noqa: F405
-            Label("Ajavahemik (tulekul)"),  # noqa: F405
-            Span(  # noqa: F405
-                Input(
-                    "ajavahemik_algus",
-                    type="date",
-                    aria_label="Alguskuupäev",
-                    disabled=True,
-                ),
-                Span(" – ", cls="muted-text"),  # noqa: F405
-                Input(
-                    "ajavahemik_lopp",
-                    type="date",
-                    aria_label="Lõppkuupäev",
-                    disabled=True,
-                ),
-                cls="analyysikeskus-date-range",
+        *checkboxes,
+    ]
+    if checkbox_help:
+        parts.append(Small(checkbox_help, cls="muted-text"))  # noqa: F405
+    parts.extend(
+        [
+            # KOV regulations — not wired yet; disabled with a "Tulekul" tooltip.
+            Checkbox(
+                "kaasa_kov",
+                checked=False,
+                label="Kaasa KOV regulatsioonid",
+                disabled=True,
+                title="Tulekul",
             ),
-            cls="form-field",
-        ),
-        Button("Uuenda ulatust", type="submit", variant="secondary", size="sm"),
+            # Optional time range — disabled ("tulekul"); temporal scoping
+            # isn't backed by data yet.
+            Div(  # noqa: F405
+                Label("Ajavahemik (tulekul)"),  # noqa: F405
+                Span(  # noqa: F405
+                    Input(
+                        "ajavahemik_algus",
+                        type="date",
+                        aria_label="Alguskuupäev",
+                        disabled=True,
+                    ),
+                    Span(" – ", cls="muted-text"),  # noqa: F405
+                    Input(
+                        "ajavahemik_lopp",
+                        type="date",
+                        aria_label="Lõppkuupäev",
+                        disabled=True,
+                    ),
+                    cls="analyysikeskus-date-range",
+                ),
+                cls="form-field",
+            ),
+            Button("Uuenda ulatust", type="submit", variant="secondary", size="sm"),
+        ]
+    )
+    return Form(  # noqa: F405
+        *parts,
         method="get",
-        action="/analyysikeskus/normi-mojuahel",
+        action=action,
         cls="analyysikeskus-scope-form",
+    )
+
+
+def _normi_scope_block(sisend: str, scope: _Scope) -> Any:
+    """The enabled ``Ulatus`` scope form for Normi mõjuahel (#722)."""
+    return _scope_form(
+        sisend=sisend,
+        workflow=_WORKFLOW_NORMI,
+        intro_text=(
+            "Analüüsin vaikimisi kehtivat õigust, seotud eelnõusid, Riigikohtu "
+            "praktikat ja EL õigusakte. Võite ulatust muuta ja analüüsi uuesti käivitada."
+        ),
+        checkboxes=[
+            # Toggles that actually affect the analysis output.
+            Checkbox("kaasa_el", checked=scope.include_eu, label="Kaasa EL õigus"),
+            Checkbox(
+                "kaasa_kohtupraktika",
+                checked=scope.include_court,
+                label="Kaasa kohtupraktika",
+            ),
+            Checkbox(
+                "kogu_organisatsioon",
+                checked=scope.org_wide_drafts,
+                label="Kaasa kogu organisatsiooni eelnõud",
+            ),
+        ],
+        checkbox_help=(
+            "Vaikimisi näitan otseseid eelnõuseoseid; märkige see, et "
+            "kaasata kogu organisatsiooni eelnõud."
+        ),
+    )
+
+
+def _el_ulevott_scope_block(sisend: str, scope: _Scope) -> Any:
+    """The enabled ``Ulatus`` scope form for EL ülevõtt ja harmoneerimine (#723).
+
+    Legal/policy language only — the controls read as "what to include in
+    the transposition overview", never as query configuration. In the
+    act/provision-level MVP the two enabled checkboxes are kept for UX
+    parity with Normi and carry through for shareability, but neither
+    currently filters the transposition table (see :func:`el_ulevott_page`
+    for the honesty note).
+    """
+    return _scope_form(
+        sisend=sisend,
+        workflow=_WORKFLOW_EL,
+        intro_text=(
+            "Vaatan vaikimisi, millised Eesti õigusaktid ja sätted on selle "
+            "EL õigusaktiga seotud, ning seotud Riigikohtu praktikat. Võite "
+            "ulatust muuta ja analüüsi uuesti käivitada."
+        ),
+        checkboxes=[
+            Checkbox(
+                "kaasa_kohtupraktika",
+                checked=scope.include_court,
+                label="Kaasa kohtupraktika",
+            ),
+            Checkbox(
+                "kaasa_eelnoud",
+                checked=scope.include_transposing_drafts,
+                label="Kaasa eelnõud, mis puudutavad ülevõtvaid sätteid",
+            ),
+        ],
+        checkbox_help=(
+            "Kohtupraktika ja eelnõude sidumine ülevõtvate sätetega on "
+            "täiendamisel — praegu kuvan akti- ja sättetasandi ülevaate."
+        ),
     )
 
 
@@ -1472,6 +1601,554 @@ def _render_unresolved(
         theme=theme,
         scope_block=_normi_scope_block(sisend, scope),
     )
+
+
+# ---------------------------------------------------------------------------
+# EL ülevõtt ja harmoneerimine (#723)
+# ---------------------------------------------------------------------------
+#
+# Workflow flow (per the epic #714 design note, "Workflow 2"):
+#
+#   1. parse_user_reference(sisend) → if it contains a CELEX-bearing
+#      ``eu_act`` ref, resolve it via ReferenceResolver. Exactly one EU
+#      act URI ⇒ run_eu_transposition(uri) and render the result.
+#   2. No CELEX (a free-text title / policy area) ⇒ search_eu_acts_by_label.
+#      Exactly one candidate ⇒ treat as resolved (re-run with its CELEX
+#      or exact label). Several ⇒ render a "Mitu vastet — valige üks:"
+#      disambiguation card with clickable candidate links. None ⇒ a
+#      friendly "Ei tuvastanud EL õigusakti" warning.
+#   3. A dead Jena (resolver / runner / label-search all returning
+#      empty) ⇒ a graceful "ei õnnestunud" message inside the result
+#      shell — never a 500.
+#
+# The result page is the standard 5-block ``analysis_result_shell``:
+# Sisend / Ulatus / Tulemused (one-line summary + the transposition
+# table + a risk band) / Tõendid / Soovitatud tegevused. The MVP is an
+# **act/provision-level transposition table** — there is no EU
+# Article/Obligation entity model in the ontology, so the article-by-
+# article matrix sketched under "Workflow 2 / UI Output" in the design
+# note is a separate ontology-enrichment ticket.
+#
+# Honesty note (per the design note's "honesty over coverage"): the two
+# enabled ``Ulatus`` checkboxes ("Kaasa kohtupraktika", "Kaasa eelnõud,
+# mis puudutavad ülevõtvaid sätteid") are kept for UX parity with Normi
+# and carry through for shareability, but in this act-level MVP neither
+# *filters* the transposition table — wiring court practice / drafts to
+# the transposing provisions cleanly needs ontology + SPARQL work that's
+# out of scope here. Nothing on the page uses SPARQL / RDF / named-graph
+# / embedding language — legal/policy words only.
+
+# Status → Badge variant. Consistent with the impact-report / dashboard
+# badge usage: covered → success, partial → warning, missing → danger,
+# unclear → the neutral default.
+_TRANSPOSITION_STATUS_BADGE: dict[str, BadgeVariant] = {
+    "kaetud": "success",
+    "osaline": "warning",
+    "puudub": "danger",
+    "ebaselge": "default",
+}
+
+# Status → a short Estonian label for the ``Staatus`` column.
+_TRANSPOSITION_STATUS_LABEL_ET: dict[str, str] = {
+    "kaetud": "Kaetud",
+    "osaline": "Osaline",
+    "puudub": "Puudub",
+    "ebaselge": "Ebaselge",
+}
+
+# Status → the recommended next action shown in the ``Soovitatud
+# tegevus`` column (a short Estonian phrase, no LLM).
+_TRANSPOSITION_STATUS_ACTION_ET: dict[str, str] = {
+    "kaetud": "—",
+    "osaline": "Täpsusta ülevõttu",
+    "puudub": "Lisa puuduv säte",
+    "ebaselge": "Kontrolli ülevõtu staatust",
+}
+
+# Status → the relation phrase used in the ``Tõendid`` rows.
+_TRANSPOSITION_RELATION_ET: dict[str, str] = {
+    "with_provision": "on harmoneeritud aktiga",
+    "act_only": "võtab üle direktiivi",
+}
+
+
+def _eu_celex_or_label(ref_text: str) -> str:
+    """Return *ref_text* unchanged — used to build a candidate deep-link's ``sisend``.
+
+    A candidate's best ``sisend`` is its CELEX (a clean, unambiguous
+    re-resolve) if it has one, else its exact label. The caller picks
+    which to pass; this helper just keeps the call sites tidy.
+    """
+    return ref_text
+
+
+def _eu_summary_line(rows: list[dict[str, Any]], *, eu_label: str) -> Any:
+    """The one-line ``Tulemused`` lead — N linked Estonian acts, M uncovered rows."""
+    linked_acts = {str(r.get("ee_act")) for r in rows if r.get("ee_act")}
+    n_acts = len(linked_acts)
+    n_missing = sum(1 for r in rows if str(r.get("status")) != "kaetud")
+    return P(  # noqa: F405
+        Strong(eu_label),  # noqa: F405
+        f" ülevõte: {n_acts} Eesti õigusakti seotud, {n_missing} kohustust/akti katmata.",
+    )
+
+
+def _eu_link(uri: str | None, label: str, *, scope: _Scope | None = None) -> Any:
+    """Render *label* linked to the explorer focus view, or plain text without a URI.
+
+    *scope* is accepted (and ignored) for call-site symmetry — the
+    explorer link doesn't carry the workflow scope; only the
+    workflow's own candidate / scope-form links do.
+    """
+    text = label or (uri or "—")
+    if not uri:
+        return Span(text)  # noqa: F405
+    return A(text, href=explorer_focus_url(uri), cls="data-table-link")  # noqa: F405
+
+
+def _eu_act_cell(row: dict[str, Any]) -> Any:
+    """``EL õigusakt`` cell — label + CELEX, linked to the explorer."""
+    label = str(row.get("eu_label") or "EL õigusakt")
+    celex = str(row.get("celex") or "").strip()
+    text = f"{label} ({celex})" if celex else label
+    return _eu_link(str(row.get("eu_act") or "") or None, text)
+
+
+def _ee_act_cell(row: dict[str, Any]) -> Any:
+    """``Eesti õigusakt(id)`` cell — label linked to the explorer, or "—"."""
+    uri = str(row.get("ee_act") or "").strip()
+    if not uri:
+        return "—"
+    label = str(row.get("ee_act_label") or "").strip() or uri
+    return _eu_link(uri, label)
+
+
+def _ee_provision_cell(row: dict[str, Any]) -> Any:
+    """``Eesti säte(d)`` cell — the harmonised provision's label, or "—"."""
+    uri = str(row.get("ee_provision") or "").strip()
+    if not uri:
+        return "—"
+    label = str(row.get("ee_provision_label") or "").strip() or uri
+    return _eu_link(uri, label)
+
+
+def _status_badge_cell(row: dict[str, Any]) -> Any:
+    """``Staatus`` cell — a colour-coded Badge."""
+    status = str(row.get("status") or "ebaselge")
+    variant = _TRANSPOSITION_STATUS_BADGE.get(status, "default")
+    label = _TRANSPOSITION_STATUS_LABEL_ET.get(status, status)
+    return Badge(label, variant=variant)
+
+
+def _status_action_cell(row: dict[str, Any]) -> Any:
+    """``Soovitatud tegevus`` cell — a short Estonian phrase keyed by status."""
+    status = str(row.get("status") or "ebaselge")
+    return _TRANSPOSITION_STATUS_ACTION_ET.get(status, "Kontrolli ülevõtu staatust")
+
+
+def _eu_risk_band(rows: list[dict[str, Any]]) -> tuple[str, BadgeVariant]:
+    """Derive a risk band + Badge variant from the row statuses.
+
+    Any ``puudub`` → ``Kõrge risk``; any ``osaline`` / ``ebaselge`` but
+    no ``puudub`` → ``Vajab kontrolli``; all ``kaetud`` → ``Väike mõju``.
+    Mirrors the band vocabulary the Normi workflow's result page speaks.
+    """
+    statuses = {str(r.get("status") or "ebaselge") for r in rows}
+    if "puudub" in statuses:
+        return "Kõrge risk", "danger"
+    if statuses & {"osaline", "ebaselge"}:
+        return "Vajab kontrolli", "warning"
+    return "Väike mõju", "success"
+
+
+def _eu_recommendation(rows: list[dict[str, Any]]) -> str:
+    """A one-line recommended-next-action sentence templated from the statuses."""
+    n_missing = sum(1 for r in rows if str(r.get("status")) == "puudub")
+    n_partial = sum(1 for r in rows if str(r.get("status")) in {"osaline", "ebaselge"})
+    if n_missing > 0:
+        return (
+            "Soovitus: lisada puuduvad ülevõtvad sätted ja vajadusel "
+            "kaasata EL koordinaator enne menetlust."
+        )
+    if n_partial > 0:
+        return (
+            "Soovitus: täpsustada osalist või ebaselget ülevõttu ning "
+            "kontrollida vastavust EL õigusaktile."
+        )
+    return "Soovitus: ülevõte näib kaetud — kasuta seda kinnitusena kooskõlastamisel."
+
+
+def _eu_results_block(rows: list[dict[str, Any]], *, eu_label: str) -> list[Any]:
+    """Assemble the ``Tulemused`` content: summary + transposition table + risk band.
+
+    Empty *rows* (shouldn't normally happen — :func:`run_eu_transposition`
+    synthesises a ``puudub`` row when the act has no transposing acts —
+    but a dead-Jena ``[]`` reaches here) renders a one-line muted row.
+    The ``Vastutav asutus`` column is intentionally absent: no
+    competent-authority predicate is wired in the app yet (see
+    :mod:`app.docs.impact.eu_transposition`), and shipping a column of
+    "—" would be noise.
+    """
+    if not rows:
+        return [_missing_row("Ülevõtu seoseid ei leitud.")]
+
+    capped = rows[:_MAX_RESULT_ROWS]
+    columns = [
+        Column(key="eu_act", label="EL õigusakt", sortable=False, render=_eu_act_cell),
+        Column(key="ee_act", label="Eesti õigusakt(id)", sortable=False, render=_ee_act_cell),
+        Column(
+            key="ee_provision",
+            label="Eesti säte(d)",
+            sortable=False,
+            render=_ee_provision_cell,
+        ),
+        Column(key="status", label="Staatus", sortable=False, render=_status_badge_cell),
+        Column(
+            key="action",
+            label="Soovitatud tegevus",
+            sortable=False,
+            render=_status_action_cell,
+        ),
+    ]
+    band_label, band_variant = _eu_risk_band(rows)
+    return [
+        _eu_summary_line(rows, eu_label=eu_label),
+        DataTable(columns=columns, rows=capped, empty_message="Ülevõtu seoseid ei leitud."),
+        _sub_section(
+            "Riskihinnang ja soovitus",
+            P(Span("Riskitase: ", cls="muted-text"), Badge(band_label, variant=band_variant)),  # noqa: F405
+            P(_eu_recommendation(rows)),  # noqa: F405
+        ),
+    ]
+
+
+def _eu_evidence_block(rows: list[dict[str, Any]]) -> list[Any]:
+    """Assemble the ``Tõendid`` rows — one per transposition / harmonisation link.
+
+    Source = the Estonian act/provision label; relation = "võtab üle
+    direktiivi" (act-level) or "on harmoneeritud aktiga" (provision-
+    level); target = the EU act label + CELEX. Includes the raw
+    ``transpositionStatus`` literal where present (the row's mapped
+    bucket label), an "Ava allikas" link to the EE act/provision plus an
+    "Ava õiguskaardil →" deep link, and a "miks see on oluline" line.
+    A ``puudub`` row (no transposing act) becomes one evidence row
+    flagging the gap. Empty → a muted "—".
+    """
+    out: list[Any] = []
+    for r in rows or []:
+        status = str(r.get("status") or "ebaselge")
+        eu_label = str(r.get("eu_label") or "EL õigusakt")
+        celex = str(r.get("celex") or "").strip()
+        target_label = f"{eu_label} ({celex})" if celex else eu_label
+        provision_uri = str(r.get("ee_provision") or "").strip()
+        provision_label = str(r.get("ee_provision_label") or "").strip()
+        act_uri = str(r.get("ee_act") or "").strip()
+        act_label = str(r.get("ee_act_label") or "").strip()
+
+        if status == "puudub":
+            out.append(
+                _evidence_row(
+                    source_label=target_label,
+                    relation="ei ole veel üle võetud ühegi Eesti õigusaktiga",
+                    target_label="",
+                    uri=act_uri or "",
+                    why=(
+                        "Selle EL õigusakti ülevõtmiseks ei leitud Eesti sätet — "
+                        "kontrolli, kas ülevõte on vajalik või veel pooleli."
+                    ),
+                    when=_TRANSPOSITION_STATUS_LABEL_ET.get(status, status),
+                )
+            )
+            continue
+
+        if provision_uri:
+            source_label = provision_label or act_label or "Eesti säte"
+            relation = _TRANSPOSITION_RELATION_ET["with_provision"]
+            link_uri = provision_uri
+            why = (
+                "See Eesti säte on EL õigusaktiga harmoneeritud — "
+                "muudatus võib mõjutada vastavust."
+            )
+        else:
+            source_label = act_label or "Eesti õigusakt"
+            relation = _TRANSPOSITION_RELATION_ET["act_only"]
+            link_uri = act_uri
+            why = (
+                "See Eesti õigusakt võtab EL õigusakti üle — "
+                "kontrolli ülevõtu täielikkust enne menetlust."
+            )
+        out.append(
+            _evidence_row(
+                source_label=source_label,
+                relation=relation,
+                target_label=target_label,
+                uri=link_uri,
+                why=why,
+                when=_TRANSPOSITION_STATUS_LABEL_ET.get(status, status),
+            )
+        )
+    return out
+
+
+def _eu_actions(eu_act_uri: str | None) -> list[dict[str, str]]:
+    """The ``Soovitatud tegevused`` action set for an EL ülevõtt result page.
+
+    ``Ava õiguskaardil`` (the explorer focus view of the EU act),
+    ``Küsi nõustajalt`` (→ ``/chat/new``), and ``Tagasi
+    analüüsikeskusesse``. ``Koosta kooskõla memo`` has no machinery yet
+    so it's omitted (a 500-ing button would be worse than a missing one).
+    """
+    actions: list[dict[str, str]] = []
+    if eu_act_uri:
+        actions.append({"label": "Ava õiguskaardil", "href": explorer_focus_url(eu_act_uri)})
+    actions.append({"label": "Küsi nõustajalt", "href": "/chat/new"})
+    actions.append({"label": "Tagasi analüüsikeskusesse", "href": "/analyysikeskus"})
+    return actions
+
+
+def _eu_input_summary(eu_label: str, celex: str | None) -> Any:
+    """The ``Sisend`` card body — which EU act we analysed + its CELEX."""
+    return P(  # noqa: F405
+        "Analüüsisin EL õigusakti: ",
+        Strong(eu_label),  # noqa: F405
+        " — ",
+        celex or "(CELEX puudub)",
+    )
+
+
+def _render_eu_transposition_result(
+    *,
+    auth: Any,
+    theme: str,
+    eu_act_uri: str,
+    eu_label: str,
+    celex: str | None,
+    sisend: str,
+    scope: _Scope,
+) -> Any:
+    """Render the EL ülevõtt result page for a resolved EU act URI.
+
+    Runs :func:`app.docs.impact.eu_transposition.run_eu_transposition`
+    (entity-centered, no synthetic graph) and lays the rows out through
+    :func:`analysis_result_shell`. A dead Jena ⇒ ``run_eu_transposition``
+    returns ``[]`` ⇒ the ``Tulemused`` block shows a graceful "ei
+    õnnestunud" line rather than 500.
+    """
+    rows = run_eu_transposition(eu_act_uri)
+    # Prefer the label/CELEX the runner saw on the act itself (it may be
+    # richer than what the resolver / label-search handed us).
+    if rows:
+        eu_label = str(rows[0].get("eu_label") or eu_label) or eu_label
+        celex = (str(rows[0].get("celex") or "").strip() or celex) or celex
+
+    if rows:
+        results_block: Any = _eu_results_block(rows, eu_label=eu_label)
+        evidence_rows = _eu_evidence_block(rows)
+        evidence_block: Any = evidence_rows if evidence_rows else _missing_row("—")
+    else:
+        results_block = Alert(
+            "Ülevõtu andmete päring ei õnnestunud. Proovige hiljem uuesti.",
+            variant="warning",
+        )
+        evidence_block = _missing_row("—")
+
+    return analysis_result_shell(
+        workflow_title="EL ülevõtt ja harmoneerimine",
+        input_summary=_eu_input_summary(eu_label, celex),
+        results_block=results_block,
+        evidence_block=evidence_block,
+        actions=_eu_actions(eu_act_uri),
+        user=auth,
+        theme=theme,
+        scope_block=_el_ulevott_scope_block(sisend, scope),
+    )
+
+
+def _render_eu_disambiguation(
+    *,
+    auth: Any,
+    theme: str,
+    candidates: list[dict[str, Any]],
+    sisend: str,
+    scope: _Scope,
+) -> Any:
+    """Render the "Mitu vastet — valige üks:" card for several label matches.
+
+    Each candidate becomes a link that re-runs the workflow with that
+    candidate's CELEX (preferred — clean re-resolve) or, lacking one,
+    its exact label. The scope params ride along so the user's scope
+    selection survives the pick.
+    """
+    items: list[Any] = []
+    for c in candidates:
+        uri = str(c.get("uri") or "").strip()
+        label = str(c.get("label") or uri or "EL õigusakt").strip()
+        celex = str(c.get("celex") or "").strip()
+        ref_for_link = _eu_celex_or_label(celex or label)
+        if not ref_for_link:
+            continue
+        shown = f"{label} ({celex})" if celex else label
+        items.append(
+            Li(A(shown, href=_workflow_link(ref_for_link, workflow=_WORKFLOW_EL, scope=scope)))  # noqa: F405
+        )
+    results_block: list[Any] = [
+        Alert("Mitu vastet — valige üks:", variant="info"),
+    ]
+    if items:
+        results_block.append(Ul(*items, cls="analyysikeskus-candidates"))  # noqa: F405
+    return analysis_result_shell(
+        workflow_title="EL ülevõtt ja harmoneerimine",
+        input_summary=P(f"Sisestasite: «{sisend}»"),  # noqa: F405
+        results_block=results_block,
+        evidence_block=_missing_row("—"),
+        actions=[
+            {"label": "Küsi nõustajalt", "href": "/chat/new"},
+            {"label": "Tagasi analüüsikeskusesse", "href": "/analyysikeskus"},
+        ],
+        user=auth,
+        theme=theme,
+        scope_block=_el_ulevott_scope_block(sisend, scope),
+    )
+
+
+def _render_eu_unresolved(
+    *,
+    auth: Any,
+    theme: str,
+    sisend: str,
+    scope: _Scope,
+) -> Any:
+    """Render the "Ei tuvastanud EL õigusakti" warning page."""
+    return analysis_result_shell(
+        workflow_title="EL ülevõtt ja harmoneerimine",
+        input_summary=P(f"Sisestasite: «{sisend}»"),  # noqa: F405
+        results_block=Alert(
+            "Ei tuvastanud EL õigusakti. Proovige CELEX-numbrit (nt 32016R0679) "
+            "või akti pealkirja.",
+            variant="warning",
+        ),
+        evidence_block=_missing_row("—"),
+        actions=[
+            {"label": "Küsi nõustajalt", "href": "/chat/new"},
+            {"label": "Tagasi analüüsikeskusesse", "href": "/analyysikeskus"},
+        ],
+        user=auth,
+        theme=theme,
+        scope_block=_el_ulevott_scope_block(sisend, scope),
+    )
+
+
+def _resolve_eu_act_from_celex(refs: list[ExtractedRef]) -> Any | None:
+    """Resolve the first ``eu_act`` ref via :class:`ReferenceResolver`.
+
+    Returns the single resolved ref (with ``entity_uri`` set) when
+    exactly one EU act resolves, else ``None``. Wrapped so a dead Jena
+    (or any resolver crash) degrades to ``None`` — the route then falls
+    through to the label-search path. ``parse_user_reference`` only ever
+    emits **one** ``eu_act`` ref per input (a single CELEX token), so
+    "exactly one" is the normal case.
+    """
+    eu_refs = [r for r in refs if getattr(r, "ref_type", "") == "eu_act"]
+    if not eu_refs:
+        return None
+    try:
+        resolved = ReferenceResolver().resolve(eu_refs)
+    except Exception:
+        logger.warning("EL ülevõtt: CELEX resolution failed", exc_info=True)
+        return None
+    with_uri = [
+        r for r in resolved if getattr(r, "entity_uri", None) and str(r.entity_uri).strip()
+    ]
+    if len(with_uri) == 1:
+        return with_uri[0]
+    return None
+
+
+def _eu_label_search(sisend: str) -> list[dict[str, Any]]:
+    """Free-text → EU-act candidates; an unreachable Jena yields ``[]``.
+
+    Thin wrapper around
+    :func:`app.analyysikeskus.eu_lookup.search_eu_acts_by_label` so the
+    route has one obvious patch point (and the search-box text is bound
+    safely inside the SPARQL ``FILTER(CONTAINS(...))`` — never
+    interpolated).
+    """
+    try:
+        return search_eu_acts_by_label(sisend)
+    except Exception:
+        logger.warning("EL ülevõtt: EU-act label search failed", exc_info=True)
+        return []
+
+
+def el_ulevott_page(req: Request):
+    """GET /analyysikeskus/el-ulevott?sisend=<text> — EL ülevõtt ja harmoneerimine (#723).
+
+    Flow (see the section header above for the design rationale):
+
+    1. Blank ``sisend`` → 303 back to ``/analyysikeskus``.
+    2. ``parse_user_reference(sisend)`` → if a CELEX-bearing ``eu_act``
+       ref resolves to exactly one EU act URI → ``run_eu_transposition``
+       → render the act/provision-level transposition table.
+    3. No CELEX → ``search_eu_acts_by_label`` → exactly one candidate →
+       treat as resolved; several → a "Mitu vastet — valige üks:"
+       disambiguation card; none → an "Ei tuvastanud EL õigusakti"
+       warning.
+
+    A dead Jena anywhere ⇒ a graceful "ei õnnestunud" message inside the
+    result shell, never a 500.
+    """
+    auth = req.scope.get("auth") or None
+    theme = get_theme_from_request(req)
+
+    sisend = (req.query_params.get("sisend") or "").strip()
+    if not sisend:
+        return RedirectResponse(url="/analyysikeskus", status_code=303)
+
+    scope = _Scope(req.query_params, workflow=_WORKFLOW_EL)
+
+    parsed_refs = parse_user_reference(sisend)
+
+    # --- 1. CELEX path -----------------------------------------------------
+    resolved_eu = _resolve_eu_act_from_celex(parsed_refs)
+    if resolved_eu is not None:
+        eu_uri = str(resolved_eu.entity_uri)
+        matched_label = str(getattr(resolved_eu, "matched_label", "") or "").strip()
+        extracted = getattr(resolved_eu, "extracted", None)
+        celex = str(getattr(extracted, "ref_text", "") or "").strip() or None
+        return _render_eu_transposition_result(
+            auth=auth,
+            theme=theme,
+            eu_act_uri=eu_uri,
+            eu_label=matched_label or celex or "EL õigusakt",
+            celex=celex,
+            sisend=sisend,
+            scope=scope,
+        )
+
+    # --- 2. label-search path ---------------------------------------------
+    candidates = _eu_label_search(sisend)
+    if len(candidates) == 1:
+        only = candidates[0]
+        return _render_eu_transposition_result(
+            auth=auth,
+            theme=theme,
+            eu_act_uri=str(only.get("uri") or ""),
+            eu_label=str(only.get("label") or "EL õigusakt"),
+            celex=str(only.get("celex") or "").strip() or None,
+            sisend=sisend,
+            scope=scope,
+        )
+    if len(candidates) > 1:
+        return _render_eu_disambiguation(
+            auth=auth,
+            theme=theme,
+            candidates=candidates,
+            sisend=sisend,
+            scope=scope,
+        )
+
+    # --- 3. nothing recognised --------------------------------------------
+    return _render_eu_unresolved(auth=auth, theme=theme, sisend=sisend, scope=scope)
 
 
 # ---------------------------------------------------------------------------
