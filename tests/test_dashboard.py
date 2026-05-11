@@ -196,6 +196,7 @@ class TestAdminDashboard:
 _WIDGET_HELPERS = (
     "_get_active_drafter_sessions",
     "_get_high_risk_reports",
+    "_get_unviewed_reports",
     "_get_stale_analysis_drafts",
     "_get_recent_syncs",
     "_get_recent_exports",
@@ -339,6 +340,82 @@ class TestDashboardWorkQueue:
         # Stale-analysis row → "analüüsi uuesti" copy + report link.
         assert "Analüüsi uuesti." in html
         assert "/drafts/cccc3333-0000-0000-0000-000000000003/report" in html
+
+    def test_next_actions_include_unviewed_reports(self):
+        from datetime import UTC, datetime
+
+        now = datetime(2026, 5, 11, 9, 0, tzinfo=UTC)
+        html = _render_dashboard(
+            {
+                "_get_user_org_info": _ORG_INFO,
+                "_get_unviewed_reports": [
+                    {
+                        "draft_id": "dddd4444-0000-0000-0000-000000000004",
+                        "title": "Liiklusseaduse muudatus",
+                        "impact_score": 25,
+                        "conflict_count": 0,
+                        "generated_at": now,
+                        "reanalyzed": False,
+                    },
+                    {
+                        "draft_id": "eeee5555-0000-0000-0000-000000000005",
+                        "title": "Maksuseadus",
+                        "impact_score": 40,
+                        "conflict_count": 0,
+                        "generated_at": now,
+                        "reanalyzed": True,
+                    },
+                ],
+            }
+        )
+        # A never-opened low/medium report still surfaces as a next action…
+        assert "Mõjuaruanne valmis: «Liiklusseaduse muudatus»." in html
+        assert "/drafts/dddd4444-0000-0000-0000-000000000004/report" in html
+        # …and a re-analysed-since-last-view one gets the "uuesti" framing.
+        assert "Maksuseadus»: eelnõu analüüsiti uuesti" in html
+        assert "/drafts/eeee5555-0000-0000-0000-000000000005/report" in html
+
+    def test_next_actions_dedupe_by_draft(self):
+        """A draft that qualifies for several sources gets one row — the
+        most-urgent framing wins (stale > high-risk > unviewed)."""
+        from datetime import UTC, datetime
+
+        now = datetime(2026, 5, 11, 9, 0, tzinfo=UTC)
+        did = "ffff6666-0000-0000-0000-000000000006"
+        html = _render_dashboard(
+            {
+                "_get_user_org_info": _ORG_INFO,
+                "_get_high_risk_reports": [
+                    {
+                        "draft_id": did,
+                        "title": "Topelt eelnõu",
+                        "impact_score": 80,
+                        "conflict_count": 3,
+                        "affected_count": 10,
+                        "gap_count": 0,
+                        "generated_at": now,
+                    },
+                ],
+                "_get_stale_analysis_drafts": [
+                    {"draft_id": did, "title": "Topelt eelnõu", "stale_count": 1},
+                ],
+                "_get_unviewed_reports": [
+                    {
+                        "draft_id": did,
+                        "title": "Topelt eelnõu",
+                        "impact_score": 80,
+                        "conflict_count": 3,
+                        "generated_at": now,
+                        "reanalyzed": False,
+                    },
+                ],
+            }
+        )
+        # Stale wins → "analüüsi uuesti" copy appears…
+        assert "Topelt eelnõu»: ontoloogia uuenes" in html
+        # …and the high-risk / unviewed framings for the same draft do NOT.
+        assert "3 konflikti vajavad ülevaatust" not in html
+        assert "Mõjuaruanne valmis: «Topelt eelnõu»." not in html
 
     def test_high_risk_widget_renders_band_badge_and_link(self):
         from datetime import UTC, datetime

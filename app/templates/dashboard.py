@@ -21,7 +21,6 @@ or schema change — everything is derivable from existing tables.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 from typing import Any
 
 from fasthtml.common import *
@@ -52,6 +51,7 @@ _MAX_NEXT_ACTIONS = 8
 # Per-widget row caps for the supporting sections (kept small so the page
 # stays dense-but-calm — see the design doc's "Visual Design Direction").
 _MAX_HIGH_RISK = 8
+_MAX_UNVIEWED = 8
 _MAX_STALE = 8
 _MAX_SYNCS = 5
 _MAX_EXPORTS = 5
@@ -105,23 +105,35 @@ def _get_high_risk_reports(org_id: str | None, *, limit: int = _MAX_HIGH_RISK) -
         return []
     try:
         with _connect() as conn:
+            # Pick the *latest* report per draft first, THEN filter by score —
+            # so a draft re-analysed from high risk down to medium/low drops
+            # off the list instead of clinging to its stale high-risk row.
             rows = conn.execute(
                 """
-                SELECT DISTINCT ON (ir.draft_id)
-                       ir.draft_id, d.title, ir.impact_score,
-                       ir.conflict_count, ir.affected_count, ir.gap_count,
-                       ir.generated_at
-                FROM impact_reports ir
-                JOIN drafts d ON d.id = ir.draft_id
-                WHERE d.org_id = %s AND ir.impact_score > 50
-                ORDER BY ir.draft_id, ir.generated_at DESC
+                WITH latest_report AS (
+                    SELECT DISTINCT ON (ir.draft_id)
+                           ir.draft_id, ir.impact_score, ir.conflict_count,
+                           ir.affected_count, ir.gap_count, ir.generated_at
+                    FROM impact_reports ir
+                    JOIN drafts d ON d.id = ir.draft_id
+                    WHERE d.org_id = %s
+                    ORDER BY ir.draft_id, ir.generated_at DESC
+                )
+                SELECT lr.draft_id, d.title, lr.impact_score,
+                       lr.conflict_count, lr.affected_count, lr.gap_count,
+                       lr.generated_at
+                FROM latest_report lr
+                JOIN drafts d ON d.id = lr.draft_id
+                WHERE lr.impact_score > 50
+                ORDER BY lr.generated_at DESC
+                LIMIT %s
                 """,
-                (org_id,),
+                (org_id, limit),
             ).fetchall()
     except Exception:
         logger.exception("Failed to fetch high-risk reports for org %s", org_id)
         return []
-    out = [
+    return [
         {
             "draft_id": str(r[0]),
             "title": r[1] or "Pealkirjata eelnõu",
@@ -133,10 +145,71 @@ def _get_high_risk_reports(org_id: str | None, *, limit: int = _MAX_HIGH_RISK) -
         }
         for r in rows
     ]
-    # DISTINCT ON returns draft-grouped rows in draft_id order; re-sort by
-    # recency and apply the widget cap.
-    out.sort(key=lambda d: d["generated_at"] or datetime.min, reverse=True)
-    return out[:limit]
+
+
+def _get_unviewed_reports(  # type: ignore[type-arg]
+    user_id: str, org_id: str | None, *, limit: int = _MAX_UNVIEWED
+) -> list[dict]:
+    """Return drafts whose latest impact report this user hasn't opened.
+
+    Implements the "report ready but not viewed" next-action source from #717,
+    derived from the ``draft.report.view`` audit_log entry that
+    :func:`app.docs.report_routes.draft_report_page` already writes (no schema
+    change). A draft surfaces when the current user has *never* opened its
+    report, or last opened it before the latest (re-)analysis — so a fresh
+    re-analysis re-appears in the queue.
+
+    ``detail->>'draft_id'`` is compared as text against ``draft_id::text`` —
+    no cast of the JSON field, so a stray non-UUID detail value can't take the
+    whole query down. Returns ``[{draft_id, title, impact_score,
+    conflict_count, generated_at, reanalyzed}]`` newest first.
+    """
+    if not user_id or not org_id:
+        return []
+    try:
+        with _connect() as conn:
+            rows = conn.execute(
+                """
+                WITH latest_report AS (
+                    SELECT DISTINCT ON (ir.draft_id)
+                           ir.draft_id, ir.impact_score, ir.conflict_count,
+                           ir.generated_at
+                    FROM impact_reports ir
+                    JOIN drafts d ON d.id = ir.draft_id
+                    WHERE d.org_id = %s
+                    ORDER BY ir.draft_id, ir.generated_at DESC
+                ),
+                last_view AS (
+                    SELECT a.detail->>'draft_id' AS draft_id, MAX(a.created_at) AS viewed_at
+                    FROM audit_log a
+                    WHERE a.user_id = %s AND a.action = 'draft.report.view'
+                    GROUP BY a.detail->>'draft_id'
+                )
+                SELECT lr.draft_id, d.title, lr.impact_score, lr.conflict_count,
+                       lr.generated_at, (lv.viewed_at IS NOT NULL) AS reanalyzed
+                FROM latest_report lr
+                JOIN drafts d ON d.id = lr.draft_id
+                LEFT JOIN last_view lv ON lv.draft_id = lr.draft_id::text
+                WHERE lv.viewed_at IS NULL OR lv.viewed_at < lr.generated_at
+                ORDER BY lr.generated_at DESC
+                LIMIT %s
+                """,
+                (org_id, user_id, limit),
+            ).fetchall()
+    except Exception:
+        logger.exception("Failed to fetch unviewed reports for user %s", user_id)
+        return []
+    return [
+        {
+            "draft_id": str(r[0]),
+            "title": r[1] or "Pealkirjata eelnõu",
+            "impact_score": int(r[2] or 0),
+            "conflict_count": int(r[3] or 0),
+            "generated_at": r[4],
+            "reanalyzed": bool(r[5]),
+        }
+        for r in rows
+    ]
 
 
 def _get_stale_analysis_drafts(org_id: str | None, *, limit: int = _MAX_STALE) -> list[dict]:  # type: ignore[type-arg]
@@ -226,8 +299,10 @@ def _get_recent_exports(org_id: str | None, *, limit: int = _MAX_EXPORTS) -> lis
 
     The ``background_jobs`` table is not org-scoped, so we recover the org via
     the ``draft_id`` carried in the job payload (``payload->>'draft_id'``) and
-    join to ``drafts``. Only ``export_report`` jobs in the ``success`` state
-    are surfaced.
+    join to ``drafts``. The join compares ``drafts.id::text`` against the raw
+    payload string — no cast of the JSON value to ``uuid``, so a single
+    malformed payload can't fail the query and hide every valid export. Only
+    ``export_report`` jobs in the ``success`` state are surfaced.
 
     Returns ``[{draft_id, title, finished_at}]`` newest first — the row links
     to ``/drafts/{id}/report`` (the report page hosts the download button), so
@@ -241,7 +316,7 @@ def _get_recent_exports(org_id: str | None, *, limit: int = _MAX_EXPORTS) -> lis
                 """
                 SELECT j.payload->>'draft_id' AS draft_id, d.title, j.finished_at
                 FROM background_jobs j
-                JOIN drafts d ON d.id = (j.payload->>'draft_id')::uuid
+                JOIN drafts d ON d.id::text = (j.payload->>'draft_id')
                 WHERE j.job_type = 'export_report'
                   AND j.status = 'success'
                   AND d.org_id = %s
@@ -273,7 +348,10 @@ def _get_unresolved_annotation_drafts(  # type: ignore[type-arg]
     Covers every annotation whose ``target_type`` resolves to a draft —
     impact-report row annotations carry a ``draft_version_id`` (joined through
     ``draft_versions``), while older ``target_type='draft'`` annotations carry
-    the draft id directly in ``target_id``. Org-scoped via ``annotations.org_id``.
+    the draft id directly in ``target_id``. That branch joins on
+    ``drafts.id::text = a.target_id`` (text comparison — no ``::uuid`` cast),
+    so a single malformed legacy ``target_id`` can't fail the query and hide
+    every draft. Org-scoped via ``annotations.org_id``.
 
     Returns ``[{draft_id, title, unresolved_count}]`` ordered by the busiest
     draft first.
@@ -297,7 +375,7 @@ def _get_unresolved_annotation_drafts(  # type: ignore[type-arg]
 
                 SELECT d.id, d.title, COUNT(*) AS unresolved_count
                 FROM annotations a
-                JOIN drafts d ON d.id = a.target_id::uuid
+                JOIN drafts d ON d.id::text = a.target_id
                 WHERE a.org_id = %s
                   AND a.resolved = FALSE
                   AND a.target_type = 'draft'
@@ -306,8 +384,6 @@ def _get_unresolved_annotation_drafts(  # type: ignore[type-arg]
                 (org_id, org_id),
             ).fetchall()
     except Exception:
-        # ``target_id::uuid`` can throw on a non-UUID legacy value — degrade
-        # to an empty widget rather than crashing the whole dashboard.
         logger.exception("Failed to fetch drafts with unresolved annotations for org %s", org_id)
         return []
     # Merge the two UNION branches per draft (a draft could in theory have both
@@ -468,16 +544,21 @@ def _build_next_actions(
     sessions: list[dict],  # type: ignore[type-arg]
     high_risk: list[dict],  # type: ignore[type-arg]
     stale: list[dict],  # type: ignore[type-arg]
+    unviewed: list[dict],  # type: ignore[type-arg]
 ) -> list[dict]:  # type: ignore[type-arg]
     """Synthesise the "what should I do next" list from existing signals.
 
-    This is *not* a new data source — it folds three already-loaded widget
+    This is *not* a new data source — it folds four already-loaded widget
     result sets into one prioritised list of ``{text, href, link_label}``
-    dicts, capped at :data:`_MAX_NEXT_ACTIONS`. Order: drafter sessions
-    first (you have unfinished work), then high-risk reports (something needs
-    review), then stale analyses (the ontology moved on).
+    dicts, capped at :data:`_MAX_NEXT_ACTIONS`. Order, and one row per draft
+    (a draft that qualifies for several sources gets only the most-urgent
+    framing): drafter sessions first (unfinished work), then stale analyses
+    (the ontology moved on — re-analyse, even if the now-outdated report
+    flags high risk), then high-risk reports (conflicts to review), then
+    reports you simply haven't opened yet.
     """
     actions: list[dict[str, str]] = []
+    seen_drafts: set[str] = set()
 
     for s in sessions:
         step_num = s["current_step"]
@@ -489,7 +570,27 @@ def _build_next_actions(
             }
         )
 
+    for st in stale:
+        did = st["draft_id"]
+        if did in seen_drafts:
+            continue
+        seen_drafts.add(did)
+        actions.append(
+            {
+                "text": (
+                    f"«{st['title']}»: ontoloogia uuenes pärast aruande koostamist. "
+                    "Analüüsi uuesti."
+                ),
+                "href": f"/drafts/{did}/report",
+                "link_label": "Ava aruanne",
+            }
+        )
+
     for r in high_risk:
+        did = r["draft_id"]
+        if did in seen_drafts:
+            continue
+        seen_drafts.add(did)
         conflicts = r["conflict_count"]
         title = r["title"]
         if conflicts > 0:
@@ -498,19 +599,21 @@ def _build_next_actions(
             band_label = IMPACT_BAND_LABELS_ET[impact_band(r["impact_score"])].lower()
             text = f"Vaata mõjuaruannet «{title}» — {band_label} (skoor {r['impact_score']}/100)"
         actions.append(
-            {"text": text, "href": f"/drafts/{r['draft_id']}/report", "link_label": "Ava aruanne"}
+            {"text": text, "href": f"/drafts/{did}/report", "link_label": "Ava aruanne"}
         )
 
-    for st in stale:
+    for u in unviewed:
+        did = u["draft_id"]
+        if did in seen_drafts:
+            continue
+        seen_drafts.add(did)
+        title = u["title"]
+        if u["reanalyzed"]:
+            text = f"«{title}»: eelnõu analüüsiti uuesti — vaata uut mõjuaruannet."
+        else:
+            text = f"Mõjuaruanne valmis: «{title}». Vaata aruannet."
         actions.append(
-            {
-                "text": (
-                    f"«{st['title']}»: ontoloogia uuenes pärast aruande koostamist. "
-                    "Analüüsi uuesti."
-                ),
-                "href": f"/drafts/{st['draft_id']}/report",
-                "link_label": "Ava aruanne",
-            }
+            {"text": text, "href": f"/drafts/{did}/report", "link_label": "Ava aruanne"}
         )
 
     return actions[:_MAX_NEXT_ACTIONS]
@@ -773,6 +876,7 @@ def dashboard_page(req: Request):
     if user_id:
         sessions = _get_active_drafter_sessions(user_id, org_id)
         high_risk = _get_high_risk_reports(org_id)
+        unviewed = _get_unviewed_reports(user_id, org_id)
         stale = _get_stale_analysis_drafts(org_id)
         syncs = _get_recent_syncs()
         exports = _get_recent_exports(org_id)
@@ -780,10 +884,10 @@ def dashboard_page(req: Request):
         bookmarks = _get_bookmarks(user_id)
         org_info = _get_user_org_info(user_id)
     else:
-        sessions = high_risk = stale = syncs = exports = unresolved = bookmarks = []
+        sessions = high_risk = unviewed = stale = syncs = exports = unresolved = bookmarks = []
         org_info = None
 
-    next_actions = _build_next_actions(sessions, high_risk, stale)
+    next_actions = _build_next_actions(sessions, high_risk, stale, unviewed)
 
     # Compact header — no marketing hero. H1 + a small org/role line.
     if org_info is not None:
