@@ -144,7 +144,11 @@ def test_system_admin_temp_password_sets_must_change(org_with_users):
     )
     assert resp.status_code == 303
     assert "/reset" in resp.headers["location"]
-    assert "temp=Tempnew1Z" in resp.headers["location"]
+    # #740: the live temp credential must NOT travel in the redirect URL
+    # (history / proxy logs / referrers). It is handed to the reveal page
+    # via the signed session cookie instead.
+    assert "Tempnew1Z" not in resp.headers["location"]
+    assert "temp=" not in resp.headers["location"]
 
     with _connect() as conn:
         row = conn.execute(
@@ -155,6 +159,62 @@ def test_system_admin_temp_password_sets_must_change(org_with_users):
     must_change, pw_hash = row
     assert must_change is True
     assert bcrypt.checkpw(b"Tempnew1Z", pw_hash.encode())
+
+
+def test_temp_password_revealed_exactly_once_on_reset_page(org_with_users):
+    """#740 — after setting a temp password the admin sees it once on the
+    reset page (sourced from the session, not the URL), and a second view
+    of the same page no longer shows it. The reveal response is also
+    marked ``Cache-Control: no-store``.
+    """
+    sa = org_with_users["sysadmin_id"]
+    sa_email = f"sa-{sa}@example.com"
+    target = org_with_users["drafter_id"]
+    c = _client_as(sa, sa_email)
+
+    # 1. Set the temp password — the session now holds the one-time reveal.
+    set_resp = c.post(
+        f"/admin/users/{target}/reset_temp",
+        data={"new_password": "Tempnew1Z"},
+        follow_redirects=False,
+    )
+    assert set_resp.status_code == 303
+    reveal_path = set_resp.headers["location"]
+    assert reveal_path.endswith(f"/admin/users/{target}/reset")
+
+    # 2. First load of the reset page reveals the credential exactly once.
+    first = c.get(reveal_path)
+    assert first.status_code == 200
+    assert "Tempnew1Z" in first.text
+    assert first.headers.get("cache-control") == "no-store"
+
+    # 3. Second load no longer reveals it (session value was consumed).
+    second = c.get(reveal_path)
+    assert second.status_code == 200
+    assert "Tempnew1Z" not in second.text
+
+
+def test_org_admin_temp_password_reveal_uses_session_not_url(org_with_users):
+    """#740 — the org-admin variant of the reset flow has the same
+    no-credential-in-URL guarantee.
+    """
+    oa = org_with_users["orgadmin_id"]
+    oa_email = f"oa-{oa}@example.com"
+    target = org_with_users["drafter_id"]
+    c = _client_as(oa, oa_email)
+    resp = c.post(
+        f"/org/users/{target}/reset_temp",
+        data={"new_password": "Tempnew1Z"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert resp.headers["location"].endswith(f"/org/users/{target}/reset")
+    assert "Tempnew1Z" not in resp.headers["location"]
+
+    page = c.get(resp.headers["location"])
+    assert page.status_code == 200
+    assert "Tempnew1Z" in page.text
+    assert page.headers.get("cache-control") == "no-store"
 
 
 def test_org_admin_cannot_temp_password_org_admin(org_with_users):

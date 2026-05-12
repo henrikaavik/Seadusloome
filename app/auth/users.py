@@ -6,8 +6,9 @@ import logging
 import os
 
 from fasthtml.common import *
+from fasthtml.common import to_xml
 from starlette.requests import Request
-from starlette.responses import RedirectResponse
+from starlette.responses import HTMLResponse, RedirectResponse
 
 from app.auth.audit import log_action
 from app.auth.organizations import list_orgs
@@ -765,6 +766,54 @@ def org_user_deactivate(req: Request, user_id: str):
 # Admin password reset — shared helpers and handlers
 # ---------------------------------------------------------------------------
 
+# Session key holding a freshly-set admin temporary password awaiting its
+# one-time reveal on the next ``GET …/reset`` page load. The value is
+# ``{"user_id": <str>, "password": <str>}`` — keyed by user so a reveal can
+# never be shown against the wrong target after a redirect. The credential
+# travels in the signed *session cookie* (server-side state for our
+# purposes), never in the URL, so it can't leak via browser history,
+# proxy/access logs, referrers, or copied links (#740).
+_PW_RESET_REVEAL_KEY = "pw_reset_reveal"
+
+
+def _session_dict(req: Request) -> dict | None:  # type: ignore[type-arg]
+    """Return the Starlette session mapping, or ``None`` if unavailable.
+
+    Mirrors :func:`app.ui.feedback.flash._session` — the session middleware
+    is always installed in production but unit tests that exercise these
+    helpers directly (without the ASGI stack) won't have it.
+    """
+    try:
+        return req.session  # type: ignore[attr-defined,no-any-return]
+    except (AssertionError, AttributeError, KeyError):
+        return None
+
+
+def _stash_temp_password_reveal(req: Request, user_id: str, password: str) -> None:
+    """Stash *password* in the session for a one-time reveal on the reset page."""
+    sess = _session_dict(req)
+    if sess is None:
+        return
+    sess[_PW_RESET_REVEAL_KEY] = {"user_id": str(user_id), "password": password}
+
+
+def _pop_temp_password_reveal(req: Request, user_id: str) -> str | None:
+    """Return and clear the stashed temp password if it matches *user_id*.
+
+    Drains the session key unconditionally so a stale reveal queued for a
+    different user never lingers across navigations.
+    """
+    sess = _session_dict(req)
+    if sess is None:
+        return None
+    raw = sess.pop(_PW_RESET_REVEAL_KEY, None)
+    if not isinstance(raw, dict):
+        return None
+    if str(raw.get("user_id")) != str(user_id):
+        return None
+    pw = raw.get("password")
+    return pw if isinstance(pw, str) and pw else None
+
 
 def _admin_reset_page(req: Request, user_id: str, *, base_path: str, active_nav: str):
     """GET /admin/users/{id}/reset (or /org/users/{id}/reset)."""
@@ -783,18 +832,20 @@ def _admin_reset_page(req: Request, user_id: str, *, base_path: str, active_nav:
                 active_nav,
             )
 
-    flash = req.query_params.get("temp")  # one-time temp-pw reveal
+    # One-time temp-pw reveal — read from the (signed) session, never the URL.
+    revealed_password = _pop_temp_password_reveal(req, user_id)
 
-    return PageShell(
+    page = PageShell(
         H1("Lähtesta parool", cls="page-title"),
         Card(
             CardHeader(P(f"Kasutaja: {user['full_name']} ({user['email']})", cls="card-subtitle")),
             CardBody(
                 Alert(
-                    f"Ajutine parool on määratud. Edasta see kasutajale turvaliselt: {flash}",
+                    "Ajutine parool on määratud. Edasta see kasutajale turvaliselt: "
+                    f"{revealed_password}",
                     variant="success",
                 )
-                if flash
+                if revealed_password
                 else None,
                 AppForm(
                     Button("Saada e-postiga", type="submit", variant="primary"),
@@ -823,6 +874,11 @@ def _admin_reset_page(req: Request, user_id: str, *, base_path: str, active_nav:
         user=auth or None,
         active_nav=active_nav,
     )
+    if revealed_password:
+        # The page body now contains a live credential — keep it out of any
+        # shared/back-button cache.
+        return HTMLResponse(to_xml(page), headers={"Cache-Control": "no-store"})
+    return page
 
 
 def _admin_reset_email(req: Request, user_id: str, *, base_path: str, active_nav: str):
@@ -897,8 +953,12 @@ def _admin_reset_temp(
         {"target_user_id": user_id, "mode": "temp"},
     )
 
+    # Hand the credential to the reveal page via the signed session — NOT
+    # the redirect URL — so it can't leak through history/logs/referrers
+    # (#740). The reset page consumes it exactly once.
+    _stash_temp_password_reveal(req, user_id, new_password)
     return RedirectResponse(
-        url=f"{base_path}/{user_id}/reset?temp={new_password}",
+        url=f"{base_path}/{user_id}/reset",
         status_code=303,
     )
 

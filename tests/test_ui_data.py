@@ -142,3 +142,63 @@ def test_pagination_links_have_no_hx_attrs():
     html = to_xml(Pagination(current_page=2, total_pages=5, base_url="/x"))
     assert "hx-get" not in html
     assert "hx-target" not in html
+
+
+def test_pagination_clamps_page_above_total_pages():
+    """#742 — ``?page=999`` on a 5-page table must render the LAST real
+    page and a valid "X kuni Y kokku N" range, not "24951 kuni 100".
+    """
+    # 100 rows / 20 per page = 5 pages; page 999 must clamp to 5.
+    html = to_xml(
+        Pagination(
+            current_page=999,
+            total_pages=5,
+            base_url="/drafts",
+            page_size=20,
+            total=100,
+        )
+    )
+    # The last page is the active one.
+    assert 'aria-current="page"' in html
+    # Active link wraps the number "5", and the nonsense start (24951) is gone.
+    assert ">5</a>" in html
+    assert "81 kuni 100 kokku 100" in html
+    assert "24951" not in html
+    # On the last page the "next" control is disabled.
+    assert "pagination-disabled" in html
+
+
+def test_pagination_clamps_zero_and_negative_pages_to_one():
+    """Pages at or below 1 still normalise to the first page."""
+    for bad in (0, -3):
+        html = to_xml(
+            Pagination(
+                current_page=bad,
+                total_pages=4,
+                base_url="/x",
+                page_size=10,
+                total=35,
+            )
+        )
+        assert "1 kuni 10 kokku 35" in html
+        # First page → prev disabled.
+        assert "pagination-disabled" in html
+
+
+def test_pagination_out_of_range_with_zero_total_pages_renders_empty_state():
+    """When there are no pages at all, a high ``page`` collapses to the
+    empty state rather than an impossible range.
+    """
+    html = to_xml(
+        Pagination(
+            current_page=42,
+            total_pages=0,
+            base_url="/x",
+            page_size=10,
+            total=0,
+        )
+    )
+    assert "0 kirjet" in html
+    # Both controls disabled, no page-number anchors rendered.
+    assert html.count("pagination-disabled") >= 2
+    assert 'aria-current="page"' not in html

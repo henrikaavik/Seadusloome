@@ -39,6 +39,8 @@ import os
 import uuid
 from typing import Any, Protocol
 
+import psycopg
+
 from app.auth.audit import log_action
 from app.auth.provider import UserDict
 from app.db import get_connection as _connect
@@ -53,6 +55,15 @@ from app.jobs import JobQueue
 from app.storage import delete_file, store_file
 
 logger = logging.getLogger(__name__)
+
+# How many times to re-run the v2+ version-creation transaction when it
+# trips the ``UNIQUE(draft_id, version_number)`` constraint (#745).  The
+# advisory lock in :func:`app.docs.version_model.get_next_version_number`
+# should make a collision practically impossible, but a belt-and-braces
+# retry turns any residual race into a transparent second attempt rather
+# than a 500.  A tiny budget is enough — each retry re-reads ``MAX`` after
+# the conflicting transaction has committed, so the next number is free.
+_MAX_VERSION_ALLOC_ATTEMPTS = 3
 
 
 # Allowed extensions and their canonical content types. The tuple order
@@ -273,50 +284,101 @@ async def handle_upload(
 
     # Steps 4-6 live inside a single transaction so we either commit the
     # draft row *and* enqueue the job, or we bail and clean up the file.
+    #
+    # The v2+ branch additionally retries the whole transaction on a
+    # ``UNIQUE(draft_id, version_number)`` violation (#745): the advisory
+    # lock in ``get_next_version_number`` already serialises allocators,
+    # but if one still slips through we re-read ``MAX`` and try again
+    # rather than surface a raw 500.  The new-draft branch never retries.
     factory = conn_factory or _connect
     queue = job_queue or JobQueue()
-    try:
-        with factory() as conn:
-            if parent_draft_id is not None:
-                draft = _create_new_version(
-                    conn,
-                    parent_draft_id=parent_draft_id,
-                    user=user,
-                    file_size=file_size,
-                    filename=filename,
-                    content_type=content_type,
-                    storage_path=stored.storage_path,
+    max_attempts = _MAX_VERSION_ALLOC_ATTEMPTS if parent_draft_id is not None else 1
+    draft: Draft | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            with factory() as conn:
+                if parent_draft_id is not None:
+                    draft = _create_new_version(
+                        conn,
+                        parent_draft_id=parent_draft_id,
+                        user=user,
+                        file_size=file_size,
+                        filename=filename,
+                        content_type=content_type,
+                        storage_path=stored.storage_path,
+                    )
+                else:
+                    draft = _create_new_draft(
+                        conn,
+                        user_id=user_id,
+                        org_id=org_id,
+                        title=cleaned_title,
+                        filename=filename,
+                        content_type=content_type,
+                        file_size=file_size,
+                        storage_path=stored.storage_path,
+                        doc_type=doc_type,
+                        parent_vtk_id=parent_vtk_id,
+                    )
+                conn.commit()
+            break
+        except psycopg.errors.UniqueViolation:
+            # Only the v2+ branch knows what a unique violation means here
+            # (the ``UNIQUE(draft_id, version_number)`` race) and how to
+            # recover from it.  Anything else propagates to the generic
+            # handler below — re-raised unchanged after the file cleanup.
+            if parent_draft_id is None:
+                logger.exception(
+                    "Draft insert hit a unique violation — cleaning up path=%s",
+                    stored.storage_path,
                 )
-            else:
-                draft = _create_new_draft(
-                    conn,
-                    user_id=user_id,
-                    org_id=org_id,
-                    title=cleaned_title,
-                    filename=filename,
-                    content_type=content_type,
-                    file_size=file_size,
-                    storage_path=stored.storage_path,
-                    doc_type=doc_type,
-                    parent_vtk_id=parent_vtk_id,
+                delete_file(stored.storage_path)
+                raise
+            # Two uploads raced on the version number despite the advisory
+            # lock.  Roll back is implicit (the ``with`` block aborts the
+            # txn); retry if we still have budget.
+            if attempt < max_attempts:
+                logger.warning(
+                    "Draft version-number collision for parent=%s on attempt %d/%d — retrying",
+                    parent_draft_id,
+                    attempt,
+                    max_attempts,
                 )
-            conn.commit()
-    except DraftUploadError:
-        # User-facing validation failure — clean up the orphan file
-        # before re-raising so the caller can render the error.
-        logger.info(
-            "Draft upload validation failed; cleaning up file path=%s",
-            stored.storage_path,
-        )
+                continue
+            logger.warning(
+                "Draft version-number collision for parent=%s exhausted retries; "
+                "cleaning up file path=%s",
+                parent_draft_id,
+                stored.storage_path,
+            )
+            delete_file(stored.storage_path)
+            raise DraftUploadError(
+                "Uue versiooni loomine ebaõnnestus samaaegse üleslaadimise tõttu. "
+                "Palun proovige uuesti."
+            ) from None
+        except DraftUploadError:
+            # User-facing validation failure — clean up the orphan file
+            # before re-raising so the caller can render the error.
+            logger.info(
+                "Draft upload validation failed; cleaning up file path=%s",
+                stored.storage_path,
+            )
+            delete_file(stored.storage_path)
+            raise
+        except Exception:
+            logger.exception(
+                "Draft insert failed after file was stored — cleaning up path=%s",
+                stored.storage_path,
+            )
+            delete_file(stored.storage_path)
+            raise
+
+    if draft is None:
+        # Unreachable: the loop either assigned ``draft`` and broke, or
+        # raised.  Guard so the type checker (and a future refactor) can't
+        # fall through with a stale file.
         delete_file(stored.storage_path)
-        raise
-    except Exception:
-        logger.exception(
-            "Draft insert failed after file was stored — cleaning up path=%s",
-            stored.storage_path,
-        )
-        delete_file(stored.storage_path)
-        raise
+        raise RuntimeError("Draft upload transaction produced no draft row")
 
     # Step 6 proper: enqueue the async parse pipeline. A failure here is
     # *not* fatal — the DB row already exists, and ops can re-enqueue from

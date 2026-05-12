@@ -35,11 +35,12 @@ from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import psycopg
 import pytest
 
 from app.auth.provider import UserDict
 from app.docs.draft_model import Draft
-from app.docs.upload import DraftUploadError, handle_upload
+from app.docs.upload import _MAX_VERSION_ALLOC_ATTEMPTS, DraftUploadError, handle_upload
 
 # ---------------------------------------------------------------------------
 # Shared identities
@@ -676,3 +677,149 @@ class TestReturnedDraftReflectsNewVersion:
         assert result.storage_path == new_storage_path
         assert result.graph_uri == new_graph_uri
         assert result.status == "uploaded"
+
+
+# ---------------------------------------------------------------------------
+# Concurrent version-number allocation (#745)
+# ---------------------------------------------------------------------------
+
+
+def _wire_version_conn_with_insert_failures(
+    *,
+    fail_first_n: int,
+    exc: BaseException,
+) -> MagicMock:
+    """Like :func:`_wire_version_conn` but the INSERT raises ``exc`` for the
+    first *fail_first_n* calls (across the life of this mock conn), then
+    succeeds.  Used to simulate a unique-violation race on the version
+    number.
+    """
+    base = _wire_version_conn(
+        parent_row=_make_parent_row(status="ready"),
+        next_version_max=1,
+    )
+    original_side_effect = base.execute.side_effect
+    insert_calls = {"n": 0}
+
+    def _execute(sql: str, params: object = None):
+        if "insert into draft_versions" in " ".join(sql.split()).lower():
+            insert_calls["n"] += 1
+            if insert_calls["n"] <= fail_first_n:
+                raise exc
+        return original_side_effect(sql, params)
+
+    base.execute.side_effect = _execute
+    return base
+
+
+def _factory_sequence(conns: list[MagicMock]):
+    """Return a conn-factory that hands out each conn in *conns* in turn.
+
+    The upload retry loop calls ``factory()`` once per attempt; this lets a
+    test give a distinct (or repeated) mock per attempt.
+    """
+    it = iter(conns)
+
+    def factory():
+        return _ConnectCM(next(it))
+
+    return factory
+
+
+class TestConcurrentVersionAllocation:
+    def test_unique_violation_is_retried_then_succeeds(self):
+        """A single version-number collision is transparently retried — the
+        upload still returns a Draft and the parse job still fires.
+        """
+        # Attempt 1: INSERT raises UniqueViolation. Attempt 2: clean conn.
+        attempt1 = _wire_version_conn_with_insert_failures(
+            fail_first_n=1,
+            exc=psycopg.errors.UniqueViolation("duplicate key (draft_id, version_number)"),
+        )
+        attempt2 = _wire_version_conn(
+            parent_row=_make_parent_row(status="ready"),
+            next_version_max=1,
+        )
+        stored = MagicMock(storage_path="/storage/v2.enc", size_bytes=2, filename="v2.docx")
+        mock_queue = MagicMock()
+
+        with (
+            patch("app.docs.upload.store_file", return_value=stored),
+            patch("app.docs.upload.delete_file") as mock_delete,
+        ):
+            result = asyncio.run(
+                handle_upload(
+                    _uploader(),
+                    "",
+                    _StubUpload(contents=b"v2"),
+                    parent_draft_id=_PARENT_DRAFT_ID,
+                    job_queue=mock_queue,
+                    conn_factory=_factory_sequence([attempt1, attempt2]),
+                )
+            )
+
+        assert isinstance(result, Draft)
+        # The encrypted file survived the retry — only a final, exhausted
+        # failure should clean it up.
+        mock_delete.assert_not_called()
+        # Parse pipeline still enqueued exactly once for the parent draft.
+        mock_queue.enqueue.assert_called_once()
+        assert mock_queue.enqueue.call_args.args[1] == {"draft_id": str(_PARENT_DRAFT_ID)}
+
+    def test_exhausted_retries_raise_controlled_error_and_clean_up_file(self):
+        """When every attempt collides, the caller gets a user-facing
+        :class:`DraftUploadError` (NOT a raw 500) and the orphaned
+        ciphertext is removed.
+        """
+        conns = [
+            _wire_version_conn_with_insert_failures(
+                fail_first_n=99,  # always fails
+                exc=psycopg.errors.UniqueViolation("duplicate key"),
+            )
+            for _ in range(_MAX_VERSION_ALLOC_ATTEMPTS)
+        ]
+        stored = MagicMock(storage_path="/storage/orphan.enc", size_bytes=1, filename="v.docx")
+
+        with (
+            patch("app.docs.upload.store_file", return_value=stored),
+            patch("app.docs.upload.delete_file") as mock_delete,
+        ):
+            with pytest.raises(DraftUploadError, match="samaaegse üleslaadimise"):
+                asyncio.run(
+                    handle_upload(
+                        _uploader(),
+                        "",
+                        _StubUpload(contents=b"v"),
+                        parent_draft_id=_PARENT_DRAFT_ID,
+                        job_queue=MagicMock(),
+                        conn_factory=_factory_sequence(conns),
+                    )
+                )
+
+        mock_delete.assert_called_once_with("/storage/orphan.enc")
+
+    def test_new_draft_branch_does_not_retry_on_unique_violation(self):
+        """The v1/new-draft path must NOT swallow-and-retry a unique
+        violation — only the version branch has the retry budget. A
+        collision there (e.g. a duplicate-something race) propagates as
+        before, with the file cleaned up exactly once.
+        """
+        mock_conn = MagicMock()
+        mock_conn.execute.side_effect = psycopg.errors.UniqueViolation("dup")
+        stored = MagicMock(storage_path="/tmp/orphan.enc", size_bytes=1, filename="x.docx")
+
+        with (
+            patch("app.docs.upload.store_file", return_value=stored),
+            patch("app.docs.upload.delete_file") as mock_delete,
+        ):
+            with pytest.raises(psycopg.errors.UniqueViolation):
+                asyncio.run(
+                    handle_upload(
+                        _uploader(),
+                        "Uus eelnõu",  # new-draft branch: no parent_draft_id
+                        _StubUpload(contents=b"x"),
+                        job_queue=MagicMock(),
+                        conn_factory=_make_conn_factory(mock_conn),
+                    )
+                )
+        mock_delete.assert_called_once_with("/tmp/orphan.enc")

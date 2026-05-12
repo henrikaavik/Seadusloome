@@ -305,20 +305,49 @@ def create_draft_version(
     return _row_to_version(row)
 
 
+# Stable 64-bit base for the per-draft advisory-lock key (see
+# :func:`get_next_version_number`).  Postgres advisory locks are namespaced
+# by the *pair* of int4 values passed to ``pg_advisory_xact_lock(int4,
+# int4)``: this constant occupies the first slot so the second slot can
+# carry a hash of the draft id without colliding with unrelated advisory
+# locks elsewhere in the app.  The value is arbitrary — only its
+# uniqueness within our codebase matters.
+_VERSION_ALLOC_LOCK_NAMESPACE = 0x6472_6166  # ASCII "draf"
+
+
 def get_next_version_number(conn: Any, draft_id: uuid.UUID | str) -> int:
-    """Return ``MAX(version_number) + 1`` for *draft_id*.
+    """Return ``MAX(version_number) + 1`` for *draft_id*, serialising callers.
 
     Used by the v2+ upload branch in :mod:`app.docs.upload` to allocate
-    the next version slot under the same lock the caller already holds
-    on the parent draft row.  Returns ``1`` when the parent has no
-    versions yet (cannot happen post migration 030's backfill, but the
-    safe default keeps tests independent).
+    the next version slot.  Returns ``1`` when the parent has no versions
+    yet (cannot happen post migration 030's backfill, but the safe
+    default keeps tests independent).
 
-    Takes an explicit connection so the read can sit inside the same
-    transaction as the subsequent :func:`create_draft_version` call --
-    otherwise two concurrent v2 uploads against the same parent could
-    race on the unique-version-number constraint.
+    **Concurrency (#745):** ``migrations/030_draft_versions.sql`` enforces
+    ``UNIQUE(draft_id, version_number)``, so two uploads that compute the
+    same ``MAX + 1`` would both try to insert the same row and one would
+    fail the constraint.  Before reading ``MAX(version_number)`` this
+    function therefore takes a *transaction-scoped* advisory lock keyed by
+    the draft id (``pg_advisory_xact_lock``).  Concurrent allocators for
+    the *same* parent block here until the holder's transaction
+    commits/rolls back; by then the previous insert is visible (READ
+    COMMITTED), so the next allocator computes a fresh, unused number.
+    Allocators for *different* parents never contend.  The lock is
+    released automatically at transaction end — no explicit unlock, and a
+    rolled-back upload can't leak it.
+
+    Takes an explicit connection so both the lock and the read sit inside
+    the same transaction as the subsequent :func:`create_draft_version`
+    call.  ``conn`` MUST NOT be in autocommit mode or the ``xact`` lock
+    would be released immediately; the upload flow always wraps this in a
+    ``with get_connection() as conn:`` transaction.
     """
+    # int4 range is [-2^31, 2^31-1]; map the draft id into it deterministically.
+    lock_key = uuid.UUID(str(draft_id)).int % 0x8000_0000
+    conn.execute(
+        "SELECT pg_advisory_xact_lock(%s, %s)",
+        (_VERSION_ALLOC_LOCK_NAMESPACE, lock_key),
+    )
     row = conn.execute(
         """
         SELECT COALESCE(MAX(version_number), 0)
