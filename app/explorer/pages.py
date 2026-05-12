@@ -10,6 +10,17 @@ the D3 canvas filling the content area. The former control rail becomes a
 thin horizontal **toolbar** across the top of the canvas; the search box
 moves into it. The D3 v7 CDN ``<script>`` (~270 KB) and ``explorer.css`` are
 pushed into ``<head>`` via ``extra_head=`` so they load on this page only.
+
+Issue #754 (epic #762, design doc ``docs/2026-05-12-oiguskaart-evidence-map.md``,
+workstream A): a "cold" open — ``/explorer`` with no ``?focus=`` / ``?draft=`` /
+``?search=`` and not the explicit ``?vaade=koik`` opt-in — no longer auto-loads
+the 90k-entity category overview. It renders a compact **contextual start panel**
+(search box, your bookmarks, recent high-risk reports for your org, recent drafts,
+a ``Normi mõjuahel`` shortcut, "Sirvi liikide kaupa") inside the otherwise-empty
+graph area, and tells ``explorer.js`` *not* to fetch the graph data. Any of
+``?focus=`` / ``?draft=`` / ``?search=`` / ``?vaade=koik`` bypasses the panel and
+loads the graph exactly as before. The org-scoped DB queries that back the panel
+live in :mod:`app.explorer.start_panel`.
 """
 
 from __future__ import annotations
@@ -25,13 +36,22 @@ from fasthtml.common import *
 from starlette.requests import Request
 
 from app.db import get_connection as _connect
+from app.explorer.start_panel import StartPanelData, load_start_panel_data
 
 # Re-import our design-system Button after the wildcard so the symbol does
 # not silently fall back to FastHTML's unstyled Button (#419).
 from app.ui.layout import PageShell
 from app.ui.primitives.button import Button  # noqa: E402
+from app.ui.time import format_tallinn
 
 logger = logging.getLogger(__name__)
+
+# The explicit "show me the whole 90k map" opt-in. The start panel's "Näita
+# kogu kaarti" / "Sirvi liikide kaupa" buttons (and the toolbar's "Näita kogu
+# kaarti" in the Vaate seaded menu) navigate to ``/explorer?vaade=koik``; that
+# URL renders the graph view (no panel) and lets ``explorer.js`` load the
+# overview as it always did.
+_VAADE_KOIK = "koik"
 
 
 # #475: the explorer page previously re-queried ``drafts`` and
@@ -312,6 +332,17 @@ def _explorer_toolbar(*, has_back_context: bool, draft_tip: bool):  # noqa: ANN2
         Details(
             Summary("Vaate seaded ▾", cls="ctrl-btn ctrl-settings-summary"),
             Div(
+                # #754: an explicit way back to the full 90k category overview
+                # from inside the graph view — pairs with the start panel's
+                # "Näita kogu kaarti" button. Loads the overview via JS (no
+                # navigation) so it doesn't disturb the current focus state.
+                Button(
+                    "Näita kogu kaarti",
+                    type="button",
+                    cls="ctrl-btn",
+                    onclick="explorerShowFullMap()",
+                    title="Lae kogu õiguskaardi liikide ülevaade",
+                ),
                 Button(
                     "Lähtesta paigutus",
                     type="button",
@@ -396,6 +427,177 @@ def _explorer_toolbar(*, has_back_context: bool, draft_tip: bool):  # noqa: ANN2
     )
 
 
+# ---------------------------------------------------------------------------
+# #754 — the contextual start panel (shown on a "cold" open)
+# ---------------------------------------------------------------------------
+
+
+# A muted single-line "nothing here yet" row shared by the panel's sections.
+def _panel_empty(text: str):  # noqa: ANN202
+    return P(text, cls="start-panel-empty")
+
+
+def _start_panel_section(title: str, body):  # noqa: ANN202
+    """One ``<section>`` of the start panel — an ``<h3>`` + its body."""
+    return Section(H3(title, cls="start-panel-section-title"), body, cls="start-panel-section")
+
+
+def _start_panel_search():  # noqa: ANN202
+    """The search box at the top of the start panel.
+
+    Submitting navigates to ``/explorer?search=<term>`` — the same ``?search=``
+    plumbing the toolbar's "Otsi" button and the deep-link bridge already use
+    (#746). ``explorer.js`` wires the click/Enter handlers (``startPanelSearch``)
+    so the page can carry a clean ``<input>`` with no inline JS.
+    """
+    return Form(
+        Input(
+            id="start-panel-search-input",
+            name="search",
+            type="search",
+            placeholder="Otsi seadust, §-viidet, CELEX-numbrit, kohtuasja numbrit…",
+            aria_label="Otsi seadusi, §-viiteid, CELEX-numbreid, kohtuasju",
+            autocomplete="off",
+        ),
+        Button(
+            "Otsi",
+            type="submit",
+            id="start-panel-search-btn",
+            cls="start-panel-search-btn",
+        ),
+        # method=GET so a no-JS submit still lands on /explorer?search=… ;
+        # explorer.js intercepts to reuse the in-page search flow.
+        method="get",
+        action="/explorer",
+        id="start-panel-search-form",
+        cls="start-panel-search",
+        role="search",
+    )
+
+
+def _start_panel_bookmarks(bookmarks: list):  # noqa: ANN202
+    if not bookmarks:
+        return _start_panel_section(
+            "Sinu järjehoidjad", _panel_empty("Sul pole veel ühtegi järjehoidjat.")
+        )
+    items = [
+        Li(
+            A(bm["label"], href=bm["explorer_url"], cls="start-panel-link"),
+            cls="start-panel-item",
+        )
+        for bm in bookmarks
+    ]
+    return _start_panel_section("Sinu järjehoidjad", Ul(*items, cls="start-panel-list"))
+
+
+def _start_panel_high_risk(reports: list):  # noqa: ANN202
+    if not reports:
+        return _start_panel_section(
+            "Hiljutised kõrge riskiga leiud",
+            _panel_empty("Kõrge riskiga mõjuaruandeid hetkel pole."),
+        )
+    items = []
+    for r in reports:
+        meta_bits = f"{r['band_label']} · skoor {r['impact_score']}/100"
+        if r["conflict_count"]:
+            meta_bits += f" · {r['conflict_count']} konflikti"
+        when = format_tallinn(r["generated_at"])
+        items.append(
+            Li(
+                A(r["title"], href=r["report_url"], cls="start-panel-link"),
+                Span(meta_bits, cls="start-panel-meta"),
+                Span(when, cls="start-panel-meta start-panel-meta-date"),
+                A(
+                    "Ava mõjukaart",
+                    href=r["explorer_url"],
+                    cls="start-panel-secondary-link",
+                ),
+                cls="start-panel-item start-panel-item--rich",
+            )
+        )
+    return _start_panel_section(
+        "Hiljutised kõrge riskiga leiud", Ul(*items, cls="start-panel-list")
+    )
+
+
+def _start_panel_recent_drafts(drafts: list):  # noqa: ANN202
+    if not drafts:
+        return _start_panel_section(
+            "Sinu hiljutised eelnõud", _panel_empty("Hiljutisi eelnõusid pole.")
+        )
+    items = []
+    for d in drafts:
+        when = format_tallinn(d["updated_at"])
+        items.append(
+            Li(
+                A(d["title"], href=d["detail_url"], cls="start-panel-link"),
+                Span(when, cls="start-panel-meta start-panel-meta-date"),
+                A(
+                    "Ava mõjukaart",
+                    href=d["explorer_url"],
+                    cls="start-panel-secondary-link",
+                ),
+                cls="start-panel-item start-panel-item--rich",
+            )
+        )
+    return _start_panel_section("Sinu hiljutised eelnõud", Ul(*items, cls="start-panel-list"))
+
+
+def _start_panel_shortcuts():  # noqa: ANN202
+    """The two "do something" rows at the foot of the panel.
+
+    "Alusta Normi mõjuahelat" → ``/analyysikeskus/normi-mojuahel`` (a real
+    navigation). "Sirvi liikide kaupa" → loads today's category overview *in
+    place* (``explorer.js`` ``explorerShowFullMap()``), which is now opt-in.
+    """
+    return Section(
+        Div(
+            A(
+                "Alusta Normi mõjuahelat",
+                href="/analyysikeskus/normi-mojuahel",
+                cls="start-panel-action start-panel-action--primary",
+            ),
+            Button(
+                "Sirvi liikide kaupa",
+                type="button",
+                id="start-panel-browse-btn",
+                cls="start-panel-action start-panel-action--secondary",
+                onclick="explorerShowFullMap()",
+                title="Lae kõigi õiguskaardi liikide ülevaade",
+            ),
+            cls="start-panel-actions",
+        ),
+        cls="start-panel-section start-panel-section--actions",
+    )
+
+
+def _start_panel(data: StartPanelData):  # noqa: ANN202
+    """Build the full contextual start panel (#754).
+
+    Sits inside ``#main-content`` (``position: relative; overflow: hidden``)
+    like the other overlays — ``explorer.css`` anchors ``#explorer-start-panel``
+    absolutely below the toolbar.
+    """
+    return Div(
+        Div(
+            H2("Õiguskaart", cls="start-panel-title"),
+            P(
+                "Vali, mida vaadata — otsi õigusakti, ava järjehoidja, vaata "
+                "eelnõu mõjukaarti, või sirvi kogu kaarti liikide kaupa.",
+                cls="start-panel-lead",
+            ),
+            _start_panel_search(),
+            _start_panel_bookmarks(data["bookmarks"]),
+            _start_panel_high_risk(data["high_risk_reports"]),
+            _start_panel_recent_drafts(data["recent_drafts"]),
+            _start_panel_shortcuts(),
+            cls="start-panel-inner",
+        ),
+        id="explorer-start-panel",
+        aria_label="Õiguskaardi avapaneel",
+    )
+
+
 def explorer_page(req: Request):
     """GET /explorer -- the Õiguskaart graph inside the standard app chrome.
 
@@ -415,17 +617,38 @@ def explorer_page(req: Request):
     ``?focus=`` and ``?search=`` are present, ``focus`` wins. The page
     itself requires authentication via the global ``auth_before``
     middleware (see #442).
+
+    #754: a "cold" open — none of ``?focus=`` / ``?draft=`` / ``?search=`` and
+    not the explicit ``?vaade=koik`` opt-in — renders the **contextual start
+    panel** over the (empty) graph area and tells ``explorer.js`` *not* to
+    fetch the 90k overview. ``?vaade=koik`` (set by the start panel's "Näita
+    kogu kaarti" / "Sirvi liikide kaupa" buttons and the toolbar's "Näita kogu
+    kaarti") forces the classic graph view. Unauthenticated requests never
+    reach here — ``auth_before`` redirects to ``/auth/login`` first (#442).
     """
     auth = req.scope.get("auth")
     draft_param = req.query_params.get("draft", "").strip()
     focus_param = req.query_params.get("focus", "").strip()
     search_param = req.query_params.get("search", "").strip()
+    vaade_param = req.query_params.get("vaade", "").strip()
     overlay_uris: list[str] = []
     if draft_param:
         overlay_uris = _fetch_draft_overlay(req, draft_param)
 
-    # ---- Server → JS bridge: ?focus= / ?search= / draft-overlay blobs ----
+    # #754: the start panel shows only when there is nothing to deep-link to
+    # and the user hasn't explicitly asked for the whole map. Any of
+    # ?focus= / ?draft= / ?search= / ?vaade=koik bypasses it and renders the
+    # classic graph view (so existing deep links / overlays never regress).
+    show_start_panel = not (
+        focus_param or search_param or draft_param or vaade_param == _VAADE_KOIK
+    )
+
+    # ---- Server → JS bridge: ?focus= / ?search= / draft-overlay / mode blobs ----
     bridge_tags: list = []
+    if show_start_panel:
+        # The flag explorer.js checks on init() to skip loadOverview() — the
+        # whole point of #754 (don't fetch the cold blob until the user picks).
+        bridge_tags.append(Script("window.__explorerStartPanel=true;"))
     # #719: hand the focus URI to the JS (it's validated server-side at
     # /api/explorer/entity/{uri}; embedding it escaped keeps the contract
     # explicit so the JS need not re-parse location.search).
@@ -449,10 +672,25 @@ def explorer_page(req: Request):
     # report / analysis result (?focus= or ?draft=) — explorer.js detects
     # the same thing from document.referrer for the detail-panel back link.
     has_back_context = bool(focus_param) or bool(overlay_uris) or bool(draft_param)
-    # A "cold" open (no focus / draft / overlay) gets the small ?draft= tip.
-    show_draft_tip = not overlay_uris and not draft_param and not focus_param
+    # The small ?draft= toolbar tip is only useful in the classic graph view
+    # with no focus/draft/overlay — the start panel makes it redundant.
+    show_draft_tip = (
+        not show_start_panel and not overlay_uris and not draft_param and not focus_param
+    )
+
+    # #754: the start panel is an opaque overlay over the (idle) graph chrome.
+    # We still render the full graph DOM so explorer.js' top-level
+    # getElementById() calls don't hit nulls — it just doesn't fetch data.
+    start_panel_tag: list = []
+    if show_start_panel:
+        user_id = (auth or {}).get("id")
+        org_id = (auth or {}).get("org_id")
+        panel_data = load_start_panel_data(user_id, org_id)
+        start_panel_tag.append(_start_panel(panel_data))
 
     content = (
+        # ----- Contextual start panel (#754) — opaque overlay, cold open only -----
+        *start_panel_tag,
         # ----- Graph toolbar (across the top of the canvas) -----
         _explorer_toolbar(has_back_context=has_back_context, draft_tip=show_draft_tip),
         # ----- Breadcrumb -----
@@ -611,14 +849,19 @@ def explorer_page(req: Request):
         ),
         # ----- SVG canvas (fills the content area; sized by explorer.js) -----
         NotStr('<svg id="canvas"></svg>'),
-        # ----- Explorer JS (after the DOM it touches) -----
+        # ----- Server → JS bridge blobs (mode flag, ?focus= / ?search=, draft
+        # overlay) — emitted BEFORE explorer.js so the flags are visible to
+        # init()'s *synchronous* prologue (the start-panel gate in particular
+        # has to be read before loadOverview() is called). #719's ?focus= /
+        # ?search= blobs are only consulted after an `await`, so this ordering
+        # is also safe for them. -----
+        *bridge_tags,
+        # ----- Explorer JS (after the DOM it touches + the bridge blobs) -----
         Script(src="/static/js/explorer.js"),
         # ----- Auto-hide the (dismissed) draft tip -----
         Script(_TIP_AUTOHIDE_SCRIPT),
         # ----- Detail-panel annotation button wiring -----
         Script(_PANEL_ANNOTATION_SCRIPT),
-        # ----- ?focus= / ?search= / draft-overlay bridge blobs -----
-        *bridge_tags,
     )
 
     return PageShell(
