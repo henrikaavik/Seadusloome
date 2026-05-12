@@ -369,7 +369,8 @@ class TestChatView:
         with patch("app.chat.routes.get_conversation", return_value=conv):
             client = _authed_client()
             resp = client.get(f"/chat/{_CONV_ID}")
-            assert resp.status_code == 200
+            # #739: the not-found page now answers an explicit 404.
+            assert resp.status_code == 404
             assert "ei leitud" in resp.text.lower() or "puudub" in resp.text.lower()
 
     @patch("app.chat.routes._connect")
@@ -387,7 +388,7 @@ class TestChatView:
         with patch("app.chat.routes.get_conversation", return_value=conv):
             client = _authed_client()
             resp = client.get(f"/chat/{_CONV_ID}")
-            assert resp.status_code == 200
+            assert resp.status_code == 404
             assert "ei leitud" in resp.text.lower() or "puudub" in resp.text.lower()
 
     @patch("app.chat.routes._connect")
@@ -396,7 +397,7 @@ class TestChatView:
         mock_provider.return_value = _stub_provider()
         client = _authed_client()
         resp = client.get("/chat/not-a-uuid")
-        assert resp.status_code == 200
+        assert resp.status_code == 404
         assert "ei leitud" in resp.text.lower()
 
     @patch("app.chat.routes._connect")
@@ -410,7 +411,7 @@ class TestChatView:
         with patch("app.chat.routes.get_conversation", return_value=None):
             client = _authed_client()
             resp = client.get(f"/chat/{_CONV_ID}")
-            assert resp.status_code == 200
+            assert resp.status_code == 404
             assert "ei leitud" in resp.text.lower()
 
     @patch("app.chat.routes._get_draft_title", return_value="TestEelnou")
@@ -540,7 +541,8 @@ class TestChatDelete:
         with patch("app.chat.routes.get_conversation", return_value=conv):
             client = _authed_client()
             resp = client.post(f"/chat/{_CONV_ID}/delete")
-            assert resp.status_code == 200
+            # #739: the not-found page now answers an explicit 404.
+            assert resp.status_code == 404
             assert "ei leitud" in resp.text.lower()
 
     @patch("app.chat.routes._connect")
@@ -556,7 +558,7 @@ class TestChatDelete:
         with patch("app.chat.routes.get_conversation", return_value=conv):
             client = _authed_client()
             resp = client.post(f"/chat/{_CONV_ID}/delete")
-            assert resp.status_code == 200
+            assert resp.status_code == 404
             assert "ei leitud" in resp.text.lower()
 
 

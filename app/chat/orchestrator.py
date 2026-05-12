@@ -600,6 +600,8 @@ class ChatOrchestrator:
         user_message: str,
         auth: dict[str, Any],
         send: Callable[[dict[str, Any]], Awaitable[None]],
+        *,
+        regenerate_pivot_message_id: uuid.UUID | None = None,
     ) -> None:
         """Process a user message and stream the assistant response.
 
@@ -618,15 +620,31 @@ class ChatOrchestrator:
         conversation_id:
             UUID of the conversation this message belongs to.
         user_message:
-            The text the user typed.
+            The text the user typed. The sentinel empty string ``""`` is
+            the marker for **regenerate mode** (issues #737 / #738) — the
+            WS ``regenerate`` action passes it; the prompt is then taken
+            from the persisted history rather than from this argument.
         auth:
             Auth dict from request scope (must have ``id``, ``org_id``).
         send:
             Async callback for pushing events to the client. Wrapped in
             :func:`_safe_send` with a 5-second timeout.
+        regenerate_pivot_message_id:
+            Only meaningful in regenerate mode. The user message to
+            regenerate from; the HTTP regenerate/edit endpoints resolve
+            the clicked assistant bubble to that boundary and have
+            already deleted the stale reply + downstream. When the id
+            resolves to an assistant / tool reply we walk back to the
+            nearest preceding user turn; when it is ``None`` the
+            conversation's last user message is used. Outside regenerate
+            mode (``user_message`` non-empty) this argument is ignored.
         """
         user_id = auth.get("id")
         org_id = auth.get("org_id")
+        # Regenerate mode is signalled by the WS ``regenerate`` action
+        # passing an empty ``user_message``; a normal ``send_message`` turn
+        # always carries non-empty content (the WS handler rejects blanks).
+        regenerating = not (user_message or "").strip()
 
         # Post-review fix to #684: track pre-stream wall-clock so each
         # awaited DB step is capped by ``min(per_step_ceiling,
@@ -751,6 +769,42 @@ class ChatOrchestrator:
 
         history_length_before = len(history)
 
+        # Regenerate mode (issues #737 / #738): the prompt is the persisted
+        # user turn, not a freshly-typed message. Resolve the pivot, strip
+        # it (and anything after — though the HTTP endpoint already trimmed)
+        # from ``history`` so :func:`_build_llm_messages` re-adds it exactly
+        # once at the tail, and use its content as the effective
+        # ``user_message``. We do NOT persist a new user row — re-inserting
+        # the pivot is exactly the duplicate-turn bug #737 set out to fix.
+        # ``history_length_before`` keeps the *pre-trim* count so the
+        # first-exchange-only auto-title job (:func:`_maybe_generate_title`,
+        # gated on ``history_length_before == 0``) never fires when the
+        # conversation's opening turn is regenerated.
+        if regenerating:
+            pivot_index = _find_regenerate_pivot_index(history, regenerate_pivot_message_id)
+            if pivot_index is None:
+                logger.info(
+                    "Regenerate requested for conv=%s but no user turn found "
+                    "(pivot=%s) — nothing to replay",
+                    conversation_id,
+                    regenerate_pivot_message_id,
+                )
+                try:
+                    await _safe_send(
+                        send,
+                        {"type": "error", "message": "Pole midagi uuesti genereerida."},
+                    )
+                except WebSocketSendTimeout:
+                    pass
+                return
+            user_message = history[pivot_index].content or ""
+            history = history[:pivot_index]
+            logger.info(
+                "chat.handle_message step=regenerate conv=%s pivot_index=%s",
+                conversation_id,
+                pivot_index,
+            )
+
         # 3a. Persist the user message FIRST in its own transaction (#658).
         # Decoupled from the budget check so a stuck pg_advisory_xact_lock
         # or any downstream failure cannot lose user input. Bounded by an
@@ -764,42 +818,46 @@ class ChatOrchestrator:
         # path would silently re-introduce the data-loss bug. Persist is
         # now unconditionally the first DB write of the turn after the
         # read-only setup steps.
-        logger.info(
-            "chat.handle_message step=3a-persist-user conv=%s user=%s",
-            conversation_id,
-            user_id,
-        )
-        try:
-            await asyncio.wait_for(
-                asyncio.to_thread(_persist_user_message, conversation_id, user_message),
-                timeout=_step_deadline(pre_stream_start),
-            )
-        except TimeoutError:
-            logger.warning(
-                "User-message persist timed out after %.1fs of pre-stream budget for conv=%s",
-                time.monotonic() - pre_stream_start,
+        #
+        # Skipped in regenerate mode: the user message already lives in the
+        # DB (it is the pivot), so re-inserting it would duplicate the turn.
+        if not regenerating:
+            logger.info(
+                "chat.handle_message step=3a-persist-user conv=%s user=%s",
                 conversation_id,
+                user_id,
             )
             try:
-                await _safe_send(
-                    send,
-                    {
-                        "type": "error",
-                        "message": "Andmebaas vastab aeglaselt. Palun proovi uuesti.",
-                    },
+                await asyncio.wait_for(
+                    asyncio.to_thread(_persist_user_message, conversation_id, user_message),
+                    timeout=_step_deadline(pre_stream_start),
                 )
-            except WebSocketSendTimeout:
-                pass
-            return
-        except Exception:
-            logger.exception("Failed to persist user message for conv=%s", conversation_id)
-            try:
-                await _safe_send(
-                    send, {"type": "error", "message": "Sõnumi salvestamine ebaõnnestus."}
+            except TimeoutError:
+                logger.warning(
+                    "User-message persist timed out after %.1fs of pre-stream budget for conv=%s",
+                    time.monotonic() - pre_stream_start,
+                    conversation_id,
                 )
-            except WebSocketSendTimeout:
-                pass
-            return
+                try:
+                    await _safe_send(
+                        send,
+                        {
+                            "type": "error",
+                            "message": "Andmebaas vastab aeglaselt. Palun proovi uuesti.",
+                        },
+                    )
+                except WebSocketSendTimeout:
+                    pass
+                return
+            except Exception:
+                logger.exception("Failed to persist user message for conv=%s", conversation_id)
+                try:
+                    await _safe_send(
+                        send, {"type": "error", "message": "Sõnumi salvestamine ebaõnnestus."}
+                    )
+                except WebSocketSendTimeout:
+                    pass
+                return
 
         # 3b. Budget check in a separate transaction. The user message is
         # already safely persisted; if the budget is over the user simply
@@ -1387,6 +1445,45 @@ class ChatOrchestrator:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _find_regenerate_pivot_index(
+    history: list[Any], pivot_message_id: uuid.UUID | None
+) -> int | None:
+    """Return the index in *history* of the user turn to regenerate from.
+
+    Resolution mirrors :func:`app.chat.handlers._resolve_regenerate_pivot`
+    so the orchestrator is robust even if it loads a slightly different
+    view of the conversation than the HTTP endpoint did:
+
+    * *pivot_message_id* points at a ``user`` message → that index.
+    * *pivot_message_id* points at an ``assistant`` / ``tool`` reply →
+      walk back to the nearest preceding ``user`` message.
+    * *pivot_message_id* is ``None``, unknown, or has no preceding user
+      turn → fall back to the conversation's **last** ``user`` message.
+
+    Returns ``None`` when the conversation contains no ``user`` message at
+    all (nothing to regenerate).
+    """
+
+    def _last_user_index() -> int | None:
+        for i in range(len(history) - 1, -1, -1):
+            if getattr(history[i], "role", None) == "user":
+                return i
+        return None
+
+    if pivot_message_id is not None:
+        idx = next(
+            (i for i, m in enumerate(history) if getattr(m, "id", None) == pivot_message_id),
+            None,
+        )
+        if idx is not None:
+            if getattr(history[idx], "role", None) == "user":
+                return idx
+            for j in range(idx - 1, -1, -1):
+                if getattr(history[j], "role", None) == "user":
+                    return j
+    return _last_user_index()
 
 
 def _tool_result_count(result: Any) -> int:

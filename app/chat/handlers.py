@@ -68,6 +68,7 @@ from app.chat.models import (
     Conversation,
     Message,
     delete_messages_after,
+    delete_messages_from,
     fork_conversation,
     get_conversation,
     list_conversations_for_user,
@@ -219,6 +220,56 @@ def _delete_messages_after_pivot(conn: Any, conv_id: uuid.UUID, pivot_msg: Messa
     ``created_at`` and delegate.
     """
     return int(delete_messages_after(conn, conv_id, pivot_msg.created_at) or 0)
+
+
+def _delete_messages_from_pivot(conn: Any, conv_id: uuid.UUID, pivot_msg: Message) -> int:
+    """Drop the pivot row *and* every row newer than it in *conv_id*.
+
+    Used by the regenerate flow's degenerate fallback (assistant bubble
+    with no preceding user turn): we cannot anchor the replay on a user
+    message, so the orphan assistant reply itself must be removed before
+    the next turn — otherwise it survives a reload (issue #737).
+    """
+    return int(delete_messages_from(conn, conv_id, pivot_msg.created_at) or 0)
+
+
+def _resolve_regenerate_pivot(
+    conn: Any, conv_id: uuid.UUID, clicked: Message
+) -> tuple[Message, bool] | None:
+    """Resolve the clicked message to the user-turn boundary for a regenerate.
+
+    The regenerate affordance lives on assistant bubbles, but the assistant
+    reply is *itself* a persisted row — so "delete everything after the
+    clicked message" leaves the stale reply behind (issue #737). The fix is
+    to anchor the replay on the **preceding user message**: delete the
+    assistant reply + everything downstream, keep the user turn, and
+    re-run generation from the existing history up to and including that
+    user message.
+
+    Returns a ``(boundary_message, inclusive)`` tuple:
+
+    * the clicked message *is* a ``user`` message → ``(clicked, False)``
+      (delete strictly after it; this is the edit-style anchor).
+    * the clicked message is an ``assistant`` / ``tool`` reply with a
+      preceding ``user`` message → ``(that_user_message, False)``.
+    * the clicked message is an ``assistant`` / ``tool`` reply with **no**
+      preceding ``user`` message (pathological) → ``(clicked, True)`` so
+      the caller drops the orphan reply too.
+
+    Returns ``None`` when the message id is not in the conversation.
+    """
+    messages = list_messages(conn, conv_id)
+    idx = next((i for i, m in enumerate(messages) if m.id == clicked.id), None)
+    if idx is None:
+        return None
+    if messages[idx].role == "user":
+        return messages[idx], False
+    # Walk backwards for the nearest preceding user message.
+    for j in range(idx - 1, -1, -1):
+        if messages[j].role == "user":
+            return messages[j], False
+    # No user turn before this reply — drop the orphan reply itself.
+    return messages[idx], True
 
 
 def _update_message_content(conn: Any, msg_id: uuid.UUID, new_content: str) -> None:
@@ -698,13 +749,25 @@ async def feedback_handler(req: Request, conv_id: str, msg_id: str):
 async def regenerate_handler(req: Request, conv_id: str, msg_id: str):
     """POST /chat/{conv_id}/messages/{msg_id}/regenerate.
 
-    Discards every message *after* the pivot and returns 204. The actual
-    replay is driven by the client: after this call succeeds the page
-    re-sends the preceding user message through the existing chat
-    WebSocket, which re-enters :mod:`app.chat.orchestrator` and streams a
-    fresh assistant turn. Keeping the regenerate trigger out of the WS
-    protocol means the HTTP transaction — delete + audit — cannot race
+    Resolves the clicked message to its **preceding user turn** (the
+    regenerate affordance lives on assistant bubbles; the assistant reply
+    is itself a persisted row), deletes that reply + everything downstream
+    *before* re-generating, and returns JSON describing the user-turn
+    pivot::
+
+        {"conversation_id": "<uuid>", "pivot_message_id": "<uuid>"}
+
+    The actual replay is driven by the client over the chat WebSocket via
+    a distinct ``{"type": "regenerate", ...}`` action that carries the
+    conversation id (and the pivot message id): the orchestrator re-runs
+    generation from the existing history *up to and including* that user
+    message and does **not** insert a new user message (issue #737).
+    Keeping the delete in this HTTP transaction means it cannot race
     against an in-flight stream.
+
+    ``pivot_message_id`` is ``None`` in the degenerate case where the
+    clicked reply has no preceding user turn — the orphan reply is dropped
+    outright and the client just reloads.
     """
     auth_or_redirect = _require_auth(req)
     if isinstance(auth_or_redirect, Response):
@@ -722,10 +785,22 @@ async def regenerate_handler(req: Request, conv_id: str, msg_id: str):
 
     try:
         with _connect() as conn:
-            pivot = _load_message_in_conversation(conn, parsed_conv, parsed_msg)
-            if pivot is None:
+            clicked = _load_message_in_conversation(conn, parsed_conv, parsed_msg)
+            if clicked is None:
                 return _not_found_response()
-            deleted = _delete_messages_after_pivot(conn, parsed_conv, pivot)
+            resolved = _resolve_regenerate_pivot(conn, parsed_conv, clicked)
+            if resolved is None:
+                return _not_found_response()
+            pivot_msg, inclusive = resolved
+            if inclusive:
+                # Orphan assistant reply (no preceding user turn): drop the
+                # reply itself + downstream. There is nothing to replay from.
+                deleted = _delete_messages_from_pivot(conn, parsed_conv, pivot_msg)
+                pivot_for_replay: uuid.UUID | None = None
+            else:
+                # Keep the user turn; drop its reply + everything after it.
+                deleted = _delete_messages_after_pivot(conn, parsed_conv, pivot_msg)
+                pivot_for_replay = pivot_msg.id
             conn.commit()
     except Exception:
         logger.exception("Failed to regenerate from message %s", msg_id)
@@ -736,19 +811,34 @@ async def regenerate_handler(req: Request, conv_id: str, msg_id: str):
         "chat.message.regenerate",
         {
             "conversation_id": str(parsed_conv),
-            "pivot_message_id": str(parsed_msg),
+            "clicked_message_id": str(parsed_msg),
+            "pivot_message_id": str(pivot_for_replay) if pivot_for_replay else None,
             "deleted_count": deleted,
         },
     )
-    return _hx_trigger_response("chat:message-regenerate")
+    return JSONResponse(
+        {
+            "conversation_id": str(parsed_conv),
+            "pivot_message_id": str(pivot_for_replay) if pivot_for_replay else None,
+        }
+    )
 
 
 async def edit_message_handler(req: Request, conv_id: str, msg_id: str):
     """POST /chat/{conv_id}/messages/{msg_id}/edit.
 
     Only ``role='user'`` messages can be edited. Downstream messages
-    (every message strictly after the edited one) are dropped so the
-    assistant can regenerate a response to the new prompt.
+    (every message strictly after the edited one) are dropped, then a
+    fresh assistant turn is generated for the rewritten prompt. The
+    response is JSON describing the user-turn pivot::
+
+        {"conversation_id": "<uuid>", "pivot_message_id": "<uuid>"}
+
+    The client persists the edit via this endpoint and then fires the
+    same WebSocket ``{"type": "regenerate", ...}`` action used by the
+    regenerate affordance (issue #737 / #738) — #737 and #738 share one
+    primitive: "persist the rewind → run the standard WS generation path
+    from that user message", with no duplicate user row inserted.
     """
     auth_or_redirect = _require_auth(req)
     if isinstance(auth_or_redirect, Response):
@@ -795,7 +885,12 @@ async def edit_message_handler(req: Request, conv_id: str, msg_id: str):
             "message_id": str(parsed_msg),
         },
     )
-    return _hx_trigger_response("chat:message-edited")
+    return JSONResponse(
+        {
+            "conversation_id": str(parsed_conv),
+            "pivot_message_id": str(parsed_msg),
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
