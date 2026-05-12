@@ -21,6 +21,16 @@ graph area, and tells ``explorer.js`` *not* to fetch the graph data. Any of
 ``?focus=`` / ``?draft=`` / ``?search=`` / ``?vaade=koik`` bypasses the panel and
 loads the graph exactly as before. The org-scoped DB queries that back the panel
 live in :mod:`app.explorer.start_panel`.
+
+Issue #756 (epic #762, same design doc, workstream C): the toolbar grows
+**legal-view preset chips** — ``Kehtiv õigus`` · ``Eelnõu mõjud`` · ``EL
+seosed`` · ``Kohtupraktika`` · ``Ajalugu``. Each preset is a named bundle of
+the knobs the explorer already has (which entity types / relation types to keep
+on screen + whether the timeline is on); the raw simulation knobs stay under
+``Vaate seaded ▾``. Presets are URL-addressable — ``/explorer?vaade=<slug>``
+applies one on load (and, like ``?vaade=koik``, skips the start panel);
+``explorer.js`` mirrors a clicked preset into the URL. See
+:data:`_LEGAL_VIEW_PRESETS`.
 """
 
 from __future__ import annotations
@@ -52,6 +62,114 @@ logger = logging.getLogger(__name__)
 # URL renders the graph view (no panel) and lets ``explorer.js`` load the
 # overview as it always did.
 _VAADE_KOIK = "koik"
+
+# #756 (epic #762, design doc ``docs/2026-05-12-oiguskaart-evidence-map.md``,
+# workstream C): legal-view presets in the toolbar. Each preset is a *named
+# bundle* of the knobs the explorer already has — which entity types (graph
+# categories) to keep on screen, which relation types to keep (matched on the
+# edge labels explorer.js already renders, i.e. the predicate names), and
+# whether the timeline ("ajaline vaade") is on. The raw simulation knobs
+# (``Lähtesta paigutus`` / ``Näita-peida seosenimed`` / ``Rühmita liigi
+# järgi`` / the timeline slider) stay under the existing ``Vaate seaded ▾``
+# disclosure — presets are the *legal-work* surface.
+#
+# Presets are URL-addressable: ``/explorer?vaade=<slug>`` applies the preset on
+# load (and, like ``?vaade=koik``, forces the graph view past the #754 start
+# panel — a preset is meaningless without the graph). explorer.js mirrors a
+# clicked preset back into the URL via ``history.replaceState``. An unknown
+# ``?vaade=`` value is ignored gracefully (the page renders as if no ``vaade``
+# param were present).
+#
+# The mapping is best-effort against the ontology's actual predicates
+# (``estleg:references`` / ``interpretsProvision`` / ``transposesDirective`` /
+# ``amendsProvision`` / ``transposedBy`` / ``harmonisedWith`` — see
+# ``app/docs/impact/queries.py`` / ``app/analyysikeskus/eu_lookup.py``); where a
+# clean relation-type grouping doesn't exist the keyword list errs on the side
+# of "show a bit more". Category keys match ``CATEGORY_COLORS`` in
+# ``app/static/js/explorer.js``.
+#
+# Each entry: ``slug -> {"label", "title", "categories", "rel_keywords",
+# "timeline"}``. ``categories`` / ``rel_keywords`` empty ⇒ "no filter on that
+# axis" (used by ``ajalugu``, which keeps every type and just turns the
+# timeline on).
+_LEGAL_VIEW_PRESETS: dict[str, dict] = {
+    "kehtiv-oigus": {
+        "label": "Kehtiv õigus",
+        "title": "Kehtivad seadused ja õigusnormid ning nende struktuursed seosed",
+        "categories": [
+            "EnactedLaw",
+            "LegalProvision",
+            "Section",
+            "Division",
+            "Chapter",
+            "Subdivision",
+            "LegalPart",
+        ],
+        # Structural containment relations between an act and its provisions —
+        # no impact/EU/case predicates. ``hasInstance`` is the synthetic
+        # category→entity edge explorer.js draws on drill-down.
+        "rel_keywords": ["contains", "haspart", "ispartof", "hasprovision", "hasinstance"],
+        "timeline": False,
+    },
+    "eelnou-mojud": {
+        "label": "Eelnõu mõjud",
+        "title": "Eelnõud ja nende mõjuseosed (mõjutab / on vastuolus / muudab)",
+        "categories": ["DraftLegislation", "LegalProvision", "EnactedLaw"],
+        "rel_keywords": [
+            "reference",
+            "viit",
+            "affect",
+            "mojut",
+            "conflict",
+            "vastuolu",
+            "amend",
+            "muut",
+        ],
+        "timeline": False,
+    },
+    "el-seosed": {
+        "label": "EL seosed",
+        "title": "EL õigusaktid ja ülevõtmisseosed (võtab üle direktiivi / on harmoneeritud)",
+        "categories": ["EULegislation", "LegalProvision", "EnactedLaw"],
+        "rel_keywords": [
+            "transpos",
+            "ulevot",
+            "directive",
+            "direktiiv",
+            "harmonis",
+            "harmonee",
+            "implement",
+        ],
+        "timeline": False,
+    },
+    "kohtupraktika": {
+        "label": "Kohtupraktika",
+        "title": "Kohtulahendid ja nende tõlgendus-/kohaldamisseosed",
+        "categories": ["CourtDecision", "EUCourtDecision", "LegalProvision"],
+        "rel_keywords": ["interpret", "tolgenda", "appl", "kohalda", "cite", "viit"],
+        "timeline": False,
+    },
+    "ajalugu": {
+        "label": "Ajalugu",
+        "title": "Versioonid ja muudatused — ajaline vaade sees",
+        # No category filter — versions/amendments span every entity type.
+        "categories": [],
+        "rel_keywords": ["amend", "muut", "version", "versioon", "supersede", "asend", "replace"],
+        "timeline": True,
+    },
+}
+
+
+def _legal_view_presets_for_js() -> dict[str, dict]:
+    """Trim the preset table to the keys ``explorer.js`` needs (no labels)."""
+    return {
+        slug: {
+            "categories": p["categories"],
+            "relKeywords": p["rel_keywords"],
+            "timeline": p["timeline"],
+        }
+        for slug, p in _LEGAL_VIEW_PRESETS.items()
+    }
 
 
 # #475: the explorer page previously re-queried ``drafts`` and
@@ -297,15 +415,57 @@ def _escape_for_script(payload: str) -> str:
     return payload.replace("</", "<\\/").replace(" ", "\\u2028").replace(" ", "\\u2029")
 
 
-def _explorer_toolbar(*, has_back_context: bool, draft_tip: bool):  # noqa: ANN202
+# #756: the legal-view preset chips, rendered as one group in the toolbar.
+def _legal_view_preset_chips(active_preset: str | None):  # noqa: ANN202
+    """Build the ``Õigusvaated`` chip row for the toolbar.
+
+    One ``.preset-chip`` button per entry in :data:`_LEGAL_VIEW_PRESETS`; the
+    chip matching *active_preset* (the resolved ``?vaade=`` slug, if it names a
+    real preset) carries the ``active`` class so the page reflects which view is
+    on without waiting for JS. explorer.js wires the ``onclick`` (it calls
+    ``explorerApplyPreset(slug)``), re-paints the active chip when a preset is
+    clicked, and mirrors the slug into the URL.
+    """
+    chips: list = [Span("Õigusvaated:", cls="preset-group-label")]
+    for slug, preset in _LEGAL_VIEW_PRESETS.items():
+        is_active = slug == active_preset
+        chips.append(
+            Button(
+                preset["label"],
+                type="button",
+                cls="ctrl-btn preset-chip active" if is_active else "ctrl-btn preset-chip",
+                # explorer.js reads this to find the button when reflecting the
+                # URL / re-painting the active state.
+                data_vaade=slug,
+                onclick=f"explorerApplyPreset('{slug}')",
+                title=preset["title"],
+                aria_pressed="true" if is_active else "false",
+            )
+        )
+    return Div(
+        *chips,
+        id="explorer-presets",
+        cls="preset-group",
+        role="group",
+        aria_label="Õiguskaardi vaated",
+        data_active_vaade=active_preset or "",
+    )
+
+
+def _explorer_toolbar(
+    *, has_back_context: bool, draft_tip: bool, active_preset: str | None = None
+):  # noqa: ANN202
     """The thin horizontal graph toolbar across the top of the canvas.
 
-    Holds the legal-work view actions (``Ülevaade`` / ``Lähtesta vaade``),
-    the ``Vaate seaded`` disclosure (technical layout controls), the search
-    input + ``Otsi`` button (moved here from the deleted bespoke topbar),
-    and — when the page was opened from a report/analysis — a "← Tagasi
-    aruandesse" link. explorer.js wires the ``onclick`` handlers and unhides
-    the panel back link based on ``document.referrer``.
+    Holds the legal-work view actions (``Ülevaade`` / ``Lähtesta vaade``), the
+    legal-view preset chips (#756 — ``Kehtiv õigus`` · ``Eelnõu mõjud`` · ``EL
+    seosed`` · ``Kohtupraktika`` · ``Ajalugu``), the ``Vaate seaded``
+    disclosure (technical layout controls), the search input + ``Otsi`` button
+    (moved here from the deleted bespoke topbar), and — when the page was
+    opened from a report/analysis — a "← Tagasi aruandesse" link. explorer.js
+    wires the ``onclick`` handlers and unhides the panel back link based on
+    ``document.referrer``. *active_preset* is the resolved ``?vaade=`` slug when
+    it names a real preset (else ``None``); the matching chip renders active.
     """
     items: list = [
         # A small page-identity label — the highlighted sidebar item and
@@ -325,6 +485,9 @@ def _explorer_toolbar(*, has_back_context: bool, draft_tip: bool):  # noqa: ANN2
             onclick="explorerResetView()",
             title="Lähtesta suum ja valik",
         ),
+        # #756: legal-view presets — the legal-work surface; the raw graph
+        # knobs stay under "Vaate seaded ▾" below.
+        _legal_view_preset_chips(active_preset),
         # Technical layout controls behind a disclosure so the toolbar
         # reads in legal-work language, not force-simulation jargon
         # (#714 / #718). The menu drops down (position: absolute) so it
@@ -625,30 +788,59 @@ def explorer_page(req: Request):
     kogu kaarti" / "Sirvi liikide kaupa" buttons and the toolbar's "Näita kogu
     kaarti") forces the classic graph view. Unauthenticated requests never
     reach here — ``auth_before`` redirects to ``/auth/login`` first (#442).
+
+    #756: ``?vaade=<slug>`` where ``<slug>`` names a legal-view preset (see
+    :data:`_LEGAL_VIEW_PRESETS`) renders the graph view with that preset's chip
+    active and hands the preset config to ``explorer.js`` (``window.__explorerVaade``)
+    so the filter combo (entity types + relation types + timeline) is applied on
+    load. Like ``?vaade=koik`` a preset slug bypasses the start panel. An unknown
+    ``?vaade=`` value is ignored (treated as if absent).
     """
     auth = req.scope.get("auth")
     draft_param = req.query_params.get("draft", "").strip()
     focus_param = req.query_params.get("focus", "").strip()
     search_param = req.query_params.get("search", "").strip()
     vaade_param = req.query_params.get("vaade", "").strip()
+    # #756: resolve ?vaade= once. ``active_preset`` is set only when the slug
+    # names a real legal-view preset; ``?vaade=koik`` (the #754 "show me
+    # everything" opt-in) and unknown values both leave it ``None``. ``?focus=``
+    # / ``?search=`` are more specific intents (a particular entity / query) —
+    # when present, ``?vaade=`` is ignored entirely so the chip state and the
+    # JS init path don't fight the focus/search deep link.
+    active_preset: str | None = None
+    if not focus_param and not search_param:
+        active_preset = vaade_param if vaade_param in _LEGAL_VIEW_PRESETS else None
     overlay_uris: list[str] = []
     if draft_param:
         overlay_uris = _fetch_draft_overlay(req, draft_param)
 
-    # #754: the start panel shows only when there is nothing to deep-link to
-    # and the user hasn't explicitly asked for the whole map. Any of
-    # ?focus= / ?draft= / ?search= / ?vaade=koik bypasses it and renders the
-    # classic graph view (so existing deep links / overlays never regress).
+    # #754 / #756: the start panel shows only when there is nothing to deep-link
+    # to and the user hasn't explicitly asked for a full/preset view. Any of
+    # ?focus= / ?draft= / ?search= / ?vaade=koik / ?vaade=<preset> bypasses it
+    # and renders the classic graph view (so existing deep links / overlays
+    # never regress, and a preset has the graph to filter).
     show_start_panel = not (
-        focus_param or search_param or draft_param or vaade_param == _VAADE_KOIK
+        focus_param
+        or search_param
+        or draft_param
+        or vaade_param == _VAADE_KOIK
+        or active_preset is not None
     )
 
-    # ---- Server → JS bridge: ?focus= / ?search= / draft-overlay / mode blobs ----
+    # ---- Server → JS bridge: ?focus= / ?search= / ?vaade= / draft-overlay / mode blobs ----
     bridge_tags: list = []
     if show_start_panel:
         # The flag explorer.js checks on init() to skip loadOverview() — the
         # whole point of #754 (don't fetch the cold blob until the user picks).
         bridge_tags.append(Script("window.__explorerStartPanel=true;"))
+    # #756: hand the full preset table + the active slug to explorer.js. The
+    # table is small static config (no user data) so plain json.dumps is fine;
+    # _escape_for_script keeps it safe inside the <script> regardless.
+    presets_payload = _escape_for_script(json.dumps(_legal_view_presets_for_js()))
+    bridge_tags.append(Script(f"window.__explorerPresets={presets_payload};"))
+    if active_preset is not None:
+        vaade_payload = _escape_for_script(json.dumps(active_preset))
+        bridge_tags.append(Script(f"window.__explorerVaade={vaade_payload};"))
     # #719: hand the focus URI to the JS (it's validated server-side at
     # /api/explorer/entity/{uri}; embedding it escaped keeps the contract
     # explicit so the JS need not re-parse location.search).
@@ -692,7 +884,11 @@ def explorer_page(req: Request):
         # ----- Contextual start panel (#754) — opaque overlay, cold open only -----
         *start_panel_tag,
         # ----- Graph toolbar (across the top of the canvas) -----
-        _explorer_toolbar(has_back_context=has_back_context, draft_tip=show_draft_tip),
+        _explorer_toolbar(
+            has_back_context=has_back_context,
+            draft_tip=show_draft_tip,
+            active_preset=active_preset,
+        ),
         # ----- Breadcrumb -----
         Div(id="breadcrumb"),
         # ----- Tooltip -----
