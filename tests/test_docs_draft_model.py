@@ -29,8 +29,10 @@ from app.docs.draft_model import (
     Draft,
     _row_to_draft,
     create_draft,
+    delete_draft,
     fetch_draft,
     get_draft,
+    get_draft_artifact_paths,
     list_drafts_for_org,
     list_eelnous_for_vtk,
     list_versionable_drafts_for_org,
@@ -1108,3 +1110,128 @@ class TestListEelnousForVtk:
         mock_connect.return_value.__exit__ = MagicMock(return_value=False)
 
         assert list_eelnous_for_vtk(_VTK_ID, org_id=_ORG_ID) == []
+
+
+# ---------------------------------------------------------------------------
+# get_draft_artifact_paths -- collect EVERY version's file + named graph (#736)
+# ---------------------------------------------------------------------------
+
+
+def _artifact_conn(*, legacy_row, version_rows):
+    """Build a MagicMock conn whose two ``execute`` calls return the
+    legacy ``drafts`` row then the ``draft_versions`` rows.
+
+    ``get_draft_artifact_paths`` issues exactly two queries: a single-row
+    SELECT against ``drafts`` followed by a multi-row SELECT against
+    ``draft_versions`` ordered by ``version_number ASC``.
+    """
+    conn = MagicMock()
+    legacy_cursor = MagicMock()
+    legacy_cursor.fetchone.return_value = legacy_row
+    versions_cursor = MagicMock()
+    versions_cursor.fetchall.return_value = list(version_rows)
+    conn.execute.side_effect = [legacy_cursor, versions_cursor]
+    return conn
+
+
+class TestGetDraftArtifactPaths:
+    def test_collects_every_version_path_and_graph(self):
+        """A draft with 3 versions yields all 3 files + all 3 graphs.
+
+        The legacy ``drafts`` columns equal v1's values here (the normal
+        post-migration-030 case) so they de-dup away — the result is the
+        ordered union with no repeats.
+        """
+        v1 = ("/storage/v1.enc", "urn:draft:d/v1")
+        v2 = ("/storage/v2.enc", "urn:draft:d/v2")
+        v3 = ("/storage/v3.enc", "urn:draft:d/v3")
+        conn = _artifact_conn(legacy_row=v1, version_rows=[v1, v2, v3])
+
+        storage_paths, graph_uris = get_draft_artifact_paths(conn, _DRAFT_ID)
+
+        assert storage_paths == ["/storage/v1.enc", "/storage/v2.enc", "/storage/v3.enc"]
+        assert graph_uris == ["urn:draft:d/v1", "urn:draft:d/v2", "urn:draft:d/v3"]
+        # First query targets drafts, second targets draft_versions ASC.
+        first_sql = conn.execute.call_args_list[0].args[0].lower()
+        second_sql = conn.execute.call_args_list[1].args[0].lower()
+        assert "from drafts" in first_sql
+        assert "from draft_versions" in second_sql
+        assert "version_number asc" in second_sql
+
+    def test_legacy_columns_differ_from_versions_are_included(self):
+        """If the legacy ``drafts.*`` differs from every version row
+        (a draft predating the 030 backfill), the legacy file/graph is
+        still returned so it cannot orphan.
+        """
+        legacy = ("/storage/legacy.enc", "urn:draft:d/legacy")
+        v1 = ("/storage/v1.enc", "urn:draft:d/v1")
+        conn = _artifact_conn(legacy_row=legacy, version_rows=[v1])
+
+        storage_paths, graph_uris = get_draft_artifact_paths(conn, _DRAFT_ID)
+
+        assert storage_paths == ["/storage/legacy.enc", "/storage/v1.enc"]
+        assert graph_uris == ["urn:draft:d/legacy", "urn:draft:d/v1"]
+
+    def test_no_versions_falls_back_to_legacy_only(self):
+        legacy = ("/storage/only.enc", "urn:draft:d")
+        conn = _artifact_conn(legacy_row=legacy, version_rows=[])
+
+        storage_paths, graph_uris = get_draft_artifact_paths(conn, _DRAFT_ID)
+
+        assert storage_paths == ["/storage/only.enc"]
+        assert graph_uris == ["urn:draft:d"]
+
+    def test_missing_draft_returns_empty_lists(self):
+        conn = _artifact_conn(legacy_row=None, version_rows=[])
+
+        assert get_draft_artifact_paths(conn, _DRAFT_ID) == ([], [])
+
+    def test_nulls_are_skipped(self):
+        """A version row with a NULL/empty path or graph contributes
+        nothing rather than queueing ``""`` for deletion.
+        """
+        conn = _artifact_conn(
+            legacy_row=(None, None),
+            version_rows=[("/storage/v1.enc", None), (None, "urn:draft:d/v2")],
+        )
+
+        storage_paths, graph_uris = get_draft_artifact_paths(conn, _DRAFT_ID)
+
+        assert storage_paths == ["/storage/v1.enc"]
+        assert graph_uris == ["urn:draft:d/v2"]
+
+    def test_db_error_returns_empty_lists(self):
+        conn = MagicMock()
+        conn.execute.side_effect = RuntimeError("db down")
+
+        assert get_draft_artifact_paths(conn, _DRAFT_ID) == ([], [])
+
+
+class TestDeleteDraft:
+    def test_returns_legacy_storage_path_and_deletes_row(self):
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = ("/storage/x.enc",)
+
+        result = delete_draft(conn, _DRAFT_ID)
+
+        assert result == "/storage/x.enc"
+        # A DELETE FROM drafts was issued for the row.
+        delete_calls = [
+            c
+            for c in conn.execute.call_args_list
+            if "delete from drafts" in (c.args[0].lower() if c.args else "")
+        ]
+        assert delete_calls
+        assert delete_calls[0].args[1] == (str(_DRAFT_ID),)
+
+    def test_missing_draft_returns_none_without_delete(self):
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = None
+
+        assert delete_draft(conn, _DRAFT_ID) is None
+        delete_calls = [
+            c
+            for c in conn.execute.call_args_list
+            if "delete from drafts" in (c.args[0].lower() if c.args else "")
+        ]
+        assert not delete_calls
