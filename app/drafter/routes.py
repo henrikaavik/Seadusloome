@@ -37,6 +37,7 @@ from app.auth.helpers import require_auth as _require_auth
 from app.auth.policy import can_access_drafter_session
 from app.auth.provider import UserDict
 from app.db import get_connection as _connect
+from app.docs.report_routes import explorer_focus_url
 from app.drafter.audit import (
     log_drafter_clause_edit,
     log_drafter_export,
@@ -882,7 +883,15 @@ def _step_3_page(session: DraftingSession, auth: UserDict):
 
 
 def _research_category_card(title: str, items: list[dict[str, str]], category: str):
-    """Render a summary card for a research category."""
+    """Render a summary card for a research category.
+
+    #759: every researched entity that carries an ontology URI gets an
+    "Ava õiguskaardil →" deep link (URL-encoded by
+    :func:`app.docs.report_routes.explorer_focus_url`) so the drafter can
+    jump from a found provision / EL act / court decision straight to the
+    legal map centred on it. Items without a URI (e.g. topic clusters)
+    render as plain text, matching how Analüüsikeskus handles the same case.
+    """
     count = len(items)
     if count == 0:
         return Div(  # noqa: F405
@@ -893,8 +902,23 @@ def _research_category_card(title: str, items: list[dict[str, str]], category: s
 
     item_list: list[Any] = []
     for item in items[:10]:
-        label = item.get("label") or item.get("act_label") or item.get("uri", "")
-        item_list.append(Li(label, cls="research-item"))  # noqa: F405
+        uri = str(item.get("uri") or "").strip()
+        label = item.get("label") or item.get("act_label") or uri or "—"
+        if uri:
+            item_list.append(
+                Li(  # noqa: F405
+                    Span(label, cls="research-item-label"),  # noqa: F405
+                    " ",
+                    A(  # noqa: F405
+                        "Ava õiguskaardil →",
+                        href=explorer_focus_url(uri),
+                        cls="data-table-link research-item-link",
+                    ),
+                    cls="research-item",
+                )
+            )
+        else:
+            item_list.append(Li(label, cls="research-item"))  # noqa: F405
 
     return Div(  # noqa: F405
         H4(f"{title}: {count}", cls="research-category-title"),  # noqa: F405

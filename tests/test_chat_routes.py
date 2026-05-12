@@ -737,6 +737,59 @@ class TestConversationViewPolish:
 
     @patch("app.chat.routes._connect")
     @patch("app.auth.middleware._get_provider")
+    def test_rag_sources_carry_oiguskaart_deeplink(self, mock_provider, mock_connect):
+        """#759: each cited source with a URI gets a "vaata kaardil →"
+        affordance pointing at ``/explorer?focus=<urlencoded-uri>``."""
+        mock_provider.return_value = _stub_provider()
+        self._setup(mock_connect)
+        conv = _make_conversation()
+        provision_uri = "https://data.riik.ee/ontology/estleg#KarS_par_113"
+        rag = [
+            {
+                "source_uri": provision_uri,
+                "content": "Karistusseadustiku § 113 kaitseb inimese elu...",
+                "score": 0.9,
+            },
+        ]
+        msg = _make_message("assistant", "Vastus", rag_context=rag)
+        with (
+            patch("app.chat.routes.get_conversation", return_value=conv),
+            patch("app.chat.routes.list_messages", return_value=[msg]),
+        ):
+            client = _authed_client()
+            resp = client.get(f"/chat/{_CONV_ID}")
+            assert resp.status_code == 200
+            assert "vaata kaardil" in resp.text
+            assert "chat-source-map-link" in resp.text
+            assert "/explorer?focus=" in resp.text
+            # The estleg ``#`` must be percent-encoded so ``focus`` is not
+            # truncated to ".../estleg" by the browser fragment parser.
+            assert "%23KarS_par_113" in resp.text
+
+    @patch("app.chat.routes._connect")
+    @patch("app.auth.middleware._get_provider")
+    def test_rag_sources_without_uri_have_no_map_link(self, mock_provider, mock_connect):
+        """#759: a source chunk with no ``source_uri`` renders as plain
+        text — no "vaata kaardil" affordance to point nowhere."""
+        mock_provider.return_value = _stub_provider()
+        self._setup(mock_connect)
+        conv = _make_conversation()
+        rag = [
+            {"source_uri": "", "content": "Mingi taustateave ilma allika URI-ta.", "score": 0.5},
+        ]
+        msg = _make_message("assistant", "Vastus", rag_context=rag)
+        with (
+            patch("app.chat.routes.get_conversation", return_value=conv),
+            patch("app.chat.routes.list_messages", return_value=[msg]),
+        ):
+            client = _authed_client()
+            resp = client.get(f"/chat/{_CONV_ID}")
+            assert resp.status_code == 200
+            assert "chat-sources" in resp.text
+            assert "chat-source-map-link" not in resp.text
+
+    @patch("app.chat.routes._connect")
+    @patch("app.auth.middleware._get_provider")
     def test_action_row_present_on_assistant_messages(self, mock_provider, mock_connect):
         mock_provider.return_value = _stub_provider()
         self._setup(mock_connect)

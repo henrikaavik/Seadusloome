@@ -68,6 +68,7 @@ from app.docs.draft_model import (
     update_draft_parent_vtk,
 )
 from app.docs.graph_builder import write_doc_lineage
+from app.docs.report_routes import explorer_draft_url
 from app.docs.routes._detail_modals import (
     _DELETE_FORM_ID,
     _DELETE_MODAL_ID,
@@ -361,6 +362,19 @@ def _draft_detail_body(
             LinkButton(
                 "Vaata mõjuaruannet",
                 href=f"/drafts/{draft.id}/report",
+            )
+        )
+        # #759: deep-link into Õiguskaart centred on this draft's impact
+        # subgraph (``/explorer?draft=<id>`` — the ``?draft=`` handling is
+        # issue #755; this just mints the URL via the shared helper). Same
+        # ``ready`` guard as the report CTA — no impact subgraph exists
+        # before the analyse pipeline completes.
+        actions.append(
+            LinkButton(
+                "Vaata mõjukaarti",
+                href=explorer_draft_url(str(draft.id)),
+                variant="secondary",
+                title="Visualiseeri eelnõu ja mõjutatud sätted Õiguskaardil.",
             )
         )
         # #724: cross-link into the Analüüsikeskus "Normi mõjuahel" workflow,

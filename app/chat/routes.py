@@ -52,6 +52,7 @@ from app.chat.pending_seed import (
 )
 from app.chat.sanitize import render_markdown_safe, render_plaintext_safe
 from app.db import get_connection as _connect
+from app.docs.report_routes import explorer_focus_url
 from app.ui.data.data_table import Column, DataTable
 from app.ui.data.pagination import Pagination
 from app.ui.layout import PageShell
@@ -851,7 +852,17 @@ def _message_action_row(
 
 
 def _rag_sources_block(rag_context: list[dict] | None):
-    """Render a ``<details>`` disclosure of RAG source chunks."""
+    """Render a ``<details>`` disclosure of RAG source chunks.
+
+    #759: each source row that carries an ontology URI also gets a small
+    "vaata kaardil \u2192" affordance that deep-links into \u00d5iguskaart centred
+    on that entity (``/explorer?focus=<urlencoded-uri>``, via
+    :func:`app.docs.report_routes.explorer_focus_url`). RAG context is
+    sourced from ontology-derived chunks, so the chunk URIs are exactly
+    the provision / act / court-case entities the assistant grounded its
+    answer on \u2014 making them the "cited URIs" the design doc asks us to
+    surface a map link for.
+    """
     if not rag_context:
         return ""
 
@@ -866,18 +877,27 @@ def _rag_sources_block(rag_context: list[dict] | None):
         snippet = content[:200].strip()
         if len(content) > 200:
             snippet = snippet + "\u2026"
+        link: Any
+        map_link: Any = ""
         if source_uri:
-            link: Any = A(  # noqa: F405
+            link = A(  # noqa: F405
                 title,
                 href=f"/explorer?q={source_uri}",
                 target="_blank",
                 rel="noopener noreferrer",
+            )
+            map_link = A(  # noqa: F405
+                "vaata kaardil \u2192",
+                href=explorer_focus_url(source_uri),
+                cls="chat-source-map-link",
+                title="Ava see allikas \u00d5iguskaardil.",
             )
         else:
             link = Span(title)  # noqa: F405
         items.append(
             Li(  # noqa: F405
                 link,
+                map_link,
                 P(snippet, cls="chat-source-snippet") if snippet else "",  # noqa: F405
             )
         )

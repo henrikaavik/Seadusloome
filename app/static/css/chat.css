@@ -1435,6 +1435,15 @@
   gap: var(--space-2);
 }
 
+/* #759: "vaata kaardil →" deep-link beside each cited source — sits
+   inline after the source title, slightly muted so it reads as a
+   secondary affordance rather than the primary source link. */
+.chat-source-map-link {
+  margin-inline-start: var(--space-2);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
 /* ===========================================================================
    Conversation list toolbar + row actions
    =========================================================================== */
