@@ -669,3 +669,183 @@ class TestExplorerDraftOverlay:
         assert call_counter["n"] == 1, (
             "overlay cache should have absorbed the second request (#475)"
         )
+
+
+# ---------------------------------------------------------------------------
+# #757 — evidence-card detail panel: relation-phrase map + "why it matters"
+# rule table + the enhanced entity-detail payload (epic #762 workstream D)
+# ---------------------------------------------------------------------------
+
+
+class TestRelationLegalPhrase:
+    """The relation IRI / short-name → Estonian legal phrase mapping."""
+
+    def test_common_relations_map_to_legal_phrases(self):
+        from app.explorer.routes import relation_legal_phrase
+
+        assert relation_legal_phrase("estleg:amendsProvision") == "muudab"
+        assert relation_legal_phrase("amendsProvision") == "muudab"
+        assert relation_legal_phrase("repealsProvision") == "tunnistab kehtetuks"
+        assert relation_legal_phrase("transposesDirective") == "võtab üle direktiivi"
+        assert relation_legal_phrase("references") == "viitab"
+        assert relation_legal_phrase("appliesProvision") == "kohaldab"
+        assert relation_legal_phrase("interpretsProvision") == "tõlgendab"
+
+    def test_full_iri_is_reduced_to_local_name(self):
+        from app.explorer.routes import relation_legal_phrase
+
+        iri = "https://data.riik.ee/ontology/estleg#amendsProvision"
+        assert relation_legal_phrase(iri) == "muudab"
+
+    def test_unknown_relation_falls_back_to_short_name(self):
+        from app.explorer.routes import relation_legal_phrase
+
+        # Not in the table → the bare local name, not an empty string.
+        assert relation_legal_phrase("estleg:somethingNobodyMapped") == "somethingNobodyMapped"
+        assert relation_legal_phrase("") == ""
+
+
+class TestWhyItMatters:
+    """The deterministic 'miks see oluline on' rule table."""
+
+    def test_repeals_critical_produces_expected_line(self):
+        from app.explorer.routes import why_it_matters
+
+        line = why_it_matters("repeals", "critical")
+        assert line.startswith("Tunnistab kehtetuks — eelnõu kaotaks selle sätte.")
+        # The high-stakes band is appended in parentheses.
+        assert "kriitiline" in line
+
+    def test_amends_without_band_is_band_agnostic(self):
+        from app.explorer.routes import why_it_matters
+
+        line = why_it_matters("amendsProvision")
+        assert line == "Muudab — säte saaks uue redaktsiooni."
+        # No parenthetical when the band is unknown.
+        assert "(" not in line
+
+    def test_transposes_directive_high_band(self):
+        from app.explorer.routes import why_it_matters
+
+        line = why_it_matters("transposesDirective", "high")
+        assert line.startswith("Võtab üle direktiivi —")
+        assert "kõrge risk" in line
+
+    def test_unknown_relation_gets_generic_line(self):
+        from app.explorer.routes import why_it_matters
+
+        # Unknown but mappable relation name → a generic but non-empty note.
+        line = why_it_matters("relatedTo")
+        assert "On seotud" in line
+        # Truly unknown predicate → still non-empty.
+        fallback = why_it_matters("estleg:somethingNobodyMapped")
+        assert fallback
+        assert "mõjutada" in fallback
+
+
+class TestEntityDetailEvidenceFields:
+    """``GET /api/explorer/entity/{uri}`` carries the evidence-card extras."""
+
+    @patch("app.auth.middleware._get_provider")
+    def test_relations_carry_legal_phrase_and_why_text(self, mock_get_provider: MagicMock):
+        mock_get_provider.return_value = _api_provider()
+        with patch("app.explorer.routes._get_client") as mock_get:
+            mock_client = mock_get.return_value
+            mock_client.query.side_effect = _mock_query
+            resp = _api_client().get(
+                "/api/explorer/entity/https%3A%2F%2Fdata.riik.ee%2Fontology%2Festleg%23Act_1"
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        # Every outgoing / incoming relation gets predicateLabel + whyText.
+        for rel in data["outgoing"]:
+            assert "predicateLabel" in rel
+            assert "whyText" in rel
+        for rel in data["incoming"]:
+            assert "predicateLabel" in rel
+            assert "whyText" in rel
+        # The incoming mock relation is estleg:sourceAct → its legal phrase.
+        assert any(
+            rel.get("predicateName") == "sourceAct"
+            and rel.get("predicateLabel") == "kuulub õigusakti"
+            for rel in data["incoming"]
+        )
+
+    @patch("app.auth.middleware._get_provider")
+    def test_payload_has_source_and_date_info_keys(self, mock_get_provider: MagicMock):
+        mock_get_provider.return_value = _api_provider()
+        with patch("app.explorer.routes._get_client") as mock_get:
+            mock_client = mock_get.return_value
+            mock_client.query.side_effect = _mock_query
+            resp = _api_client().get(
+                "/api/explorer/entity/https%3A%2F%2Fdata.riik.ee%2Fontology%2Festleg%23Act_1"
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        # The evidence-card extras are always present (may be null / empty).
+        assert "source" in data
+        assert "dateInfo" in data
+        assert isinstance(data["dateInfo"], list)
+
+    @patch("app.auth.middleware._get_provider")
+    def test_source_is_derived_from_source_act_relation(self, mock_get_provider: MagicMock):
+        mock_get_provider.return_value = _api_provider()
+
+        def _mock_with_source(sparql, bindings=None, uri_bindings=None):
+            if "?predicate ?object" in sparql:
+                return [
+                    {
+                        "predicate": "https://data.riik.ee/ontology/estleg#sourceAct",
+                        "object": "https://data.riik.ee/ontology/estleg#KarS",
+                        "objectLabel": "Karistusseadustik",
+                    }
+                ]
+            return _mock_query(sparql, bindings, uri_bindings)
+
+        with patch("app.explorer.routes._get_client") as mock_get:
+            mock_client = mock_get.return_value
+            mock_client.query.side_effect = _mock_with_source
+            resp = _api_client().get(
+                "/api/explorer/entity/https%3A%2F%2Fdata.riik.ee%2Fontology%2Festleg%23KarS_par_1"
+            )
+
+        assert resp.status_code == 200
+        source = resp.json()["data"]["source"]
+        assert source is not None
+        assert source["uri"] == "https://data.riik.ee/ontology/estleg#KarS"
+        assert source["label"] == "Karistusseadustik"
+        assert source["kindLabel"] == "Õigusakt"
+        assert source["relationLabel"] == "kuulub õigusakti"
+
+    @patch("app.auth.middleware._get_provider")
+    def test_date_info_is_derived_from_metadata(self, mock_get_provider: MagicMock):
+        mock_get_provider.return_value = _api_provider()
+
+        def _mock_with_dates(sparql, bindings=None, uri_bindings=None):
+            if "isLiteral" in sparql:
+                return [
+                    {
+                        "predicate": "https://data.riik.ee/ontology/estleg#validFrom",
+                        "value": "1993-12-01",
+                    },
+                    {
+                        "predicate": "https://data.riik.ee/ontology/estleg#caseNumber",
+                        "value": "3-1-1-5-13",
+                    },
+                ]
+            return _mock_query(sparql, bindings, uri_bindings)
+
+        with patch("app.explorer.routes._get_client") as mock_get:
+            mock_client = mock_get.return_value
+            mock_client.query.side_effect = _mock_with_dates
+            resp = _api_client().get(
+                "/api/explorer/entity/https%3A%2F%2Fdata.riik.ee%2Fontology%2Festleg%23Act_1"
+            )
+
+        assert resp.status_code == 200
+        date_info = resp.json()["data"]["dateInfo"]
+        labels = {row["label"]: row["value"] for row in date_info}
+        assert labels.get("Jõustunud") == "1993-12-01"
+        assert labels.get("Kohtuasja number") == "3-1-1-5-13"

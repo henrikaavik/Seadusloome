@@ -822,6 +822,10 @@ async function expandCategory(categoryKey) {
 }
 
 async function showEntityDetail(d) {
+  // #757: remember the entity the panel was showing *before* this click, so
+  // the evidence card's "Seose liik" slot can name the relation from the
+  // previously-focused node to the newly-selected one.
+  const prevEntity = state.selectedEntity;
   state.selectedEntity = d.uri || d.id;
   state.view = 'entity';
   updateBreadcrumb();
@@ -837,9 +841,17 @@ async function showEntityDetail(d) {
   const panelLink = document.getElementById('panel-link');
 
   panelTitle.textContent = d.label;
+  // #757: stash the entity URI on the title element so _PANEL_ANNOTATION_SCRIPT
+  // (the MutationObserver wiring the entity-level AnnotationButton) picks the
+  // real URI rather than the human-readable label.
+  panelTitle.dataset.entityUri = d.uri || d.id || '';
   panelCategory.textContent = CATEGORY_LABELS[d.category] || d.category;
   panelCategory.style.background = colorFor(d.category) + '22';
   panelCategory.style.color = colorFor(d.category);
+
+  // #757: the evidence-card slots (Allikas / Kuupäev-versioon / Seose liik /
+  // Miks see oluline on) + the four action buttons.
+  populateEvidenceCard(d, detail ? detail.entity : null, prevEntity);
 
   // Metadata
   panelMeta.innerHTML = '';
@@ -911,10 +923,11 @@ async function showEntityDetail(d) {
   state.selectedEntityData = detail ? detail.entity : null;
   renderVersionHistory(detail ? detail.entity : null);
 
-  // Reset bookmark button
+  // Reset bookmark button (#757: relabelled "Lisa j\u00e4rjehoidja" to fit the
+  // evidence card's "Tegevused" group; the XHR path itself is unchanged).
   const bookmarkBtn = document.getElementById('panel-bookmark-btn');
   if (bookmarkBtn) {
-    bookmarkBtn.textContent = 'Lisa j\u00e4rjehoidjatesse';
+    bookmarkBtn.textContent = 'Lisa j\u00e4rjehoidja';
     bookmarkBtn.classList.remove('bookmarked');
   }
 
@@ -933,6 +946,200 @@ async function showEntityDetail(d) {
 
 function closeDetail() {
   detailPanel.classList.remove('open');
+}
+
+// ---------------------------------------------------------------------------
+// #757: evidence-card detail panel (epic #762, design doc
+// docs/2026-05-12-oiguskaart-evidence-map.md, workstream D).
+//
+// Fills the panel's evidence-card slots — Allikas (source act / draft / court)
+// · Kuupäev / versioon · Seose liik (relation type in legal language) · Miks
+// see oluline on (a deterministic one-line note) — and wires the four action
+// buttons (Küsi nõustajalt → POST /chat/seed · Ava analüüsikeskuses →
+// /analyysikeskus/normi-mojuahel?sisend=<uri> · Lisa märkus → the entity-level
+// annotation button · Lisa järjehoidja → the #743 XHR bookmark button).
+//
+// The relation-phrase + "why it matters" strings come from the entity-detail
+// API (which derives them from a small static rule table — no LLM call); this
+// function only picks the right one and renders it.
+// ---------------------------------------------------------------------------
+
+// The optional ?draft=<uuid> on /explorer — threaded into the "Küsi nõustajalt"
+// form so the new conversation picks up the draft's impact context. UUID-only,
+// so exposing it via location.search is harmless.
+function _explorerDraftParam() {
+  try {
+    var d = new URLSearchParams(window.location.search).get('draft') || '';
+    return /^[0-9a-fA-F-]{1,64}$/.test(d) ? d : '';
+  } catch (e) {
+    return '';
+  }
+}
+
+function _showEvidenceSection(sectionId, show) {
+  var el = document.getElementById(sectionId);
+  if (el) el.style.display = show ? '' : 'none';
+}
+
+// Append a <span class="evidence-date-label">…</span><span class="evidence-date-value">…</span>
+// pair to a container using DOM methods (no innerHTML).
+function _appendKvRow(container, rowClass, keyClass, keyText, valClass, valText) {
+  var row = document.createElement('div');
+  row.className = rowClass;
+  var k = document.createElement('span');
+  k.className = keyClass;
+  k.textContent = keyText;
+  var v = document.createElement('span');
+  v.className = valClass;
+  v.textContent = valText;
+  row.appendChild(k);
+  row.appendChild(v);
+  container.appendChild(row);
+}
+
+// Find the relation (predicateLabel + whyText) from the previously-focused
+// entity to the now-selected one, by scanning the new entity's incoming /
+// outgoing relations for one whose other endpoint is `prevEntity`.
+function _relationToPrev(entityData, prevEntity, selfUri) {
+  if (!entityData || !prevEntity || prevEntity === selfUri) return null;
+  var incoming = Array.isArray(entityData.incoming) ? entityData.incoming : [];
+  for (var i = 0; i < incoming.length; i++) {
+    if (incoming[i] && incoming[i].subject === prevEntity) {
+      return {
+        label: incoming[i].predicateLabel || incoming[i].predicateName || '',
+        why: incoming[i].whyText || '',
+        otherLabel: incoming[i].subjectLabel || '',
+      };
+    }
+  }
+  var outgoing = Array.isArray(entityData.outgoing) ? entityData.outgoing : [];
+  for (var j = 0; j < outgoing.length; j++) {
+    if (outgoing[j] && outgoing[j].object === prevEntity) {
+      return {
+        label: outgoing[j].predicateLabel || outgoing[j].predicateName || '',
+        why: outgoing[j].whyText || '',
+        otherLabel: outgoing[j].objectLabel || '',
+      };
+    }
+  }
+  return null;
+}
+
+// Pick a "primary" relation for the entity when there's no previously-focused
+// node to relate to — the first outgoing relation with a known legal phrase
+// (so a freshly-opened ?focus= panel still shows *something* sensible).
+function _primaryRelation(entityData) {
+  if (!entityData) return null;
+  var outgoing = Array.isArray(entityData.outgoing) ? entityData.outgoing : [];
+  // Prefer relations the rule table actually phrases (predicateLabel + whyText
+  // present) and skip the rdf:type / rdfs:label noise.
+  for (var i = 0; i < outgoing.length; i++) {
+    var rel = outgoing[i];
+    if (!rel) continue;
+    var name = (rel.predicateName || '').toLowerCase();
+    if (name === 'type' || name === 'label') continue;
+    if (rel.predicateLabel && rel.whyText) {
+      return {
+        label: rel.predicateLabel,
+        why: rel.whyText,
+        otherLabel: rel.objectLabel || '',
+      };
+    }
+  }
+  return null;
+}
+
+function populateEvidenceCard(d, entityData, prevEntity) {
+  var selfUri = d.uri || d.id || '';
+
+  // ---- Allikas (source: parent act / draft / court) -------------------------
+  var sourceRow = document.getElementById('panel-source-row');
+  var source = entityData && entityData.source ? entityData.source : null;
+  if (sourceRow && source && source.uri) {
+    while (sourceRow.firstChild) sourceRow.removeChild(sourceRow.firstChild);
+    var kind = document.createElement('span');
+    kind.className = 'evidence-source-kind';
+    kind.textContent = (source.kindLabel || 'Allikas') + ': ';
+    var link = document.createElement('a');
+    link.className = 'evidence-source-link';
+    // Deep-link the source itself into the map (the existing ?focus= contract).
+    link.href = '/explorer?focus=' + encodeURIComponent(source.uri);
+    link.textContent = source.label || source.uri;
+    sourceRow.appendChild(kind);
+    sourceRow.appendChild(link);
+    _showEvidenceSection('evidence-source-section', true);
+  } else {
+    _showEvidenceSection('evidence-source-section', false);
+  }
+
+  // ---- Kuupäev / versioon ---------------------------------------------------
+  var dateInfoEl = document.getElementById('panel-date-info');
+  var dateInfo = (entityData && Array.isArray(entityData.dateInfo)) ? entityData.dateInfo : [];
+  if (dateInfoEl && dateInfo.length) {
+    while (dateInfoEl.firstChild) dateInfoEl.removeChild(dateInfoEl.firstChild);
+    dateInfo.forEach(function(di) {
+      _appendKvRow(
+        dateInfoEl, 'evidence-date-row',
+        'evidence-date-label', String(di.label || ''),
+        'evidence-date-value', String(di.value || '')
+      );
+    });
+    _showEvidenceSection('evidence-date-section', true);
+  } else {
+    _showEvidenceSection('evidence-date-section', false);
+  }
+
+  // ---- Seose liik + Miks see oluline on -------------------------------------
+  var rel = _relationToPrev(entityData, prevEntity, selfUri) || _primaryRelation(entityData);
+  var relationEl = document.getElementById('panel-relation');
+  var whyEl = document.getElementById('panel-why');
+  if (rel && rel.label) {
+    if (relationEl) {
+      relationEl.textContent = rel.otherLabel ? (rel.label + ' — ' + rel.otherLabel) : rel.label;
+    }
+    _showEvidenceSection('evidence-relation-section', true);
+  } else {
+    _showEvidenceSection('evidence-relation-section', false);
+  }
+  if (rel && rel.why) {
+    if (whyEl) whyEl.textContent = rel.why;
+    _showEvidenceSection('evidence-why-section', true);
+  } else {
+    _showEvidenceSection('evidence-why-section', false);
+  }
+
+  // ---- Tegevused (action buttons) -------------------------------------------
+  // (1) Küsi nõustajalt selle kohta — fill the /chat/seed form's hidden inputs.
+  var seedTextEl = document.getElementById('panel-chat-seed-text');
+  var seedDraftEl = document.getElementById('panel-chat-seed-draft');
+  if (seedTextEl) {
+    var label = d.label || selfUri;
+    var seedParts = ['«' + label + '»'];
+    if (rel && rel.label && rel.otherLabel) {
+      seedParts.push(rel.label + ' «' + rel.otherLabel + '»');
+    } else if (rel && rel.label) {
+      seedParts.push(rel.label);
+    }
+    var finding = seedParts.join(' ');
+    seedTextEl.value = 'Selgita seda õiguskaardi leidu: ' + finding +
+      '. Mida peaksin selle puhul tähele panema?';
+  }
+  if (seedDraftEl) seedDraftEl.value = _explorerDraftParam();
+
+  // (2) Ava analüüsikeskuses — /analyysikeskus/normi-mojuahel?sisend=<uri>.
+  var akLink = document.getElementById('panel-analyysikeskus-link');
+  if (akLink) {
+    if (selfUri && selfUri.indexOf('http') === 0) {
+      akLink.href = '/analyysikeskus/normi-mojuahel?sisend=' + encodeURIComponent(selfUri);
+      akLink.style.display = '';
+    } else {
+      akLink.style.display = 'none';
+    }
+  }
+  // (3) Lisa märkus — handled by _PANEL_ANNOTATION_SCRIPT (it watches
+  //     #panel-title and (un)hides #panel-annotation-btn). Nothing to do here.
+  // (4) Lisa järjehoidja — the #743 XHR button; its reset happens below in
+  //     showEntityDetail() (kept where it was).
 }
 
 // ---------------------------------------------------------------------------

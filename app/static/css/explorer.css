@@ -379,6 +379,68 @@ summary.ctrl-settings-summary::-webkit-details-marker { display: none; }
 .version-label { color: #cbd5e1; }
 .version-empty { color: #64748b; font-size: 12px; font-style: italic; }
 
+/* #757 — evidence-card detail panel (epic #762, design doc
+ * docs/2026-05-12-oiguskaart-evidence-map.md, workstream D). The node detail
+ * panel becomes an "evidence card": Allikas (source act/draft/court) · Kuupäev
+ * / versioon · Seose liik (relation type in legal language) · Miks see oluline
+ * on (a deterministic one-line note) · Tegevused (four action buttons). Each
+ * .evidence-section is shown/hidden by explorer.js depending on whether the
+ * entity has that datum. */
+#detail-panel .evidence-section { margin-bottom: 18px; }
+
+/* Allikas row: "<Kind>: <linked source label>". */
+#detail-panel .evidence-source-row { font-size: 12px; line-height: 1.5; }
+#detail-panel .evidence-source-kind { color: #64748b; }
+#detail-panel .evidence-source-link {
+  color: #38bdf8; text-decoration: none;
+  border-bottom: 1px solid rgba(56, 189, 248, 0.3);
+  word-break: break-word;
+}
+#detail-panel .evidence-source-link:hover { border-bottom-color: #38bdf8; }
+
+/* Kuupäev / versioon: a small key→value list. */
+#detail-panel .evidence-date-row {
+  display: flex; gap: 8px; padding: 3px 0;
+  font-size: 12px; border-bottom: 1px solid rgba(100, 116, 139, 0.1);
+}
+#detail-panel .evidence-date-label { color: #64748b; min-width: 110px; flex-shrink: 0; }
+#detail-panel .evidence-date-value { color: #cbd5e1; word-break: break-word; }
+
+/* Seose liik: the relation type in legal language, set apart as a chip. */
+#detail-panel .evidence-relation {
+  font-size: 13px; color: #e2e8f0; font-weight: 600;
+  background: rgba(56, 189, 248, 0.08);
+  border-left: 3px solid rgba(56, 189, 248, 0.5);
+  padding: 6px 10px; border-radius: 4px;
+}
+
+/* Miks see oluline on: the plain-language note. */
+#detail-panel .evidence-why {
+  font-size: 12px; color: #cbd5e1; line-height: 1.5; margin: 0;
+  background: rgba(100, 116, 139, 0.08);
+  padding: 8px 10px; border-radius: 4px;
+}
+
+/* Tegevused: stack the four action buttons full-width with a small gap. */
+#detail-panel .evidence-actions-section { margin-bottom: 14px; }
+#detail-panel .evidence-action-form { margin: 0 0 8px; }
+#detail-panel .evidence-action {
+  display: block; width: 100%; box-sizing: border-box;
+  text-align: center; font-size: 12px; cursor: pointer;
+  padding: 8px 16px; border-radius: 8px; margin-bottom: 8px;
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  background: rgba(56, 189, 248, 0.1); color: #38bdf8;
+  text-decoration: none; transition: background 0.15s, border-color 0.15s;
+}
+#detail-panel .evidence-action:hover { background: rgba(56, 189, 248, 0.2); }
+/* The bookmark button keeps its existing .bookmark-btn rules (incl. the
+ * green .bookmarked state) — .evidence-action just adds the shared box model;
+ * .bookmark-btn's own margin-bottom-less rule is overridden above. */
+#detail-panel .evidence-action-annotation { margin-bottom: 8px; }
+#detail-panel .evidence-action-annotation .annotation-button {
+  width: 100%; text-align: center;
+}
+
 /* ------- #754: contextual start panel (cold-open overlay) -------
  * A "cold" /explorer open (no ?focus / ?draft / ?search / ?vaade=koik)
  * renders this panel over the (idle) graph chrome instead of auto-loading

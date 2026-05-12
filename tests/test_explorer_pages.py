@@ -490,6 +490,84 @@ def test_explorer_search_param_wins_over_vaade_preset():
 
 
 # ---------------------------------------------------------------------------
+# #757 — evidence-card detail panel (epic #762, design doc workstream D)
+# ---------------------------------------------------------------------------
+
+
+def test_explorer_detail_panel_renders_evidence_card_structure():
+    """The node detail panel exposes the evidence-card slots — Allikas,
+    Kuupäev / versioon, Seose liik, "Miks see oluline on" — plus the heading
+    of the Tegevused (actions) group. explorer.js fills + (un)hides each one."""
+    # ?focus= still renders the detail panel DOM (explorer.js unhides it).
+    uri = "https://data.riik.ee/ontology/estleg#KarS_par_133"
+    html = _html(f"focus={uri}")
+    assert 'id="detail-panel"' in html
+    # The four evidence-card section containers + their fill targets.
+    assert 'id="evidence-source-section"' in html
+    assert 'id="panel-source-row"' in html
+    assert 'id="evidence-date-section"' in html
+    assert 'id="panel-date-info"' in html
+    assert 'id="evidence-relation-section"' in html
+    assert 'id="panel-relation"' in html
+    assert 'id="evidence-why-section"' in html
+    assert 'id="panel-why"' in html
+    # The Estonian section headings.
+    assert "Allikas" in html
+    assert "Kuupäev / versioon" in html
+    assert "Seose liik" in html
+    assert "Miks see oluline on" in html
+    assert "Tegevused" in html
+    # The evidence sections start hidden (explorer.js shows the ones with data).
+    assert "evidence-section" in html
+    assert "display:none" in html
+
+
+def test_explorer_detail_panel_has_four_actions_wired():
+    """The evidence card's four actions point at the right places:
+    1) Küsi nõustajalt → POST /chat/seed (the single-use pending_chat_seed flow);
+    2) Ava analüüsikeskuses → /analyysikeskus/normi-mojuahel;
+    3) Lisa märkus → the entity-level annotation button (#panel-annotation-btn);
+    4) Lisa järjehoidja → the #743 XHR bookmark button (#panel-bookmark-btn)."""
+    html = _html("focus=https://data.riik.ee/ontology/estleg#KarS")
+    # (1) Küsi nõustajalt selle kohta — a <form method=post action=/chat/seed>
+    # with the seed_text + draft_id hidden inputs explorer.js fills in.
+    assert "Küsi nõustajalt selle kohta" in html
+    assert 'id="panel-chat-seed-form"' in html
+    assert 'action="/chat/seed"' in html
+    assert 'name="seed_text"' in html
+    assert 'name="draft_id"' in html
+    # (2) Ava analüüsikeskuses — links to the Normi mõjuahel workflow (the
+    # ?sisend=<uri> is appended client-side by explorer.js).
+    assert "Ava analüüsikeskuses" in html
+    assert 'id="panel-analyysikeskus-link"' in html
+    assert "/analyysikeskus/normi-mojuahel" in html
+    # (3) Lisa märkus — the entity-level annotation slot, filled by
+    # _PANEL_ANNOTATION_SCRIPT (which POSTs annotations the standard way).
+    assert 'id="panel-annotation-btn"' in html
+    # (4) Lisa järjehoidja — the existing XHR bookmark button (kept working).
+    assert "Lisa järjehoidja" in html
+    assert 'id="panel-bookmark-btn"' in html
+    assert 'onclick="explorerBookmark()"' in html
+    # The bookmark XHR endpoint is still the one the #743 path uses (the JS
+    # POSTs /api/bookmarks with X-Requested-With) — assert the JS bundle is
+    # still wired in (the actual fetch lives in explorer.js).
+    assert "/static/js/explorer.js" in html
+
+
+def test_explorer_detail_panel_keeps_back_link_and_metadata_sections():
+    """The evidence-card restyle is additive — the panel still carries the
+    #719 back link, the metadata dump, the version history, and the relations
+    list (so explorer.js' existing populate logic keeps working)."""
+    html = _html("focus=https://data.riik.ee/ontology/estleg#KarS")
+    assert 'id="panel-back"' in html
+    assert 'id="panel-meta"' in html
+    assert 'id="version-history-section"' in html
+    assert 'id="panel-neighbors"' in html
+    assert 'id="panel-title"' in html
+    assert 'id="panel-link"' in html
+
+
+# ---------------------------------------------------------------------------
 # #754 — app/explorer/start_panel.py: the org-scoped data queries
 # ---------------------------------------------------------------------------
 
