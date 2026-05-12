@@ -280,13 +280,155 @@ def test_explorer_focus_param_skips_the_start_panel():
 
 def test_explorer_draft_param_skips_the_start_panel():
     # ?draft= (even a malformed/cross-org one whose overlay is dropped) must
-    # bypass the start panel and render the classic graph view (#755 handles
-    # the proper draft subgraph — for #754 the panel just gets skipped).
+    # bypass the start panel and render the classic graph view (#755's subgraph
+    # mode only kicks in for a resolvable, org-owned draft — for an unresolvable
+    # one the panel just gets skipped and the classic chrome is shown).
     html = _html("draft=not-a-uuid")
     assert 'id="explorer-start-panel"' not in html
     assert "window.__explorerStartPanel" not in html
+    # No subgraph blob either — the draft id didn't resolve.
+    assert "window.__explorerDraftSubgraph" not in html
     # The graph toolbar is the visible chrome here (not hidden behind a panel).
     assert 'id="explorer-toolbar"' in html
+
+
+# ---------------------------------------------------------------------------
+# #755 — ?draft=<id> renders the draft's impact subgraph (epic #762, ws B)
+# ---------------------------------------------------------------------------
+
+
+# A draft connection stub for ``app.explorer.pages._resolve_draft_for_subgraph``
+# (``SELECT org_id, title FROM drafts`` then ``SELECT 1 FROM impact_reports``).
+class _DraftResolveCur:
+    def __init__(self, draft_row, report_row):
+        self._rows = [draft_row, report_row]
+        self._i = -1
+
+    def __call__(self, sql, params=()):
+        self._i += 1
+        return self
+
+    def fetchone(self):
+        return self._rows[self._i] if 0 <= self._i < len(self._rows) else None
+
+
+class _DraftResolveConn:
+    def __init__(self, draft_row, report_row):
+        self.execute = _DraftResolveCur(draft_row, report_row)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+
+_SUBGRAPH_DRAFT_ID = "44444444-4444-4444-4444-444444444444"
+_SUBGRAPH_ORG_ID = "11111111-1111-1111-1111-111111111111"  # matches _req()'s auth
+
+
+def _draft_subgraph_html(draft_id: str, *, draft_row, report_row) -> str:
+    """Render ``explorer_page`` for ``?draft=<id>`` with a mocked draft conn."""
+    from app.explorer.pages import explorer_page
+
+    with patch(
+        "app.explorer.pages._connect",
+        return_value=_DraftResolveConn(draft_row, report_row),
+    ):
+        return to_xml(explorer_page(_req(f"draft={draft_id}")))
+
+
+def test_explorer_draft_param_renders_impact_subgraph_blob():
+    """?draft=<id> for an org-owned draft with an impact report switches
+    explorer.js into subgraph mode — it gets a window.__explorerDraftSubgraph
+    blob pointing at /explorer/draft-subgraph/<id>, NOT the legacy
+    draft-overlay-data blob, NOT the start panel, NOT the cold-graph bootstrap."""
+    html = _draft_subgraph_html(
+        _SUBGRAPH_DRAFT_ID,
+        draft_row=(_SUBGRAPH_ORG_ID, "Liiklusseaduse muutmise eelnõu"),
+        report_row=(1,),
+    )
+    # The subgraph bridge blob — carries the data endpoint + back links.
+    assert "window.__explorerDraftSubgraph" in html
+    assert f"/explorer/draft-subgraph/{_SUBGRAPH_DRAFT_ID}" in html
+    assert f"/drafts/{_SUBGRAPH_DRAFT_ID}" in html  # draftUrl / reportUrl
+    assert '"hasReport": true' in html or '"hasReport":true' in html
+    # NOT the legacy node-highlight overlay (that's the ?focus=&draft= path).
+    assert 'id="draft-overlay-data"' not in html
+    # NOT the start panel, NOT the cold-graph flag.
+    assert 'id="explorer-start-panel"' not in html
+    assert "window.__explorerStartPanel" not in html
+    # The toolbar back link is rendered (explorer.js wires it to the draft).
+    assert 'id="toolbar-back"' in html
+    assert 'id="panel-back"' in html
+    # The graph DOM + JS are still present (explorer.js fetches the subgraph).
+    assert 'id="canvas"' in html
+    assert "/static/js/explorer.js" in html
+
+
+def test_explorer_draft_param_no_report_still_enters_subgraph_mode():
+    """A valid, org-owned draft with no impact report yet still switches into
+    subgraph mode (hasReport=false) — explorer.js shows a "run the analysis"
+    fallback rather than the cold 90k graph. No 500, no start panel."""
+    html = _draft_subgraph_html(
+        _SUBGRAPH_DRAFT_ID,
+        draft_row=(_SUBGRAPH_ORG_ID, "Analüüsimata eelnõu"),
+        report_row=None,
+    )
+    assert "window.__explorerDraftSubgraph" in html
+    assert '"hasReport": false' in html or '"hasReport":false' in html
+    assert f"/explorer/draft-subgraph/{_SUBGRAPH_DRAFT_ID}" in html
+    assert 'id="explorer-start-panel"' not in html
+    assert "window.__explorerStartPanel" not in html
+
+
+def test_explorer_draft_param_cross_org_falls_back_no_subgraph():
+    """A draft owned by a different org → _resolve_draft_for_subgraph returns
+    None, so no subgraph blob is emitted. The page falls back to the classic
+    graph view (never a 500, the draft's existence isn't revealed)."""
+    html = _draft_subgraph_html(
+        _SUBGRAPH_DRAFT_ID,
+        draft_row=("99999999-9999-9999-9999-999999999999", "Teise asutuse eelnõu"),
+        report_row=None,
+    )
+    assert "window.__explorerDraftSubgraph" not in html
+    assert 'id="draft-overlay-data"' not in html
+    # Classic graph chrome (no start panel, no subgraph blob).
+    assert 'id="explorer-start-panel"' not in html
+    assert 'id="explorer-toolbar"' in html
+    assert 'id="canvas"' in html
+
+
+def test_explorer_draft_param_db_error_falls_back_no_subgraph():
+    """A DB error while resolving the draft → no subgraph blob, classic graph
+    view, never a 500."""
+    from app.explorer.pages import explorer_page
+
+    with patch("app.explorer.pages._connect", side_effect=RuntimeError("no db")):
+        html = to_xml(explorer_page(_req(f"draft={_SUBGRAPH_DRAFT_ID}")))
+    assert "window.__explorerDraftSubgraph" not in html
+    assert 'id="explorer-toolbar"' in html
+
+
+def test_explorer_focus_and_draft_uses_legacy_overlay_not_subgraph():
+    """When ?focus= is *also* present (a report deep link), the legacy
+    node-highlight overlay path wins — the draft-overlay-data blob is embedded,
+    NOT the subgraph blob (the user wants the entity neighbourhood, not the
+    whole impact subgraph)."""
+    uri = "https://data.riik.ee/ontology/estleg#KarS_par_133"
+    # _fetch_draft_overlay does SELECT org_id then SELECT report_data.
+    report_data = {"affected_entities": [{"uri": "urn:x:1"}]}
+    with patch(
+        "app.explorer.pages._connect",
+        return_value=_DraftResolveConn((_SUBGRAPH_ORG_ID,), (report_data,)),
+    ):
+        from app.explorer.pages import explorer_page
+
+        html = to_xml(explorer_page(_req(f"focus={uri}&draft={_SUBGRAPH_DRAFT_ID}")))
+    assert 'id="draft-overlay-data"' in html
+    assert "urn:x:1" in html
+    assert "window.__explorerDraftSubgraph" not in html
+    assert "window.__explorerFocus" in html
 
 
 def test_explorer_search_param_skips_the_start_panel():

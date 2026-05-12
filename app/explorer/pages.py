@@ -310,6 +310,67 @@ def _fetch_draft_overlay(req: Request, draft_id_raw: str) -> list[str]:
     return uris
 
 
+# #755: epic #762, workstream B — ``?draft=<id>`` renders the draft's impact
+# subgraph (its affected / conflicting / gap provisions + the inter-relations)
+# as the actual graph content, not the full 90k overview. The subgraph data
+# itself is fetched client-side from ``/explorer/draft-subgraph/{draft_id}``
+# (a small auth-gated, org-scoped JSON endpoint in :mod:`app.explorer.routes`);
+# this page handler just needs to know *whether* to switch explorer.js into
+# subgraph mode — which depends on the draft being resolvable + owned by the
+# caller's org. A draft with no impact report yet still switches into the mode
+# (the JS shows a "run the analysis" fallback rather than the cold 90k graph).
+#
+# Distinct from :func:`_fetch_draft_overlay` (which conflates "cross-org" and
+# "no report" into an empty list and feeds the legacy node-highlight overlay):
+# here we need the three-way result {cross-org → fall back to start panel,
+# resolvable+report → subgraph, resolvable+no report → subgraph w/ fallback msg}.
+
+
+def _resolve_draft_for_subgraph(req: Request, draft_id_raw: str) -> dict | None:
+    """Return ``{draft_id, title, draft_url, report_url, has_report}`` or ``None``.
+
+    ``None`` means "don't switch into subgraph mode" — i.e. unauthenticated,
+    non-UUID id, missing draft, or a draft owned by another org. In those cases
+    the caller falls back to the normal flow (start panel on a cold open). A
+    valid, org-owned draft returns the dict even when it has no impact report
+    yet (``has_report=False``); explorer.js then shows the graceful fallback.
+
+    Any DB error is logged and treated as "can't resolve" → ``None`` so the
+    explorer still renders (degrading to the start panel / overview).
+    """
+    auth = req.scope.get("auth")
+    if not auth or not auth.get("org_id"):
+        return None
+    try:
+        draft_uuid = uuid.UUID(draft_id_raw)
+    except (TypeError, ValueError):
+        return None
+    org_id = str(auth.get("org_id"))
+    try:
+        with _connect() as conn:
+            draft_row = conn.execute(
+                "SELECT org_id, title FROM drafts WHERE id = %s",
+                (str(draft_uuid),),
+            ).fetchone()
+            if draft_row is None or str(draft_row[0]) != org_id:
+                return None
+            title = str(draft_row[1] or "Eelnõu")
+            report_row = conn.execute(
+                "SELECT 1 FROM impact_reports WHERE draft_id = %s LIMIT 1",
+                (str(draft_uuid),),
+            ).fetchone()
+    except Exception:
+        logger.exception("explorer draft-subgraph resolve: DB error for draft=%s", draft_id_raw)
+        return None
+    return {
+        "draft_id": str(draft_uuid),
+        "title": title,
+        "draft_url": f"/drafts/{draft_uuid}",
+        "report_url": f"/drafts/{draft_uuid}/report",
+        "has_report": report_row is not None,
+    }
+
+
 # ---------------------------------------------------------------------------
 # <head> resources — D3 v7 CDN + the explorer stylesheet. Kept off the global
 # ``_HDRS`` in app/main.py: D3 is ~270 KB and only the Õiguskaart page uses
@@ -764,14 +825,22 @@ def _start_panel(data: StartPanelData):  # noqa: ANN202
 def explorer_page(req: Request):
     """GET /explorer -- the Õiguskaart graph inside the standard app chrome.
 
-    When called with ``?draft=<uuid>`` and the caller's org owns that
-    draft, the affected-entity URIs from its latest impact report are
-    embedded as a JSON blob in a ``<script id="draft-overlay-data">``
-    tag. The explorer JS reads this blob on load and applies the
-    ``d3-node-highlighted`` class to matching nodes. Cross-org or
-    malformed draft params are silently dropped (no error UI) so the
-    page stays usable as a generic ontology browser even when the
-    overlay can't be applied.
+    #755 (epic #762, workstream B): when called with ``?draft=<uuid>`` and the
+    caller's org owns that draft, the page switches ``explorer.js`` into
+    **impact-subgraph mode** — it fetches ``/explorer/draft-subgraph/{id}`` (a
+    small org-scoped JSON endpoint that reshapes the draft's *already-computed*
+    latest ``impact_reports`` row into D3 ``{nodes, links}`` — no fresh 90k
+    traversal) and renders only that subgraph (the draft itself + its affected /
+    conflicting / gap provisions + the inter-relations), with a "← Tagasi eelnõu
+    juurde" link back to the draft. A valid draft with no impact report yet
+    still enters the mode (the JS shows a "run the analysis" fallback rather
+    than the cold 90k graph). Cross-org / malformed / non-UUID ``?draft=``
+    params don't switch modes — they fall through to the normal flow (the
+    contextual start panel on a cold open), never a 500. When ``?focus=`` is
+    *also* present it wins: that's the legacy node-highlight overlay path (the
+    affected-entity URIs from the latest report are embedded as a JSON blob in a
+    ``<script id="draft-overlay-data">`` tag and ``explorer.js`` applies the
+    ``d3-node-highlighted`` class to matching nodes in the full graph).
 
     When called with ``?focus=<uri>`` (URL-encoded — see
     :func:`app.docs.report_routes.explorer_focus_url`) the JS loads that
@@ -811,7 +880,20 @@ def explorer_page(req: Request):
     if not focus_param and not search_param:
         active_preset = vaade_param if vaade_param in _LEGAL_VIEW_PRESETS else None
     overlay_uris: list[str] = []
-    if draft_param:
+    # #755: ``?draft=<id>`` (without ``?focus=``) → render the draft's impact
+    # subgraph (not the 90k graph). Resolve the draft org-scoped here so we can
+    # tell explorer.js to switch into subgraph mode; the subgraph data itself is
+    # fetched client-side from /explorer/draft-subgraph/{id}. ``None`` (unknown
+    # / cross-org / non-UUID) → fall through to the normal flow (the start panel
+    # on a cold open). When ``?focus=`` is *also* present (a report's deep link —
+    # see :func:`app.docs.report_routes.explorer_focus_url`) the legacy
+    # node-highlight overlay path takes over instead: the affected-entity URIs
+    # are embedded as the ``draft-overlay-data`` blob and highlighted on the
+    # full graph around the focused entity.
+    draft_subgraph: dict | None = None
+    if draft_param and not focus_param:
+        draft_subgraph = _resolve_draft_for_subgraph(req, draft_param)
+    elif draft_param and focus_param:
         overlay_uris = _fetch_draft_overlay(req, draft_param)
 
     # #754 / #756: the start panel shows only when there is nothing to deep-link
@@ -853,7 +935,27 @@ def explorer_page(req: Request):
         # the more specific intent). Escaped exactly like the focus blob.
         search_payload = _escape_for_script(json.dumps(search_param))
         bridge_tags.append(Script(f"window.__explorerSearch={search_payload};"))
-    if overlay_uris:
+    # #755: when ``?draft=<id>`` resolves to an org-owned draft, switch
+    # explorer.js into impact-subgraph mode (it fetches the subgraph from the
+    # data endpoint below and renders *only* that). This takes priority over
+    # the legacy node-highlight overlay — we don't load the 90k graph at all in
+    # this mode — so the ``draft-overlay-data`` blob + its init script are
+    # suppressed here. The blob is escaped exactly like the other bridge tags.
+    if draft_subgraph is not None:
+        subgraph_payload = _escape_for_script(
+            json.dumps(
+                {
+                    "draftId": draft_subgraph["draft_id"],
+                    "title": draft_subgraph["title"],
+                    "dataUrl": f"/explorer/draft-subgraph/{draft_subgraph['draft_id']}",
+                    "draftUrl": draft_subgraph["draft_url"],
+                    "reportUrl": draft_subgraph["report_url"],
+                    "hasReport": bool(draft_subgraph["has_report"]),
+                }
+            )
+        )
+        bridge_tags.append(Script(f"window.__explorerDraftSubgraph={subgraph_payload};"))
+    elif overlay_uris:
         # #464: escape closing-tag + Unicode line-separator sequences in
         # the JSON payload before embedding in a <script>.
         payload = _escape_for_script(json.dumps({"uris": overlay_uris}))
@@ -863,7 +965,11 @@ def explorer_page(req: Request):
     # "Back to report/analysis" context: the page was opened from an impact
     # report / analysis result (?focus= or ?draft=) — explorer.js detects
     # the same thing from document.referrer for the detail-panel back link.
-    has_back_context = bool(focus_param) or bool(overlay_uris) or bool(draft_param)
+    # #755: the draft-subgraph mode also wires "← Tagasi eelnõu juurde" from the
+    # blob's draftUrl, so it counts as back-context too.
+    has_back_context = (
+        bool(focus_param) or bool(overlay_uris) or bool(draft_param) or draft_subgraph is not None
+    )
     # The small ?draft= toolbar tip is only useful in the classic graph view
     # with no focus/draft/overlay — the start panel makes it redundant.
     show_draft_tip = (

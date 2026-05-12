@@ -680,4 +680,42 @@ g.node.you-are-here text.you-are-here-badge {
   .start-panel-secondary-link { margin-left: 0; }
   .start-panel-actions { flex-direction: column; }
   .start-panel-action { text-align: center; }
+
+  /* #755: draft-subgraph fallback box also goes edge-to-edge on a phone. */
+  .explorer-draft-fallback { max-width: 92%; padding: 24px 18px; }
 }
+
+/* #755: ------- draft impact subgraph mode (?draft=<id>) -------
+ * The "no impact report yet" / "report found nothing" fallback — a centred
+ * card over the (idle) canvas area pointing the user at the analysis or back
+ * to the draft. (The subgraph graph itself reuses the normal node styling;
+ * the draft node just renders larger via its r=26 in explorer.js.) */
+.explorer-draft-fallback {
+  position: absolute; top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 20;
+  max-width: 460px; width: calc(100% - 64px);
+  background: rgba(15, 23, 41, 0.97);
+  border: 1px solid rgba(100, 116, 139, 0.3);
+  border-radius: 12px;
+  padding: 28px 24px;
+  text-align: center;
+}
+.explorer-draft-fallback h2 {
+  font-size: 18px; font-weight: 700; color: #f1f5f9; margin: 0 0 10px;
+}
+.explorer-draft-fallback p {
+  font-size: 13px; color: #94a3b8; line-height: 1.6; margin: 0 0 18px;
+}
+.explorer-draft-fallback-actions {
+  display: flex; flex-direction: column; gap: 8px; align-items: center;
+}
+.explorer-draft-fallback-link {
+  display: inline-block;
+  background: rgba(56, 189, 248, 0.15);
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  color: #38bdf8; padding: 8px 16px; border-radius: 8px;
+  font-size: 13px; cursor: pointer; text-decoration: none;
+  transition: all 0.15s;
+}
+.explorer-draft-fallback-link:hover { background: rgba(56, 189, 248, 0.25); }

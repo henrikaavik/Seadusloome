@@ -396,6 +396,7 @@ class TestExplorerAuthRequired:
 
 # ---------------------------------------------------------------------------
 # Phase 2 Batch 4 — Explorer draft overlay
+# (+ #755 — ?draft=<id> impact subgraph mode, epic #762 workstream B)
 # ---------------------------------------------------------------------------
 
 
@@ -425,6 +426,15 @@ def _overlay_authed_client() -> TestClient:
     client = TestClient(app, follow_redirects=False)
     client.cookies.set("access_token", "stub-token")
     return client
+
+
+# A focus URI to pair with ?draft= so the legacy node-highlight overlay path
+# (which embeds the `draft-overlay-data` blob) is exercised. Post-#755 a bare
+# ?draft= goes into subgraph mode instead, so the overlay tests use ?focus=&draft=
+# — the exact shape `app.docs.report_routes.explorer_focus_url(uri, draft_id)`
+# emits from impact-report links (the `#` in estleg: URIs is percent-encoded so
+# the browser doesn't treat it as a fragment).
+_OVERLAY_FOCUS_URI = "https%3A%2F%2Fdata.riik.ee%2Fontology%2Festleg%23KarS_par_133"
 
 
 class _ConnectCM:
@@ -460,6 +470,28 @@ def _make_overlay_conn(
     return conn
 
 
+def _make_subgraph_resolve_conn(
+    *,
+    draft_org_id: str | None,
+    draft_title: str = "Test eelnõu",
+    has_report: bool = True,
+) -> MagicMock:
+    """Connection mock for ``app.explorer.pages._resolve_draft_for_subgraph``.
+
+    That helper does ``SELECT org_id, title FROM drafts`` then
+    ``SELECT 1 FROM impact_reports … LIMIT 1`` (the latter only when the draft
+    exists + is in-org). ``draft_org_id=None`` → missing draft; ``has_report``
+    toggles whether the impact_reports probe finds a row.
+    """
+    conn = MagicMock()
+    cursor1 = MagicMock()
+    cursor1.fetchone.return_value = (draft_org_id, draft_title) if draft_org_id else None
+    cursor2 = MagicMock()
+    cursor2.fetchone.return_value = (1,) if has_report else None
+    conn.execute.side_effect = [cursor1, cursor2]
+    return conn
+
+
 class TestExplorerDraftOverlay:
     """End-to-end overlay tests using a real authenticated session.
 
@@ -472,6 +504,11 @@ class TestExplorerDraftOverlay:
     DB connection used by ``_fetch_draft_overlay``. Any future
     regression that bypasses the middleware would surface as a 303
     redirect to ``/auth/login``.
+
+    Post-#755: a *bare* ``?draft=<id>`` switches into impact-subgraph mode
+    (covered by ``TestExplorerDraftSubgraphMode`` below). These overlay tests
+    therefore use the ``?focus=…&draft=…`` form — the legacy node-highlight
+    path that impact-report deep links still use.
     """
 
     @patch("app.explorer.pages._connect")
@@ -497,7 +534,8 @@ class TestExplorerDraftOverlay:
         mock_connect.return_value = _ConnectCM(conn)
 
         client = _overlay_authed_client()
-        resp = client.get(f"/explorer?draft={_OVERLAY_DRAFT_ID}")
+        # ?focus=&draft= → the legacy overlay path (an impact-report deep link).
+        resp = client.get(f"/explorer?focus={_OVERLAY_FOCUS_URI}&draft={_OVERLAY_DRAFT_ID}")
 
         assert resp.status_code == 200, (
             f"explorer page must require auth via cookie (#442); got {resp.status_code}"
@@ -528,20 +566,22 @@ class TestExplorerDraftOverlay:
         mock_connect: MagicMock,
     ):
         mock_get_provider.return_value = _overlay_provider()
-        # Draft belongs to a different org — _fetch_draft_overlay
-        # short-circuits on the org check and returns an empty list.
-        conn = _make_overlay_conn(
+        # Bare ?draft= with a draft owned by a different org: the #755
+        # subgraph resolver short-circuits on the org check and returns None,
+        # so no subgraph blob is emitted — the page falls back to the classic
+        # graph view (no error UI, the draft's existence is not revealed).
+        conn = _make_subgraph_resolve_conn(
             draft_org_id=_OVERLAY_OTHER_ORG_ID,
-            findings=None,
         )
         mock_connect.return_value = _ConnectCM(conn)
 
         client = _overlay_authed_client()
         resp = client.get(f"/explorer?draft={_OVERLAY_DRAFT_ID}")
 
-        # Page still renders normally — no overlay tag, no error UI.
+        # Page still renders normally — no overlay tag, no subgraph blob.
         assert resp.status_code == 200
         assert 'id="draft-overlay-data"' not in resp.text
+        assert "window.__explorerDraftSubgraph" not in resp.text
         # The explorer page still works (Otsi search button as a smoke check).
         assert "Otsi" in resp.text
 
@@ -551,13 +591,14 @@ class TestExplorerDraftOverlay:
         mock_get_provider: MagicMock,
     ):
         mock_get_provider.return_value = _overlay_provider()
-        # _fetch_draft_overlay short-circuits before any DB lookup when
-        # the UUID is malformed, so no _connect mock is needed.
+        # Both the #755 subgraph resolver and the legacy overlay short-circuit
+        # before any DB lookup when the UUID is malformed — no _connect needed.
         client = _overlay_authed_client()
         resp = client.get("/explorer?draft=not-a-uuid")
 
         assert resp.status_code == 200
         assert 'id="draft-overlay-data"' not in resp.text
+        assert "window.__explorerDraftSubgraph" not in resp.text
         # Standard explorer chrome is still present.
         assert "Otsi" in resp.text
 
@@ -596,7 +637,8 @@ class TestExplorerDraftOverlay:
         mock_connect.return_value = _ConnectCM(conn)
 
         client = _overlay_authed_client()
-        resp = client.get(f"/explorer?draft={_OVERLAY_DRAFT_ID}")
+        # ?focus=&draft= → the legacy overlay path that embeds the blob.
+        resp = client.get(f"/explorer?focus={_OVERLAY_FOCUS_URI}&draft={_OVERLAY_DRAFT_ID}")
 
         assert resp.status_code == 200
         # The JSON tag must contain the escaped form ``<\/script>``.
@@ -634,7 +676,9 @@ class TestExplorerDraftOverlay:
         Without the TTL cache the explorer re-queries both ``drafts``
         and ``impact_reports`` on every page load (including every
         HTMX polling fragment). This test asserts the second hit does
-        NOT call ``_connect`` again.
+        NOT call ``_connect`` again — exercised via the ``?focus=&draft=``
+        overlay path (a bare ``?draft=`` is the #755 subgraph mode, which
+        resolves the draft separately and is *not* cached server-side).
         """
         mock_get_provider.return_value = _overlay_provider()
         report_data = {"affected_entities": [{"uri": "urn:x:1"}]}
@@ -656,14 +700,15 @@ class TestExplorerDraftOverlay:
         mock_connect.side_effect = _factory
 
         client = _overlay_authed_client()
+        url = f"/explorer?focus={_OVERLAY_FOCUS_URI}&draft={_OVERLAY_DRAFT_ID}"
         # First request — cache miss, DB queried.
-        resp1 = client.get(f"/explorer?draft={_OVERLAY_DRAFT_ID}")
+        resp1 = client.get(url)
         assert resp1.status_code == 200
         assert "urn:x:1" in resp1.text
         assert call_counter["n"] == 1
 
         # Second request — cache hit, DB NOT queried.
-        resp2 = client.get(f"/explorer?draft={_OVERLAY_DRAFT_ID}")
+        resp2 = client.get(url)
         assert resp2.status_code == 200
         assert "urn:x:1" in resp2.text
         assert call_counter["n"] == 1, (
@@ -849,3 +894,211 @@ class TestEntityDetailEvidenceFields:
         labels = {row["label"]: row["value"] for row in date_info}
         assert labels.get("Jõustunud") == "1993-12-01"
         assert labels.get("Kohtuasja number") == "3-1-1-5-13"
+
+
+# ---------------------------------------------------------------------------
+# #755 — GET /explorer/draft-subgraph/{draft_id} (epic #762, workstream B)
+# ---------------------------------------------------------------------------
+
+
+def _make_subgraph_data_conn(
+    *,
+    draft_org_id: str | None,
+    draft_title: str = "Test eelnõu",
+    report_data: dict | None = None,
+) -> MagicMock:
+    """Connection mock for ``app.explorer.routes.explorer_draft_subgraph``.
+
+    It does ``SELECT org_id, title FROM drafts`` then (if in-org)
+    ``SELECT report_data FROM impact_reports … LIMIT 1``.
+    """
+    conn = MagicMock()
+    cursor1 = MagicMock()
+    cursor1.fetchone.return_value = (draft_org_id, draft_title) if draft_org_id else None
+    cursor2 = MagicMock()
+    cursor2.fetchone.return_value = (report_data,) if report_data is not None else None
+    conn.execute.side_effect = [cursor1, cursor2]
+    return conn
+
+
+class TestExplorerDraftSubgraphData:
+    """The org-scoped JSON endpoint that backs ?draft=<id> subgraph mode."""
+
+    @patch("app.explorer.routes._connect")
+    @patch("app.auth.middleware._get_provider")
+    def test_returns_subgraph_nodes_and_links(
+        self,
+        mock_get_provider: MagicMock,
+        mock_connect: MagicMock,
+    ):
+        mock_get_provider.return_value = _overlay_provider()
+        report_data = {
+            "affected_entities": [
+                {"uri": "urn:x:1", "label": "§ 1", "type": "estleg#LegalProvision"},
+                {"uri": "urn:x:2", "label": "§ 2", "type": "estleg#LegalProvision"},
+            ],
+            "conflicts": [
+                {
+                    "draft_ref": "§ 1",
+                    "conflicting_entity": "urn:c:1",
+                    "conflicting_label": "Vastuolu säte",
+                    "reason": "Sama paragrahvi muudab teine eelnõu",
+                }
+            ],
+            "gaps": [
+                {
+                    "topic_cluster": "urn:tc:1",
+                    "topic_cluster_label": "Andmekaitse",
+                    "description": "Viitab 1 / 5 sättele",
+                }
+            ],
+        }
+        mock_connect.return_value = _ConnectCM(
+            _make_subgraph_data_conn(draft_org_id=_OVERLAY_ORG_ID, report_data=report_data)
+        )
+
+        client = _overlay_authed_client()
+        resp = client.get(f"/explorer/draft-subgraph/{_OVERLAY_DRAFT_ID}")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["meta"]["has_report"] is True
+        data = body["data"]
+        # The central node is the draft itself.
+        draft_nodes = [n for n in data["nodes"] if n.get("kind") == "draft"]
+        assert len(draft_nodes) == 1
+        assert draft_nodes[0]["id"] == f"draft:{_OVERLAY_DRAFT_ID}"
+        # Affected / conflict / gap entities are all present as nodes.
+        node_ids = {n["id"] for n in data["nodes"]}
+        assert "urn:x:1" in node_ids and "urn:x:2" in node_ids
+        assert "urn:c:1" in node_ids
+        assert "urn:tc:1" in node_ids
+        # Every spoke is linked back to the draft node with a labelled edge.
+        link_targets = {edge["target"] for edge in data["links"]}
+        assert "urn:x:1" in link_targets and "urn:c:1" in link_targets
+        kinds = {edge["kind"] for edge in data["links"]}
+        assert {"affected", "conflict", "gap"}.issubset(kinds)
+
+    @patch("app.explorer.routes._connect")
+    @patch("app.auth.middleware._get_provider")
+    def test_no_report_returns_has_report_false_not_500(
+        self,
+        mock_get_provider: MagicMock,
+        mock_connect: MagicMock,
+    ):
+        mock_get_provider.return_value = _overlay_provider()
+        mock_connect.return_value = _ConnectCM(
+            _make_subgraph_data_conn(draft_org_id=_OVERLAY_ORG_ID, report_data=None)
+        )
+        client = _overlay_authed_client()
+        resp = client.get(f"/explorer/draft-subgraph/{_OVERLAY_DRAFT_ID}")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["meta"]["has_report"] is False
+        assert body["data"]["nodes"] == []
+        assert body["data"]["links"] == []
+
+    @patch("app.explorer.routes._connect")
+    @patch("app.auth.middleware._get_provider")
+    def test_cross_org_draft_returns_404(
+        self,
+        mock_get_provider: MagicMock,
+        mock_connect: MagicMock,
+    ):
+        mock_get_provider.return_value = _overlay_provider()
+        # Draft belongs to a different org — must 404 (existence not revealed).
+        mock_connect.return_value = _ConnectCM(
+            _make_subgraph_data_conn(draft_org_id=_OVERLAY_OTHER_ORG_ID, report_data=None)
+        )
+        client = _overlay_authed_client()
+        resp = client.get(f"/explorer/draft-subgraph/{_OVERLAY_DRAFT_ID}")
+        assert resp.status_code == 404
+
+    @patch("app.explorer.routes._connect")
+    @patch("app.auth.middleware._get_provider")
+    def test_unknown_draft_returns_404(
+        self,
+        mock_get_provider: MagicMock,
+        mock_connect: MagicMock,
+    ):
+        mock_get_provider.return_value = _overlay_provider()
+        # Missing draft row → 404.
+        mock_connect.return_value = _ConnectCM(
+            _make_subgraph_data_conn(draft_org_id=None, report_data=None)
+        )
+        client = _overlay_authed_client()
+        resp = client.get(f"/explorer/draft-subgraph/{_OVERLAY_DRAFT_ID}")
+        assert resp.status_code == 404
+
+    @patch("app.auth.middleware._get_provider")
+    def test_non_uuid_draft_returns_404_no_db(
+        self,
+        mock_get_provider: MagicMock,
+    ):
+        mock_get_provider.return_value = _overlay_provider()
+        # Malformed id short-circuits before any DB lookup.
+        client = _overlay_authed_client()
+        resp = client.get("/explorer/draft-subgraph/not-a-uuid")
+        assert resp.status_code == 404
+
+    @patch("app.explorer.routes._connect")
+    @patch("app.auth.middleware._get_provider")
+    def test_db_error_degrades_to_no_report_not_500(
+        self,
+        mock_get_provider: MagicMock,
+        mock_connect: MagicMock,
+    ):
+        mock_get_provider.return_value = _overlay_provider()
+        mock_connect.side_effect = RuntimeError("no db")
+        client = _overlay_authed_client()
+        resp = client.get(f"/explorer/draft-subgraph/{_OVERLAY_DRAFT_ID}")
+        # Degrades gracefully — never a 500 for the explorer canvas.
+        assert resp.status_code == 200
+        assert resp.json()["meta"]["has_report"] is False
+
+    def test_requires_auth(self):
+        client = TestClient(app, follow_redirects=False)
+        resp = client.get(f"/explorer/draft-subgraph/{_OVERLAY_DRAFT_ID}")
+        # Unauthenticated → the middleware redirects to login.
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/auth/login"
+
+
+class TestBuildDraftSubgraph:
+    """Unit tests for the pure ``build_draft_subgraph`` reshaper."""
+
+    def test_dedupes_entity_in_affected_and_conflict(self):
+        from app.explorer.routes import build_draft_subgraph
+
+        findings = {
+            "affected_entities": [{"uri": "urn:x:1", "label": "§ 1"}],
+            "conflicts": [
+                {"conflicting_entity": "urn:x:1", "conflicting_label": "§ 1", "reason": "r"}
+            ],
+            "gaps": [],
+        }
+        sg = build_draft_subgraph("d-1", "Eelnõu X", findings)
+        # urn:x:1 appears once as a node, but gets two edges (affected + conflict).
+        node_ids = [n["id"] for n in sg["nodes"]]
+        assert node_ids.count("urn:x:1") == 1
+        edges_to_x1 = [edge for edge in sg["links"] if edge["target"] == "urn:x:1"]
+        assert {edge["kind"] for edge in edges_to_x1} == {"affected", "conflict"}
+
+    def test_empty_findings_yields_lone_draft_node(self):
+        from app.explorer.routes import build_draft_subgraph
+
+        sg = build_draft_subgraph("d-2", "Tühi eelnõu", {})
+        assert len(sg["nodes"]) == 1
+        assert sg["nodes"][0]["kind"] == "draft"
+        assert sg["links"] == []
+
+    def test_caps_nodes_per_kind(self):
+        from app.explorer.routes import build_draft_subgraph
+
+        findings = {
+            "affected_entities": [{"uri": f"urn:a:{i}"} for i in range(200)],
+            "conflicts": [],
+            "gaps": [],
+        }
+        sg = build_draft_subgraph("d-3", "Suur eelnõu", findings, max_per_kind=10)
+        affected_nodes = [n for n in sg["nodes"] if n.get("kind") == "affected"]
+        assert len(affected_nodes) == 10
