@@ -591,6 +591,8 @@ def _explorer_toolbar(
             cls="ctrl-settings",
         ),
         # Search — moved out of the deleted #topbar into the toolbar.
+        # ``role="search"`` makes it a landmark; the input + button inside are
+        # plain tab stops (the input also responds to Enter — wired in JS).
         Div(
             Input(
                 id="search-input",
@@ -605,6 +607,7 @@ def _explorer_toolbar(
                 onclick="explorerSearch()",
             ),
             id="search-box",
+            role="search",
         ),
     ]
     if has_back_context:
@@ -818,6 +821,9 @@ def _start_panel(data: StartPanelData):  # noqa: ANN202
             cls="start-panel-inner",
         ),
         id="explorer-start-panel",
+        # A labelled landmark region — a screen-reader user can jump straight
+        # to "Õiguskaardi avapaneel" rather than tabbing past the page chrome.
+        role="region",
         aria_label="Õiguskaardi avapaneel",
     )
 
@@ -995,8 +1001,10 @@ def explorer_page(req: Request):
             draft_tip=show_draft_tip,
             active_preset=active_preset,
         ),
-        # ----- Breadcrumb -----
-        Div(id="breadcrumb"),
+        # ----- Breadcrumb (drill-down trail; populated by explorer.js) -----
+        # ``aria-label`` names the landmark even while it's empty; the crumbs
+        # explorer.js injects are keyboard-operable (role="button" + Enter/Space).
+        Nav(id="breadcrumb", aria_label="Asukoht õiguskaardil"),
         # ----- Tooltip -----
         Div(
             H3(id="tt-title"),
@@ -1226,6 +1234,14 @@ def explorer_page(req: Request):
                 rel="noopener",
             ),
             id="detail-panel",
+            # The evidence card is a labelled region; its H4-headed sections give
+            # screen-reader users a heading-nav structure inside it. It starts
+            # hidden from AT (it's off-screen via CSS until ``.open``) — explorer.js
+            # flips ``aria-hidden`` and moves focus to the close button when it
+            # opens, and restores focus to the opener when it closes (#760).
+            role="region",
+            aria_label="Üksuse üksikasjad",
+            aria_hidden="true",
         ),
         # ----- SVG canvas (fills the content area; sized by explorer.js) -----
         NotStr('<svg id="canvas"></svg>'),
@@ -1235,9 +1251,14 @@ def explorer_page(req: Request):
         # rect in sync with the main d3-zoom transform, and pans the main view
         # on click/drag. Hidden until the graph is populated (explorer.js
         # toggles the ``visible`` class).
+        # The mini-map is a visual duplicate of the main canvas + a mouse-only
+        # pan affordance — ``role="img"`` + the label name it for AT without
+        # exposing the (pointer-only) drag handle as a fake widget; it isn't a
+        # tab stop, so it can't become a keyboard trap (#760).
         Div(
-            NotStr('<svg id="minimap-svg"></svg>'),
+            NotStr('<svg id="minimap-svg" focusable="false" aria-hidden="true"></svg>'),
             id="minimap",
+            role="img",
             aria_label="Õiguskaardi miniülevaade",
         ),
         # ----- Server → JS bridge blobs (mode flag, ?focus= / ?search=, draft

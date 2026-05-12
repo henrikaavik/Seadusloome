@@ -1355,7 +1355,8 @@ async function showEntityDetail(d) {
       li.className = 'neighbor-item';
       li.innerHTML = `<span class="neighbor-dot" style="background:${colorFor(nb.category)}"></span>
         <span>${escapeHtml(nb.label)}</span>`;
-      li.addEventListener('click', () => {
+      // #760: keyboard-operable — Tab reaches the row, Enter/Space opens it.
+      makeKeyActivatable(li, () => {
         const nodeData = state.nodes.find(n => n.id === nb.id);
         if (nodeData) showEntityDetail(nodeData);
       });
@@ -1387,11 +1388,54 @@ async function showEntityDetail(d) {
     panelLink.style.display = 'none';
   }
 
+  openDetailPanel();
+}
+
+// #760: open the detail panel and manage focus + the accessibility tree.
+// - Remember whatever had focus so we can restore it on close (so Tab order
+//   doesn't dump the user back at the top of the page).
+// - Drop aria-hidden so the panel's contents are in the a11y tree...
+// - ...and move focus into the panel (the close button) so a keyboard /
+//   screen-reader user lands in the new content rather than behind it.
+let _detailPanelOpener = null;
+function openDetailPanel() {
+  if (!detailPanel) return;
+  const active = document.activeElement;
+  // Only stash an opener that's a real, focusable element outside the panel.
+  if (active && active !== document.body && !detailPanel.contains(active)) {
+    _detailPanelOpener = active;
+  }
   detailPanel.classList.add('open');
+  detailPanel.removeAttribute('aria-hidden');
+  const closeBtn = document.getElementById('detail-close');
+  if (closeBtn && typeof closeBtn.focus === 'function') {
+    try { closeBtn.focus(); } catch (e) { /* focus can throw in odd DOM states */ }
+  }
 }
 
 function closeDetail() {
+  if (!detailPanel) return;
+  const wasOpen = detailPanel.classList.contains('open');
   detailPanel.classList.remove('open');
+  // #760: hide the (now off-screen) panel from AT.
+  detailPanel.setAttribute('aria-hidden', 'true');
+  const opener = _detailPanelOpener;
+  _detailPanelOpener = null;
+  if (!wasOpen) return;
+  // Return focus to whatever opened the panel; if that's gone (e.g. the node
+  // was removed), fall back to a toolbar control so focus is never stranded
+  // inside the now-hidden panel or lost to <body>. Only do this when focus is
+  // actually inside the panel — don't yank it away if the user has already
+  // tabbed elsewhere.
+  if (!detailPanel.contains(document.activeElement)) return;
+  let target = (opener && document.body.contains(opener)) ? opener : null;
+  if (!target) {
+    target = document.getElementById('toolbar-back');
+    if (!target || target.offsetParent === null) target = document.getElementById('search-input');
+  }
+  if (target && typeof target.focus === 'function') {
+    try { target.focus(); } catch (e) { /* ignore */ }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2009,14 +2053,14 @@ function updateBreadcrumb() {
 
   const overview = document.createElement('span');
   overview.textContent = '\u00dclevaade';
-  overview.addEventListener('click', () => {
-    collapseToOverview(true);
-  });
+  // #760: keyboard-operable crumb (Enter/Space \u2192 collapse to the overview).
+  makeKeyActivatable(overview, () => { collapseToOverview(true); });
   breadcrumb.appendChild(overview);
 
   if (state.view === 'category' || state.view === 'entity') {
     const sep = document.createElement('span');
     sep.className = 'separator';
+    sep.setAttribute('aria-hidden', 'true');
     sep.textContent = ' \u203a ';
     breadcrumb.appendChild(sep);
 
@@ -2024,13 +2068,14 @@ function updateBreadcrumb() {
     const catKey = state.expandedCategory || (state.selectedEntity ? '' : '');
     cat.textContent = CATEGORY_LABELS[catKey] || catKey || 'Kategooria';
     if (state.view === 'entity' && catKey) {
-      cat.addEventListener('click', () => {
+      makeKeyActivatable(cat, () => {
         closeDetail();
         state.view = 'category';
         updateBreadcrumb();
       });
     } else {
       cat.className = 'current';
+      cat.setAttribute('aria-current', 'page');
     }
     breadcrumb.appendChild(cat);
   }
@@ -2323,6 +2368,24 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+// #760: turn a click-only element (a breadcrumb crumb, a neighbour-list <li>)
+// into a keyboard-operable button — tab-reachable, a "button" role for AT, and
+// Enter / Space fire the same handler a click does. Used so every navigable
+// affordance in the explorer chrome is reachable without a mouse. The handler
+// runs with no arguments (these surfaces don't need the event).
+function makeKeyActivatable(el, handler) {
+  if (!el || typeof handler !== 'function') return;
+  el.setAttribute('tabindex', '0');
+  el.setAttribute('role', 'button');
+  el.addEventListener('click', () => { handler(); });
+  el.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+      e.preventDefault();
+      handler();
+    }
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Toast notifications
 // ---------------------------------------------------------------------------
@@ -2563,10 +2626,39 @@ async function addBookmark() {
 // #754 — contextual start panel: gate the 90k-graph load behind a choice
 // ---------------------------------------------------------------------------
 
-// Hide (and stop occupying) the start-panel overlay. Cheap + idempotent.
+// #760: the start-panel overlay covers the graph chrome opaquely; while it's up,
+// the toolbar / timeline / detail panel / legend behind it are out of reach
+// visually but would still be in the tab order. Mark them ``inert`` (also AT-
+// hidden) so keyboard / screen-reader focus stays inside the panel; clear it
+// when the panel is dismissed. ``inert`` is ignored by browsers that don't
+// support it — those just keep the prior (slightly leaky) behaviour, no harm.
+var _BEHIND_PANEL_IDS = [
+  'explorer-toolbar', 'breadcrumb', 'timeline-bar', 'detail-panel',
+  'legend', 'instructions', 'minimap',
+];
+function _setBehindPanelInert(on) {
+  _BEHIND_PANEL_IDS.forEach(function (id) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    if (on) {
+      el.setAttribute('inert', '');
+      el.setAttribute('aria-hidden', 'true');
+    } else {
+      el.removeAttribute('inert');
+      // Don't clobber the detail panel's own aria-hidden lifecycle — it manages
+      // that itself (closed ⇒ true, open ⇒ removed). The others are always
+      // visible once the panel is gone.
+      if (id !== 'detail-panel') el.removeAttribute('aria-hidden');
+    }
+  });
+}
+
+// Hide (and stop occupying) the start-panel overlay. Cheap + idempotent. Also
+// un-inerts the chrome behind it (#760).
 function _dismissStartPanel() {
   var panel = document.getElementById('explorer-start-panel');
   if (panel) panel.style.display = 'none';
+  _setBehindPanelInert(false);
 }
 
 // Load the category overview into state + render it. Does NOT touch the
@@ -2849,6 +2941,9 @@ async function init() {
   // kaupa" / "Näita kogu kaarti" (→ explorerShowFullMap) or runs a search.
   if (window.__explorerStartPanel) {
     state.startPanelMode = true;
+    // #760: the panel is an opaque overlay — take the chrome behind it out of
+    // the tab order / a11y tree so keyboard focus stays in the panel.
+    _setBehindPanelInert(true);
     // The detail panel can still be Escape-closed etc.; just no graph data.
     // WebSocket sync notifications are still useful — connect once.
     if (!wsInitialized) {

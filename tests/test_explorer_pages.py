@@ -1015,3 +1015,140 @@ def test_py_seed_mirror_matches_for_ascii_ids():
     x, y = _py_seed_position("")
     assert abs(x - math.cos(a * math.pi * 2) * math.sqrt(b) * 480.0) < 1e-9
     assert abs(y - math.sin(a * math.pi * 2) * math.sqrt(b) * 480.0) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# #760 — responsive + accessibility QA pass (epic #762, workstream G)
+# ---------------------------------------------------------------------------
+
+_EXPLORER_CSS = _REPO_ROOT / "app" / "static" / "css" / "explorer.css"
+
+
+def _css() -> str:
+    return _EXPLORER_CSS.read_text(encoding="utf-8")
+
+
+def _js() -> str:
+    return _EXPLORER_JS.read_text(encoding="utf-8")
+
+
+def test_explorer_landmark_roles_and_labels_present():
+    """#760: the new surfaces carry sensible landmark roles + labels — the
+    toolbar (already "Õiguskaardi tööriistad"), the search box (role=search),
+    the preset chip group (role=group + aria-label, aria-pressed on chips),
+    the breadcrumb nav, the detail panel (role=region, starts aria-hidden),
+    and the mini-map (role=img + label, its inner svg aria-hidden)."""
+    html = _html()  # cold open — start panel + the (idle) graph chrome
+    # Toolbar (pre-existing) + the new search-box landmark.
+    assert 'aria-label="Õiguskaardi tööriistad"' in html
+    assert 'id="search-box"' in html
+    assert 'role="search"' in html  # both the toolbar #search-box and the panel form
+    # The legal-view preset chips: a labelled group with aria-pressed on chips.
+    assert 'id="explorer-presets"' in html
+    assert 'role="group"' in html
+    assert 'aria-label="Õiguskaardi vaated"' in html
+    assert 'aria-pressed="false"' in html  # no chip active on a cold open
+    # The breadcrumb is a labelled <nav> landmark even while empty.
+    assert 'id="breadcrumb"' in html
+    assert 'aria-label="Asukoht õiguskaardil"' in html
+    # The detail panel is a labelled region, hidden from AT until opened.
+    assert 'id="detail-panel"' in html
+    assert 'aria-label="Üksuse üksikasjad"' in html
+    assert 'aria-hidden="true"' in html
+    # The mini-map: role=img + label on the wrapper; the inner svg is AT-hidden
+    # and not focusable (so it can't trap keyboard focus).
+    assert 'id="minimap"' in html
+    assert 'role="img"' in html
+    assert 'aria-label="Õiguskaardi miniülevaade"' in html
+    assert 'focusable="false"' in html
+    # The start panel is a labelled region too.
+    assert 'id="explorer-start-panel"' in html
+    assert 'aria-label="Õiguskaardi avapaneel"' in html
+
+
+def test_explorer_active_preset_chip_is_aria_pressed_true():
+    """#760 (+ #756): the active legal-view preset chip reports aria-pressed=true
+    so AT announces which view is on."""
+    html = _html("vaade=el-seosed")
+    assert 'aria-pressed="true"' in html
+    assert "preset-chip active" in html
+
+
+def test_explorer_css_has_focus_visible_rings_for_chrome_controls():
+    """#760: every bespoke interactive control gets a visible :focus-visible
+    ring (reusing the design system's --color-focus-ring token)."""
+    css = _css()
+    assert ":focus-visible" in css
+    assert "--color-focus-ring" in css
+    # The ring covers the toolbar buttons, the preset chips, the search box,
+    # the "Vaate seaded" summary, the detail-panel actions, and the start panel.
+    for needle in (
+        ".ctrl-btn:focus-visible",
+        "summary.ctrl-settings-summary:focus-visible",
+        "#search-input:focus-visible",
+        "#detail-close:focus-visible",
+        "#detail-panel .evidence-action:focus-visible",
+        "#explorer-start-panel a:focus-visible",
+        "#timeline-slider:focus-visible",
+        "#minimap-svg:focus-visible",
+    ):
+        assert needle in css, needle
+
+
+def test_explorer_css_respects_prefers_reduced_motion():
+    """#760: animations are wrapped in @media (prefers-reduced-motion: reduce) —
+    the #758 "you are here" pulsing ring, the loading spinner, the toasts, and
+    the detail-panel slide."""
+    css = _css()
+    assert css.count("@media (prefers-reduced-motion: reduce)") >= 3
+    # The you-are-here ring stops pulsing.
+    assert "you-are-here-ring { animation: none" in css
+    # The spinner stops spinning.
+    assert ".spinner { animation: none; }" in css
+
+
+def test_explorer_css_responsive_blocks_cover_new_surfaces():
+    """#760: the @media blocks handle the preset chips, the evidence card, the
+    mini-map (shrunk ≤768px, hidden on the smallest phones), and the start
+    panel — at 768px and at ~360px."""
+    css = _css()
+    assert "@media (max-width: 768px)" in css
+    assert "@media (max-width: 400px)" in css
+    # Preset chips: full-width wrapping line that can scroll-x on a phone.
+    assert ".preset-group {" in css
+    # The mini-map is shrunk on a phone and hidden on the smallest screens.
+    assert "#minimap, #minimap.visible { display: none; }" in css
+    # The detail panel becomes a full-content-width overlay on a phone.
+    assert "#detail-panel { width: 100%; max-width: 100%;" in css
+
+
+def test_explorer_css_closed_detail_panel_leaves_the_tab_order():
+    """#760: the closed (off-screen) detail panel is ``visibility: hidden`` so
+    its action buttons aren't a "ghost focus" trap; it becomes ``visible`` only
+    when ``.open``."""
+    css = _css()
+    # Match irrespective of internal whitespace.
+    detail_block = re.search(r"#detail-panel\s*\{[^}]*\}", css)
+    assert detail_block is not None
+    assert "visibility: hidden" in detail_block.group(0)
+    open_block = re.search(r"#detail-panel\.open\s*\{[^}]*\}", css)
+    assert open_block is not None
+    assert "visibility: visible" in open_block.group(0)
+
+
+def test_explorer_js_has_keyboard_and_focus_helpers():
+    """#760: explorer.js exposes the keyboard-activation helper (used for the
+    breadcrumb crumbs + the neighbour-list rows), manages detail-panel focus +
+    aria-hidden, and inerts the chrome behind the contextual start panel."""
+    js = _js()
+    # The keyboard helper + its use on the two click-only surfaces.
+    assert "function makeKeyActivatable(" in js
+    assert "makeKeyActivatable(overview" in js  # breadcrumb crumb
+    assert js.count("makeKeyActivatable(") >= 3  # helper def + breadcrumb + neighbour + cat
+    # Detail-panel focus management.
+    assert "function openDetailPanel(" in js
+    assert "removeAttribute('aria-hidden')" in js
+    assert "setAttribute('aria-hidden', 'true')" in js
+    # The start panel inerts the chrome behind it.
+    assert "function _setBehindPanelInert(" in js
+    assert "setAttribute('inert'" in js
