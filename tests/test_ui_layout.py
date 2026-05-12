@@ -8,10 +8,11 @@ TestClient so they remain fast and isolated from the rest of the app.
 from typing import cast, get_args
 
 import pytest
-from fasthtml.common import to_xml
+from fasthtml.common import Link, Script, to_xml
 
 from app.auth.provider import UserDict
 from app.ui.layout.container import Container, ContainerSize
+from app.ui.layout.page_shell import PageShell
 from app.ui.layout.sidebar import NAV_ITEMS, Sidebar
 from app.ui.layout.top_bar import TopBar
 
@@ -228,3 +229,61 @@ def test_head_contains_theme_init_script_and_stylesheets():
 
     # And the per-page <title> must still be present.
     assert head.find("title") is not None
+
+
+# ---------------------------------------------------------------------------
+# PageShell — default container wrapping vs full_bleed; extra_head (#746)
+# ---------------------------------------------------------------------------
+
+
+def test_page_shell_default_wraps_content_in_container():
+    html = to_xml(PageShell("hello", title="Test"))
+    # The standard shell centres content in a .container (size-lg by default).
+    assert "container container-lg" in html
+    assert "main-content" in html
+    # Default mode is NOT full-bleed.
+    assert "main-content--full" not in html
+    assert "hello" in html
+
+
+def test_page_shell_full_bleed_skips_container_and_marks_main():
+    html = to_xml(PageShell("canvas-goes-here", title="Õiguskaart", full_bleed=True))
+    # full_bleed=True: the <main> carries the modifier class…
+    assert "main-content main-content--full" in html
+    # …and the content is NOT wrapped in a centring .container.
+    assert "container container-lg" not in html
+    assert "canvas-goes-here" in html
+
+
+def test_page_shell_extra_head_elements_appended_after_title():
+    """``extra_head=`` FT elements are appended into the head fragment, after
+    the standard ``<title>`` — FastHTML hoists everything a handler returns
+    that belongs in ``<head>`` (``Script``/``Link``/``Title``) at response
+    time, so emitting them here keeps them out of ``<body>``."""
+    html = to_xml(
+        PageShell(
+            "body",
+            title="WithExtra",
+            extra_head=[
+                Script(src="https://example.test/x.js"),
+                Link(rel="stylesheet", href="/x.css"),
+            ],
+        )
+    )
+    # The standard <title> is still present…
+    assert "WithExtra — Seadusloome" in html
+    # …and the extra head resources are emitted (before the body landmarks).
+    assert "https://example.test/x.js" in html
+    assert "/x.css" in html
+    title_pos = html.index("WithExtra — Seadusloome")
+    skip_pos = html.index("skip-to-content")
+    assert title_pos < html.index("https://example.test/x.js") < skip_pos
+    assert title_pos < html.index("/x.css") < skip_pos
+
+
+def test_page_shell_no_extra_head_is_back_compat():
+    """Default ``PageShell(...)`` (no ``extra_head``) still emits just the
+    standard <title> at the top — the explorer is the only caller passing
+    ``extra_head=``."""
+    html = to_xml(PageShell("body", title="Plain"))
+    assert "Plain — Seadusloome" in html

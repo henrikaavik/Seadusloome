@@ -39,6 +39,16 @@
   overflow-x: auto;
 }
 
+/* Full-bleed content area — for pages that own their whole canvas (the
+   Õiguskaart D3 graph). `position: relative` makes this the containing
+   block for the page's `position: absolute` overlays (toolbar, legend,
+   detail panel, …); `overflow: hidden` clips the SVG to the box. */
+.main-content--full {
+  padding: 0;
+  overflow: hidden;
+  position: relative;
+}
+
 .container {
   margin: 0 auto;
   width: 100%;

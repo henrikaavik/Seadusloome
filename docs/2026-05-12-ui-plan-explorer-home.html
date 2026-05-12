@@ -1,0 +1,898 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Seadusloome UI Plan - Home and Õiguskaart</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #07111f;
+      --panel: #101b2d;
+      --panel-2: #17243a;
+      --line: #2b3c58;
+      --muted: #9fb0c8;
+      --text: #eef5ff;
+      --accent: #22c7ee;
+      --accent-2: #7dd3fc;
+      --green: #34d399;
+      --amber: #fbbf24;
+      --red: #fb7185;
+      --white: #ffffff;
+      --shadow: 0 24px 80px rgba(0, 0, 0, .35);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 20% 0%, rgba(34, 199, 238, .10), transparent 34rem),
+        linear-gradient(180deg, #081525 0%, var(--bg) 42rem);
+      color: var(--text);
+      line-height: 1.55;
+    }
+
+    a { color: var(--accent-2); }
+
+    .page {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 40px 24px 72px;
+    }
+
+    header.hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 24px;
+      align-items: end;
+      padding: 34px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: rgba(16, 27, 45, .82);
+      box-shadow: var(--shadow);
+    }
+
+    .eyebrow {
+      margin: 0 0 10px;
+      color: var(--accent-2);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      font-size: 12px;
+    }
+
+    h1, h2, h3 { line-height: 1.15; margin: 0; }
+    h1 { font-size: clamp(32px, 5vw, 58px); max-width: 850px; }
+    h2 { font-size: 28px; margin-bottom: 14px; }
+    h3 { font-size: 18px; margin-bottom: 8px; }
+
+    .hero p {
+      max-width: 820px;
+      margin: 18px 0 0;
+      color: var(--muted);
+      font-size: 18px;
+    }
+
+    .stamp {
+      min-width: 180px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+      background: #0b1627;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .stamp strong {
+      display: block;
+      color: var(--white);
+      font-size: 18px;
+      margin-bottom: 2px;
+    }
+
+    section {
+      margin-top: 36px;
+      padding: 28px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: rgba(16, 27, 45, .76);
+    }
+
+    .plain {
+      padding: 0;
+      border: 0;
+      background: transparent;
+    }
+
+    .grid {
+      display: grid;
+      gap: 18px;
+    }
+
+    .grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #0d1829;
+      padding: 18px;
+    }
+
+    .card p { margin: 8px 0 0; color: var(--muted); }
+
+    .callout {
+      border-left: 4px solid var(--accent);
+      padding: 16px 18px;
+      background: rgba(34, 199, 238, .08);
+      border-radius: 8px;
+      color: var(--text);
+    }
+
+    .warning { border-left-color: var(--amber); background: rgba(251, 191, 36, .08); }
+    .success { border-left-color: var(--green); background: rgba(52, 211, 153, .08); }
+
+    ul, ol { padding-left: 22px; }
+    li + li { margin-top: 8px; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #0d1829;
+    }
+
+    th, td {
+      padding: 13px 14px;
+      text-align: left;
+      vertical-align: top;
+      border-bottom: 1px solid var(--line);
+    }
+
+    th {
+      color: var(--white);
+      background: #132036;
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+    }
+
+    tr:last-child td { border-bottom: 0; }
+    td { color: var(--muted); }
+    td strong { color: var(--white); }
+
+    code {
+      padding: 2px 5px;
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      background: #07111f;
+      color: var(--accent-2);
+      font-size: .92em;
+    }
+
+    figure {
+      margin: 0;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      background: #0b1627;
+    }
+
+    figure img {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+
+    figcaption {
+      padding: 12px 14px;
+      color: var(--muted);
+      font-size: 14px;
+      border-top: 1px solid var(--line);
+    }
+
+    .tag-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 14px;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      padding: 4px 9px;
+      border-radius: 6px;
+      border: 1px solid var(--line);
+      background: #0b1627;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .decision {
+      display: grid;
+      grid-template-columns: 160px 1fr;
+      gap: 18px;
+      align-items: start;
+    }
+
+    .score {
+      display: grid;
+      place-items: center;
+      min-height: 120px;
+      border-radius: 8px;
+      border: 1px solid rgba(52, 211, 153, .45);
+      background: rgba(52, 211, 153, .08);
+      color: var(--green);
+      font-weight: 800;
+      font-size: 28px;
+      text-align: center;
+    }
+
+    .flow {
+      width: 100%;
+      min-height: 290px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #07111f;
+    }
+
+    .wireframe {
+      display: grid;
+      grid-template-columns: 230px 1fr;
+      min-height: 450px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      background: #07111f;
+    }
+
+    .wf-sidebar {
+      border-right: 1px solid var(--line);
+      background: #101b2d;
+      padding: 18px;
+    }
+
+    .wf-sidebar .logo {
+      font-weight: 800;
+      margin-bottom: 22px;
+    }
+
+    .wf-nav {
+      display: grid;
+      gap: 8px;
+    }
+
+    .wf-nav span {
+      padding: 9px 10px;
+      border-radius: 6px;
+      color: var(--muted);
+    }
+
+    .wf-nav .active {
+      background: rgba(34, 199, 238, .12);
+      color: var(--white);
+      border: 1px solid rgba(34, 199, 238, .35);
+    }
+
+    .wf-main {
+      display: grid;
+      grid-template-rows: auto auto 1fr;
+      min-width: 0;
+    }
+
+    .wf-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 16px 18px;
+      border-bottom: 1px solid var(--line);
+      background: #0d1829;
+    }
+
+    .wf-title {
+      font-weight: 800;
+      font-size: 22px;
+    }
+
+    .wf-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 12px 18px;
+      border-bottom: 1px solid var(--line);
+      background: #111d30;
+    }
+
+    .wf-pill {
+      min-height: 32px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      border: 1px solid var(--line);
+      color: var(--muted);
+      background: #0b1627;
+      font-size: 13px;
+    }
+
+    .wf-pill.primary {
+      background: var(--accent);
+      color: #06111f;
+      border-color: var(--accent);
+      font-weight: 800;
+    }
+
+    .wf-body {
+      display: grid;
+      grid-template-columns: 1fr 270px;
+      min-height: 330px;
+    }
+
+    .wf-graph {
+      position: relative;
+      min-height: 330px;
+      background:
+        radial-gradient(circle at 44% 45%, rgba(34, 199, 238, .2), transparent 16px),
+        radial-gradient(circle at 58% 35%, rgba(52, 211, 153, .2), transparent 18px),
+        radial-gradient(circle at 55% 62%, rgba(251, 191, 36, .16), transparent 16px),
+        #07111f;
+    }
+
+    .wf-graph::before,
+    .wf-graph::after {
+      content: "";
+      position: absolute;
+      height: 1px;
+      background: #526886;
+      transform-origin: left;
+    }
+
+    .wf-graph::before { width: 190px; left: 42%; top: 45%; transform: rotate(-32deg); }
+    .wf-graph::after { width: 210px; left: 44%; top: 45%; transform: rotate(26deg); }
+
+    .wf-detail {
+      border-left: 1px solid var(--line);
+      padding: 16px;
+      background: #101b2d;
+    }
+
+    .wf-detail .line {
+      height: 12px;
+      margin: 12px 0;
+      border-radius: 3px;
+      background: #263853;
+    }
+
+    .priority-list {
+      display: grid;
+      gap: 14px;
+      counter-reset: item;
+    }
+
+    .priority {
+      display: grid;
+      grid-template-columns: 42px 1fr;
+      gap: 14px;
+      align-items: start;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #0d1829;
+    }
+
+    .priority::before {
+      counter-increment: item;
+      content: counter(item);
+      display: grid;
+      place-items: center;
+      width: 36px;
+      height: 36px;
+      border-radius: 8px;
+      background: rgba(34, 199, 238, .12);
+      color: var(--accent-2);
+      font-weight: 800;
+    }
+
+    .priority p { margin: 6px 0 0; color: var(--muted); }
+
+    footer {
+      margin-top: 36px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    @media (max-width: 860px) {
+      header.hero,
+      .grid.two,
+      .grid.three,
+      .decision,
+      .wireframe,
+      .wf-body {
+        grid-template-columns: 1fr;
+      }
+
+      .wf-sidebar { border-right: 0; border-bottom: 1px solid var(--line); }
+      .wf-detail { border-left: 0; border-top: 1px solid var(--line); }
+      .page { padding: 24px 14px 48px; }
+      section { padding: 20px; }
+      table { display: block; overflow-x: auto; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">UI planning report</p>
+        <h1>Move Seadusloome from graph-first to workbench-first</h1>
+        <p>
+          The current authenticated root sends users directly into Õiguskaart. That makes the product feel like a graph tool, while the higher-value workflows are analysis, draft review, advisory help, and daily legal work triage.
+        </p>
+        <div class="tag-row">
+          <span class="tag">Scope: main view</span>
+          <span class="tag">Scope: explorer navigation</span>
+          <span class="tag">Output: implementation-ready plan</span>
+        </div>
+      </div>
+      <div class="stamp">
+        <strong>2026-05-12</strong>
+        Seadusloome<br>
+        UI logic review
+      </div>
+    </header>
+
+    <section>
+      <h2>Executive Recommendation</h2>
+      <div class="decision">
+        <div class="score">Use<br>Dashboard</div>
+        <div>
+          <p>
+            Change authenticated <code>/</code> from Õiguskaart to <code>/dashboard</code>. Keep Õiguskaart as an evidence and relationship view that opens from a draft, analysis result, search, or advisory answer with context already applied.
+          </p>
+          <p>
+            The Explorer should not be the main product surface. It is useful when the user already knows what legal object they want to inspect. It is weak as a daily starting point because it asks officials to begin with a visualization instead of a legal question, draft, risk, task, or recommendation.
+          </p>
+          <div class="callout success">
+            Recommended root behavior: unauthenticated users still go to <code>/auth/login</code>; authenticated users go to <code>/dashboard</code>. Dashboard then routes them into <code>Analüüsikeskus</code>, <code>Eelnõud</code>, <code>Koostaja</code>, <code>Nõustaja</code>, or <code>Õiguskaart</code> based on the work item.
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="plain">
+      <div class="grid two">
+        <figure>
+          <img src="kasutusjuhend/assets/screenshot_explorer.png" alt="Existing Õiguskaart screenshot">
+          <figcaption>
+            Existing authenticated Õiguskaart screenshot in the repository manual assets. It shows the graph-first experience and a custom navigation/control bar.
+          </figcaption>
+        </figure>
+        <figure>
+          <img src="kasutusjuhend/assets/screenshot_dashboard.png" alt="Dashboard screenshot">
+          <figcaption>
+            Dashboard screenshot from the same manual assets. This is closer to the right default landing model: user-specific work queue and next actions.
+          </figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section>
+      <h2>What Is Happening Now</h2>
+      <div class="grid three">
+        <div class="card">
+          <h3>Root route is graph-first</h3>
+          <p>
+            In <code>app/main.py</code>, authenticated <code>/</code> currently returns <code>explorer_page(req)</code>. That makes the graph the default product entry point.
+          </p>
+        </div>
+        <div class="card">
+          <h3>Explorer has a separate shell</h3>
+          <p>
+            <code>app/explorer/pages.py</code> builds a custom <code>Html</code>/<code>Body</code> page and local navigation instead of using the standard <code>PageShell</code>.
+          </p>
+        </div>
+        <div class="card">
+          <h3>Global nav already exists</h3>
+          <p>
+            <code>app/ui/layout/sidebar.py</code> already defines the broader workbench nav: <code>Töölaud</code>, <code>Analüüsikeskus</code>, <code>Eelnõud</code>, <code>Õiguskaart</code>, <code>Koostaja</code>, <code>Nõustaja</code>, and admin items.
+          </p>
+        </div>
+      </div>
+      <p class="callout warning">
+        Note: the live URL was login-gated during this review, so the authenticated screenshots come from the repository's existing user-manual assets and the UI logic is verified from local source.
+      </p>
+    </section>
+
+    <section>
+      <h2>Why Explorer Is Weak As Home</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Problem</th>
+            <th>User impact</th>
+            <th>Better behavior</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>It starts with the data structure</strong></td>
+            <td>Officials have to translate a legal task into graph exploration.</td>
+            <td>Start from daily legal work: drafts, risks, analyses, review tasks, and recent work.</td>
+          </tr>
+          <tr>
+            <td><strong>It lacks a clear next action</strong></td>
+            <td>A graph can show relationships, but it does not tell the user what needs attention.</td>
+            <td>Dashboard cards should show "continue drafting", "review high-risk finding", "analysis changed", and "ask advisor".</td>
+          </tr>
+          <tr>
+            <td><strong>Graph usefulness depends on context</strong></td>
+            <td>The graph is useful after selecting a provision, draft, EU act, or court decision; it is less useful cold.</td>
+            <td>Open Õiguskaart with <code>?focus=</code>, <code>?draft=</code>, or <code>?search=</code> from other workflows.</td>
+          </tr>
+          <tr>
+            <td><strong>Custom navigation creates inconsistency</strong></td>
+            <td>Explorer feels like a separate app and users lose the stable sidebar/topbar model.</td>
+            <td>Use the shared app shell or recreate it exactly, with Õiguskaart active in the same sidebar.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Current Flow</h2>
+      <svg class="flow" viewBox="0 0 1080 300" role="img" aria-label="Current user flow from login to explorer">
+        <defs>
+          <marker id="arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+            <path d="M0,0 L10,4 L0,8 z" fill="#7dd3fc"></path>
+          </marker>
+          <style>
+            .box { fill:#101b2d; stroke:#2b3c58; stroke-width:2; rx:8; }
+            .box-warn { fill:#241c12; stroke:#b98718; stroke-width:2; rx:8; }
+            .txt { fill:#eef5ff; font: 700 16px Inter, sans-serif; }
+            .sub { fill:#9fb0c8; font: 13px Inter, sans-serif; }
+            .arr { stroke:#7dd3fc; stroke-width:2.5; marker-end:url(#arrow); fill:none; }
+          </style>
+        </defs>
+        <rect class="box" x="30" y="95" width="170" height="92"></rect>
+        <text class="txt" x="56" y="132">Login</text>
+        <text class="sub" x="56" y="158">/auth/login</text>
+        <path class="arr" d="M205 141 H300"></path>
+        <rect class="box-warn" x="310" y="75" width="210" height="132"></rect>
+        <text class="txt" x="338" y="116">Authenticated /</text>
+        <text class="sub" x="338" y="142">returns explorer_page(req)</text>
+        <text class="sub" x="338" y="166">user lands in graph</text>
+        <path class="arr" d="M525 141 H620"></path>
+        <rect class="box" x="630" y="75" width="190" height="132"></rect>
+        <text class="txt" x="658" y="116">Õiguskaart</text>
+        <text class="sub" x="658" y="142">search / nodes / timeline</text>
+        <text class="sub" x="658" y="166">custom nav controls</text>
+        <path class="arr" d="M825 141 H920"></path>
+        <rect class="box" x="930" y="75" width="120" height="132"></rect>
+        <text class="txt" x="956" y="116">Manual</text>
+        <text class="sub" x="956" y="142">find route,</text>
+        <text class="sub" x="956" y="164">task, or</text>
+        <text class="sub" x="956" y="186">entity</text>
+      </svg>
+    </section>
+
+    <section>
+      <h2>Proposed Flow</h2>
+      <svg class="flow" viewBox="0 0 1080 330" role="img" aria-label="Proposed user flow from login to dashboard and contextual explorer">
+        <defs>
+          <marker id="arrow2" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+            <path d="M0,0 L10,4 L0,8 z" fill="#34d399"></path>
+          </marker>
+          <style>
+            .box2 { fill:#101b2d; stroke:#2b3c58; stroke-width:2; rx:8; }
+            .box-good { fill:#102318; stroke:#2f8d63; stroke-width:2; rx:8; }
+            .txt2 { fill:#eef5ff; font: 700 16px Inter, sans-serif; }
+            .sub2 { fill:#9fb0c8; font: 13px Inter, sans-serif; }
+            .arr2 { stroke:#34d399; stroke-width:2.5; marker-end:url(#arrow2); fill:none; }
+          </style>
+        </defs>
+        <rect class="box2" x="30" y="119" width="150" height="92"></rect>
+        <text class="txt2" x="56" y="156">Login</text>
+        <text class="sub2" x="56" y="181">/auth/login</text>
+        <path class="arr2" d="M185 165 H270"></path>
+        <rect class="box-good" x="280" y="95" width="190" height="140"></rect>
+        <text class="txt2" x="310" y="132">Dashboard</text>
+        <text class="sub2" x="310" y="158">/dashboard</text>
+        <text class="sub2" x="310" y="181">next actions, risks,</text>
+        <text class="sub2" x="310" y="202">stale analyses</text>
+        <path class="arr2" d="M475 165 H560"></path>
+        <rect class="box2" x="570" y="28" width="190" height="94"></rect>
+        <text class="txt2" x="600" y="64">Analüüsikeskus</text>
+        <text class="sub2" x="600" y="90">legal workflows</text>
+        <rect class="box2" x="570" y="136" width="190" height="94"></rect>
+        <text class="txt2" x="600" y="172">Eelnõud</text>
+        <text class="sub2" x="600" y="198">draft workspace</text>
+        <rect class="box2" x="570" y="244" width="190" height="64"></rect>
+        <text class="txt2" x="600" y="282">Koostaja / Nõustaja</text>
+        <path class="arr2" d="M765 75 C840 75 840 150 910 150"></path>
+        <path class="arr2" d="M765 183 H910"></path>
+        <path class="arr2" d="M765 276 C840 276 840 216 910 216"></path>
+        <rect class="box-good" x="920" y="116" width="130" height="132"></rect>
+        <text class="txt2" x="944" y="154">Õiguskaart</text>
+        <text class="sub2" x="944" y="181">opened with</text>
+        <text class="sub2" x="944" y="203">context:</text>
+        <text class="sub2" x="944" y="225">focus/draft/search</text>
+      </svg>
+    </section>
+
+    <section>
+      <h2>Recommended Navigation Model</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Area</th>
+            <th>Role in product</th>
+            <th>Home priority</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Töölaud</strong></td>
+            <td>Daily queue: next actions, high-risk findings, stale analyses, active drafts, recent exports, bookmarks.</td>
+            <td>Default authenticated root.</td>
+          </tr>
+          <tr>
+            <td><strong>Analüüsikeskus</strong></td>
+            <td>Main place to start legal questions such as norm impact chains and EU transposition checks.</td>
+            <td>Primary dashboard CTA and top-level nav item.</td>
+          </tr>
+          <tr>
+            <td><strong>Eelnõud</strong></td>
+            <td>Document workspace for uploads, versions, impact reports, retention, export, and deletion.</td>
+            <td>Primary dashboard CTA when draft work exists.</td>
+          </tr>
+          <tr>
+            <td><strong>Õiguskaart</strong></td>
+            <td>Evidence map for relationships, provenance, timeline, and graph inspection.</td>
+            <td>Secondary: opened from context or direct search.</td>
+          </tr>
+          <tr>
+            <td><strong>Koostaja</strong></td>
+            <td>Drafting workflow, preferably seeded from an analysis or uploaded draft.</td>
+            <td>Primary when a user has active drafting sessions.</td>
+          </tr>
+          <tr>
+            <td><strong>Nõustaja</strong></td>
+            <td>Legal advisory conversation, also available from report rows and findings.</td>
+            <td>Contextual and top-level fallback.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Explorer Menu Fix</h2>
+      <p>
+        The Explorer should use one of two implementation paths. The first is preferable because it removes duplicated navigation logic.
+      </p>
+      <div class="grid two">
+        <div class="card">
+          <h3>Preferred: PageShell-based Õiguskaart</h3>
+          <p>
+            Render Õiguskaart inside the shared <code>PageShell</code> with <code>active_nav="/explorer"</code>. The sidebar and topbar come from the same components as the rest of the app. The graph canvas becomes the page content area.
+          </p>
+          <ul>
+            <li>One source of truth for nav labels and role filtering.</li>
+            <li>Consistent active state, user menu, notifications, skip link, and layout landmarks.</li>
+            <li>Explorer-specific controls become a toolbar, not global navigation.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>Fallback: Visual parity shell</h3>
+          <p>
+            If the full PageShell constrains the D3 canvas too much, keep a custom body but import the same navigation data and match the same sidebar/topbar dimensions, colors, icons, and active states.
+          </p>
+          <ul>
+            <li>No hard-coded Explorer nav list.</li>
+            <li>Use real anchors for app navigation.</li>
+            <li>Use <code>aria-label="Õiguskaardi tööriistad"</code> for graph controls.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="callout">
+        Separate the concepts: app navigation belongs in the app shell; graph actions belong in the Õiguskaart toolbar. Users should never have to learn a different menu model just because the page contains D3.
+      </div>
+    </section>
+
+    <section>
+      <h2>Target Õiguskaart Layout</h2>
+      <div class="wireframe" aria-label="Wireframe of proposed Õiguskaart with consistent left navigation and graph toolbar">
+        <aside class="wf-sidebar">
+          <div class="logo">Seadusloome</div>
+          <nav class="wf-nav">
+            <span>Töölaud</span>
+            <span>Analüüsikeskus</span>
+            <span>Eelnõud</span>
+            <span class="active">Õiguskaart</span>
+            <span>Koostaja</span>
+            <span>Nõustaja</span>
+            <span>Administraator</span>
+          </nav>
+        </aside>
+        <div class="wf-main">
+          <div class="wf-top">
+            <div>
+              <div class="wf-title">Õiguskaart</div>
+              <div style="color:var(--muted);font-size:13px;">Eesti õiguse seosed ja tõendid</div>
+            </div>
+            <div class="wf-pill">User menu</div>
+          </div>
+          <div class="wf-toolbar">
+            <span class="wf-pill primary">Otsi</span>
+            <span class="wf-pill">Sisend: AvTS § 35</span>
+            <span class="wf-pill">Ajaline vaade</span>
+            <span class="wf-pill">Vaate seaded</span>
+            <span class="wf-pill">Tagasi aruandesse</span>
+          </div>
+          <div class="wf-body">
+            <div class="wf-graph"></div>
+            <aside class="wf-detail">
+              <strong>Detailpaneel</strong>
+              <div class="line" style="width:72%;"></div>
+              <div class="line" style="width:94%;"></div>
+              <div class="line" style="width:88%;"></div>
+              <div class="line" style="width:52%;"></div>
+              <div class="wf-pill primary" style="margin-top:24px;display:inline-flex;">Küsi nõustajalt</div>
+            </aside>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Make Õiguskaart More Useful</h2>
+      <div class="priority-list">
+        <div class="priority">
+          <div>
+            <h3>Open with context by default</h3>
+            <p>
+              Treat direct, blank graph entry as the exception. Most links into Õiguskaart should include <code>?focus=</code>, <code>?draft=</code>, <code>?search=</code>, or an analysis id so the user sees a relevant subgraph immediately.
+            </p>
+          </div>
+        </div>
+        <div class="priority">
+          <div>
+            <h3>Replace cold graph start with legal starting points</h3>
+            <p>
+              If there is no context, show a compact start panel: search a law/provision, open recent bookmarks, inspect recent high-risk findings, or start <code>Normi mõjuahel</code> in Analüüsikeskus. Load the broad graph only after a choice.
+            </p>
+          </div>
+        </div>
+        <div class="priority">
+          <div>
+            <h3>Turn graph detail into evidence and actions</h3>
+            <p>
+              The detail panel should show source, date/version, relation type in legal language, why it matters, and actions: <code>Küsi nõustajalt</code>, <code>Ava analüüsikeskuses</code>, <code>Lisa märkus</code>, <code>Lisa järjehoidja</code>.
+            </p>
+          </div>
+        </div>
+        <div class="priority">
+          <div>
+            <h3>Use presets instead of graph jargon</h3>
+            <p>
+              Prefer legal view presets such as "Kehtiv õigus", "Eelnõu mõjud", "EL seosed", "Kohtupraktika", and "Ajalugu". Keep simulation controls under <code>Vaate seaded</code>.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Implementation Plan</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Phase</th>
+            <th>Change</th>
+            <th>Files likely touched</th>
+            <th>Validation</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>1</strong></td>
+            <td>Change authenticated root from Explorer to Dashboard.</td>
+            <td><code>app/main.py</code>, dashboard auth tests.</td>
+            <td><code>GET /</code> unauthenticated still redirects to login; authenticated user lands on <code>/dashboard</code> or receives a 303 to it.</td>
+          </tr>
+          <tr>
+            <td><strong>2</strong></td>
+            <td>Unify Explorer navigation with shared app shell.</td>
+            <td><code>app/explorer/pages.py</code>, <code>app/static/css/explorer.css</code>, possibly <code>app/ui/layout/page_shell.py</code>.</td>
+            <td>Õiguskaart shows same sidebar/topbar model, active nav state, user menu, and landmarks as other pages.</td>
+          </tr>
+          <tr>
+            <td><strong>3</strong></td>
+            <td>Move graph actions into an Explorer toolbar.</td>
+            <td><code>app/explorer/pages.py</code>, <code>app/static/js/explorer.js</code>, explorer CSS.</td>
+            <td>Toolbar contains search, timeline, view presets, and settings; no duplicated global nav in the graph toolbar.</td>
+          </tr>
+          <tr>
+            <td><strong>4</strong></td>
+            <td>Add contextual empty state and stronger deep links.</td>
+            <td>Explorer page, analysis result links, draft detail/report links, chat seed links.</td>
+            <td>Opening from a report focuses the entity or draft; opening blank shows useful legal starting points.</td>
+          </tr>
+          <tr>
+            <td><strong>5</strong></td>
+            <td>Responsive QA and accessibility pass.</td>
+            <td>Explorer CSS/tests.</td>
+            <td>Desktop and mobile screenshots show no overlap; keyboard can reach search, toolbar, graph controls, and detail panel.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Acceptance Criteria</h2>
+      <div class="grid two">
+        <div class="card">
+          <h3>Navigation</h3>
+          <ul>
+            <li>Authenticated root no longer opens a blank graph as the first screen.</li>
+            <li>All primary sections use the same labels and ordering in topbar/sidebar.</li>
+            <li>Õiguskaart has the same active nav treatment as other pages.</li>
+            <li>App navigation links are anchors with real <code>href</code> values.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>Explorer usefulness</h3>
+          <ul>
+            <li>Blank Õiguskaart has a useful search/start state.</li>
+            <li>Analysis and draft pages can open Õiguskaart with context already applied.</li>
+            <li>The detail panel explains why a relation matters and offers next actions.</li>
+            <li>Mobile layout keeps search, controls, graph, and detail panel usable without overlap.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Decision Summary</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Decision</th>
+            <th>Recommendation</th>
+            <th>Reason</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Main view</strong></td>
+            <td>Use <code>Töölaud</code> / <code>/dashboard</code>.</td>
+            <td>It can represent daily legal work and route users to the right tool.</td>
+          </tr>
+          <tr>
+            <td><strong>Explorer role</strong></td>
+            <td>Reframe as <code>Õiguskaart</code>, a supporting evidence map.</td>
+            <td>The graph is valuable after context is known, not as the first decision surface.</td>
+          </tr>
+          <tr>
+            <td><strong>Explorer menu</strong></td>
+            <td>Use the shared app shell or an exact visual/navigation equivalent.</td>
+            <td>One navigation system lowers cognitive load and maintenance cost.</td>
+          </tr>
+          <tr>
+            <td><strong>Graph controls</strong></td>
+            <td>Keep them in a local toolbar with legal-language presets.</td>
+            <td>Users need legal scope controls, not simulation vocabulary.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <footer>
+      Sources reviewed: <code>app/main.py</code>, <code>app/ui/layout/sidebar.py</code>, <code>app/ui/layout/page_shell.py</code>, <code>app/explorer/pages.py</code>, existing manual screenshots under <code>docs/kasutusjuhend/assets/</code>, and the product structure note <code>docs/2026-05-11-ministry-lawyer-ui-structure.md</code>.
+    </footer>
+  </main>
+</body>
+</html>

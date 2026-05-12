@@ -24,7 +24,7 @@ from app.docs.routes import register_draft_routes
 from app.docs.websocket import register_draft_ws_routes
 from app.docs.ws_export_progress import register_export_progress_ws_routes
 from app.drafter.routes import register_drafter_routes
-from app.explorer.pages import explorer_page, register_explorer_pages
+from app.explorer.pages import register_explorer_pages
 from app.explorer.routes import register_explorer_routes
 from app.explorer.websocket import register_ws_routes
 from app.notifications.routes import register_notification_routes
@@ -257,10 +257,17 @@ register_notification_routes(rt)
 
 @rt("/")
 def index(req: Request):
+    """GET / — route the visitor to the right landing page.
+
+    Unauthenticated users are sent to the login page; authenticated users
+    land on the operational dashboard (``/dashboard`` — the "Töölaud" work
+    queue), not the Õiguskaart graph. See issue #746 / the design rationale
+    in ``docs/2026-05-12-ui-plan-explorer-home.html``.
+    """
     auth = req.scope.get("auth")
     if auth is None:
         return RedirectResponse(url="/auth/login", status_code=303)
-    return explorer_page(req)
+    return RedirectResponse(url="/dashboard", status_code=303)
 
 
 @rt("/api/ping", methods=["GET"])
