@@ -359,6 +359,106 @@ summary.ctrl-settings-summary::-webkit-details-marker { display: none; }
 .version-label { color: #cbd5e1; }
 .version-empty { color: #64748b; font-size: 12px; font-style: italic; }
 
+/* ------- #754: contextual start panel (cold-open overlay) -------
+ * A "cold" /explorer open (no ?focus / ?draft / ?search / ?vaade=koik)
+ * renders this panel over the (idle) graph chrome instead of auto-loading
+ * the 90k category overview. It's an opaque, scrollable overlay anchored to
+ * the whole content box — so the legend / instructions / timeline behind it
+ * never peek through. "Sirvi liikide kaupa" / "Näita kogu kaarti" hide it
+ * (display:none) and let explorer.js load the overview. */
+#explorer-start-panel {
+  position: absolute; inset: 0; z-index: 25;
+  overflow-y: auto;
+  background: rgba(15, 23, 41, 0.985);
+  -webkit-overflow-scrolling: touch;
+}
+#explorer-start-panel::-webkit-scrollbar { width: 8px; }
+#explorer-start-panel::-webkit-scrollbar-track { background: transparent; }
+#explorer-start-panel::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.3); border-radius: 4px;
+}
+.start-panel-inner {
+  max-width: 720px; margin: 0 auto; padding: 40px 28px 56px;
+}
+.start-panel-title {
+  font-size: 22px; font-weight: 700; color: #f1f5f9; margin: 0 0 6px;
+}
+.start-panel-lead {
+  font-size: 13px; color: #94a3b8; line-height: 1.6; margin: 0 0 24px;
+  max-width: 56ch;
+}
+
+/* --- search box at the top of the panel --- */
+.start-panel-search {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 28px;
+}
+#start-panel-search-input {
+  flex: 1; min-width: 0;
+  background: rgba(30, 41, 59, 0.85); border: 1px solid rgba(100, 116, 139, 0.3);
+  color: #e2e8f0; padding: 9px 14px; border-radius: 8px; font-size: 13px;
+  outline: none; transition: border-color 0.15s;
+}
+#start-panel-search-input:focus { border-color: rgba(56, 189, 248, 0.5); }
+#start-panel-search-input::placeholder { color: #64748b; }
+.start-panel-search-btn {
+  flex-shrink: 0;
+  background: rgba(56, 189, 248, 0.15); border: 1px solid rgba(56, 189, 248, 0.3);
+  color: #38bdf8; padding: 9px 18px; border-radius: 8px; font-size: 13px;
+  cursor: pointer; transition: all 0.15s;
+}
+.start-panel-search-btn:hover { background: rgba(56, 189, 248, 0.25); }
+
+/* --- sections --- */
+.start-panel-section { margin-bottom: 24px; }
+.start-panel-section-title {
+  font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em;
+  color: #64748b; margin: 0 0 10px;
+}
+.start-panel-empty {
+  font-size: 13px; color: #475569; font-style: italic; margin: 0;
+}
+.start-panel-list { list-style: none; padding: 0; margin: 0; }
+.start-panel-item {
+  padding: 8px 0; border-bottom: 1px solid rgba(100, 116, 139, 0.12);
+  font-size: 13px;
+}
+.start-panel-item:last-child { border-bottom: none; }
+.start-panel-item--rich {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px;
+}
+.start-panel-link {
+  color: #e2e8f0; text-decoration: none; font-weight: 500;
+  border-bottom: 1px solid transparent; transition: border-color 0.15s, color 0.15s;
+}
+.start-panel-link:hover { color: #38bdf8; border-bottom-color: rgba(56, 189, 248, 0.4); }
+.start-panel-meta { font-size: 11px; color: #64748b; }
+.start-panel-meta-date { color: #475569; }
+.start-panel-secondary-link {
+  font-size: 11px; color: #6ee7b7; text-decoration: none;
+  margin-left: auto; white-space: nowrap;
+  border-bottom: 1px solid rgba(110, 231, 183, 0.3); transition: color 0.15s, border-color 0.15s;
+}
+.start-panel-secondary-link:hover { color: #a7f3d0; border-bottom-color: rgba(110, 231, 183, 0.6); }
+
+/* --- bottom action row --- */
+.start-panel-section--actions { margin-top: 8px; }
+.start-panel-actions {
+  display: flex; flex-wrap: wrap; gap: 10px;
+}
+.start-panel-action {
+  display: inline-block; padding: 9px 18px; border-radius: 8px;
+  font-size: 13px; cursor: pointer; text-decoration: none;
+  border: 1px solid transparent; transition: all 0.15s; font-family: inherit;
+}
+.start-panel-action--primary {
+  background: rgba(56, 189, 248, 0.15); border-color: rgba(56, 189, 248, 0.3); color: #38bdf8;
+}
+.start-panel-action--primary:hover { background: rgba(56, 189, 248, 0.25); }
+.start-panel-action--secondary {
+  background: rgba(30, 41, 59, 0.85); border-color: rgba(100, 116, 139, 0.3); color: #94a3b8;
+}
+.start-panel-action--secondary:hover { background: rgba(51, 65, 85, 0.9); color: #e2e8f0; }
+
 /* ------- Annotation section in detail panel ------- */
 .annotation-section { margin-top: 12px; }
 .annotation-button-wrapper { display: inline-flex; align-items: center; gap: 8px; }
@@ -396,4 +496,16 @@ summary.ctrl-settings-summary::-webkit-details-marker { display: none; }
      small screen; the detail panel goes full content-width. */
   #legend, #instructions { max-width: 60%; }
   #detail-panel { width: 100%; max-width: 100%; }
+
+  /* #754: the start panel goes edge-to-edge with tighter padding, and its
+     search box / action buttons stack so nothing overflows on a phone. */
+  .start-panel-inner { padding: 24px 16px 40px; }
+  .start-panel-title { font-size: 19px; }
+  .start-panel-search { flex-wrap: wrap; }
+  #start-panel-search-input { flex-basis: 100%; }
+  .start-panel-search-btn { flex: 1; }
+  .start-panel-item--rich { gap: 4px 8px; }
+  .start-panel-secondary-link { margin-left: 0; }
+  .start-panel-actions { flex-direction: column; }
+  .start-panel-action { text-align: center; }
 }

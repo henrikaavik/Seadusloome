@@ -82,6 +82,12 @@ const state = {
   timelineActive: false,      // whether the timeline filter is applied
   timelineYear: 2026,         // currently selected year on the timeline slider
   selectedEntityData: null,   // full entity detail data (metadata, outgoing, incoming)
+  // #754: when true the page rendered the contextual start panel and we must
+  // NOT auto-fetch the 90k category overview — the user picks what to load.
+  startPanelMode: false,
+  // Whether loadOverview() has run at least once (so explorerShowFullMap()
+  // can no-op back to the existing overview instead of re-fetching it).
+  overviewLoaded: false,
 };
 
 // ---------------------------------------------------------------------------
@@ -1227,6 +1233,23 @@ window.explorerResetTimeline = resetTimeline;
 
 window.explorerBookmark = addBookmark;
 
+// #754: leave the contextual start panel and load today's full category
+// overview in place — wired to the start panel's "Sirvi liikide kaupa" /
+// "Näita kogu kaarti" buttons and the toolbar's "Näita kogu kaarti" item.
+// Idempotent: if the overview is already loaded, just (re)collapses to it.
+window.explorerShowFullMap = function() {
+  _dismissStartPanel();
+  state.startPanelMode = false;
+  if (state.overviewLoaded) {
+    collapseToOverview(true);
+    setTimeout(function() { zoomToFit(500); }, 300);
+    return;
+  }
+  loadFullOverview().then(function() {
+    setTimeout(function() { zoomToFit(600); }, 800);
+  });
+};
+
 // ---------------------------------------------------------------------------
 // Drag handlers
 // ---------------------------------------------------------------------------
@@ -1498,6 +1521,60 @@ async function addBookmark() {
 }
 
 // ---------------------------------------------------------------------------
+// #754 — contextual start panel: gate the 90k-graph load behind a choice
+// ---------------------------------------------------------------------------
+
+// Hide (and stop occupying) the start-panel overlay. Cheap + idempotent.
+function _dismissStartPanel() {
+  var panel = document.getElementById('explorer-start-panel');
+  if (panel) panel.style.display = 'none';
+}
+
+// Load the category overview into state + render it. Does NOT touch the
+// zoom/viewport — callers decide whether to fit-all afterwards (the plain
+// init path does; the ?focus= / ?search= paths re-frame themselves).
+// Factored out of init() so explorerShowFullMap() (the "Näita kogu kaarti" /
+// "Sirvi liikide kaupa" buttons) can call it on demand.
+async function loadFullOverview() {
+  var overview = await loadOverview();
+  state.nodes = overview.nodes;
+  state.links = overview.links;
+  state.view = 'overview';
+  state.overviewLoaded = true;
+  updateBreadcrumb();
+  render();
+}
+
+// Wire the start panel's own search form: intercept submit and reuse the
+// in-page search flow (the same path the toolbar "Otsi" button uses) instead
+// of a full navigation. A no-JS submit still works — the <form> is
+// method=GET action=/explorer, so it lands on /explorer?search=<term>, which
+// the server then renders in graph mode with the search pre-run.
+function _wireStartPanel() {
+  var form = document.getElementById('start-panel-search-form');
+  if (!form) return;
+  form.addEventListener('submit', function(e) {
+    var input = document.getElementById('start-panel-search-input');
+    var term = input ? input.value.trim() : '';
+    if (!term) { e.preventDefault(); return; }
+    e.preventDefault();
+    // Mirror the term into the toolbar search box (kept in sync for when the
+    // user re-opens "Vaate seaded") and run the shared search.
+    var toolbarInput = document.getElementById('search-input');
+    if (toolbarInput) toolbarInput.value = term;
+    _dismissStartPanel();
+    state.startPanelMode = false;
+    // performSearch() collapses to the overview first — make sure it exists.
+    var run = function() { performSearch(); };
+    if (!state.overviewLoaded) {
+      loadFullOverview().then(run);
+    } else {
+      run();
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Version history rendering
 // ---------------------------------------------------------------------------
 
@@ -1716,13 +1793,26 @@ async function init() {
   // #746: wire the toolbar-level "← Tagasi" link if the server rendered it
   // (it's present whenever the page carries back-context — ?focus= / ?draft=).
   _wireToolbarBack();
+  // #754: the start panel has its own search form — always wire it (it's a
+  // no-op when the panel isn't on the page).
+  _wireStartPanel();
 
-  const overview = await loadOverview();
-  state.nodes = overview.nodes;
-  state.links = overview.links;
-  state.view = 'overview';
-  updateBreadcrumb();
-  render();
+  // #754: a "cold" open rendered the contextual start panel — the server set
+  // window.__explorerStartPanel. Do NOT fetch the 90k category overview; the
+  // graph chrome is idle behind the panel until the user picks "Sirvi liikide
+  // kaupa" / "Näita kogu kaarti" (→ explorerShowFullMap) or runs a search.
+  if (window.__explorerStartPanel) {
+    state.startPanelMode = true;
+    // The detail panel can still be Escape-closed etc.; just no graph data.
+    // WebSocket sync notifications are still useful — connect once.
+    if (!wsInitialized) {
+      wsInitialized = true;
+      initWebSocket();
+    }
+    return;
+  }
+
+  await loadFullOverview();
 
   // #719: arrived via ?focus=<uri> (e.g. a link from an impact report)?
   // Jump straight to that entity instead of leaving the user on the
@@ -1747,7 +1837,7 @@ async function init() {
     await performSearch();
     setTimeout(function() { zoomToFit(600); }, 800);
   } else {
-    // Center the graph once the simulation settles
+    // Plain overview — centre the graph once the simulation settles.
     setTimeout(function() { zoomToFit(600); }, 800);
   }
 
