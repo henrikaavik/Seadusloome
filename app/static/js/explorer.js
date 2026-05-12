@@ -133,6 +133,9 @@ const state = {
   // #758: the URI of the node the page was opened on (?focus= / ?draft=), if
   // any — given a persistent "you are here" ring + pin so it's never lost.
   youAreHereUri: null,
+  // #755: in ?draft=<id> mode, the {draftId,title,dataUrl,draftUrl,reportUrl}
+  // blob from the server (null otherwise).
+  draftSubgraph: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -1752,6 +1755,185 @@ function collapseToOverview(resetView) {
   }
 }
 
+// #755: ---------------------------------------------------------------------
+// Draft impact subgraph mode (epic #762, workstream B)
+//
+// When the page is opened with ?draft=<id> and the org owns it, the server
+// sets window.__explorerDraftSubgraph = { draftId, title, dataUrl, draftUrl,
+// reportUrl, hasReport }. Instead of loading the cold 90k category overview we
+// fetch dataUrl (a small org-scoped JSON endpoint that reshapes the draft's
+// *already-computed* latest impact_reports row into {nodes, links}) and render
+// only that subgraph: the draft itself in the centre, its affected /
+// conflicting / gap provisions as spokes, with a "← Tagasi eelnõu juurde"
+// link back to /drafts/<id>. No fresh full-ontology traversal happens here.
+// ---------------------------------------------------------------------------
+
+// #755: wire the "← Tagasi …" links to an explicit URL (the draft / report)
+// rather than document.referrer — the user may have arrived from a bookmark
+// or a typed URL, not from the report page.
+function _wireBackToUrl(el, url, label) {
+  if (!el) return;
+  el.textContent = label || '← Tagasi';
+  el.style.display = '';
+  if (url) { el.href = url; }
+  el.onclick = function (e) {
+    e.preventDefault();
+    if (url) {
+      window.location.href = url;
+    } else if (document.referrer) {
+      window.location.href = document.referrer;
+    } else {
+      window.history.back();
+    }
+  };
+}
+
+// #755: shape a server subgraph row into a graph node. The draft node is
+// rendered bigger + flagged so the rest of the layout (and the legend) treats
+// it as the "you are here" anchor. Affected/conflict/gap spokes get a stable
+// radius keyed off their kind so the picture reads consistently.
+function _subgraphNode(row) {
+  var isDraft = !!row.isDraft || row.kind === 'draft';
+  var radius = isDraft ? 26 : (row.kind === 'gap' ? 16 : 14);
+  return {
+    id: row.id,
+    uri: row.uri || (isDraft ? '' : row.id),
+    label: row.label || (row.uri ? _fallbackLabel(row.uri) : row.id),
+    category: row.category || (isDraft ? 'DraftLegislation' : 'LegalProvision'),
+    desc: row.note || '',
+    count: 0,
+    r: radius,
+    isCategory: false,
+    isDraft: isDraft,
+    kind: row.kind || '',
+    note: row.note || '',
+  };
+}
+
+// #755: the empty / no-report fallback — an overlay message inside the canvas
+// area pointing the user at the analysis. Reuses the loading-overlay slot's
+// neighbour DOM; built with DOM methods (no innerHTML of untrusted strings).
+function _showDraftSubgraphFallback(meta, message) {
+  var existing = document.getElementById('explorer-draft-fallback');
+  if (existing) existing.remove();
+  var box = document.createElement('div');
+  box.id = 'explorer-draft-fallback';
+  box.className = 'explorer-draft-fallback';
+  box.setAttribute('role', 'status');
+
+  var h = document.createElement('h2');
+  h.textContent = (meta && meta.title) ? meta.title : 'Eelnõu mõjukaart';
+  box.appendChild(h);
+
+  var p = document.createElement('p');
+  p.textContent = message || 'Sellel eelnõul pole veel mõjuaruannet, mille põhjal mõjukaarti kuvada.';
+  box.appendChild(p);
+
+  var actions = document.createElement('div');
+  actions.className = 'explorer-draft-fallback-actions';
+  if (meta && meta.reportUrl) {
+    var a1 = document.createElement('a');
+    a1.href = meta.reportUrl;
+    a1.className = 'explorer-draft-fallback-link';
+    a1.textContent = 'Ava mõjuaruanne →';
+    actions.appendChild(a1);
+  }
+  if (meta && meta.draftUrl) {
+    var a2 = document.createElement('a');
+    a2.href = meta.draftUrl;
+    a2.className = 'explorer-draft-fallback-link';
+    a2.textContent = '← Tagasi eelnõu juurde';
+    actions.appendChild(a2);
+  }
+  var a3 = document.createElement('button');
+  a3.type = 'button';
+  a3.className = 'explorer-draft-fallback-link';
+  a3.textContent = 'Näita kogu kaarti';
+  a3.onclick = function () { box.remove(); window.explorerShowFullMap(); };
+  actions.appendChild(a3);
+  box.appendChild(actions);
+
+  var mount = document.getElementById('main-content') || document.body;
+  mount.appendChild(box);
+}
+
+async function loadDraftSubgraph(meta) {
+  if (!meta || !meta.dataUrl) return;
+  state.view = 'draft-subgraph';
+  state.draftSubgraph = meta;
+
+  // Wire the "back to draft" links right away — independent of the fetch.
+  var backLabel = '← Tagasi eelnõu juurde';
+  _wireBackToUrl(document.getElementById('toolbar-back'), meta.draftUrl, backLabel);
+
+  // The server told us up front whether a report exists; skip the fetch if not.
+  if (meta.hasReport === false) {
+    _showDraftSubgraphFallback(meta, null);
+    return;
+  }
+
+  var json = null;
+  try {
+    var resp = await fetch(meta.dataUrl);
+    if (resp.ok) { json = await resp.json(); }
+  } catch (e) {
+    json = null;
+  }
+
+  var data = json && json.data ? json.data : null;
+  var serverMeta = json && json.meta ? json.meta : {};
+  if (data && serverMeta && serverMeta.has_report === false) {
+    // Race: report disappeared between the page render and this fetch.
+    _showDraftSubgraphFallback(meta, null);
+    return;
+  }
+  if (!data || !Array.isArray(data.nodes) || data.nodes.length === 0) {
+    _showDraftSubgraphFallback(
+      meta,
+      'Selle eelnõu mõjuaruanne ei tuvastanud ühtegi seotud üksust.'
+    );
+    return;
+  }
+
+  var nodes = data.nodes.map(_subgraphNode);
+  var nodeIds = new Set(nodes.map(function (n) { return n.id; }));
+  var links = (Array.isArray(data.links) ? data.links : [])
+    .filter(function (l) {
+      var s = typeof l.source === 'object' ? l.source.id : l.source;
+      var t = typeof l.target === 'object' ? l.target.id : l.target;
+      return nodeIds.has(s) && nodeIds.has(t);
+    })
+    .map(function (l) {
+      return {
+        source: l.source,
+        target: l.target,
+        label: l.label || '',
+        kind: l.kind || '',
+        isCross: false,
+      };
+    });
+
+  state.nodes = nodes;
+  state.links = links;
+  state.expandedCategory = null;
+  state.pinnedNodes.clear();
+  // Pin the draft node at the centre so the spokes radiate around it.
+  var draftNode = nodes.find(function (n) { return n.isDraft; });
+  if (draftNode) {
+    draftNode.x = 0; draftNode.y = 0;
+    draftNode.fx = 0; draftNode.fy = 0;
+  }
+  updateBreadcrumb();
+  render();
+
+  if (serverMeta && serverMeta.truncated) {
+    showToast('Mõjukaart on suure aruande puhul kärbitud — täielik nimekiri on aruandes.', 'info');
+  }
+
+  // Re-frame once the simulation settles (mirrors the other entry paths).
+  setTimeout(function () { zoomToFit(600); }, 800);
+}
+
 // ---------------------------------------------------------------------------
 // Search
 // ---------------------------------------------------------------------------
@@ -1809,6 +1991,20 @@ function updateBreadcrumb() {
     breadcrumb.style.display = 'none';
     return;
   }
+  // #755: draft-subgraph mode shows a single "Eeln\u00f5u m\u00f5jukaart:
+  // <title>" crumb (no "\u00dclevaade \u203a" lead \u2014 there's no overview
+  // behind it in this mode).
+  if (state.view === 'draft-subgraph') {
+    breadcrumb.style.display = '';
+    const dsCrumb = document.createElement('span');
+    dsCrumb.className = 'current';
+    const dsTitle = (state.draftSubgraph && state.draftSubgraph.title) || 'Eeln\u00f5u';
+    const dsShort = dsTitle.length > 40 ? dsTitle.slice(0, 40) + '\u2026' : dsTitle;
+    dsCrumb.textContent = 'Eeln\u00f5u m\u00f5jukaart: ' + dsShort;
+    breadcrumb.appendChild(dsCrumb);
+    return;
+  }
+
   breadcrumb.style.display = '';
 
   const overview = document.createElement('span');
@@ -2655,6 +2851,20 @@ async function init() {
     state.startPanelMode = true;
     // The detail panel can still be Escape-closed etc.; just no graph data.
     // WebSocket sync notifications are still useful — connect once.
+    if (!wsInitialized) {
+      wsInitialized = true;
+      initWebSocket();
+    }
+    return;
+  }
+
+  // #755: ?draft=<id> mode — the server resolved an org-owned draft and set
+  // window.__explorerDraftSubgraph. Render ONLY that draft's impact subgraph
+  // (its affected/conflict/gap provisions, fetched from the data endpoint),
+  // not the cold 90k overview. If the draft has no report yet, this shows a
+  // graceful "run the analysis" fallback rather than the full graph.
+  if (window.__explorerDraftSubgraph && window.__explorerDraftSubgraph.dataUrl) {
+    await loadDraftSubgraph(window.__explorerDraftSubgraph);
     if (!wsInitialized) {
       wsInitialized = true;
       initWebSocket();

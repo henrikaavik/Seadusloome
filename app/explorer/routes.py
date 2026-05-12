@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
+import uuid
+from typing import Any
 from urllib.parse import unquote
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from app.db import get_connection as _connect
 from app.ontology.queries import (
     CATEGORY_OVERVIEW,
     ENTITIES_AT_DATE,
@@ -588,6 +592,342 @@ def explorer_timeline(req: Request) -> JSONResponse:
 
 
 # ---------------------------------------------------------------------------
+# #755 — draft impact subgraph (epic #762, workstream B)
+#
+# ``/explorer?draft=<uuid>`` renders only that draft's impact subgraph — the
+# affected / conflicting / gap provisions and the relations between them —
+# instead of the full 90k-entity graph. The data comes straight out of the
+# draft's latest ``impact_reports`` row (the same JSON the report page and the
+# .docx export read), so this is *not* a fresh full-ontology traversal: it is
+# the already-computed :class:`~app.docs.impact.analyzer.ImpactFindings`
+# reshaped into D3 ``{nodes, links}`` form.
+#
+# Access control mirrors ``app.explorer.pages._fetch_draft_overlay``:
+#   - unauthenticated → 401 (defensive; the middleware redirects first)
+#   - malformed / non-UUID id → 404 (graceful, never a 500)
+#   - draft owned by another org → 404 (existence not revealed)
+#   - no impact report yet → 200 with ``has_report=False`` so the JS can show
+#     a "run the analysis" fallback instead of a blank graph.
+# ---------------------------------------------------------------------------
+
+# How many of each finding kind we surface as graph nodes. The full findings
+# list is still in the impact_reports row + the .docx export contains every
+# row — this is purely page-weight control for the D3 canvas (mirrors
+# ``app.docs.report_routes._MAX_INLINE_ROWS`` in spirit).
+_SUBGRAPH_MAX_PER_KIND = 60
+
+
+def _category_for_type_uri(type_uri: str) -> str:
+    """Map an ontology type URI to one of explorer.js' CATEGORY_COLORS keys.
+
+    A loose mirror of explorer.js ``categoryFromUri`` so the subgraph nodes
+    pick up sensible colours. Anything unrecognised falls back to
+    ``LegalProvision`` (the affected/conflict entities are overwhelmingly
+    provisions); the JS resolver applies its own fuzzy fallback on top.
+    """
+    if not type_uri:
+        return "LegalProvision"
+    short = type_uri.rsplit("#", 1)[-1] if "#" in type_uri else type_uri.rsplit("/", 1)[-1]
+    lower = short.lower()
+    if "draft" in lower:
+        return "DraftLegislation"
+    if "eucourt" in lower or "eu_court" in lower:
+        return "EUCourtDecision"
+    if "court" in lower or "decision" in lower:
+        return "CourtDecision"
+    if "directive" in lower or "regulation" in lower or lower.startswith("eu"):
+        return "EULegislation"
+    if "enacted" in lower or short in ("Act", "EnactedLaw"):
+        return "EnactedLaw"
+    if "topiccluster" in lower or "topic_cluster" in lower or "cluster" in lower:
+        return "TopicCluster"
+    if "concept" in lower:
+        return "LegalConcept"
+    if "provision" in lower or "section" in lower or short in ("Section", "LegalProvision"):
+        return "LegalProvision"
+    return "LegalProvision"
+
+
+def _parse_report_json(raw: Any) -> dict[str, Any]:
+    """Normalise the JSONB ``report_data`` value into a dict.
+
+    Mirrors ``app.docs.report_routes._parse_report_data`` (kept local so this
+    module doesn't reach into ``app/docs/`` for a one-liner).
+    """
+    if raw is None:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, (bytes, bytearray)):
+        try:
+            return json.loads(raw.decode())
+        except (TypeError, ValueError, UnicodeDecodeError):
+            return {}
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except (TypeError, ValueError):
+            return {}
+    return {}
+
+
+def _short_name_from_uri(uri: str) -> str:
+    """Best-effort short label from a URI fragment / last path segment."""
+    if not uri:
+        return ""
+    tail = uri.rsplit("#", 1)[-1] if "#" in uri else uri.rsplit("/", 1)[-1]
+    return tail or uri
+
+
+def build_draft_subgraph(
+    draft_id: str,
+    title: str,
+    findings: dict[str, Any],
+    *,
+    max_per_kind: int = _SUBGRAPH_MAX_PER_KIND,
+) -> dict[str, Any]:
+    """Reshape a draft's :class:`ImpactFindings` JSON into a D3 ``{nodes, links}``.
+
+    The central node is the draft itself; spokes are the affected / conflicting
+    / gap entities, each linked back to the draft with a labelled edge
+    ("mõjutab" / "konflikt" / "lünk"). Nodes are de-duplicated by URI so an
+    entity that is both affected *and* in a conflict appears once. Pure +
+    side-effect-free so it's unit-testable without a DB (Phase 5 readiness:
+    same shape can back an MCP tool).
+
+    Args:
+        draft_id: The draft's UUID (string) — used as the central node id.
+        title: The draft's human title (panel label).
+        findings: The parsed ``impact_reports.report_data`` dict.
+        max_per_kind: Cap on nodes contributed per finding kind.
+
+    Returns:
+        ``{"draft_id", "title", "nodes": [...], "links": [...]}``. ``nodes`` and
+        ``links`` use the same field names explorer.js' graph layer expects
+        (``id`` / ``label`` / ``category`` / ``uri`` / ``isCategory``;
+        ``source`` / ``target`` / ``label``).
+    """
+    draft_node_id = f"draft:{draft_id}"
+    nodes: list[dict[str, Any]] = [
+        {
+            "id": draft_node_id,
+            "uri": "",
+            "label": title or "Eelnõu",
+            "category": "DraftLegislation",
+            "isCategory": False,
+            "isDraft": True,
+            "kind": "draft",
+        }
+    ]
+    links: list[dict[str, Any]] = []
+    seen: set[str] = {draft_node_id}
+
+    def _add_spoke(
+        node_id: str,
+        label: str,
+        category: str,
+        kind: str,
+        edge_label: str,
+        *,
+        uri: str = "",
+        note: str = "",
+    ) -> None:
+        if not node_id or node_id in seen:
+            # Still draw the edge if the node already exists (e.g. affected ∩
+            # conflict) so the relationship isn't lost — but only one edge
+            # per (kind) to keep it readable.
+            if node_id and node_id in seen and node_id != draft_node_id:
+                already = any(
+                    (link.get("target") == node_id and link.get("kind") == kind) for link in links
+                )
+                if not already:
+                    links.append(
+                        {
+                            "source": draft_node_id,
+                            "target": node_id,
+                            "label": edge_label,
+                            "kind": kind,
+                        }
+                    )
+            return
+        seen.add(node_id)
+        node: dict[str, Any] = {
+            "id": node_id,
+            "uri": uri,
+            "label": label or _short_name_from_uri(uri) or node_id,
+            "category": category,
+            "isCategory": False,
+            "kind": kind,
+        }
+        if note:
+            node["note"] = note
+        nodes.append(node)
+        links.append(
+            {
+                "source": draft_node_id,
+                "target": node_id,
+                "label": edge_label,
+                "kind": kind,
+            }
+        )
+
+    # --- Affected entities (the 2-hop BFS hits) ---
+    for row in list(findings.get("affected_entities") or [])[:max_per_kind]:
+        if not isinstance(row, dict):
+            continue
+        uri = str(row.get("uri") or "").strip()
+        if not uri:
+            continue
+        _add_spoke(
+            uri,
+            str(row.get("label") or ""),
+            _category_for_type_uri(str(row.get("type") or "")),
+            "affected",
+            "mõjutab",
+            uri=uri,
+        )
+
+    # --- Conflicts (overlaps with other drafts / court decisions) ---
+    for row in list(findings.get("conflicts") or [])[:max_per_kind]:
+        if not isinstance(row, dict):
+            continue
+        uri = str(row.get("conflicting_entity") or "").strip()
+        label = str(row.get("conflicting_label") or "") or _short_name_from_uri(uri)
+        reason = str(row.get("reason") or "")
+        if uri:
+            _add_spoke(
+                uri,
+                label,
+                _category_for_type_uri(uri),
+                "conflict",
+                "konflikt",
+                uri=uri,
+                note=reason,
+            )
+        else:
+            # A conflict with no URI still gets a (synthetic) node so the
+            # finding isn't silently dropped from the map.
+            draft_ref = str(row.get("draft_ref") or "")
+            synth_id = f"conflict:{draft_ref or label or len(nodes)}"
+            _add_spoke(
+                synth_id,
+                label or draft_ref or "Konflikt",
+                "DraftLegislation",
+                "conflict",
+                "konflikt",
+                note=reason,
+            )
+
+    # --- Gaps (under-referenced topic clusters) ---
+    for row in list(findings.get("gaps") or [])[:max_per_kind]:
+        if not isinstance(row, dict):
+            continue
+        uri = str(row.get("topic_cluster") or "").strip()
+        label = str(row.get("topic_cluster_label") or "") or _short_name_from_uri(uri)
+        desc = str(row.get("description") or "")
+        node_id = uri or f"gap:{label or len(nodes)}"
+        _add_spoke(
+            node_id,
+            label or "Teemaklaster",
+            "TopicCluster",
+            "gap",
+            "lünk",
+            uri=uri,
+            note=desc,
+        )
+
+    return {
+        "draft_id": draft_id,
+        "title": title or "Eelnõu",
+        "nodes": nodes,
+        "links": links,
+    }
+
+
+def explorer_draft_subgraph(req: Request, draft_id: str) -> JSONResponse:
+    """GET /explorer/draft-subgraph/{draft_id} — the draft's impact subgraph.
+
+    Returns a JSON ``{nodes, links}`` built from the draft's latest impact
+    report. Org-scoped: a user from another org gets a 404 (the draft's
+    existence is not revealed). Malformed ids → 404. No impact report yet →
+    200 with ``has_report=False`` and empty ``nodes``/``links`` so explorer.js
+    can show a graceful "run the analysis" fallback.
+    """
+    auth = req.scope.get("auth")
+    if not auth or not auth.get("id") or not auth.get("org_id"):
+        return JSONResponse({"error": "Authentication required"}, status_code=401)
+
+    try:
+        draft_uuid = uuid.UUID(str(draft_id))
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "Eelnõu ei leitud"}, status_code=404)
+
+    org_id = str(auth.get("org_id"))
+    try:
+        with _connect() as conn:
+            draft_row = conn.execute(
+                "SELECT org_id, title FROM drafts WHERE id = %s",
+                (str(draft_uuid),),
+            ).fetchone()
+            if draft_row is None or str(draft_row[0]) != org_id:
+                # Missing or cross-org → 404 (don't reveal which).
+                return JSONResponse({"error": "Eelnõu ei leitud"}, status_code=404)
+            title = str(draft_row[1] or "Eelnõu")
+            report_row = conn.execute(
+                """
+                SELECT report_data
+                FROM impact_reports
+                WHERE draft_id = %s
+                ORDER BY generated_at DESC
+                LIMIT 1
+                """,
+                (str(draft_uuid),),
+            ).fetchone()
+    except Exception:
+        logger.exception("draft subgraph: DB error for draft=%s", draft_id)
+        # Degrade to "no report" rather than 500 — the JS shows the fallback.
+        return JSONResponse(
+            {
+                "data": {"draft_id": str(draft_uuid), "title": "Eelnõu", "nodes": [], "links": []},
+                "meta": {"has_report": False, "draft_id": str(draft_uuid)},
+            }
+        )
+
+    if report_row is None:
+        return JSONResponse(
+            {
+                "data": {"draft_id": str(draft_uuid), "title": title, "nodes": [], "links": []},
+                "meta": {"has_report": False, "draft_id": str(draft_uuid)},
+            }
+        )
+
+    findings = _parse_report_json(report_row[0])
+    subgraph = build_draft_subgraph(str(draft_uuid), title, findings)
+    affected = len(list(findings.get("affected_entities") or []))
+    conflicts = len(list(findings.get("conflicts") or []))
+    gaps = len(list(findings.get("gaps") or []))
+    return JSONResponse(
+        {
+            "data": subgraph,
+            "meta": {
+                "has_report": True,
+                "draft_id": str(draft_uuid),
+                "affected_count": affected,
+                "conflict_count": conflicts,
+                "gap_count": gaps,
+                "node_count": len(subgraph["nodes"]),
+                # The report itself is unbounded; the graph is capped per kind.
+                "truncated": (
+                    affected > _SUBGRAPH_MAX_PER_KIND
+                    or conflicts > _SUBGRAPH_MAX_PER_KIND
+                    or gaps > _SUBGRAPH_MAX_PER_KIND
+                ),
+            },
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
 # Route registration
 # ---------------------------------------------------------------------------
 
@@ -599,3 +939,5 @@ def register_explorer_routes(rt) -> None:  # type: ignore[no-untyped-def]
     rt("/api/explorer/entity/{entity_id:path}", methods=["GET"])(explorer_entity)
     rt("/api/explorer/search", methods=["GET"])(explorer_search)
     rt("/api/explorer/timeline", methods=["GET"])(explorer_timeline)
+    # #755: the draft's impact subgraph (org-scoped; backs ?draft=<id>).
+    rt("/explorer/draft-subgraph/{draft_id}", methods=["GET"])(explorer_draft_subgraph)
