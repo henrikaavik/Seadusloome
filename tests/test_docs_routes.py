@@ -678,10 +678,10 @@ class TestDraftDetailPage:
         client = _authed_client()
         resp = client.get(f"/drafts/{foreign.id}")
 
-        # We return the not-found page (HTTP 200 with 404-style content)
-        # rather than a raw 403 so we never leak the existence of drafts
-        # belonging to other organisations.
-        assert resp.status_code == 200
+        # We return the not-found page (HTTP 404, #739) rather than a raw
+        # 403 so we never leak the existence of drafts belonging to other
+        # organisations.
+        assert resp.status_code == 404
         assert "Eelnõu ei leitud" in resp.text
         assert "Minu eelnõu" not in resp.text
 
@@ -698,8 +698,27 @@ class TestDraftDetailPage:
         client = _authed_client()
         resp = client.get("/drafts/99999999-9999-9999-9999-999999999999")
 
-        assert resp.status_code == 200
+        assert resp.status_code == 404
         assert "Eelnõu ei leitud" in resp.text
+
+    @patch("app.docs.routes._detail.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_invalid_uuid_draft_detail_returns_404(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+    ):
+        """A malformed draft id never reaches the DB and 404s (#739)."""
+        mock_get_provider.return_value = _stub_provider()
+
+        client = _authed_client()
+        resp = client.get("/drafts/not-a-uuid")
+
+        assert resp.status_code == 404
+        # The not-found page is served as a full HTML document.
+        assert resp.headers["content-type"].startswith("text/html")
+        assert "Eelnõu ei leitud" in resp.text
+        mock_fetch.assert_not_called()
 
     @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")
@@ -1153,7 +1172,7 @@ class TestDeleteDraftHandler:
         client = _authed_client()
         resp = client.post("/drafts/44444444-4444-4444-4444-444444444444/delete")
 
-        assert resp.status_code == 200
+        assert resp.status_code == 404
         assert "Eelnõu ei leitud" in resp.text
 
     @patch("app.docs.routes._lifecycle.fetch_draft")
@@ -1173,7 +1192,7 @@ class TestDeleteDraftHandler:
         client = _authed_client()
         resp = client.post("/drafts/44444444-4444-4444-4444-444444444444/delete")
 
-        assert resp.status_code == 200
+        assert resp.status_code == 404
         assert "Eelnõu ei leitud" in resp.text
 
     @patch("app.docs.routes._lifecycle.JobQueue")
@@ -1457,6 +1476,7 @@ class TestFlashMessages:
         assert "Eelnõu üles laaditud, analüüs algas." in detail.text
         assert "toast-success" in detail.text
 
+    @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.docs.routes._lifecycle.touch_draft_access")
     @patch("app.docs.routes._lifecycle._connect")
     @patch("app.docs.routes._detail.log_draft_view")
@@ -1469,10 +1489,16 @@ class TestFlashMessages:
         mock_log_view: MagicMock,
         mock_connect: MagicMock,
         mock_touch: MagicMock,
+        mock_detail_fetch: MagicMock,
     ):
         mock_get_provider.return_value = _stub_provider()
         draft = _make_draft()
         mock_fetch.return_value = draft
+        # The follow-up GET /drafts/{id} resolves the draft through the
+        # detail module's own ``fetch_draft`` binding — patch it too so
+        # the detail page renders the draft (not the 404 page) and the
+        # flash toast is asserted against the real content (#739).
+        mock_detail_fetch.return_value = draft
         mock_conn = MagicMock()
         mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
         mock_connect.return_value.__exit__ = MagicMock(return_value=False)
@@ -1908,7 +1934,7 @@ class TestLinkVtkHandler:
             data={"parent_vtk_id": _VTK_ID},
         )
 
-        assert resp.status_code == 200
+        assert resp.status_code == 404
         assert "Eelnõu ei leitud" in resp.text
 
 
@@ -2305,7 +2331,7 @@ class TestRetryFailedDraft:
         client = _authed_client()
         resp = client.post(f"/drafts/{foreign.id}/retry")
 
-        assert resp.status_code == 200
+        assert resp.status_code == 404
         assert "Eelnõu ei leitud" in resp.text
         mock_reset.assert_not_called()
         mock_queue.enqueue.assert_not_called()
@@ -2984,7 +3010,7 @@ class TestDraftDiffPage:
         client = _authed_client()
         resp = client.get(f"/drafts/{foreign.id}/diff?from=1&to=2")
 
-        assert resp.status_code == 200
+        assert resp.status_code == 404
         assert "Eelnõu ei leitud" in resp.text
         # The diff table must NOT render for an unauthorised viewer.
         assert "diff-table" not in resp.text
@@ -3011,7 +3037,7 @@ class TestDraftDiffPage:
         client = _authed_client()
         resp = client.get(f"/drafts/{draft.id}/diff?from=1&to=99")
 
-        assert resp.status_code == 200
+        assert resp.status_code == 404
         assert "Eelnõu ei leitud" in resp.text
         assert "diff-table" not in resp.text
 
@@ -3030,7 +3056,7 @@ class TestDraftDiffPage:
         # Neither `from` nor `to` provided.
         resp = client.get(f"/drafts/{draft.id}/diff")
 
-        assert resp.status_code == 200
+        assert resp.status_code == 404
         assert "Eelnõu ei leitud" in resp.text
 
     @patch("app.docs.routes._detail_versions.fetch_draft")
@@ -3048,7 +3074,7 @@ class TestDraftDiffPage:
         # 'one' is not a valid int.
         resp = client.get(f"/drafts/{draft.id}/diff?from=one&to=two")
 
-        assert resp.status_code == 200
+        assert resp.status_code == 404
         assert "Eelnõu ei leitud" in resp.text
 
     @patch("app.docs.routes._detail_versions.list_versions_for_draft")
@@ -3109,7 +3135,7 @@ class TestDraftDiffPage:
         client = _authed_client()
         resp = client.get(f"/drafts/{draft.id}/diff?from=2&to=2")
 
-        assert resp.status_code == 200
+        assert resp.status_code == 404
         assert "Eelnõu ei leitud" in resp.text
 
     def test_diff_route_redirects_unauthenticated(self):

@@ -13,20 +13,16 @@ the function body so this charter is preserved (post-review fix).
 from __future__ import annotations
 
 import uuid
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import HTMLResponse, Response
 
 from app.auth.helpers import require_auth
 from app.auth.policy import can_delete_draft, can_edit_draft, can_view_draft
 from app.auth.provider import UserDict
 from app.docs import draft_model as _dm
 from app.docs.draft_model import Draft
-
-if TYPE_CHECKING:
-    from fastcore.xml import FT
-
 
 # Set of valid actions for :func:`resolve_draft`. Using ``Literal`` so a
 # typo at the call site is a pyright error rather than a silent fallback
@@ -40,12 +36,12 @@ class ResolvedDraft(NamedTuple):
     A typed ``NamedTuple`` (rather than a bare ``tuple[Draft, dict]``) so
     call sites can discriminate the success branch from the failure
     branch via ``isinstance(result, ResolvedDraft)``. The failure branch
-    returns an opaque response object (Starlette ``Response`` for auth
-    redirects, FastHTML FT element for the 404 page) and the typed
-    discriminator stays unambiguous regardless of what the failure side
-    returns. Future-proofs against fastcore versions where FT may
-    inherit from ``tuple``, and against ad-hoc ``(error, code)`` tuples
-    returned by any upstream helper.
+    returns an opaque Starlette ``Response`` (a ``RedirectResponse`` for
+    auth misses, an ``HTMLResponse`` with ``status_code=404`` for the
+    not-found page) and the typed discriminator stays unambiguous
+    regardless of what the failure side returns. Future-proofs against
+    fastcore versions where FT may inherit from ``tuple``, and against
+    ad-hoc ``(error, code)`` tuples returned by any upstream helper.
 
     Supports both attribute access (``resolved.draft``) and tuple
     unpacking (``draft, auth = resolved``) — see the test in
@@ -68,7 +64,7 @@ def _parse_uuid(raw: str) -> uuid.UUID | None:
         return None
 
 
-def _not_found_page(req: Request) -> Any:
+def _not_found_page(req: Request) -> HTMLResponse:
     """Render the 404 page used whenever a draft is missing or out of scope.
 
     UI-layer imports are deferred to the function body so the module
@@ -76,13 +72,16 @@ def _not_found_page(req: Request) -> Any:
     lets :mod:`app.docs.retry_handler` and other lean importers load
     without dragging the entire ``app.ui`` subtree).
 
-    Return is typed ``Any`` because :func:`PageShell` returns an FT
-    element whose concrete fastcore type is exposed as a 3-tuple,
-    which conflicts with the narrower ``FT`` annotation on
-    :func:`resolve_draft`'s return. Pragmatically the value is opaque
-    to callers — they just return it from their handler.
+    The rendered :func:`PageShell` is wrapped in an explicit
+    :class:`~starlette.responses.HTMLResponse` with ``status_code=404``
+    (#739). Returning the bare FT element let FastHTML serve it as
+    ``200 OK``, so missing / cross-org drafts could be cached, crawled,
+    or mistaken for a success by API and HTMX callers. Every caller in
+    this module (and the sibling route packages) returns the value
+    verbatim from a Starlette handler, so a ``Response`` is the right
+    shape there.
     """
-    from fasthtml.common import H1, A, P
+    from fasthtml.common import H1, A, P, to_xml
 
     from app.ui.layout import PageShell
     from app.ui.surfaces.alert import Alert
@@ -90,7 +89,7 @@ def _not_found_page(req: Request) -> Any:
 
     auth = req.scope.get("auth")
     theme = get_theme_from_request(req)
-    return PageShell(
+    page = PageShell(
         H1("Eelnõu ei leitud", cls="page-title"),
         Alert(
             "Otsitud eelnõu ei ole olemas või Te ei oma selle vaatamise õigust.",
@@ -103,6 +102,7 @@ def _not_found_page(req: Request) -> Any:
         active_nav="/drafts",
         request=req,
     )
+    return HTMLResponse(to_xml(page), status_code=404)
 
 
 def resolve_draft(
@@ -110,7 +110,7 @@ def resolve_draft(
     draft_id: str,
     *,
     action: DraftAction = "view",
-) -> ResolvedDraft | Response | FT:
+) -> ResolvedDraft | Response:
     """Run the standard auth + parse + load + authorize preamble for a draft route.
 
     The drafts module has ~15 handlers that all open with the same five
@@ -125,8 +125,10 @@ def resolve_draft(
 
     This helper consolidates that preamble (#624). On success it returns
     a :class:`ResolvedDraft` named tuple. On any failure it returns the
-    appropriate response object — either a Starlette ``Response`` (auth
-    redirect) or a FastHTML FT element from :func:`_not_found_page`.
+    appropriate Starlette ``Response`` — a ``RedirectResponse`` to the
+    login page for an auth miss, or the ``status_code=404``
+    ``HTMLResponse`` from :func:`_not_found_page` for a missing /
+    cross-org draft.
 
     Discriminate via ``isinstance(result, ResolvedDraft)`` rather than
     ``isinstance(result, tuple)`` — see :class:`ResolvedDraft` for the

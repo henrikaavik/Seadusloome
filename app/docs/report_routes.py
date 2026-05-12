@@ -25,8 +25,9 @@ from typing import Any
 from urllib.parse import quote
 
 from fasthtml.common import *  # noqa: F403
+from fasthtml.common import to_xml
 from starlette.requests import Request
-from starlette.responses import FileResponse, Response
+from starlette.responses import FileResponse, HTMLResponse, Response
 
 from app.annotations.row_keys import (
     collect_row_specs as _collect_row_specs,
@@ -95,11 +96,19 @@ def _parse_uuid(raw: str) -> uuid.UUID | None:
         return None
 
 
-def _not_found_page(req: Request):
-    """Render the 404 page used whenever a draft/report is missing or out of scope."""
+def _not_found_page(req: Request) -> HTMLResponse:
+    """Render the 404 page used whenever a draft/report is missing or out of scope.
+
+    Wrapped in an explicit ``HTMLResponse`` with ``status_code=404``
+    (#739): returning the bare ``PageShell`` let FastHTML serve it as
+    ``200 OK``, so a missing / cross-org draft or report looked like a
+    success to API and HTMX callers. Every caller in this module returns
+    this verbatim from a Starlette route handler, so a ``Response`` is
+    the right shape.
+    """
     auth = req.scope.get("auth")
     theme = get_theme_from_request(req)
-    return PageShell(
+    page = PageShell(
         H1("Eelnõu ei leitud", cls="page-title"),  # noqa: F405
         Alert(
             "Otsitud eelnõu või mõjuaruanne ei ole olemas või Te ei oma selle vaatamise õigust.",
@@ -111,6 +120,7 @@ def _not_found_page(req: Request):
         theme=theme,
         active_nav="/drafts",
     )
+    return HTMLResponse(to_xml(page), status_code=404)
 
 
 def _format_timestamp(value: Any) -> str:
@@ -1520,8 +1530,23 @@ def export_status_fragment(req: Request, draft_id: str, job_id: str):
         # access; reset the archive clock.
         touch_draft_access_conn(parsed_draft)
         result = job.result or {}
-        docx_path = str(result.get("docx_path") or "")
-        if not docx_path:
+        # #741: the requested format decides the artefact + label. PDF
+        # jobs still write a ``docx_path`` (the .docx is the content
+        # source of truth) plus a ``pdf_path``; the download endpoint
+        # picks the right file from the same ``payload["format"]`` key,
+        # so the success-state label has to match or the user who
+        # requested a PDF sees a ".docx" link. Legacy jobs without a
+        # format key are treated as docx (mirrors the download handler).
+        fmt = str(payload.get("format") or "docx").lower()
+        if fmt not in _VALID_EXPORT_FORMATS:
+            fmt = "docx"
+        if fmt == "pdf":
+            artefact_path = str(result.get("pdf_path") or "")
+            download_label = "Laadi alla .pdf"
+        else:
+            artefact_path = str(result.get("docx_path") or "")
+            download_label = "Laadi alla .docx"
+        if not artefact_path:
             return Div(
                 Alert(
                     "Eksport valmis, kuid faili ei leitud.",
@@ -1533,7 +1558,7 @@ def export_status_fragment(req: Request, draft_id: str, job_id: str):
         return Div(
             Span("Eksport valmis. ", cls="export-status-text"),  # noqa: F405
             LinkButton(
-                "Laadi alla .docx",
+                download_label,
                 href=f"/drafts/{parsed_draft}/export/{parsed_job_id}/download",
                 size="sm",
             ),

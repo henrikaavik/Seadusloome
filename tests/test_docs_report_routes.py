@@ -251,7 +251,7 @@ class TestDraftReportPage:
         client = _authed_client()
         resp = client.get(f"/drafts/{_DRAFT_ID}/report")
 
-        assert resp.status_code == 200
+        assert resp.status_code == 404
         assert "Eelnõu ei leitud" in resp.text
 
     @patch("app.docs.report_routes._fetch_latest_report")
@@ -270,7 +270,7 @@ class TestDraftReportPage:
         client = _authed_client()
         resp = client.get(f"/drafts/{_DRAFT_ID}/report")
 
-        assert resp.status_code == 200
+        assert resp.status_code == 404
         assert "Eelnõu ei leitud" in resp.text
 
     @patch("app.docs.report_routes.fetch_draft")
@@ -285,7 +285,7 @@ class TestDraftReportPage:
         client = _authed_client()
         resp = client.get("/drafts/not-a-uuid/report")
 
-        assert resp.status_code == 200
+        assert resp.status_code == 404
         assert "Eelnõu ei leitud" in resp.text
         # fetch_draft must NOT be called when UUID parsing fails.
         mock_fetch.assert_not_called()
@@ -382,7 +382,7 @@ class TestExportDraftReportHandler:
 
         client = _authed_client()
         resp = client.post(f"/drafts/{_DRAFT_ID}/export")
-        assert resp.status_code == 200
+        assert resp.status_code == 404
         assert "Eelnõu ei leitud" in resp.text
 
 
@@ -473,6 +473,88 @@ class TestExportStatusFragment:
     @patch("app.docs.report_routes.JobQueue")
     @patch("app.docs.report_routes.fetch_draft")
     @patch("app.auth.middleware._get_provider")
+    def test_status_success_pdf_job_labels_link_as_pdf(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_queue_cls: MagicMock,
+    ):
+        """#741: a completed PDF export must show a ``.pdf`` download
+        label (and not ``.docx``), matching what the download endpoint
+        actually serves from ``payload["format"]``. PDF jobs still write
+        a ``docx_path`` (the .docx is the content source of truth) plus
+        a ``pdf_path`` — the fragment must key on the format, not on the
+        mere presence of ``docx_path``."""
+        mock_get_provider.return_value = _stub_provider()
+        mock_fetch.return_value = _make_draft()
+        queue_instance = MagicMock()
+        queue_instance.get.return_value = _make_job(
+            status="success",
+            payload={
+                "draft_id": str(_DRAFT_ID),
+                "report_id": str(_REPORT_ID),
+                "format": "pdf",
+            },
+            result={
+                "draft_id": str(_DRAFT_ID),
+                "report_id": str(_REPORT_ID),
+                "format": "pdf",
+                "docx_path": "/tmp/exports/output.docx",
+                "pdf_path": "/tmp/exports/output.pdf",
+            },
+        )
+        mock_queue_cls.return_value = queue_instance
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{_DRAFT_ID}/export-status/7")
+
+        assert resp.status_code == 200
+        assert "Laadi alla .pdf" in resp.text
+        assert "Laadi alla .docx" not in resp.text
+        assert f"/drafts/{_DRAFT_ID}/export/7/download" in resp.text
+        assert "every 2s" not in resp.text
+
+    @patch("app.docs.report_routes.JobQueue")
+    @patch("app.docs.report_routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_status_success_pdf_job_without_pdf_path_shows_error(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_queue_cls: MagicMock,
+    ):
+        """A PDF job whose ``pdf_path`` is missing surfaces the
+        file-not-found alert rather than silently linking the .docx
+        (#741)."""
+        mock_get_provider.return_value = _stub_provider()
+        mock_fetch.return_value = _make_draft()
+        queue_instance = MagicMock()
+        queue_instance.get.return_value = _make_job(
+            status="success",
+            payload={
+                "draft_id": str(_DRAFT_ID),
+                "report_id": str(_REPORT_ID),
+                "format": "pdf",
+            },
+            result={
+                "draft_id": str(_DRAFT_ID),
+                "report_id": str(_REPORT_ID),
+                "format": "pdf",
+                "docx_path": "/tmp/exports/output.docx",
+            },
+        )
+        mock_queue_cls.return_value = queue_instance
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{_DRAFT_ID}/export-status/7")
+
+        assert resp.status_code == 200
+        assert "Eksport valmis, kuid faili ei leitud." in resp.text
+        assert "Laadi alla" not in resp.text
+
+    @patch("app.docs.report_routes.JobQueue")
+    @patch("app.docs.report_routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
     def test_status_failed_shows_error_alert(
         self,
         mock_get_provider: MagicMock,
@@ -558,7 +640,7 @@ class TestDownloadExportHandler:
 
         client = _authed_client()
         resp = client.get(f"/drafts/{_DRAFT_ID}/export/7/download")
-        assert resp.status_code == 200
+        assert resp.status_code == 404
         assert "Eelnõu ei leitud" in resp.text
 
     @patch("app.docs.report_routes.JobQueue")
@@ -585,7 +667,7 @@ class TestDownloadExportHandler:
 
         client = _authed_client()
         resp = client.get(f"/drafts/{_DRAFT_ID}/export/7/download")
-        assert resp.status_code == 200
+        assert resp.status_code == 404
         assert "Eelnõu ei leitud" in resp.text
 
     @patch("app.docs.report_routes.JobQueue")
@@ -606,7 +688,7 @@ class TestDownloadExportHandler:
 
         client = _authed_client()
         resp = client.get(f"/drafts/{_DRAFT_ID}/export/7/download")
-        assert resp.status_code == 200
+        assert resp.status_code == 404
         assert "Eelnõu ei leitud" in resp.text
 
 
@@ -709,7 +791,7 @@ class TestReportSectionPagination:
 
         client = _authed_client()
         resp = client.get(f"/drafts/{_DRAFT_ID}/report/section/bogus")
-        assert resp.status_code == 200
+        assert resp.status_code == 404
         assert "Eelnõu ei leitud" in resp.text
 
 
@@ -802,7 +884,7 @@ class TestOntologyDriftBanner:
         mock_fetch.return_value = _make_draft(org_id=_OTHER_ORG_ID)
         client = _authed_client()
         resp = client.post(f"/drafts/{_DRAFT_ID}/report/reanalyze")
-        assert resp.status_code == 200
+        assert resp.status_code == 404
         assert "Eelnõu ei leitud" in resp.text
 
 

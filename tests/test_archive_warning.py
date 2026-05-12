@@ -344,9 +344,9 @@ class TestKeepDraftRoute:
         client = _authed_client()
         resp = client.post(f"/drafts/{draft.id}/keep")
 
-        # Route returns the 404 page (never 403) so we don't leak the
-        # existence of another user's draft.
-        assert resp.status_code == 200
+        # Route returns the 404 page (never 403, #739) so we don't leak
+        # the existence of another user's draft.
+        assert resp.status_code == 404
         assert "Eelnõu ei leitud" in resp.text
         mock_touch.assert_not_called()
 
@@ -366,7 +366,7 @@ class TestKeepDraftRoute:
         client = _authed_client()
         resp = client.post(f"/drafts/{draft.id}/keep")
 
-        assert resp.status_code == 200
+        assert resp.status_code == 404
         assert "Eelnõu ei leitud" in resp.text
         mock_touch.assert_not_called()
 
@@ -383,7 +383,7 @@ class TestKeepDraftRoute:
         client = _authed_client()
         resp = client.post("/drafts/99999999-9999-9999-9999-999999999999/keep")
 
-        assert resp.status_code == 200
+        assert resp.status_code == 404
         assert "Eelnõu ei leitud" in resp.text
 
 

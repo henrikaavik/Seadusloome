@@ -28,8 +28,9 @@ from typing import Any
 from urllib.parse import quote as url_quote
 
 from fasthtml.common import *  # noqa: F403
+from fasthtml.common import to_xml
 from starlette.requests import Request
-from starlette.responses import FileResponse, RedirectResponse, Response
+from starlette.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 
 from app.auth.audit import log_action
 from app.auth.helpers import require_auth as _require_auth
@@ -153,10 +154,17 @@ def _parse_uuid(raw: str) -> uuid.UUID | None:
         return None
 
 
-def _not_found_page(req: Request):
-    """Render the 404 page for missing or cross-org sessions."""
+def _not_found_page(req: Request) -> HTMLResponse:
+    """Render the 404 page for missing or cross-org sessions.
+
+    Wrapped in an explicit ``HTMLResponse`` with ``status_code=404``
+    (#739): returning the bare ``PageShell`` let FastHTML serve it as
+    ``200 OK``, so a missing or cross-org session looked like a success
+    to API and HTMX callers. Every caller returns this verbatim from a
+    Starlette route handler, so a ``Response`` is the right shape.
+    """
     auth = req.scope.get("auth")
-    return PageShell(
+    page = PageShell(
         H1("Koostamissessioon ei leitud", cls="page-title"),  # noqa: F405
         Alert(
             "Otsitud koostamissessioon ei ole olemas või Te ei oma selle vaatamise õigust.",
@@ -167,6 +175,7 @@ def _not_found_page(req: Request):
         user=auth,
         active_nav="/drafter",
     )
+    return HTMLResponse(to_xml(page), status_code=404)
 
 
 def _format_timestamp(value: Any) -> str:
