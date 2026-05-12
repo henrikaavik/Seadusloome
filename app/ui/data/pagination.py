@@ -92,7 +92,12 @@ def Pagination(
     """Render page controls plus an optional "X kuni Y kokku Z" info line.
 
     Args:
-        current_page: 1-indexed current page.
+        current_page: 1-indexed current page. Clamped into ``[1, total_pages]``
+            (or to ``1`` when there are no pages) so a hand-edited
+            ``?page=999`` URL renders the last real page with a valid
+            "X kuni Y kokku N" range instead of an empty table and an
+            impossible info line (#742). Callers therefore do not need to
+            normalise the page value before passing it in.
         total_pages: Total number of pages (0 when there are no rows).
         base_url: URL to link back to; the ``page`` query param is overwritten.
         page_size: Rows per page — required together with ``total`` to render
@@ -100,8 +105,11 @@ def Pagination(
         total: Grand total row count — required together with ``page_size``.
         cls: Extra classes appended to the wrapper.
     """
-    current = max(1, current_page)
     total_pages = max(0, total_pages)
+    # Clamp the requested page so out-of-range values (negative, zero, or
+    # past the last page) never reach rendering. With no pages at all the
+    # only sensible value is 1; the empty-state info line is handled below.
+    current = min(max(1, current_page), total_pages) if total_pages > 0 else 1
 
     controls: list = []
 

@@ -478,6 +478,44 @@ class TestGetNextVersionNumber:
         assert "COALESCE(MAX(version_number), 0)" in sql
         assert "WHERE draft_id = %s" in sql
 
+    def test_takes_transaction_scoped_advisory_lock_before_reading_max(self):
+        """#745 — the allocation must serialise concurrent callers by taking
+        a ``pg_advisory_xact_lock`` keyed by the draft id *before* reading
+        ``MAX(version_number)``, so two uploads can't compute the same next
+        number.
+        """
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = (2,)
+
+        get_next_version_number(conn, _DRAFT_ID)
+
+        # Two execute() calls: (1) the advisory lock, (2) the MAX read.
+        assert conn.execute.call_count == 2
+        lock_call, max_call = conn.execute.call_args_list
+        assert "pg_advisory_xact_lock" in lock_call.args[0]
+        assert "MAX(version_number)" in max_call.args[0]
+        # Lock key is derived from the draft id and stays inside int4 range.
+        lock_params = lock_call.args[1]
+        assert len(lock_params) == 2
+        assert all(isinstance(p, int) for p in lock_params)
+        assert all(-(2**31) <= p < 2**31 for p in lock_params)
+        # Different drafts must hash to different keys (no global contention).
+        other_conn = MagicMock()
+        other_conn.execute.return_value.fetchone.return_value = (0,)
+        get_next_version_number(other_conn, uuid.UUID("dddddddd-dddd-dddd-dddd-dddddddddddd"))
+        other_lock_params = other_conn.execute.call_args_list[0].args[1]
+        assert other_lock_params[1] != lock_params[1]
+
+    def test_advisory_lock_key_is_stable_for_a_given_draft(self):
+        """The same draft id always yields the same lock key (idempotent)."""
+        conn1 = MagicMock()
+        conn1.execute.return_value.fetchone.return_value = (0,)
+        get_next_version_number(conn1, _DRAFT_ID)
+        conn2 = MagicMock()
+        conn2.execute.return_value.fetchone.return_value = (0,)
+        get_next_version_number(conn2, str(_DRAFT_ID))
+        assert conn1.execute.call_args_list[0].args[1] == conn2.execute.call_args_list[0].args[1]
+
 
 class TestDraftVersionDataclass:
     def test_is_frozen(self):
