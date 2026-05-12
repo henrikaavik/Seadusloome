@@ -1467,23 +1467,28 @@ async function addBookmark() {
   var label = node ? node.label : '';
 
   try {
+    // #743: ask /api/bookmarks for a JSON response (X-Requested-With) instead
+    // of following its 303 — a `redirect: 'manual'` fetch can't tell a save
+    // (303 → /dashboard) from an expired session (303 → /auth/login), so the
+    // old code marked the button "bookmarked" even when nothing was saved.
     var resp = await fetch('/api/bookmarks', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-Requested-With': 'XMLHttpRequest',
+      },
       body: 'entity_uri=' + encodeURIComponent(entityUri) + '&label=' + encodeURIComponent(label),
-      redirect: 'manual',
     });
 
-    if (resp.status === 303 || resp.status === 200) {
+    if (resp.ok) {
       showToast('Lisatud j\u00e4rjehoidjatesse: ' + (label || entityUri), 'success');
-
       var btn = document.getElementById('panel-bookmark-btn');
       if (btn) {
         btn.textContent = 'J\u00e4rjehoidjas \u2713';
         btn.classList.add('bookmarked');
       }
-    } else if (resp.status === 303 && resp.headers.get('location') === '/auth/login') {
-      showToast('Logi sisse, et lisada j\u00e4rjehoidjaid', 'warning');
+    } else if (resp.status === 401 || resp.status === 403) {
+      showToast('Sessioon on aegunud \u2014 logige uuesti sisse, et lisada j\u00e4rjehoidjaid.', 'warning');
     } else {
       showToast('J\u00e4rjehoidja lisamine eba\u00f5nnestus', 'warning');
     }
