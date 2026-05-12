@@ -359,6 +359,137 @@ def test_explorer_start_panel_lists_bookmarks_reports_and_drafts():
 
 
 # ---------------------------------------------------------------------------
+# #756 — legal-view preset chips in the toolbar (?vaade=<slug>)
+# ---------------------------------------------------------------------------
+
+# Keep this in sync with ``_LEGAL_VIEW_PRESETS`` in app/explorer/pages.py.
+_PRESET_SLUGS = ("kehtiv-oigus", "eelnou-mojud", "el-seosed", "kohtupraktika", "ajalugu")
+_PRESET_LABELS = ("Kehtiv õigus", "Eelnõu mõjud", "EL seosed", "Kohtupraktika", "Ajalugu")
+
+
+def test_explorer_toolbar_renders_the_five_legal_view_preset_chips():
+    """The toolbar offers the five legal-view presets as a labelled chip group;
+    the raw graph knobs stay under "Vaate seaded". Cold open is fine — the
+    chips live in the (idle) graph chrome behind the start panel."""
+    html = _html()
+    # The chip group + its accessible labelling.
+    assert 'id="explorer-presets"' in html
+    assert 'aria-label="Õiguskaardi vaated"' in html
+    assert "Õigusvaated" in html
+    # All five preset labels + their slugs, each as a clickable chip.
+    for label in _PRESET_LABELS:
+        assert label in html, label
+    for slug in _PRESET_SLUGS:
+        assert f'data-vaade="{slug}"' in html, slug
+        assert f"explorerApplyPreset('{slug}')" in html, slug
+    # The raw simulation knobs are still under "Vaate seaded", not surfaced
+    # at the top level alongside the presets.
+    assert "Vaate seaded" in html
+    assert "Lähtesta paigutus" in html
+    # explorer.js gets the preset table (and no active slug on a cold open).
+    assert "window.__explorerPresets" in html
+    assert "window.__explorerVaade" not in html
+    # No preset chip is active on a cold open.
+    assert "preset-chip active" not in html
+    assert 'data-active-vaade=""' in html
+
+
+def test_explorer_known_vaade_slug_marks_that_preset_active():
+    """``/explorer?vaade=el-seosed`` renders the graph view with the EL-seosed
+    chip active and hands the slug to explorer.js."""
+    html = _html("vaade=el-seosed")
+    # The graph view (no start panel — a preset needs the graph to filter).
+    assert 'id="explorer-start-panel"' not in html
+    assert "window.__explorerStartPanel" not in html
+    assert 'id="canvas"' in html
+    # The matching chip is active; explorer.js gets the resolved slug.
+    assert 'data-active-vaade="el-seosed"' in html
+    assert 'data-vaade="el-seosed"' in html
+    assert "preset-chip active" in html
+    assert 'aria-pressed="true"' in html
+    assert "window.__explorerVaade" in html
+    assert "el-seosed" in html
+    assert "window.__explorerPresets" in html
+
+
+def test_explorer_each_known_vaade_slug_is_addressable():
+    """Every preset slug, given as ?vaade=, marks its own chip active."""
+    for slug in _PRESET_SLUGS:
+        html = _html(f"vaade={slug}")
+        assert f'data-active-vaade="{slug}"' in html, slug
+        assert "preset-chip active" in html, slug
+        assert "window.__explorerVaade" in html, slug
+        # A preset bypasses the start panel.
+        assert "window.__explorerStartPanel" not in html, slug
+
+
+def test_explorer_vaade_preset_is_handed_to_js_with_full_table():
+    """The preset table embedded for explorer.js carries every slug's config
+    keys (categories / relKeywords / timeline)."""
+    html = _html("vaade=kohtupraktika")
+    assert "window.__explorerPresets" in html
+    # The table mentions each slug + the per-preset keys.
+    for slug in _PRESET_SLUGS:
+        assert slug in html, slug
+    assert "categories" in html
+    assert "relKeywords" in html
+    assert "timeline" in html
+    # A representative ontology category + relation keyword from the configs.
+    assert "CourtDecision" in html
+    assert "interpret" in html
+
+
+def test_explorer_unknown_vaade_value_is_ignored():
+    """An unrecognised ``?vaade=`` value renders the page as if it were absent:
+    a cold open (start panel + no preset active), no JS preset blob."""
+    html = _html("vaade=ei-ole-olemas")
+    # Falls through to the #754 cold-open behaviour.
+    assert 'id="explorer-start-panel"' in html
+    assert "window.__explorerStartPanel" in html
+    # No preset is active and no slug is handed to JS.
+    assert "preset-chip active" not in html
+    assert 'data-active-vaade=""' in html
+    assert "window.__explorerVaade" not in html
+    # The chip group + the preset table are still present (the chips just sit
+    # idle behind the start panel).
+    assert 'id="explorer-presets"' in html
+    assert "window.__explorerPresets" in html
+
+
+def test_explorer_vaade_koik_is_not_a_preset():
+    """``?vaade=koik`` keeps its #754 meaning (force the full graph view) — it
+    does not mark a preset chip active."""
+    html = _html("vaade=koik")
+    assert 'id="explorer-start-panel"' not in html
+    assert "preset-chip active" not in html
+    assert 'data-active-vaade=""' in html
+    assert "window.__explorerVaade" not in html
+
+
+def test_explorer_focus_param_wins_over_vaade_preset():
+    """When both ?focus= and ?vaade=<preset> are present, the focus deep link
+    is the more specific intent — ?vaade= is ignored entirely (no active chip,
+    no preset blob)."""
+    uri = "https://data.riik.ee/ontology/estleg#KarS_par_133"
+    html = _html(f"focus={uri}&vaade=el-seosed")
+    assert "window.__explorerFocus" in html
+    assert "window.__explorerVaade" not in html
+    assert "preset-chip active" not in html
+    assert 'data-active-vaade=""' in html
+    # The chip group itself is still present (the chips just sit idle).
+    assert 'id="explorer-presets"' in html
+
+
+def test_explorer_search_param_wins_over_vaade_preset():
+    """Same as the ?focus= case: ?search= is the more specific intent, so a
+    co-present ?vaade= is ignored."""
+    html = _html("search=andmekaitse&vaade=kohtupraktika")
+    assert "window.__explorerSearch" in html
+    assert "window.__explorerVaade" not in html
+    assert "preset-chip active" not in html
+
+
+# ---------------------------------------------------------------------------
 # #754 — app/explorer/start_panel.py: the org-scoped data queries
 # ---------------------------------------------------------------------------
 

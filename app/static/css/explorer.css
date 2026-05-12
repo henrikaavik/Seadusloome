@@ -49,6 +49,26 @@ svg#canvas {
 .ctrl-btn:hover { background: rgba(51,65,85,0.9); color: #e2e8f0; }
 .ctrl-btn.active { border-color: rgba(56,189,248,0.4); color: #38bdf8; }
 
+/* #756 — legal-view preset chips. A pill row in the toolbar; each chip is a
+   `.ctrl-btn` so it inherits the base look, with a tighter shape + a clear
+   active state (the chip for the resolved ?vaade= slug). */
+.preset-group {
+  display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  padding-left: 8px; margin-left: 2px;
+  border-left: 1px solid rgba(100,116,139,0.25);
+}
+.preset-group-label {
+  font-size: 11px; color: #64748b; white-space: nowrap; letter-spacing: 0.02em;
+}
+.ctrl-btn.preset-chip {
+  border-radius: 999px; padding: 5px 12px; font-size: 11.5px;
+}
+.ctrl-btn.preset-chip:hover { background: rgba(56,189,248,0.12); color: #cbd5e1; }
+.ctrl-btn.preset-chip.active {
+  background: rgba(56,189,248,0.18); border-color: rgba(56,189,248,0.55); color: #7dd3fc;
+}
+.ctrl-btn.preset-chip.active:hover { background: rgba(56,189,248,0.24); color: #bae6fd; }
+
 /* ------- "Vaate seaded" disclosure — drops DOWN from the toolbar -------
    In the old vertical rail the menu expanded inline; in a horizontal
    toolbar it must be an absolutely-positioned dropdown so it doesn't
@@ -491,6 +511,13 @@ summary.ctrl-settings-summary::-webkit-details-marker { display: none; }
   #search-input { width: 100%; flex: 1; }
   .ctrl-btn { padding: 5px 10px; font-size: 11px; }
   .toolbar-tip { margin-left: 0; width: 100%; max-width: none; }
+  /* #756: the preset chips wrap onto their own full-width line on a phone
+     rather than fighting the search box for horizontal space. */
+  .preset-group {
+    width: 100%; margin-left: 0; padding-left: 0; border-left: none;
+    border-top: 1px solid rgba(100,116,139,0.2); padding-top: 6px;
+  }
+  .ctrl-btn.preset-chip { padding: 5px 10px; font-size: 11px; }
 
   /* Legend + instructions get tighter insets so they don't dominate a
      small screen; the detail panel goes full content-width. */

@@ -88,6 +88,10 @@ const state = {
   // Whether loadOverview() has run at least once (so explorerShowFullMap()
   // can no-op back to the existing overview instead of re-fetching it).
   overviewLoaded: false,
+  // #756: the slug of the active legal-view preset, or null. Set by
+  // explorerApplyPreset(); reflected into the URL (?vaade=<slug>) and the
+  // active toolbar chip.
+  activePreset: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -1251,6 +1255,187 @@ window.explorerShowFullMap = function() {
 };
 
 // ---------------------------------------------------------------------------
+// #756 — legal-view presets: a named bundle of the knobs the explorer already
+// has (which graph categories / relation types to keep, plus the timeline
+// mode). The server hands the table (and the resolved ?vaade= slug) via
+// window.__explorerPresets / window.__explorerVaade; the constant below is a
+// fallback so the file is self-contained in a stripped test DOM.
+// ---------------------------------------------------------------------------
+
+const LEGAL_VIEW_PRESETS_FALLBACK = {
+  'kehtiv-oigus': {
+    categories: ['EnactedLaw', 'LegalProvision', 'Section', 'Division', 'Chapter', 'Subdivision', 'LegalPart'],
+    relKeywords: ['contains', 'haspart', 'ispartof', 'hasprovision', 'hasinstance'],
+    timeline: false,
+  },
+  'eelnou-mojud': {
+    categories: ['DraftLegislation', 'LegalProvision', 'EnactedLaw'],
+    relKeywords: ['reference', 'viit', 'affect', 'mojut', 'conflict', 'vastuolu', 'amend', 'muut'],
+    timeline: false,
+  },
+  'el-seosed': {
+    categories: ['EULegislation', 'LegalProvision', 'EnactedLaw'],
+    relKeywords: ['transpos', 'ulevot', 'directive', 'direktiiv', 'harmonis', 'harmonee', 'implement'],
+    timeline: false,
+  },
+  'kohtupraktika': {
+    categories: ['CourtDecision', 'EUCourtDecision', 'LegalProvision'],
+    relKeywords: ['interpret', 'tolgenda', 'appl', 'kohalda', 'cite', 'viit'],
+    timeline: false,
+  },
+  'ajalugu': {
+    categories: [],
+    relKeywords: ['amend', 'muut', 'version', 'versioon', 'supersede', 'asend', 'replace'],
+    timeline: true,
+  },
+};
+
+function _presetTable() {
+  var t = (typeof window !== 'undefined' && window.__explorerPresets) || null;
+  if (t && typeof t === 'object' && Object.keys(t).length > 0) return t;
+  return LEGAL_VIEW_PRESETS_FALLBACK;
+}
+
+function _presetConfig(slug) {
+  if (!slug) return null;
+  var t = _presetTable();
+  return Object.prototype.hasOwnProperty.call(t, slug) ? t[slug] : null;
+}
+
+// Does this link's predicate label match any of the preset's relation
+// keywords? Empty keyword list ⇒ "keep every relation" (the ajalugu preset
+// relies on this for the cross-category overview links it has no name for).
+function _linkMatchesPreset(link, relKeywords) {
+  if (!relKeywords || relKeywords.length === 0) return true;
+  var lbl = String((link && link.label) || '').toLowerCase();
+  // The synthetic category→entity / cross-category overview edges carry
+  // generic labels ('', 'hasInstance', 'otsing'); keep them so categories
+  // don't end up as orphan dots after a node filter.
+  if (lbl === '' || lbl === 'hasinstance' || lbl === 'otsing' || link.isCross) return true;
+  for (var i = 0; i < relKeywords.length; i++) {
+    if (lbl.indexOf(relKeywords[i]) !== -1) return true;
+  }
+  return false;
+}
+
+// Repaint the toolbar so the chip for *slug* (or none) is the active one.
+function _paintActivePresetChip(slug) {
+  var group = document.getElementById('explorer-presets');
+  if (group) group.setAttribute('data-active-vaade', slug || '');
+  var chips = document.querySelectorAll('#explorer-presets .preset-chip');
+  for (var i = 0; i < chips.length; i++) {
+    var c = chips[i];
+    var on = c.getAttribute('data-vaade') === slug;
+    c.classList.toggle('active', on);
+    c.setAttribute('aria-pressed', on ? 'true' : 'false');
+  }
+}
+
+// Mirror the active preset into the URL (?vaade=<slug>) without a navigation
+// or a history entry — deep-linkable, but the back button isn't littered.
+function _reflectPresetInUrl(slug) {
+  if (typeof history === 'undefined' || !history.replaceState) return;
+  try {
+    var url = new URL(window.location.href);
+    if (slug) url.searchParams.set('vaade', slug);
+    else url.searchParams.delete('vaade');
+    history.replaceState(history.state, '', url.toString());
+  } catch (e) { /* old browser without URL/searchParams — skip silently */ }
+}
+
+// Apply a preset's filter combo on top of the (full) overview graph: keep only
+// nodes in the preset's categories (empty ⇒ all), keep links whose predicate
+// matches the preset's relation keywords, and turn the timeline on/off. Then
+// re-frame. Idempotent. Unknown slug → clear any active preset (back to the
+// unfiltered overview), still graceful.
+async function applyLegalViewPreset(slug, opts) {
+  opts = opts || {};
+  _dismissStartPanel();
+  state.startPanelMode = false;
+
+  var cfg = _presetConfig(slug);
+  if (!cfg) {
+    // Unknown / cleared: drop back to the plain overview.
+    state.activePreset = null;
+    _paintActivePresetChip(null);
+    if (opts.reflectUrl !== false) _reflectPresetInUrl(null);
+    if (!state.overviewLoaded) { await loadFullOverview(); }
+    return;
+  }
+
+  // Make sure we have the full overview to filter (and start from it, not from
+  // a previous preset's already-trimmed node set). ``freshOverview`` lets the
+  // init() path skip a redundant re-fetch — it just loaded the overview.
+  if (!state.overviewLoaded) {
+    await loadFullOverview();
+  } else if (!opts.freshOverview) {
+    collapseToOverview(false);
+    var fresh = await loadOverview();
+    state.nodes = fresh.nodes;
+    state.links = fresh.links;
+    state.view = 'overview';
+  }
+
+  var cats = cfg.categories || [];
+  if (cats.length > 0) {
+    var keep = new Set(cats);
+    state.nodes = state.nodes.filter(function(n) { return keep.has(n.category); });
+    var nodeIds = new Set(state.nodes.map(function(n) { return n.id; }));
+    state.links = state.links.filter(function(l) {
+      var sid = typeof l.source === 'object' ? l.source.id : l.source;
+      var tid = typeof l.target === 'object' ? l.target.id : l.target;
+      return nodeIds.has(sid) && nodeIds.has(tid);
+    });
+  }
+  // Relation-type filter (best-effort — explorer edges are predicate names).
+  var nodeIds2 = new Set(state.nodes.map(function(n) { return n.id; }));
+  state.links = state.links.filter(function(l) {
+    var sid = typeof l.source === 'object' ? l.source.id : l.source;
+    var tid = typeof l.target === 'object' ? l.target.id : l.target;
+    if (!nodeIds2.has(sid) || !nodeIds2.has(tid)) return false;
+    return _linkMatchesPreset(l, cfg.relKeywords);
+  });
+
+  state.expandedCategory = null;
+  state.pinnedNodes.clear();
+  closeDetail();
+  updateBreadcrumb();
+  render();
+
+  // Timeline mode: presets that want it turn the existing temporal filter on;
+  // the others make sure it's off (so switching presets is clean).
+  if (cfg.timeline) {
+    var slider = document.getElementById('timeline-slider');
+    var year = slider ? parseInt(slider.value, 10) : state.timelineYear;
+    if (!year || isNaN(year)) year = state.timelineYear;
+    // applyTimelineFilter() replaces the graph with its own temporal layout —
+    // fine; the categories shown are still driven by what's valid at that year.
+    await applyTimelineFilter(year);
+  } else if (state.timelineActive) {
+    state.timelineActive = false;
+    var sl = document.getElementById('timeline-slider');
+    if (sl) sl.value = '2026';
+    var ve = document.getElementById('timeline-value');
+    if (ve) ve.textContent = 'Väljas';
+  }
+
+  state.activePreset = slug;
+  _paintActivePresetChip(slug);
+  if (opts.reflectUrl !== false) _reflectPresetInUrl(slug);
+  setTimeout(function() { zoomToFit(600); }, 800);
+}
+
+// Toolbar chip onclick → apply (and reflect in the URL). Clicking the already
+// active chip toggles it off (back to the unfiltered overview).
+window.explorerApplyPreset = function(slug) {
+  if (slug && state.activePreset === slug) {
+    applyLegalViewPreset(null, {});
+    return;
+  }
+  applyLegalViewPreset(slug, {});
+};
+
+// ---------------------------------------------------------------------------
 // Drag handlers
 // ---------------------------------------------------------------------------
 
@@ -1829,6 +2014,14 @@ async function init() {
     try { searchTerm = new URLSearchParams(window.location.search).get('search'); }
     catch (e) { searchTerm = null; }
   }
+  // #756: ?vaade=<slug> deep link — apply that legal-view preset on load.
+  // ?focus= / ?search= are more specific, so they win when combined; an
+  // unknown slug is ignored (applyLegalViewPreset() just falls back).
+  var vaadeSlug = (focusUri || searchTerm) ? null : window.__explorerVaade;
+  if (!focusUri && !searchTerm && !vaadeSlug) {
+    try { vaadeSlug = new URLSearchParams(window.location.search).get('vaade'); }
+    catch (e) { vaadeSlug = null; }
+  }
   if (focusUri) {
     await focusOnEntity(focusUri);
   } else if (searchTerm && String(searchTerm).trim()) {
@@ -1836,6 +2029,10 @@ async function init() {
     if (searchInput) searchInput.value = String(searchTerm);
     await performSearch();
     setTimeout(function() { zoomToFit(600); }, 800);
+  } else if (vaadeSlug && _presetConfig(vaadeSlug)) {
+    // Don't re-write the URL we were given — it's already ?vaade=<slug> — and
+    // skip the redundant overview re-fetch (loadFullOverview just ran).
+    await applyLegalViewPreset(vaadeSlug, { reflectUrl: false, freshOverview: true });
   } else {
     // Plain overview — centre the graph once the simulation settles.
     setTimeout(function() { zoomToFit(600); }, 800);
