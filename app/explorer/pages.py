@@ -974,7 +974,16 @@ def explorer_page(req: Request):
             ),
             id="timeline-bar",
         ),
-        # ----- Detail panel (slides in from the right edge of the content) -----
+        # ----- Detail panel — the evidence card (#757; epic #762, design doc
+        # docs/2026-05-12-oiguskaart-evidence-map.md, workstream D). Restructured
+        # from a plain metadata dump into: Allikas (source act/draft/court) ·
+        # Kuupäev / versioon · Seose liik (relation type in legal language) ·
+        # Miks see oluline on (a deterministic one-line note) · Tegevused (four
+        # action buttons). The original element IDs (#panel-title, #panel-meta,
+        # #panel-neighbors, #panel-bookmark-btn, #panel-annotation-btn,
+        # #panel-link, #panel-back, #panel-category, #panel-versions,
+        # #version-history-section) are kept so explorer.js + the panel
+        # annotation MutationObserver above keep working unchanged. -----
         Div(
             # #719: shown only when the page was opened via ?focus= (i.e.
             # from an impact report / analysis) — explorer.js unhides it
@@ -998,6 +1007,42 @@ def explorer_page(req: Request):
                 cls="panel-header",
             ),
             Span(id="panel-category", cls="panel-category"),
+            # #757: Allikas — the parent law / draft / court the entity belongs
+            # to. explorer.js fills #panel-source-row (and hides the section
+            # when there's no derivable source).
+            Div(
+                H4("Allikas"),
+                Div(id="panel-source-row", cls="evidence-source-row"),
+                id="evidence-source-section",
+                cls="meta-section evidence-section",
+                style="display:none;",
+            ),
+            # #757: Kuupäev / versioon — the entity's date / version literals.
+            Div(
+                H4("Kuupäev / versioon"),
+                Div(id="panel-date-info", cls="evidence-date-info"),
+                id="evidence-date-section",
+                cls="meta-section evidence-section",
+                style="display:none;",
+            ),
+            # #757: Seose liik — the relation type, in legal language, to the
+            # previously-focused node (or to whatever opened the panel).
+            Div(
+                H4("Seose liik"),
+                Div(id="panel-relation", cls="evidence-relation"),
+                id="evidence-relation-section",
+                cls="meta-section evidence-section",
+                style="display:none;",
+            ),
+            # #757: Miks see oluline on — a deterministic one-line note derived
+            # from (relation type) + (impact band if known). Not an LLM call.
+            Div(
+                H4("Miks see oluline on"),
+                P(id="panel-why", cls="evidence-why"),
+                id="evidence-why-section",
+                cls="meta-section evidence-section",
+                style="display:none;",
+            ),
             Div(
                 H4("Metaandmed"),
                 Div(id="panel-meta"),
@@ -1016,22 +1061,55 @@ def explorer_page(req: Request):
                 Ul(id="panel-neighbors", cls="neighbor-list"),
                 cls="meta-section",
             ),
-            # ----- Annotation button (entity-level) -----
+            # ----- #757: Tegevused — the evidence card's four action buttons.
+            # 1) Küsi nõustajalt selle kohta — a tiny <form> POSTed to the
+            #    existing /chat/seed single-use-token route (explorer.js fills
+            #    the hidden seed_text/draft_id inputs before showing it).
+            # 2) Ava analüüsikeskuses — link to /analyysikeskus/normi-mojuahel
+            #    ?sisend=<entity-uri> (explorer.js sets the href).
+            # 3) Lisa märkus — reuses #panel-annotation-btn (the entity-level
+            #    AnnotationButton wired by _PANEL_ANNOTATION_SCRIPT above);
+            #    hidden when the entity has no annotation target.
+            # 4) Lisa järjehoidja — the existing #743 XHR bookmark button. -----
             Div(
-                id="panel-annotation-btn",
-                cls="annotation-section",
-                style="display:none;",
-            ),
-            # ----- Bookmark button -----
-            Div(
+                H4("Tegevused"),
+                # (1) Küsi nõustajalt — POST /chat/seed (server-side token).
+                Form(
+                    Hidden(name="seed_text", value="", id="panel-chat-seed-text"),
+                    Hidden(name="draft_id", value="", id="panel-chat-seed-draft"),
+                    Button(
+                        "Küsi nõustajalt selle kohta",
+                        type="submit",
+                        cls="evidence-action evidence-action-chat",
+                    ),
+                    method="post",
+                    action="/chat/seed",
+                    id="panel-chat-seed-form",
+                    cls="evidence-action-form",
+                ),
+                # (2) Ava analüüsikeskuses — /analyysikeskus/normi-mojuahel?sisend=
+                A(
+                    "Ava analüüsikeskuses",
+                    id="panel-analyysikeskus-link",
+                    href="/analyysikeskus/normi-mojuahel",
+                    cls="evidence-action evidence-action-analyysikeskus",
+                ),
+                # (3) Lisa märkus — the entity-level annotation button (filled
+                # by _PANEL_ANNOTATION_SCRIPT; hidden when there's no target).
+                Div(
+                    id="panel-annotation-btn",
+                    cls="annotation-section evidence-action-annotation",
+                    style="display:none;",
+                ),
+                # (4) Lisa järjehoidja — the #743 XHR bookmark button.
                 Button(
-                    "Lisa järjehoidjatesse",
+                    "Lisa järjehoidja",
                     type="button",
                     id="panel-bookmark-btn",
-                    cls="bookmark-btn",
+                    cls="bookmark-btn evidence-action evidence-action-bookmark",
                     onclick="explorerBookmark()",
                 ),
-                cls="bookmark-section",
+                cls="meta-section evidence-actions-section",
             ),
             A(
                 "Ava allikas",
