@@ -541,6 +541,89 @@ summary.ctrl-settings-summary::-webkit-details-marker { display: none; }
 }
 .start-panel-action--secondary:hover { background: rgba(51, 65, 85, 0.9); color: #e2e8f0; }
 
+/* #758: spatial-map polish — mini-map panel + you-are-here marker + region drag */
+
+/* ------- Mini-map (overview panel, bottom-right) -------
+   A small SVG overview of the whole current node set with a draggable
+   viewport rectangle. Sits above the timeline bar and to the right; hidden
+   until explorer.js has graph data to show. */
+#minimap {
+  position: absolute;
+  right: 18px;
+  bottom: 96px;
+  z-index: 16;
+  width: 200px; height: 140px;
+  background: rgba(15, 23, 42, 0.92);
+  border: 1px solid rgba(100, 116, 139, 0.28);
+  border-radius: 10px;
+  backdrop-filter: blur(10px);
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s;
+}
+#minimap.visible { opacity: 1; pointer-events: auto; }
+#minimap-svg { display: block; width: 100%; height: 100%; cursor: pointer; }
+#minimap-svg .minimap-node { stroke: none; }
+#minimap-svg .minimap-link { stroke: rgba(100, 116, 139, 0.35); stroke-width: 0.5; }
+#minimap-svg .minimap-viewport {
+  fill: rgba(56, 189, 248, 0.12);
+  stroke: rgba(56, 189, 248, 0.75);
+  stroke-width: 1.2;
+  cursor: move;
+}
+#minimap-svg .minimap-focus {
+  fill: none;
+  stroke: #fbbf24;
+  stroke-width: 1.5;
+}
+
+@media (max-width: 768px) {
+  /* The mini-map would crowd a phone screen — keep it small and tucked in. */
+  #minimap { width: 132px; height: 96px; right: 10px; bottom: 88px; }
+}
+
+/* ------- "You are here" marker (focused node from ?focus= / ?draft=) -------
+   A persistent amber ring + pin glyph on the node the page was opened on, so
+   it's never lost in the layout. Applied to ``g.node.you-are-here`` by
+   explorer.js. */
+g.node.you-are-here circle.you-are-here-ring {
+  fill: none;
+  stroke: #fbbf24;
+  stroke-width: 2.5;
+  stroke-opacity: 0.9;
+  pointer-events: none;
+  animation: you-are-here-pulse 2.4s ease-in-out infinite;
+}
+@keyframes you-are-here-pulse {
+  0%, 100% { stroke-opacity: 0.9; }
+  50% { stroke-opacity: 0.35; }
+}
+g.node.you-are-here text.you-are-here-pin {
+  font-size: 13px;
+  text-anchor: middle;
+  pointer-events: none;
+}
+g.node.you-are-here text.you-are-here-badge {
+  font-size: 8px;
+  font-family: Inter, -apple-system, sans-serif;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  text-anchor: middle;
+  fill: #fbbf24;
+  pointer-events: none;
+}
+
+/* ------- Shift-drag region-select rubber band ------- */
+#region-band {
+  fill: rgba(56, 189, 248, 0.1);
+  stroke: rgba(56, 189, 248, 0.7);
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+  pointer-events: none;
+}
+
 /* ------- Annotation section in detail panel ------- */
 .annotation-section { margin-top: 12px; }
 .annotation-button-wrapper { display: inline-flex; align-items: center; gap: 8px; }

@@ -1123,6 +1123,17 @@ def explorer_page(req: Request):
         ),
         # ----- SVG canvas (fills the content area; sized by explorer.js) -----
         NotStr('<svg id="canvas"></svg>'),
+        # ----- #758: mini-map (overview panel, bottom-right corner) -----
+        # A small <svg> overview of the whole current node set with a
+        # draggable viewport rectangle; explorer.js renders into it, keeps the
+        # rect in sync with the main d3-zoom transform, and pans the main view
+        # on click/drag. Hidden until the graph is populated (explorer.js
+        # toggles the ``visible`` class).
+        Div(
+            NotStr('<svg id="minimap-svg"></svg>'),
+            id="minimap",
+            aria_label="Õiguskaardi miniülevaade",
+        ),
         # ----- Server → JS bridge blobs (mode flag, ?focus= / ?search=, draft
         # overlay) — emitted BEFORE explorer.js so the flags are visible to
         # init()'s *synchronous* prologue (the start-panel gate in particular

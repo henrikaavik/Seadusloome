@@ -67,6 +67,44 @@ const CATEGORY_POSITIONS = {
 
 const MAX_NODES = 500;
 
+// #758: spatial-map polish — constants for the mini-map + stable layout.
+const MINIMAP_PADDING = 6;          // px inset inside the mini-map svg
+const LAYOUT_SEED_RADIUS = 480;     // graph-space spread for seeded positions
+const LAYOUT_PRNG_SEED = 0x5eed1eaf; // fixed seed for d3-force's randomSource
+
+// #758: deterministic 32-bit string hash (FNV-1a variant). Pure function of
+// the string — no Math.random, no Date, no module state — so the same node id
+// always hashes the same. Factored out (and exposed at the bottom of the file)
+// so it can be unit-tested for determinism.
+function hashStringToInt(str) {
+  var h = 0x811c9dc5; // FNV offset basis
+  var s = String(str == null ? '' : str);
+  for (var i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    // h *= 16777619, kept in 32-bit unsigned range without BigInt.
+    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+  }
+  return h >>> 0;
+}
+
+// #758: derive a deterministic initial (x, y) for a node from its id. The
+// force simulation re-settles from here, but starting from a stable seed (plus
+// a fixed PRNG, see LAYOUT_PRNG_SEED) means the same query produces the same
+// picture every time it's re-opened. Positions are in graph space — the layout
+// is centred on the origin via d3.forceCenter(0, 0). Pure function: (id) → {x, y}.
+function seedPosition(id, radius) {
+  var r = (typeof radius === 'number' && radius > 0) ? radius : LAYOUT_SEED_RADIUS;
+  var h = hashStringToInt(id);
+  // Two independent fractions in [0, 1) from the high/low halves of the hash.
+  var a = (h & 0xffff) / 0x10000;          // angle fraction
+  var b = ((h >>> 16) & 0xffff) / 0x10000; // radius fraction
+  var angle = a * Math.PI * 2;
+  // sqrt() spreads points roughly uniformly over the disc rather than
+  // clustering them near the centre.
+  var dist = Math.sqrt(b) * r;
+  return { x: Math.cos(angle) * dist, y: Math.sin(angle) * dist };
+}
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
@@ -92,6 +130,9 @@ const state = {
   // explorerApplyPreset(); reflected into the URL (?vaade=<slug>) and the
   // active toolbar chip.
   activePreset: null,
+  // #758: the URI of the node the page was opened on (?focus= / ?draft=), if
+  // any — given a persistent "you are here" ring + pin so it's never lost.
+  youAreHereUri: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -197,18 +238,43 @@ const nodeLayer = g.append('g').attr('class', 'nodes');
 // Zoom
 const zoomBehavior = d3.zoom()
   .scaleExtent([0.2, 4])
-  .on('zoom', (event) => g.attr('transform', event.transform));
+  // #758: shift-drag is reserved for the rubber-band region-select (see
+  // _initRegionSelect); let d3-zoom handle everything else (wheel zoom,
+  // plain-drag pan, programmatic transforms).
+  .filter((event) => {
+    if (event.type === 'mousedown' && event.shiftKey) return false;
+    // d3-zoom's default filter rejects ctrl-wheel / right-click — preserve that.
+    return (!event.ctrlKey || event.type === 'wheel') && !event.button;
+  })
+  .on('zoom', (event) => {
+    g.attr('transform', event.transform);
+    // #758: keep the mini-map's viewport rectangle in sync with the main view.
+    updateMinimapViewport(event.transform);
+  });
 
 svg.call(zoomBehavior);
+// #758: d3-zoom binds dblclick to "zoom in 2×"; we repurpose double-click as
+// "fit this node's category cluster" (see onNodeDblClick), so disable the
+// built-in handler.
+svg.on('dblclick.zoom', null);
 svg.call(zoomBehavior.transform, d3.zoomIdentity.translate(width / 2, height / 2).scale(0.9));
 
 // Force simulation (created once, updated with data)
 const simulation = d3.forceSimulation()
+  // #758: a fixed PRNG so the simulation's internal jitter (initial placement
+  // of nodes without x/y, collide tie-breaks) is deterministic — combined with
+  // seeded node positions (see _seedNodePositions) the same query always
+  // produces the same layout. d3.randomLcg is available in d3 v7.
+  .randomSource(typeof d3.randomLcg === 'function'
+    ? d3.randomLcg(LAYOUT_PRNG_SEED)
+    : Math.random)
   .force('link', d3.forceLink().id(d => d.id).distance(100).strength(0.4))
   .force('charge', d3.forceManyBody().strength(-600))
   .force('center', d3.forceCenter(0, 0))
   .force('collision', d3.forceCollide().radius(d => (d.r || 20) + 10))
-  .on('tick', ticked);
+  .on('tick', ticked)
+  // #758: a final, accurate mini-map redraw once the layout has settled.
+  .on('end', () => { renderMinimap(); });
 
 simulation.stop();
 
@@ -216,6 +282,356 @@ simulation.stop();
 let linkSel = linkLayer.selectAll('line');
 let edgeLabelSel = edgeLabelLayer.selectAll('text');
 let nodeSel = nodeLayer.selectAll('g.node');
+
+// ---------------------------------------------------------------------------
+// #758: spatial-map polish — mini-map, region-fit, you-are-here, stable layout.
+// All of the below is additive: mini-map renders into the #minimap-svg the page
+// already ships; region-fit and you-are-here hook the existing zoom / render /
+// focus flow; stable layout seeds node positions + the simulation PRNG.
+// ---------------------------------------------------------------------------
+
+// --- Mini-map DOM (the <svg id="minimap-svg"> lives in pages.py) ---
+const minimapEl = document.getElementById('minimap');
+const minimapSvg = document.getElementById('minimap-svg')
+  ? d3.select('#minimap-svg')
+  : null;
+// Layers inside the mini-map: links < nodes < focus-ring < draggable viewport.
+const minimapLinkLayer = minimapSvg ? minimapSvg.append('g').attr('class', 'minimap-links') : null;
+const minimapNodeLayer = minimapSvg ? minimapSvg.append('g').attr('class', 'minimap-nodes') : null;
+const minimapFocusLayer = minimapSvg ? minimapSvg.append('g').attr('class', 'minimap-focus-layer') : null;
+const minimapViewportRect = minimapSvg
+  ? minimapSvg.append('rect').attr('class', 'minimap-viewport').attr('rx', 2)
+  : null;
+
+// The transform mapping graph-space coords → mini-map svg coords. Recomputed
+// every renderMinimap() from the current node bounding box; null until then.
+let _minimapTransform = null;
+
+function _minimapSize() {
+  if (!minimapEl) return { w: 200, h: 140 };
+  const r = minimapEl.getBoundingClientRect();
+  return { w: (r.width || 200), h: (r.height || 140) };
+}
+
+// Build (or rebuild) the graph→minimap transform from the current node bbox.
+function _computeMinimapTransform() {
+  if (!state.nodes.length) { _minimapTransform = null; return; }
+  let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
+  state.nodes.forEach((n) => {
+    const nx = (n.x != null) ? n.x : 0;
+    const ny = (n.y != null) ? n.y : 0;
+    const nr = n.r || 20;
+    if (nx - nr < xMin) xMin = nx - nr;
+    if (nx + nr > xMax) xMax = nx + nr;
+    if (ny - nr < yMin) yMin = ny - nr;
+    if (ny + nr > yMax) yMax = ny + nr;
+  });
+  let bw = xMax - xMin;
+  let bh = yMax - yMin;
+  if (!isFinite(bw) || !isFinite(bh) || bw <= 0) bw = 1;
+  if (bh <= 0) bh = 1;
+  const { w, h } = _minimapSize();
+  const innerW = Math.max(1, w - MINIMAP_PADDING * 2);
+  const innerH = Math.max(1, h - MINIMAP_PADDING * 2);
+  const k = Math.min(innerW / bw, innerH / bh);
+  // Centre the bbox inside the mini-map.
+  const cx = (xMin + xMax) / 2;
+  const cy = (yMin + yMax) / 2;
+  _minimapTransform = {
+    k: k,
+    x: (gx) => MINIMAP_PADDING + innerW / 2 + (gx - cx) * k,
+    y: (gy) => MINIMAP_PADDING + innerH / 2 + (gy - cy) * k,
+    // Inverse: mini-map svg coord → graph-space coord.
+    invX: (mx) => cx + (mx - MINIMAP_PADDING - innerW / 2) / k,
+    invY: (my) => cy + (my - MINIMAP_PADDING - innerH / 2) / k,
+  };
+}
+
+// Redraw the mini-map's node/link dots from the current graph data.
+function renderMinimap() {
+  if (!minimapSvg) return;
+  // Keep the svg viewBox in lock-step with the mini-map's CSS box (it can
+  // shrink on small screens via the @media query in explorer.css).
+  const sz = _minimapSize();
+  minimapSvg.attr('viewBox', `0 0 ${sz.w} ${sz.h}`);
+  _computeMinimapTransform();
+  const t = _minimapTransform;
+  if (!t) {
+    if (minimapEl) minimapEl.classList.remove('visible');
+    return;
+  }
+  if (minimapEl) minimapEl.classList.add('visible');
+
+  // Links (thin grey lines) — keep it cheap: only when the set is small enough
+  // that drawing every edge is still snappy.
+  const showLinks = state.links.length <= 600;
+  const linkData = showLinks ? state.links : [];
+  const ml = minimapLinkLayer.selectAll('line').data(linkData, (d) =>
+    `${typeof d.source === 'object' ? d.source.id : d.source}-${typeof d.target === 'object' ? d.target.id : d.target}`);
+  ml.exit().remove();
+  ml.enter().append('line').attr('class', 'minimap-link').merge(ml)
+    .attr('x1', (d) => t.x((typeof d.source === 'object' ? d.source.x : 0) || 0))
+    .attr('y1', (d) => t.y((typeof d.source === 'object' ? d.source.y : 0) || 0))
+    .attr('x2', (d) => t.x((typeof d.target === 'object' ? d.target.x : 0) || 0))
+    .attr('y2', (d) => t.y((typeof d.target === 'object' ? d.target.y : 0) || 0));
+
+  // Node dots (category colour, radius ∝ the main node radius but clamped).
+  const mn = minimapNodeLayer.selectAll('circle').data(state.nodes, (d) => d.id);
+  mn.exit().remove();
+  mn.enter().append('circle').attr('class', 'minimap-node').merge(mn)
+    .attr('cx', (d) => t.x((d.x != null) ? d.x : 0))
+    .attr('cy', (d) => t.y((d.y != null) ? d.y : 0))
+    .attr('r', (d) => Math.max(1.2, Math.min(4, (d.r || 12) * t.k * 0.5)))
+    .attr('fill', (d) => colorFor(d.category))
+    .attr('fill-opacity', 0.8);
+
+  // "You are here" marker in the mini-map: an amber ring on the focused node.
+  const focusNode = state.youAreHereUri
+    ? state.nodes.find((n) => (n.uri || n.id) === state.youAreHereUri)
+    : null;
+  const fdata = focusNode ? [focusNode] : [];
+  const mf = minimapFocusLayer.selectAll('circle').data(fdata, (d) => d.id);
+  mf.exit().remove();
+  mf.enter().append('circle').attr('class', 'minimap-focus').merge(mf)
+    .attr('cx', (d) => t.x((d.x != null) ? d.x : 0))
+    .attr('cy', (d) => t.y((d.y != null) ? d.y : 0))
+    .attr('r', (d) => Math.max(3, Math.min(7, (d.r || 12) * t.k * 0.5 + 3)));
+
+  // Keep the viewport rect on top + in sync with the current zoom transform.
+  minimapViewportRect.raise();
+  updateMinimapViewport(d3.zoomTransform(svg.node()));
+}
+
+// Position the draggable viewport rectangle to mirror what the main view shows.
+function updateMinimapViewport(transform) {
+  if (!minimapViewportRect || !_minimapTransform) return;
+  const t = _minimapTransform;
+  // The main viewport, in graph space, is the inverse-transform of [0,w]×[0,h].
+  const gx0 = transform.invertX(0);
+  const gy0 = transform.invertY(0);
+  const gx1 = transform.invertX(width);
+  const gy1 = transform.invertY(height);
+  const mx0 = t.x(gx0);
+  const my0 = t.y(gy0);
+  const mx1 = t.x(gx1);
+  const my1 = t.y(gy1);
+  const { w, h } = _minimapSize();
+  // Clamp to the mini-map box so the rect never spills past the panel edge.
+  const left = Math.max(0, Math.min(mx0, mx1));
+  const top = Math.max(0, Math.min(my0, my1));
+  const right = Math.min(w, Math.max(mx0, mx1));
+  const bottom = Math.min(h, Math.max(my0, my1));
+  minimapViewportRect
+    .attr('x', left).attr('y', top)
+    .attr('width', Math.max(2, right - left))
+    .attr('height', Math.max(2, bottom - top));
+}
+
+// Pan the main view so that a mini-map svg point maps to the viewport centre,
+// keeping the current zoom scale.
+function _panMainToMinimapPoint(mx, my, duration) {
+  if (!_minimapTransform) return;
+  const gx = _minimapTransform.invX(mx);
+  const gy = _minimapTransform.invY(my);
+  const cur = d3.zoomTransform(svg.node());
+  const transform = d3.zoomIdentity
+    .translate(width / 2, height / 2)
+    .scale(cur.k)
+    .translate(-gx, -gy);
+  const sel = (duration && duration > 0) ? svg.transition().duration(duration) : svg;
+  sel.call(zoomBehavior.transform, transform);
+}
+
+function _minimapPointerCoords(event) {
+  // d3.pointer against the mini-map svg element gives coords in its own space.
+  return d3.pointer(event, minimapSvg.node());
+}
+
+function _initMinimap() {
+  if (!minimapSvg) return;
+  const sz = _minimapSize();
+  minimapSvg.attr('viewBox', `0 0 ${sz.w} ${sz.h}`);
+  // Click anywhere on the mini-map → recentre the main view there.
+  minimapSvg.on('click', (event) => {
+    const xy = _minimapPointerCoords(event);
+    _panMainToMinimapPoint(xy[0], xy[1], 250);
+  });
+  // Drag the viewport rectangle → live-pan the main view.
+  minimapViewportRect.call(d3.drag()
+    .on('start drag', (event) => {
+      const xy = _minimapPointerCoords(event);
+      _panMainToMinimapPoint(xy[0], xy[1], 0);
+    }));
+}
+
+// --- Stable layout: deterministic node positions ---
+// For every node that hasn't been given a deterministic seed yet, derive its
+// initial (x, y) from a hash of its id (see seedPosition). This overrides the
+// Math.random()-based placement the loaders use, so re-opening the same query
+// re-creates the same picture. Pinned / already-dragged nodes (fx/fy set) and
+// nodes flagged _seeded are left alone.
+function _seedNodePositions(nodes) {
+  nodes.forEach((n) => {
+    if (n._seeded) return;
+    if (n.fx != null || n.fy != null) { n._seeded = true; return; }
+    const p = seedPosition(n.id, LAYOUT_SEED_RADIUS);
+    n.x = p.x;
+    n.y = p.y;
+    n._seeded = true;
+  });
+}
+
+// --- "You are here" marker (focused node from ?focus= / ?draft=) ---
+// Adds (or refreshes) an amber ring + pin glyph + a tiny "Te olete siin" badge
+// on the focused node's <g>. Re-applied after every render() (which recreates
+// node <g> elements via the enter/update/exit pattern), so the marker survives
+// layout churn.
+const _PIN_GLYPH = '📍'; // 📍 round pushpin (U+1F4CD)
+function _applyYouAreHereMarker() {
+  if (!state.youAreHereUri) return;
+  nodeSel.each(function (d) {
+    const sel = d3.select(this);
+    const isFocus = d && (d.uri || d.id) === state.youAreHereUri;
+    sel.classed('you-are-here', isFocus);
+    // Clear any stale marker on a node that used to be the focus.
+    sel.selectAll('.you-are-here-ring,.you-are-here-pin,.you-are-here-badge').remove();
+    if (!isFocus) return;
+    const ringR = (d.r || 16) + 8;
+    sel.append('circle')
+      .attr('class', 'you-are-here-ring')
+      .attr('r', ringR);
+    sel.append('text')
+      .attr('class', 'you-are-here-pin')
+      .attr('text-anchor', 'middle')
+      .attr('dy', -(ringR + 4))
+      .text(_PIN_GLYPH);
+    sel.append('text')
+      .attr('class', 'you-are-here-badge')
+      .attr('text-anchor', 'middle')
+      .attr('dy', -(ringR + 16))
+      .text('Te olete siin');
+    sel.raise();
+  });
+}
+
+// Mark a node URI as "you are here". Stores it in state and (if the node is
+// already on the graph) applies the marker immediately; otherwise the next
+// render() picks it up.
+function markYouAreHere(uri) {
+  if (!uri) return;
+  state.youAreHereUri = uri;
+  _applyYouAreHereMarker();
+  renderMinimap();
+}
+
+// --- Zoom-to-region ---
+// Pan/zoom so a graph-space rectangle fills the viewport (with padding).
+function zoomToRect(gx0, gy0, gx1, gy1, duration) {
+  duration = (duration == null) ? 500 : duration;
+  const xMin = Math.min(gx0, gx1);
+  const xMax = Math.max(gx0, gx1);
+  const yMin = Math.min(gy0, gy1);
+  const yMax = Math.max(gy0, gy1);
+  let bw = xMax - xMin;
+  let bh = yMax - yMin;
+  if (bw <= 0 || bh <= 0) return;
+  const padding = 40;
+  let k = Math.min((width - padding * 2) / bw, (height - padding * 2) / bh);
+  k = Math.max(0.2, Math.min(k, 4)); // honour the zoom scaleExtent
+  const midX = (xMin + xMax) / 2;
+  const midY = (yMin + yMax) / 2;
+  const transform = d3.zoomIdentity
+    .translate(width / 2, height / 2)
+    .scale(k)
+    .translate(-midX, -midY);
+  svg.transition().duration(duration).call(zoomBehavior.transform, transform);
+}
+
+// Fit the bounding box of all nodes sharing a category (a "cluster").
+function _fitCategoryCluster(category, duration) {
+  if (!category) return;
+  const members = state.nodes.filter((n) => n.category === category);
+  if (members.length === 0) return;
+  let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
+  members.forEach((n) => {
+    const nx = (n.x != null) ? n.x : 0;
+    const ny = (n.y != null) ? n.y : 0;
+    const nr = n.r || 20;
+    if (nx - nr < xMin) xMin = nx - nr;
+    if (nx + nr > xMax) xMax = nx + nr;
+    if (ny - nr < yMin) yMin = ny - nr;
+    if (ny + nr > yMax) yMax = ny + nr;
+  });
+  if (!isFinite(xMin)) return;
+  // A lone node would give a zero-area box — pad it out so we still zoom in.
+  if (xMax - xMin < 1) { xMin -= 80; xMax += 80; }
+  if (yMax - yMin < 1) { yMin -= 80; yMax += 80; }
+  zoomToRect(xMin, yMin, xMax, yMax, duration || 600);
+}
+
+// Double-click an entity node → fit its category cluster (a quick "zoom to
+// this region" gesture that fits the existing click-to-select / drag-to-pan
+// model). Category nodes keep their single-click "expand" behaviour — a
+// double-click there is a no-op so the two click events that precede it
+// (which expand the category) aren't fought.
+function onNodeDblClick(event, d) {
+  event.stopPropagation();
+  if (!d || d.isCategory || !d.category) return;
+  _fitCategoryCluster(d.category, 600);
+}
+
+// Shift-drag on the canvas → rubber-band a region, release → fit it. d3-zoom's
+// filter (above) lets shift-mousedown through to us. The band is drawn in
+// screen space (a non-transformed <rect> appended to the svg), then inverted
+// through the current zoom transform to graph coords on release.
+function _initRegionSelect() {
+  let bandRect = null;
+  let originScreen = null;
+
+  function screenXY(event) {
+    return d3.pointer(event, svg.node());
+  }
+
+  svg.on('mousedown.region', (event) => {
+    if (!event.shiftKey) return;
+    event.preventDefault();
+    originScreen = screenXY(event);
+    bandRect = svg.append('rect')
+      .attr('id', 'region-band')
+      .attr('x', originScreen[0]).attr('y', originScreen[1])
+      .attr('width', 0).attr('height', 0);
+  });
+  svg.on('mousemove.region', (event) => {
+    if (!bandRect || !originScreen) return;
+    const cur = screenXY(event);
+    const x = Math.min(originScreen[0], cur[0]);
+    const y = Math.min(originScreen[1], cur[1]);
+    bandRect.attr('x', x).attr('y', y)
+      .attr('width', Math.abs(cur[0] - originScreen[0]))
+      .attr('height', Math.abs(cur[1] - originScreen[1]));
+  });
+  function endBand(event) {
+    if (!bandRect || !originScreen) return;
+    const cur = event ? screenXY(event) : originScreen;
+    bandRect.remove();
+    bandRect = null;
+    const origin = originScreen;
+    originScreen = null;
+    // A tiny drag is treated as a misclick — don't zoom into a sliver.
+    if (Math.abs(cur[0] - origin[0]) < 12 || Math.abs(cur[1] - origin[1]) < 12) return;
+    const t = d3.zoomTransform(svg.node());
+    zoomToRect(
+      t.invertX(origin[0]), t.invertY(origin[1]),
+      t.invertX(cur[0]), t.invertY(cur[1]),
+      450,
+    );
+  }
+  svg.on('mouseup.region', endBand);
+  // If the pointer leaves the svg mid-drag, drop the band (don't leave it stuck).
+  svg.on('mouseleave.region', () => {
+    if (bandRect) { bandRect.remove(); bandRect = null; originScreen = null; }
+  });
+}
 
 // ---------------------------------------------------------------------------
 // API helpers
@@ -506,6 +922,10 @@ function isCrossCategory(d) {
 }
 
 function render() {
+  // #758: give any not-yet-seeded node a deterministic initial position before
+  // the simulation runs, so the same query re-creates the same layout.
+  _seedNodePositions(state.nodes);
+
   // --- Links ---
   linkSel = linkLayer.selectAll('line')
     .data(state.links, d => `${typeof d.source === 'object' ? d.source.id : d.source}-${typeof d.target === 'object' ? d.target.id : d.target}`);
@@ -567,6 +987,9 @@ function render() {
     .style('cursor', 'pointer')
     .style('opacity', 0)
     .call(d3.drag()
+      // #758: shift-drag is the canvas region-select gesture (see
+      // _initRegionSelect) — don't let it also drag a node out from under it.
+      .filter((event) => !event.shiftKey && !event.button)
       .on('start', dragstarted)
       .on('drag', dragged)
       .on('end', dragended));
@@ -620,7 +1043,9 @@ function render() {
     .on('mouseenter', onNodeMouseEnter)
     .on('mousemove', onNodeMouseMove)
     .on('mouseleave', onNodeMouseLeave)
-    .on('click', onNodeClick);
+    .on('click', onNodeClick)
+    // #758: double-click a node → fit its category cluster (zoom-to-region).
+    .on('dblclick', onNodeDblClick);
 
   // Merge
   nodeSel = nodeEnter.merge(nodeSel);
@@ -632,6 +1057,10 @@ function render() {
   nodeSel.selectAll('circle.outer')
     .attr('stroke-dasharray', d => state.pinnedNodes.has(d.id) ? '4,2' : null);
 
+  // #758: (re)apply the "you are here" marker — render() recreates node <g>
+  // elements, so the marker has to be re-stamped onto the merged selection.
+  _applyYouAreHereMarker();
+
   // --- Update legend to reflect current categories ---
   updateLegend();
 
@@ -639,7 +1068,16 @@ function render() {
   simulation.nodes(state.nodes);
   simulation.force('link').links(state.links);
   simulation.alpha(0.8).restart();
+
+  // #758: refresh the mini-map for the new data set.
+  renderMinimap();
 }
+
+// #758: re-render the mini-map at most every Nth tick (it's a full data join +
+// ~hundreds of circles, too heavy to do at 60fps). The viewport rect stays in
+// sync via the zoom handler regardless.
+let _minimapTickCounter = 0;
+const _MINIMAP_TICK_INTERVAL = 8;
 
 function ticked() {
   linkSel
@@ -653,6 +1091,11 @@ function ticked() {
     .attr('y', d => (d.source.y + d.target.y) / 2);
 
   nodeSel.attr('transform', d => `translate(${d.x},${d.y})`);
+
+  // #758: throttled mini-map refresh while the simulation settles.
+  if ((++_minimapTickCounter % _MINIMAP_TICK_INTERVAL) === 0) {
+    renderMinimap();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1277,6 +1720,9 @@ async function focusOnEntity(uri) {
     }
   }
   _showBackLink();
+  // #758: this is the "you are here" node — give it a persistent ring + pin so
+  // it stays findable after the layout settles / the user pans away.
+  markYouAreHere(datum.uri || datum.id);
   // Centre on the focused node once the simulation has placed neighbours
   // (mirrors init()'s 800ms settle wait).
   setTimeout(function() { centerOnNode(datum, 600); }, 800);
@@ -1292,6 +1738,11 @@ function collapseToOverview(resetView) {
   });
   state.expandedCategory = null;
   state.pinnedNodes.clear();
+  // #758: the focused ("you are here") node is a non-category node, so it's
+  // gone after this filter — drop the marker state too.
+  if (state.youAreHereUri && !state.nodes.some(n => (n.uri || n.id) === state.youAreHereUri)) {
+    state.youAreHereUri = null;
+  }
 
   if (resetView !== false) {
     state.view = 'overview';
@@ -2125,6 +2576,9 @@ function _handleResize() {
   // transform from the current node bounding box. (forceCenter stays at the
   // origin — it's in graph space, independent of the viewport size.)
   zoomToFit(200);
+  // #758: the mini-map's own CSS box can also change (it's right/bottom-anchored
+  // off the content edge) — re-render so its viewBox + viewport rect track it.
+  renderMinimap();
 }
 
 if (typeof ResizeObserver !== 'undefined' && mainEl) {
@@ -2188,6 +2642,10 @@ async function init() {
   // #754: the start panel has its own search form — always wire it (it's a
   // no-op when the panel isn't on the page).
   _wireStartPanel();
+  // #758: spatial-map polish — wire the mini-map (click/drag → pan) and the
+  // shift-drag region-select. Both are no-ops if their DOM is absent.
+  _initMinimap();
+  _initRegionSelect();
 
   // #754: a "cold" open rendered the contextual start panel — the server set
   // window.__explorerStartPanel. Do NOT fetch the 90k category overview; the
