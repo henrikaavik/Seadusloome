@@ -26,9 +26,22 @@
     const nextKey = orientation === "vertical" ? "ArrowDown" : "ArrowRight";
     const prevKey = orientation === "vertical" ? "ArrowUp" : "ArrowLeft";
 
+    // Roving tabindex follows *focus*: when arrow keys move focus to another
+    // tab, that tab becomes the single tab-stop (tabindex="0") and the rest
+    // drop to tabindex="-1". This is intentionally separate from selection —
+    // `aria-selected` and the panels' `hidden` state only change on actual
+    // activation (Enter/Space/click) via `activateTab`. WAI-ARIA APG: "tabs
+    // with manual activation". See issue #744.
+    function setRovingTabindex(focusedIndex) {
+      tabs.forEach(function (t, i) {
+        t.setAttribute("tabindex", i === focusedIndex ? "0" : "-1");
+      });
+    }
+
     function focusTab(index) {
-      const target = tabs[(index + tabs.length) % tabs.length];
-      target.focus();
+      const targetIndex = (index + tabs.length) % tabs.length;
+      setRovingTabindex(targetIndex);
+      tabs[targetIndex].focus();
     }
 
     function activateTab(tab) {
