@@ -889,3 +889,102 @@ class TestUserStats:
         assert result["total_users"] == 0
         assert result["users_per_org"] == []
         assert result["active_sessions"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Bookmark route handlers — #743: XHR callers get JSON, plain forms get a 303
+# ---------------------------------------------------------------------------
+
+
+class TestBookmarkRoute:
+    _AUTH = {"id": "u-1", "email": "u@x.ee", "full_name": "U", "role": "drafter", "org_id": None}
+
+    def _req(self, *, auth: dict | None, xhr: bool):  # type: ignore[type-arg]
+        from starlette.requests import Request
+
+        headers: list[tuple[bytes, bytes]] = []
+        if xhr:
+            headers.append((b"x-requested-with", b"XMLHttpRequest"))
+        scope: dict = {  # type: ignore[type-arg]
+            "type": "http",
+            "method": "POST",
+            "path": "/api/bookmarks",
+            "query_string": b"",
+            "headers": headers,
+        }
+        if auth is not None:
+            scope["auth"] = auth
+        return Request(scope)
+
+    @patch("app.templates.dashboard.log_action")
+    @patch(
+        "app.templates.dashboard._add_bookmark",
+        return_value={"id": "bm-1", "entity_uri": "http://x/1", "label": "L"},
+    )
+    def test_add_xhr_returns_json_ok(self, mock_add: MagicMock, mock_log: MagicMock):
+        import json as _json
+
+        from starlette.responses import JSONResponse
+
+        from app.templates.dashboard import add_bookmark
+
+        resp = add_bookmark(self._req(auth=self._AUTH, xhr=True), "http://x/1", "L")
+        assert isinstance(resp, JSONResponse)
+        assert resp.status_code == 200
+        assert _json.loads(bytes(resp.body)) == {"ok": True, "id": "bm-1"}
+
+    @patch("app.templates.dashboard.log_action")
+    @patch("app.templates.dashboard._add_bookmark", return_value=None)  # ON CONFLICT DO NOTHING
+    def test_add_xhr_already_exists_still_ok(self, mock_add: MagicMock, mock_log: MagicMock):
+        import json as _json
+
+        from app.templates.dashboard import add_bookmark
+
+        resp = add_bookmark(self._req(auth=self._AUTH, xhr=True), "http://x/1", "")
+        assert resp.status_code == 200
+        assert _json.loads(bytes(resp.body)) == {"ok": True, "id": None}
+
+    def test_add_xhr_unauthenticated_returns_401_json(self):
+        import json as _json
+
+        from app.templates.dashboard import add_bookmark
+
+        resp = add_bookmark(self._req(auth=None, xhr=True), "http://x/1", "")
+        assert resp.status_code == 401
+        assert _json.loads(bytes(resp.body)) == {"ok": False, "error": "auth"}
+
+    @patch("app.templates.dashboard.log_action")
+    @patch(
+        "app.templates.dashboard._add_bookmark",
+        return_value={"id": "bm-1", "entity_uri": "http://x/1", "label": "L"},
+    )
+    def test_add_plain_form_still_redirects(self, mock_add: MagicMock, mock_log: MagicMock):
+        from starlette.responses import RedirectResponse
+
+        from app.templates.dashboard import add_bookmark
+
+        resp = add_bookmark(self._req(auth=self._AUTH, xhr=False), "http://x/1", "L")
+        assert isinstance(resp, RedirectResponse)
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/dashboard"
+
+    def test_add_plain_form_unauthenticated_redirects_to_login(self):
+        from starlette.responses import RedirectResponse
+
+        from app.templates.dashboard import add_bookmark
+
+        resp = add_bookmark(self._req(auth=None, xhr=False), "http://x/1", "")
+        assert isinstance(resp, RedirectResponse)
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/auth/login"
+
+    @patch("app.templates.dashboard.log_action")
+    @patch("app.templates.dashboard._remove_bookmark", return_value=True)
+    def test_remove_xhr_returns_json(self, mock_rm: MagicMock, mock_log: MagicMock):
+        import json as _json
+
+        from app.templates.dashboard import remove_bookmark
+
+        resp = remove_bookmark(self._req(auth=self._AUTH, xhr=True), "bm-1")
+        assert resp.status_code == 200
+        assert _json.loads(bytes(resp.body)) == {"ok": True}

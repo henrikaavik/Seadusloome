@@ -25,7 +25,7 @@ from typing import Any
 
 from fasthtml.common import *
 from starlette.requests import Request
-from starlette.responses import RedirectResponse
+from starlette.responses import JSONResponse, RedirectResponse
 
 from app.auth.audit import log_action
 from app.db import get_connection as _connect
@@ -917,30 +917,63 @@ def dashboard_page(req: Request):
     )
 
 
+def _wants_json(req: Request) -> bool:
+    """True when the caller is an XHR/fetch (``X-Requested-With: XMLHttpRequest``).
+
+    The bookmark endpoints serve two callers: a plain HTML ``<form>`` on the
+    dashboard (which wants a 303 redirect so the page re-renders) and the
+    Õiguskaart bookmark button (a ``fetch()`` that needs a real JSON response
+    — a 303 to ``/dashboard`` vs a 303 to ``/auth/login`` are indistinguishable
+    to a ``redirect: "manual"`` fetch, so an expired session looked like a
+    successful save — #743).
+    """
+    return req.headers.get("x-requested-with", "").lower() == "xmlhttprequest"
+
+
 def add_bookmark(req: Request, entity_uri: str, label: str = ""):
-    """POST /api/bookmarks — add a bookmark for the current user."""
+    """POST /api/bookmarks — add a bookmark for the current user.
+
+    XHR callers get JSON (``200 {"ok": true, ...}`` / ``401 {"ok": false,
+    "error": "auth"}``); plain-form callers get the 303 redirects.
+    """
+    wants_json = _wants_json(req)
     auth = req.scope.get("auth", {})
     user_id = auth.get("id")
     if not user_id:
+        if wants_json:
+            return JSONResponse({"ok": False, "error": "auth"}, status_code=401)
         return RedirectResponse(url="/auth/login", status_code=303)
 
     actual_label = label.strip() if label else None
     bookmark = _add_bookmark(user_id, entity_uri.strip(), actual_label)
     if bookmark:
         log_action(user_id, "bookmark.add", {"entity_uri": entity_uri, "label": actual_label})
+    if wants_json:
+        # ``bookmark`` is None when the row already existed (ON CONFLICT DO
+        # NOTHING) — still "ok" from the caller's point of view.
+        return JSONResponse({"ok": True, "id": bookmark["id"] if bookmark else None})
     return RedirectResponse(url="/dashboard", status_code=303)
 
 
 def remove_bookmark(req: Request, bookmark_id: str):
-    """POST /api/bookmarks/{bookmark_id}/delete — remove a bookmark."""
+    """POST /api/bookmarks/{bookmark_id}/delete — remove a bookmark.
+
+    XHR callers get JSON (``200 {"ok": <bool>}`` / ``401 {"ok": false,
+    "error": "auth"}``); plain-form callers get the 303 redirects.
+    """
+    wants_json = _wants_json(req)
     auth = req.scope.get("auth", {})
     user_id = auth.get("id")
     if not user_id:
+        if wants_json:
+            return JSONResponse({"ok": False, "error": "auth"}, status_code=401)
         return RedirectResponse(url="/auth/login", status_code=303)
 
     success = _remove_bookmark(bookmark_id, user_id)
     if success:
         log_action(user_id, "bookmark.remove", {"bookmark_id": bookmark_id})
+    if wants_json:
+        return JSONResponse({"ok": bool(success)})
     return RedirectResponse(url="/dashboard", status_code=303)
 
 
