@@ -32,6 +32,28 @@ class TestDashboardAuth:
         assert response.status_code == 303
         assert response.headers["location"] == "/auth/login"
 
+    @patch("app.auth.middleware._get_provider")
+    def test_index_redirects_authenticated_to_dashboard(self, mock_get_provider: MagicMock):
+        """#746: authenticated ``GET /`` lands on ``/dashboard`` (Töölaud),
+        not the Õiguskaart graph."""
+        from app.main import app
+
+        provider = MagicMock()
+        provider.get_current_user.return_value = {
+            "id": "u-1",
+            "email": "u@seadusloome.ee",
+            "full_name": "Test Kasutaja",
+            "role": "drafter",
+            "org_id": "11111111-1111-1111-1111-111111111111",
+        }
+        mock_get_provider.return_value = provider
+
+        client = TestClient(app, follow_redirects=False)
+        client.cookies.set("access_token", "stub-token")
+        response = client.get("/")
+        assert response.status_code == 303
+        assert response.headers["location"] == "/dashboard"
+
 
 # ---------------------------------------------------------------------------
 # /api/health returns JSON without auth

@@ -97,8 +97,21 @@ const breadcrumb = document.getElementById('breadcrumb');
 // SVG setup
 // ---------------------------------------------------------------------------
 
-let width = window.innerWidth;
-let height = window.innerHeight;
+// #746: the graph now lives inside the standard PageShell content area
+// (`.main-content--full`), not full-viewport. Size everything off that box;
+// fall back to the viewport defensively if the element is missing (e.g. in
+// a stripped-down test DOM).
+const mainEl = document.getElementById('main-content');
+
+function _contentSize() {
+  if (mainEl) {
+    const r = mainEl.getBoundingClientRect();
+    if (r.width > 0 && r.height > 0) return { width: r.width, height: r.height };
+  }
+  return { width: window.innerWidth || 1200, height: window.innerHeight || 800 };
+}
+
+let { width, height } = _contentSize();
 
 const svg = d3.select('#canvas')
   .attr('width', width)
@@ -676,8 +689,11 @@ function onNodeMouseEnter(event, d) {
 }
 
 function onNodeMouseMove(event) {
-  const x = event.clientX + 16;
-  const y = event.clientY - 10;
+  // #746: #tooltip is `position: absolute` inside `.main-content--full`, so
+  // translate the viewport-relative pointer coords into the content box.
+  const rect = mainEl ? mainEl.getBoundingClientRect() : { left: 0, top: 0 };
+  const x = event.clientX - rect.left + 16;
+  const y = event.clientY - rect.top - 10;
   tooltip.style.left = (x + 320 > width ? x - 340 : x) + 'px';
   tooltip.style.top = y + 'px';
 }
@@ -923,19 +939,18 @@ function _fallbackLabel(uri) {
   }
 }
 
-function _showBackLink() {
-  var back = document.getElementById('panel-back');
-  if (!back) return;
+function _backLabel() {
   var ref = document.referrer || '';
-  if (ref.indexOf('/report') !== -1) {
-    back.textContent = '← Tagasi aruandesse';
-  } else if (ref.indexOf('/analyysikeskus') !== -1) {
-    back.textContent = '← Tagasi analüüsi';
-  } else {
-    back.textContent = '← Tagasi';
-  }
-  back.style.display = '';
-  back.onclick = function(e) {
+  if (ref.indexOf('/report') !== -1) return '← Tagasi aruandesse';
+  if (ref.indexOf('/analyysikeskus') !== -1) return '← Tagasi analüüsi';
+  return '← Tagasi';
+}
+
+function _wireBack(el) {
+  if (!el) return;
+  el.textContent = _backLabel();
+  el.style.display = '';
+  el.onclick = function(e) {
     e.preventDefault();
     if (document.referrer) {
       window.location.href = document.referrer;
@@ -943,6 +958,19 @@ function _showBackLink() {
       window.history.back();
     }
   };
+}
+
+// Detail-panel "← Tagasi" link (#719) — unhidden + wired when the page was
+// opened from a report/analysis (via ?focus=).
+function _showBackLink() {
+  _wireBack(document.getElementById('panel-back'));
+}
+
+// #746: the toolbar-level "← Tagasi aruandesse" link is server-rendered
+// (visible) whenever the page carries back-context (?focus= or ?draft=);
+// wire its label + handler on init.
+function _wireToolbarBack() {
+  _wireBack(document.getElementById('toolbar-back'));
 }
 
 // Pan/zoom so *d* sits at the centre of the viewport (#719 — the generic
@@ -1007,8 +1035,8 @@ async function focusOnEntity(uri) {
       count: 0,
       r: 16,
       isCategory: false,
-      x: (window.innerWidth || 1200) / 2,
-      y: (window.innerHeight || 800) / 2,
+      x: width / 2,
+      y: height / 2,
     };
     if (state.nodes.length < MAX_NODES) {
       state.nodes.push(datum);
@@ -1607,14 +1635,29 @@ function zoomToFit(duration) {
 }
 
 // ---------------------------------------------------------------------------
-// Window resize
+// Resize handling — the content area can change size without a window resize
+// (sidebar toggling, devtools docking, etc.), so a ResizeObserver on
+// `.main-content--full` is the right primitive. A `window.resize` listener is
+// kept as a cheap fallback for environments without ResizeObserver.
 // ---------------------------------------------------------------------------
 
-window.addEventListener('resize', () => {
-  width = window.innerWidth;
-  height = window.innerHeight;
+function _handleResize() {
+  const next = _contentSize();
+  if (Math.abs(next.width - width) < 1 && Math.abs(next.height - height) < 1) return;
+  width = next.width;
+  height = next.height;
   svg.attr('width', width).attr('height', height);
-});
+  // Re-frame the graph in the resized box: zoomToFit re-derives a centered
+  // transform from the current node bounding box. (forceCenter stays at the
+  // origin — it's in graph space, independent of the viewport size.)
+  zoomToFit(200);
+}
+
+if (typeof ResizeObserver !== 'undefined' && mainEl) {
+  const _ro = new ResizeObserver(() => { _handleResize(); });
+  _ro.observe(mainEl);
+}
+window.addEventListener('resize', _handleResize);
 
 // ---------------------------------------------------------------------------
 // Keyboard shortcut: Escape closes panel
@@ -1665,6 +1708,10 @@ document.addEventListener('DOMContentLoaded', () => {
 let wsInitialized = false;
 
 async function init() {
+  // #746: wire the toolbar-level "← Tagasi" link if the server rendered it
+  // (it's present whenever the page carries back-context — ?focus= / ?draft=).
+  _wireToolbarBack();
+
   const overview = await loadOverview();
   state.nodes = overview.nodes;
   state.links = overview.links;
@@ -1680,8 +1727,20 @@ async function init() {
     try { focusUri = new URLSearchParams(window.location.search).get('focus'); }
     catch (e) { focusUri = null; }
   }
+  // #746: ?search=<term> deep link — pre-run the search on load. ?focus=
+  // is more specific, so it wins when both are present.
+  var searchTerm = focusUri ? null : window.__explorerSearch;
+  if (!focusUri && !searchTerm) {
+    try { searchTerm = new URLSearchParams(window.location.search).get('search'); }
+    catch (e) { searchTerm = null; }
+  }
   if (focusUri) {
     await focusOnEntity(focusUri);
+  } else if (searchTerm && String(searchTerm).trim()) {
+    var searchInput = document.getElementById('search-input');
+    if (searchInput) searchInput.value = String(searchTerm);
+    await performSearch();
+    setTimeout(function() { zoomToFit(600); }, 800);
   } else {
     // Center the graph once the simulation settles
     setTimeout(function() { zoomToFit(600); }, 800);

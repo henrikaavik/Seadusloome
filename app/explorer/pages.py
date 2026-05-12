@@ -1,4 +1,16 @@
-"""Explorer page — serves the full-page D3.js ontology graph explorer."""
+"""Õiguskaart page — the D3.js ontology graph, wearing the standard app chrome.
+
+Issue #746 (design rationale: ``docs/2026-05-12-ui-plan-explorer-home.html``
+and ``docs/2026-05-11-ministry-lawyer-ui-structure.md``): the explorer no
+longer ships its own bespoke ``<html>`` document with a custom topbar and a
+left rail that mixes graph controls with site navigation. It is rendered
+inside :func:`app.ui.layout.PageShell` with ``full_bleed=True`` — the
+standard sidebar (with "Õiguskaart" highlighted) + topbar + user menu, and
+the D3 canvas filling the content area. The former control rail becomes a
+thin horizontal **toolbar** across the top of the canvas; the search box
+moves into it. The D3 v7 CDN ``<script>`` (~270 KB) and ``explorer.css`` are
+pushed into ``<head>`` via ``extra_head=`` so they load on this page only.
+"""
 
 from __future__ import annotations
 
@@ -16,6 +28,7 @@ from app.db import get_connection as _connect
 
 # Re-import our design-system Button after the wildcard so the symbol does
 # not silently fall back to FastHTML's unstyled Button (#419).
+from app.ui.layout import PageShell
 from app.ui.primitives.button import Button  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -159,8 +172,232 @@ def _fetch_draft_overlay(req: Request, draft_id_raw: str) -> list[str]:
     return uris
 
 
+# ---------------------------------------------------------------------------
+# <head> resources — D3 v7 CDN + the explorer stylesheet. Kept off the global
+# ``_HDRS`` in app/main.py: D3 is ~270 KB and only the Õiguskaart page uses
+# it, and explorer.css only styles this page's overlays.
+# ---------------------------------------------------------------------------
+_EXPLORER_HEAD: list = [
+    Script(
+        src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js",
+        integrity=(
+            "sha512-vc58qvvBdrDR4etbxMdlTt4GBQk1qjvyORR2nrsPsFPyrs+/u5c3+1Ct6upOgdZoIl7eq6k3a1UPDSNAQi/32A=="
+        ),
+        crossorigin="anonymous",
+    ),
+    Link(rel="stylesheet", href="/static/css/explorer.css"),
+]
+
+# Auto-hide the (dismissed-once) draft-tip banner — reads the localStorage
+# flag the toolbar's "×" button sets and removes the element on next load.
+_TIP_AUTOHIDE_SCRIPT = (
+    "(function(){"
+    "if(localStorage.getItem('explorer-tip-dismissed')){"
+    "var t=document.getElementById('explorer-tip-banner');"
+    "if(t)t.remove();"
+    "}"
+    "})();"
+)
+
+# Tiny inline init for the ?draft= overlay: read the JSON blob, build a Set
+# of URIs, and apply the highlight class to any node whose datum.uri /
+# datum.id is in the set. Runs every 500ms so nodes that arrive after the
+# first render via lazy-loading still get highlighted (#446 / Phase 2).
+_DRAFT_OVERLAY_INIT_SCRIPT = (
+    "(function(){"
+    "var el=document.getElementById('draft-overlay-data');"
+    "if(!el){return;}"
+    "var data;try{data=JSON.parse(el.textContent||'{}');}catch(e){return;}"
+    "var uris=new Set((data&&data.uris)||[]);"
+    "if(!uris.size){return;}"
+    "function apply(){"
+    "if(typeof d3==='undefined'){return;}"
+    "d3.selectAll('g.node').each(function(d){"
+    "if(!d){return;}"
+    "var key=d.uri||d.id;"
+    "var hit=uris.has(key);"
+    "d3.select(this).classed('d3-node-highlighted',hit);"
+    "d3.select(this).select('circle.outer').classed('d3-node-highlighted',hit);"
+    "});"
+    "}"
+    "var overlayInterval=setInterval(apply,500);"
+    "apply();"
+    "if(typeof htmx!=='undefined'){"
+    "htmx.on('htmx:beforeSwap',function(){clearInterval(overlayInterval);});"
+    "}"
+    "})();"
+)
+
+# Detail-panel annotation button wiring. When explorerShowDetail() sets
+# #panel-title, this MutationObserver injects an AnnotationButton (+ its
+# popover container) into #panel-annotation-btn via HTMX — keeping
+# explorer.js itself untouched. Built with DOM methods (no innerHTML);
+# hx-get defaults its swap to innerHTML so no hx-swap attribute is needed.
+_PANEL_ANNOTATION_SCRIPT = (
+    "(function(){"
+    "var panelBtn=document.getElementById('panel-annotation-btn');"
+    "var panelTitle=document.getElementById('panel-title');"
+    "if(!panelBtn||!panelTitle){return;}"
+    "var obs=new MutationObserver(function(){"
+    "var uri=panelTitle.dataset.entityUri||panelTitle.textContent.trim();"
+    "if(!uri){panelBtn.style.display='none';return;}"
+    "var safeId=encodeURIComponent(uri).replace(/'/g,'%27');"
+    "while(panelBtn.firstChild){panelBtn.removeChild(panelBtn.firstChild);}"
+    "var wrap=document.createElement('div');"
+    "wrap.className='annotation-button-wrapper';"
+    "var btn=document.createElement('button');"
+    "btn.type='button';btn.className='annotation-button';"
+    "btn.setAttribute('hx-get','/api/annotations?target_type=entity&target_id='+safeId);"
+    "btn.setAttribute('hx-target','#annotation-popover-entity-'+safeId);"
+    "btn.setAttribute('aria-label','Markused');"
+    "btn.setAttribute('title','Markused');"
+    "btn.textContent='\\uD83D\\uDCAC';"
+    "var pop=document.createElement('div');"
+    "pop.id='annotation-popover-entity-'+safeId;"
+    "pop.className='annotation-popover-container';"
+    "wrap.appendChild(btn);wrap.appendChild(pop);"
+    "panelBtn.appendChild(wrap);"
+    "panelBtn.style.display='block';"
+    "if(typeof htmx!=='undefined'){htmx.process(panelBtn);}"
+    "});"
+    "obs.observe(panelTitle,{childList:true,characterData:true,subtree:true});"
+    "})();"
+)
+
+
+def _escape_for_script(payload: str) -> str:
+    """Escape a JSON string so it is safe to embed inside a ``<script>``.
+
+    ``</`` would otherwise terminate the script element early; the
+    line-separator characters U+2028 / U+2029 are valid inside JSON strings
+    but break JavaScript string literals in older parsers, so they are
+    rewritten to their ``\\u`` escapes. JSON natively decodes ``<\\/`` back
+    to ``</`` so ``json.loads`` still works on the rendered payload (#464).
+    """
+    return payload.replace("</", "<\\/").replace(" ", "\\u2028").replace(" ", "\\u2029")
+
+
+def _explorer_toolbar(*, has_back_context: bool, draft_tip: bool):  # noqa: ANN202
+    """The thin horizontal graph toolbar across the top of the canvas.
+
+    Holds the legal-work view actions (``Ülevaade`` / ``Lähtesta vaade``),
+    the ``Vaate seaded`` disclosure (technical layout controls), the search
+    input + ``Otsi`` button (moved here from the deleted bespoke topbar),
+    and — when the page was opened from a report/analysis — a "← Tagasi
+    aruandesse" link. explorer.js wires the ``onclick`` handlers and unhides
+    the panel back link based on ``document.referrer``.
+    """
+    items: list = [
+        # A small page-identity label — the highlighted sidebar item and
+        # the browser tab title carry the rest. Compact, per the wireframe.
+        Span("Õiguskaart", cls="toolbar-title"),
+        Button(
+            "Ülevaade",
+            type="button",
+            cls="ctrl-btn",
+            onclick="explorerCollapseToOverview()",
+            title="Näita kõigi liikide ülevaadet",
+        ),
+        Button(
+            "Lähtesta vaade",
+            type="button",
+            cls="ctrl-btn",
+            onclick="explorerResetView()",
+            title="Lähtesta suum ja valik",
+        ),
+        # Technical layout controls behind a disclosure so the toolbar
+        # reads in legal-work language, not force-simulation jargon
+        # (#714 / #718). The menu drops down (position: absolute) so it
+        # doesn't change the toolbar's height.
+        Details(
+            Summary("Vaate seaded ▾", cls="ctrl-btn ctrl-settings-summary"),
+            Div(
+                Button(
+                    "Lähtesta paigutus",
+                    type="button",
+                    cls="ctrl-btn",
+                    onclick="explorerReheat()",
+                    title="Arvuta sõlmpunktide paigutus uuesti",
+                ),
+                Button(
+                    "Näita/peida seosenimed",
+                    type="button",
+                    cls="ctrl-btn",
+                    onclick="explorerToggleLabels()",
+                ),
+                Button(
+                    "Rühmita liigi järgi",
+                    type="button",
+                    cls="ctrl-btn",
+                    onclick="explorerGroupByCategory()",
+                ),
+                cls="ctrl-settings-menu",
+            ),
+            cls="ctrl-settings",
+        ),
+        # Search — moved out of the deleted #topbar into the toolbar.
+        Div(
+            Input(
+                id="search-input",
+                type="text",
+                placeholder="Otsi seadust, eelnõu, lahendit…",
+                aria_label="Otsi seadusi, eelnõusid, lahendeid",
+            ),
+            Button(
+                "Otsi",
+                type="button",
+                id="search-btn",
+                onclick="explorerSearch()",
+            ),
+            id="search-box",
+        ),
+    ]
+    if has_back_context:
+        # explorer.js rewrites the label ("← Tagasi aruandesse" /
+        # "← Tagasi analüüsi") from document.referrer; this toolbar anchor
+        # is the counterpart of the detail panel's #panel-back link.
+        items.append(
+            A(
+                "← Tagasi aruandesse",
+                id="toolbar-back",
+                href="#",
+                cls="toolbar-back",
+            )
+        )
+    if draft_tip:
+        # Surfaced only on a "cold" open (no ?focus / ?draft / overlay) —
+        # a small dismissible hint that ?draft=ID overlays a draft's
+        # affected entities. localStorage remembers the dismissal.
+        items.append(
+            Span(
+                Span(
+                    "Näpunäide: lisage ?draft=ID URL-ile, et näha eelnõu "
+                    "mõjutatud üksusi graafikul.",
+                    cls="toolbar-tip-text",
+                ),
+                Button(
+                    "×",
+                    type="button",
+                    cls="toolbar-tip-dismiss",
+                    aria_label="Sulge",
+                    onclick=(
+                        "localStorage.setItem('explorer-tip-dismissed','1');"
+                        "this.parentElement.remove()"
+                    ),
+                ),
+                id="explorer-tip-banner",
+                cls="toolbar-tip",
+            )
+        )
+    return Nav(
+        *items,
+        id="explorer-toolbar",
+        aria_label="Õiguskaardi tööriistad",
+    )
+
+
 def explorer_page(req: Request):
-    """GET /explorer -- full-screen interactive ontology graph.
+    """GET /explorer -- the Õiguskaart graph inside the standard app chrome.
 
     When called with ``?draft=<uuid>`` and the caller's org owns that
     draft, the affected-entity URIs from its latest impact report are
@@ -173,482 +410,225 @@ def explorer_page(req: Request):
 
     When called with ``?focus=<uri>`` (URL-encoded — see
     :func:`app.docs.report_routes.explorer_focus_url`) the JS loads that
-    entity's neighbourhood and opens the detail panel on it. ``focus``
-    and ``draft`` may be combined. The page itself requires
-    authentication via the global ``auth_before`` middleware (see #442).
+    entity's neighbourhood and opens the detail panel on it. ``?search=``
+    instead pre-runs the existing search flow with the given term; if both
+    ``?focus=`` and ``?search=`` are present, ``focus`` wins. The page
+    itself requires authentication via the global ``auth_before``
+    middleware (see #442).
     """
+    auth = req.scope.get("auth")
     draft_param = req.query_params.get("draft", "").strip()
     focus_param = req.query_params.get("focus", "").strip()
+    search_param = req.query_params.get("search", "").strip()
     overlay_uris: list[str] = []
     if draft_param:
         overlay_uris = _fetch_draft_overlay(req, draft_param)
 
-    overlay_tags: list = []
-    # #719: hand the focus URI to the JS. We don't resolve it here — the
-    # ``/api/explorer/entity/{uri}`` endpoint validates it server-side —
-    # but embedding it (escaped) keeps the contract explicit and lets the
-    # JS read it without re-parsing ``location.search``.
+    # ---- Server → JS bridge: ?focus= / ?search= / draft-overlay blobs ----
+    bridge_tags: list = []
+    # #719: hand the focus URI to the JS (it's validated server-side at
+    # /api/explorer/entity/{uri}; embedding it escaped keeps the contract
+    # explicit so the JS need not re-parse location.search).
     if focus_param.startswith("http"):
-        focus_payload = json.dumps(focus_param).replace("</", "<\\/")
-        overlay_tags.append(Script(f"window.__explorerFocus={focus_payload};"))
+        focus_payload = _escape_for_script(json.dumps(focus_param))
+        bridge_tags.append(Script(f"window.__explorerFocus={focus_payload};"))
+    elif search_param:
+        # ?search= pre-runs the search on load — the same path the "Otsi"
+        # button triggers. Suppressed when ?focus= is present (focus is
+        # the more specific intent). Escaped exactly like the focus blob.
+        search_payload = _escape_for_script(json.dumps(search_param))
+        bridge_tags.append(Script(f"window.__explorerSearch={search_payload};"))
     if overlay_uris:
-        # #464: escape any closing-tag and Unicode line-separator
-        # sequences in the JSON payload before embedding in a
-        # ``<script>`` tag. ``</`` would otherwise terminate the
-        # script element early and let an attacker inject HTML;
-        # U+2028 / U+2029 are valid in JSON strings but not in
-        # JavaScript string literals, so leaving them in causes a
-        # parse error in older browsers and confuses some inline
-        # script parsers. JSON natively decodes ``<\/`` back to
-        # ``</`` so json.loads still works on the rendered payload.
-        payload = json.dumps({"uris": overlay_uris})
-        payload = payload.replace("</", "<\\/").replace(" ", "\\u2028").replace(" ", "\\u2029")
-        overlay_tags.append(
-            Script(
-                payload,
-                id="draft-overlay-data",
-                type="application/json",
-            )
-        )
-        # Tiny inline init: read the JSON blob, build a Set of URIs,
-        # and apply the highlight class to any node whose datum.uri or
-        # datum.id is in the set. Runs every 500ms so we catch nodes
-        # that arrive after the initial render via lazy-loading.
-        overlay_tags.append(
-            Script(
-                "(function(){"
-                "var el=document.getElementById('draft-overlay-data');"
-                "if(!el){return;}"
-                "var data;try{data=JSON.parse(el.textContent||'{}');}catch(e){return;}"
-                "var uris=new Set((data&&data.uris)||[]);"
-                "if(!uris.size){return;}"
-                "function apply(){"
-                "if(typeof d3==='undefined'){return;}"
-                "d3.selectAll('g.node').each(function(d){"
-                "if(!d){return;}"
-                "var key=d.uri||d.id;"
-                "var hit=uris.has(key);"
-                "d3.select(this).classed('d3-node-highlighted',hit);"
-                "d3.select(this).select('circle.outer').classed('d3-node-highlighted',hit);"
-                "});"
-                "}"
-                "var overlayInterval=setInterval(apply,500);"
-                "apply();"
-                "if(typeof htmx!=='undefined'){"
-                "htmx.on('htmx:beforeSwap',function(){clearInterval(overlayInterval);});"
-                "}"
-                "})();"
-            )
-        )
+        # #464: escape closing-tag + Unicode line-separator sequences in
+        # the JSON payload before embedding in a <script>.
+        payload = _escape_for_script(json.dumps({"uris": overlay_uris}))
+        bridge_tags.append(Script(payload, id="draft-overlay-data", type="application/json"))
+        bridge_tags.append(Script(_DRAFT_OVERLAY_INIT_SCRIPT))
 
-    # Build the help banner elements that sit above the top bar.
-    help_banner = Div(
+    # "Back to report/analysis" context: the page was opened from an impact
+    # report / analysis result (?focus= or ?draft=) — explorer.js detects
+    # the same thing from document.referrer for the detail-panel back link.
+    has_back_context = bool(focus_param) or bool(overlay_uris) or bool(draft_param)
+    # A "cold" open (no focus / draft / overlay) gets the small ?draft= tip.
+    show_draft_tip = not overlay_uris and not draft_param and not focus_param
+
+    content = (
+        # ----- Graph toolbar (across the top of the canvas) -----
+        _explorer_toolbar(has_back_context=has_back_context, draft_tip=show_draft_tip),
+        # ----- Breadcrumb -----
+        Div(id="breadcrumb"),
+        # ----- Tooltip -----
         Div(
-            Span(
-                "ℹ️",
-                cls="info-box-icon",
-                aria_hidden="true",
-            ),
-            Div(
-                "See on õiguskaart — Eesti õiguse ontoloogia visuaalne vaade. "
-                "Klõpsake kategooriatele, et uurida seadusi, kohtuotsuseid "
-                "ja EL-i õigusakte. Kasutage otsingut konkreetsete "
-                "sätete leidmiseks.",
-                cls="info-box-content",
-            ),
-            Button(
-                "×",
-                type="button",
-                cls="info-box-dismiss",
-                aria_label="Sulge",
-                onclick=(
-                    "localStorage.setItem('explorer-help-dismissed','1');"
-                    "this.parentElement.parentElement.remove()"
-                ),
-            ),
-            cls="info-box info-box-info",
-            role="note",
+            H3(id="tt-title"),
+            Span(cls="cat", id="tt-cat"),
+            P(id="tt-desc"),
+            Div(id="tt-stat", cls="stat"),
+            id="tooltip",
         ),
-        id="explorer-help-banner",
-        style="padding:0.75rem 1rem 0;",
-    )
-
-    # Optional draft tip
-    draft_tip = None
-    if not overlay_uris and not draft_param and not focus_param:
-        draft_tip = Div(
+        # ----- Legend -----
+        Div(
+            H3("Kategooriad"),
             Div(
-                Span(
-                    "\U0001f4a1",
-                    cls="info-box-icon",
-                    aria_hidden="true",
+                Div(cls="legend-dot", style="background:#38bdf8"),
+                "Kehtiv seadus",
+                cls="legend-item",
+            ),
+            Div(
+                Div(cls="legend-dot", style="background:#a78bfa"),
+                "Eelnõu",
+                cls="legend-item",
+            ),
+            Div(
+                Div(cls="legend-dot", style="background:#fb923c"),
+                "Kohtulahend",
+                cls="legend-item",
+            ),
+            Div(
+                Div(cls="legend-dot", style="background:#34d399"),
+                "EL õigusakt",
+                cls="legend-item",
+            ),
+            Div(
+                Div(cls="legend-dot", style="background:#f472b6"),
+                "EL kohtulahend",
+                cls="legend-item",
+            ),
+            id="legend",
+        ),
+        # ----- Instructions -----
+        Div(
+            "Lohista sõlmpunkte ümber · Kerige suumimiseks "
+            "· Klõpsa ja lohista tausta panoraamimiseks",
+            Br(),
+            "Hõlju sõlmpunktil detailide nägemiseks "
+            "· Klõpsa kategooriat avamiseks "
+            "· Klõpsa olemit kinnitamiseks",
+            id="instructions",
+        ),
+        # ----- Loading overlay -----
+        Div(
+            Div(cls="spinner"),
+            id="loading-overlay",
+        ),
+        # ----- Timeline / "ajaline vaade" slider (bottom of the canvas) -----
+        Div(
+            Div(
+                Span("1990", cls="tl-label"),
+                Input(
+                    id="timeline-slider",
+                    type="range",
+                    min="1990",
+                    max=str(datetime.now().year + 1),
+                    value=str(datetime.now().year + 1),
+                    step="1",
+                    aria_label="Ajaline vaade — aasta valik",
                 ),
-                Div(
-                    "Näpunäide: lisage ?draft=ID URL-ile, "
-                    "et näha eelnõu mõjutatud üksusi graafikul.",
-                    cls="info-box-content",
+                Span(str(datetime.now().year + 1), cls="tl-label"),
+                cls="tl-slider-row",
+            ),
+            Div(
+                Span("Ajaline vaade: ", cls="tl-prefix"),
+                Span("Väljas", id="timeline-value", cls="tl-value"),
+                Button(
+                    "Lähtesta",
+                    type="button",
+                    id="timeline-reset",
+                    cls="tl-reset-btn",
+                    onclick="explorerResetTimeline()",
                 ),
+                cls="tl-info-row",
+            ),
+            id="timeline-bar",
+        ),
+        # ----- Detail panel (slides in from the right edge of the content) -----
+        Div(
+            # #719: shown only when the page was opened via ?focus= (i.e.
+            # from an impact report / analysis) — explorer.js unhides it
+            # and sets the label/target.
+            A(
+                "← Tagasi",
+                id="panel-back",
+                href="#",
+                cls="panel-back",
+                style="display:none;",
+            ),
+            Div(
+                H2(id="panel-title"),
                 Button(
                     "×",
                     type="button",
-                    cls="info-box-dismiss",
-                    aria_label="Sulge",
-                    onclick=(
-                        "localStorage.setItem('explorer-tip-dismissed','1');"
-                        "this.parentElement.parentElement.remove()"
-                    ),
+                    id="detail-close",
+                    onclick="explorerCloseDetail()",
+                    aria_label="Sulge üksikasjade paneel",
                 ),
-                cls="info-box info-box-tip",
-                role="note",
+                cls="panel-header",
             ),
-            id="explorer-tip-banner",
-            style="padding:0 1rem;",
-        )
+            Span(id="panel-category", cls="panel-category"),
+            Div(
+                H4("Metaandmed"),
+                Div(id="panel-meta"),
+                cls="meta-section",
+            ),
+            # ----- Version history section -----
+            Div(
+                H4("Versiooniajalugu"),
+                Div(id="panel-versions"),
+                id="version-history-section",
+                cls="meta-section",
+                style="display:none;",
+            ),
+            Div(
+                H4("Seosed"),
+                Ul(id="panel-neighbors", cls="neighbor-list"),
+                cls="meta-section",
+            ),
+            # ----- Annotation button (entity-level) -----
+            Div(
+                id="panel-annotation-btn",
+                cls="annotation-section",
+                style="display:none;",
+            ),
+            # ----- Bookmark button -----
+            Div(
+                Button(
+                    "Lisa järjehoidjatesse",
+                    type="button",
+                    id="panel-bookmark-btn",
+                    cls="bookmark-btn",
+                    onclick="explorerBookmark()",
+                ),
+                cls="bookmark-section",
+            ),
+            A(
+                "Ava allikas",
+                id="panel-link",
+                cls="external-link",
+                href="#",
+                target="_blank",
+                rel="noopener",
+            ),
+            id="detail-panel",
+        ),
+        # ----- SVG canvas (fills the content area; sized by explorer.js) -----
+        NotStr('<svg id="canvas"></svg>'),
+        # ----- Explorer JS (after the DOM it touches) -----
+        Script(src="/static/js/explorer.js"),
+        # ----- Auto-hide the (dismissed) draft tip -----
+        Script(_TIP_AUTOHIDE_SCRIPT),
+        # ----- Detail-panel annotation button wiring -----
+        Script(_PANEL_ANNOTATION_SCRIPT),
+        # ----- ?focus= / ?search= / draft-overlay bridge blobs -----
+        *bridge_tags,
+    )
 
-    return Html(
-        Head(
-            Meta(charset="UTF-8"),
-            Meta(name="viewport", content="width=device-width, initial-scale=1.0"),
-            Title("Õiguskaart — Eesti õiguse ontoloogia"),
-            # D3.js v7
-            Script(
-                src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js",
-                integrity="sha512-vc58qvvBdrDR4etbxMdlTt4GBQk1qjvyORR2nrsPsFPyrs+/u5c3+1Ct6upOgdZoIl7eq6k3a1UPDSNAQi/32A==",
-                crossorigin="anonymous",
-            ),
-            # Design tokens (CSS custom properties) — required by ui.css
-            Link(rel="stylesheet", href="/static/css/tokens.css"),
-            # Explorer styles
-            Link(rel="stylesheet", href="/static/css/explorer.css"),
-            # Phase 2 additions (#446): the .d3-node-highlighted rule
-            # used by the draft overlay lives in ui.css. Pull the
-            # whole stylesheet in so future Phase 2 additions take
-            # effect on the explorer page without per-rule duplication.
-            Link(rel="stylesheet", href="/static/css/ui.css"),
-        ),
-        Body(
-            # ----- Help banner -----
-            help_banner,
-            draft_tip if draft_tip else "",
-            # ----- Top bar (banner landmark) -----
-            Header(
-                Div(
-                    H1("Õiguskaart"),
-                    Span("Eesti õiguse ontoloogia", cls="explorer-tagline"),
-                    Span("D3.js", cls="badge"),
-                    # Search box
-                    Div(
-                        Input(
-                            id="search-input",
-                            type="text",
-                            placeholder="Otsi seadust, eelnõu, lahendit…",
-                            aria_label="Otsi seadusi, eelnõusid, lahendeid",
-                        ),
-                        Button(
-                            "Otsi",
-                            id="search-btn",
-                            onclick="explorerSearch()",
-                        ),
-                        id="search-box",
-                    ),
-                    id="topbar",
-                ),
-                role="banner",
-            ),
-            # ----- Controls (navigation landmark) -----
-            Nav(
-                Div(
-                    # Primary view actions — legal-work language, not
-                    # force-simulation jargon (#714 / #718).
-                    Button(
-                        "Ülevaade",
-                        cls="ctrl-btn",
-                        onclick="explorerCollapseToOverview()",
-                        title="Näita kõigi liikide ülevaadet",
-                    ),
-                    Button(
-                        "Lähtesta vaade",
-                        cls="ctrl-btn",
-                        onclick="explorerResetView()",
-                        title="Lähtesta suum ja valik",
-                    ),
-                    # Technical layout controls live behind a disclosure so the
-                    # bar isn't cluttered with simulation vocabulary.
-                    Details(
-                        Summary("Vaate seaded ▾", cls="ctrl-btn ctrl-settings-summary"),
-                        Div(
-                            Button(
-                                "Lähtesta paigutus",
-                                cls="ctrl-btn",
-                                onclick="explorerReheat()",
-                                title="Arvuta sõlmpunktide paigutus uuesti",
-                            ),
-                            Button(
-                                "Näita/peida seosenimed",
-                                cls="ctrl-btn",
-                                onclick="explorerToggleLabels()",
-                            ),
-                            Button(
-                                "Rühmita liigi järgi",
-                                cls="ctrl-btn",
-                                onclick="explorerGroupByCategory()",
-                            ),
-                            cls="ctrl-settings-menu",
-                        ),
-                        cls="ctrl-settings",
-                    ),
-                    # ----- Divider -----
-                    Div(cls="ctrl-divider"),
-                    # ----- Navigation links (semantic anchors, not buttons) -----
-                    A(
-                        "Töölaud",
-                        href="/dashboard",
-                        cls="nav-btn",
-                        role="link",
-                    ),
-                    A(
-                        "Analüüsikeskus",
-                        href="/analyysikeskus",
-                        cls="nav-btn",
-                        role="link",
-                    ),
-                    A(
-                        "Eelnõud",
-                        href="/drafts",
-                        cls="nav-btn",
-                        role="link",
-                    ),
-                    A(
-                        "Koostaja",
-                        href="/drafter",
-                        cls="nav-btn",
-                        role="link",
-                    ),
-                    A(
-                        "Nõustaja",
-                        href="/chat",
-                        cls="nav-btn",
-                        role="link",
-                    ),
-                    A(
-                        "Admin",
-                        href="/admin",
-                        cls="nav-btn",
-                        role="link",
-                    ),
-                    id="controls",
-                ),
-                aria_label="Vaate juhtimine",
-            ),
-            # ----- Main content (graph canvas + companion UI) -----
-            Main(
-                # ----- Breadcrumb -----
-                Div(id="breadcrumb"),
-                # ----- Tooltip -----
-                Div(
-                    H3(id="tt-title"),
-                    Span(cls="cat", id="tt-cat"),
-                    P(id="tt-desc"),
-                    Div(id="tt-stat", cls="stat"),
-                    id="tooltip",
-                ),
-                # ----- Legend -----
-                Div(
-                    H3("Kategooriad"),
-                    Div(
-                        Div(cls="legend-dot", style="background:#38bdf8"),
-                        "Kehtiv seadus",
-                        cls="legend-item",
-                    ),
-                    Div(
-                        Div(cls="legend-dot", style="background:#a78bfa"),
-                        "Eelnõu",
-                        cls="legend-item",
-                    ),
-                    Div(
-                        Div(cls="legend-dot", style="background:#fb923c"),
-                        "Kohtulahend",
-                        cls="legend-item",
-                    ),
-                    Div(
-                        Div(cls="legend-dot", style="background:#34d399"),
-                        "EL õigusakt",
-                        cls="legend-item",
-                    ),
-                    Div(
-                        Div(cls="legend-dot", style="background:#f472b6"),
-                        "EL kohtulahend",
-                        cls="legend-item",
-                    ),
-                    id="legend",
-                ),
-                # ----- Instructions -----
-                Div(
-                    "Lohista sõlmpunkte ümber · Kerige suumimiseks "
-                    "· Klõpsa ja lohista tausta panoraamimiseks",
-                    Br(),
-                    "Hõlju sõlmpunktil detailide nägemiseks "
-                    "· Klõpsa kategooriat avamiseks "
-                    "· Klõpsa olemit kinnitamiseks",
-                    id="instructions",
-                ),
-                # ----- Loading overlay -----
-                Div(
-                    Div(cls="spinner"),
-                    id="loading-overlay",
-                ),
-                # ----- Timeline / "ajaline vaade" slider -----
-                Div(
-                    Div(
-                        Span("1990", cls="tl-label"),
-                        Input(
-                            id="timeline-slider",
-                            type="range",
-                            min="1990",
-                            max=str(datetime.now().year + 1),
-                            value=str(datetime.now().year + 1),
-                            step="1",
-                            aria_label="Ajaline vaade — aasta valik",
-                        ),
-                        Span(str(datetime.now().year + 1), cls="tl-label"),
-                        cls="tl-slider-row",
-                    ),
-                    Div(
-                        Span("Ajaline vaade: ", cls="tl-prefix"),
-                        Span("Väljas", id="timeline-value", cls="tl-value"),
-                        Button(
-                            "Lähtesta",
-                            id="timeline-reset",
-                            cls="tl-reset-btn",
-                            onclick="explorerResetTimeline()",
-                        ),
-                        cls="tl-info-row",
-                    ),
-                    id="timeline-bar",
-                ),
-                # ----- Toast container -----
-                Div(id="toast-container"),
-                # ----- Detail panel (right sidebar) -----
-                Div(
-                    # #719: shown only when the page was opened via
-                    # ?focus= (i.e. from an impact report / analysis) —
-                    # explorer.js unhides it and sets the label/target.
-                    A(
-                        "← Tagasi",
-                        id="panel-back",
-                        href="#",
-                        cls="panel-back",
-                        style="display:none;",
-                    ),
-                    Div(
-                        H2(id="panel-title"),
-                        Button(
-                            "×",
-                            id="detail-close",
-                            onclick="explorerCloseDetail()",
-                            aria_label="Sulge üksikasjade paneel",
-                        ),
-                        cls="panel-header",
-                    ),
-                    Span(id="panel-category", cls="panel-category"),
-                    Div(
-                        H4("Metaandmed"),
-                        Div(id="panel-meta"),
-                        cls="meta-section",
-                    ),
-                    # ----- Version history section -----
-                    Div(
-                        H4("Versiooniajalugu"),
-                        Div(id="panel-versions"),
-                        id="version-history-section",
-                        cls="meta-section",
-                        style="display:none;",
-                    ),
-                    Div(
-                        H4("Seosed"),
-                        Ul(id="panel-neighbors", cls="neighbor-list"),
-                        cls="meta-section",
-                    ),
-                    # ----- Annotation button (entity-level) -----
-                    Div(
-                        id="panel-annotation-btn",
-                        cls="annotation-section",
-                        style="display:none;",
-                    ),
-                    # ----- Bookmark button -----
-                    Div(
-                        Button(
-                            "Lisa järjehoidjatesse",
-                            id="panel-bookmark-btn",
-                            cls="bookmark-btn",
-                            onclick="explorerBookmark()",
-                        ),
-                        cls="bookmark-section",
-                    ),
-                    A(
-                        "Ava allikas",
-                        id="panel-link",
-                        cls="external-link",
-                        href="#",
-                        target="_blank",
-                        rel="noopener",
-                    ),
-                    id="detail-panel",
-                ),
-                # ----- SVG canvas -----
-                NotStr('<svg id="canvas"></svg>'),
-            ),
-            # ----- Explorer JS (after DOM) -----
-            Script(src="/static/js/explorer.js"),
-            # ----- Auto-hide banners via localStorage -----
-            Script(
-                "(function(){"
-                "if(localStorage.getItem('explorer-help-dismissed')){"
-                "var h=document.getElementById('explorer-help-banner');"
-                "if(h)h.remove();"
-                "}"
-                "if(localStorage.getItem('explorer-tip-dismissed')){"
-                "var t=document.getElementById('explorer-tip-banner');"
-                "if(t)t.remove();"
-                "}"
-                "})();"
-            ),
-            # ----- Annotation button wiring for detail panel -----
-            # When explorerShowDetail() sets #panel-title, this
-            # observer injects an AnnotationButton via HTMX into
-            # #panel-annotation-btn. The MutationObserver pattern
-            # avoids patching explorer.js directly.
-            Script(
-                "(function(){"
-                "var panelBtn=document.getElementById('panel-annotation-btn');"
-                "var panelTitle=document.getElementById('panel-title');"
-                "if(!panelBtn||!panelTitle){return;}"
-                "var obs=new MutationObserver(function(){"
-                "var uri=panelTitle.dataset.entityUri||panelTitle.textContent.trim();"
-                "if(!uri){panelBtn.style.display='none';return;}"
-                "var safeId=encodeURIComponent(uri).replace(/'/g,'%27');"
-                "panelBtn.innerHTML="
-                '\'<div class="annotation-button-wrapper">'
-                '<button type="button" class="annotation-button"'
-                " hx-get=\"/api/annotations?target_type=entity&target_id='+safeId+'\""
-                " hx-target=\"#annotation-popover-entity-'+safeId+'\""
-                ' hx-swap="innerHTML"'
-                ' aria-label="Markused"'
-                ' title="Markused">&#128172;</button>'
-                "<div id=\"annotation-popover-entity-'+safeId+'\""
-                ' class="annotation-popover-container"></div></div>\';'
-                "panelBtn.style.display='block';"
-                "if(typeof htmx!=='undefined'){htmx.process(panelBtn);}"
-                "});"
-                "obs.observe(panelTitle,{childList:true,characterData:true,subtree:true});"
-                "})();"
-            ),
-            # ----- Optional draft overlay (Phase 2 Batch 4) -----
-            *overlay_tags,
-            cls="explorer-page",
-        ),
-        lang="et",
-        data_theme="dark",
+    return PageShell(
+        *content,
+        title="Õiguskaart",
+        user=auth or None,
+        active_nav="/explorer",
+        request=req,
+        full_bleed=True,
+        extra_head=_EXPLORER_HEAD,
     )
 
 
