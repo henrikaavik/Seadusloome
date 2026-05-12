@@ -741,6 +741,10 @@ class TestDraftDetailPage:
         # into the Normi mõjuahel workflow (which reuses this draft's report).
         assert "Ava analüüsikeskuses" in resp.text
         assert f"/analyysikeskus/normi-mojuahel?sisend={draft.id}" in resp.text
+        # #759: a ready draft also offers a "Vaata mõjukaarti" CTA that
+        # deep-links into Õiguskaart centred on its impact subgraph.
+        assert "Vaata mõjukaarti" in resp.text
+        assert f"/explorer?draft={draft.id}" in resp.text
         # No polling for terminal statuses.
         assert "every 3s" not in resp.text
 
@@ -752,7 +756,8 @@ class TestDraftDetailPage:
         mock_fetch: MagicMock,
     ):
         """#724: the Analüüsikeskus cross-link is gated on ``status == ready``
-        (same guard as the "Vaata mõjuaruannet" CTA)."""
+        (same guard as the "Vaata mõjuaruannet" CTA). #759: the
+        "Vaata mõjukaarti" CTA is gated the same way."""
         mock_get_provider.return_value = _stub_provider()
         draft = _make_draft(status="parsing")
         mock_fetch.return_value = draft
@@ -763,6 +768,10 @@ class TestDraftDetailPage:
         assert resp.status_code == 200
         assert "Ava analüüsikeskuses" not in resp.text
         assert f"/analyysikeskus/normi-mojuahel?sisend={draft.id}" not in resp.text
+        # #759: no impact subgraph exists before the analyse pipeline
+        # completes, so the map CTA must not render either.
+        assert "Vaata mõjukaarti" not in resp.text
+        assert f"/explorer?draft={draft.id}" not in resp.text
 
     @patch("app.docs.routes._detail.fetch_draft")
     @patch("app.auth.middleware._get_provider")

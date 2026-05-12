@@ -154,6 +154,20 @@ def explorer_focus_url(uri: str, draft_id: str | None = None) -> str:
     return f"/explorer?{qs}"
 
 
+def explorer_draft_url(draft_id: str) -> str:
+    """Build an ``/explorer?draft=<id>`` link to a draft's impact subgraph (#759).
+
+    Companion to :func:`explorer_focus_url` for the "open the map for this
+    draft" affordance (Koostaja / draft detail / chat). The ``?draft=``
+    handling itself is issue #755 — this helper just mints the URL; the
+    contract (``/explorer?draft=<urlencoded-draft-id>``) is fixed by the
+    ``docs/2026-05-12-oiguskaart-evidence-map.md`` design doc, workstream B.
+    Draft ids are UUIDs so URL-encoding is a no-op in practice, but we
+    encode anyway to stay robust against non-UUID callers.
+    """
+    return f"/explorer?draft={quote(str(draft_id), safe='')}"
+
+
 # ---------------------------------------------------------------------------
 # Annotation side-panel container + per-row trigger button (PR-C)
 # ---------------------------------------------------------------------------
@@ -1020,7 +1034,7 @@ def draft_report_page(req: Request, draft_id: str):
             Div(
                 LinkButton(
                     "Ava õiguskaardil →",
-                    href=f"/explorer?draft={draft.id}",
+                    href=explorer_draft_url(str(draft.id)),
                     variant="secondary",
                     title="Visualiseeri eelnõu ja mõjutatud sätted graafil.",
                 ),

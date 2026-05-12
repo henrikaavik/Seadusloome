@@ -636,6 +636,51 @@ class TestStep3Page:
         assert "TsiviilS" in resp.text
         assert "Jätka struktuuriga" in resp.text
 
+    @patch("app.drafter.routes._find_latest_job")
+    @patch("app.drafter.routes.decrypt_text")
+    @patch("app.drafter.routes.fetch_session")
+    @patch("app.auth.middleware._get_provider")
+    def test_step_3_research_items_link_to_oiguskaart(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_decrypt: MagicMock,
+        mock_find_job: MagicMock,
+    ):
+        """#759: each researched entity with an ontology URI gets an
+        "Ava õiguskaardil →" deep link with the URI percent-encoded into
+        ``?focus=``; entities without a URI render as plain text."""
+        import json
+
+        mock_get_provider.return_value = _stub_provider()
+        session = _make_session(current_step=3)
+        session.research_data_encrypted = b"encrypted"
+        mock_fetch.return_value = session
+        provision_uri = "https://data.riik.ee/ontology/estleg#KarS_par_133"
+        mock_decrypt.return_value = json.dumps(
+            {
+                "provisions": [
+                    {"uri": provision_uri, "label": "KarS § 133", "act_label": "KarS"},
+                ],
+                "eu_directives": [],
+                "court_decisions": [],
+                # Topic clusters carry no URI — they must stay plain text.
+                "topic_clusters": [{"label": "Inimkaubandus"}],
+            }
+        )
+
+        client = _authed_client()
+        resp = client.get(f"/drafter/{_SESSION_ID}/step/3")
+
+        assert resp.status_code == 200
+        assert "Ava õiguskaardil →" in resp.text
+        # The estleg ``#`` must be percent-encoded so ``focus`` is not
+        # truncated to ".../estleg" by the browser fragment parser.
+        assert "/explorer?focus=" in resp.text
+        assert "%23KarS_par_133" in resp.text
+        # The cluster label is shown but gets no map link of its own.
+        assert "Inimkaubandus" in resp.text
+
 
 # ---------------------------------------------------------------------------
 # Step 4: Structure editing

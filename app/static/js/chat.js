@@ -714,12 +714,23 @@
         a.target = '_blank';
         a.rel = 'noopener';
         a.textContent = title;
+        li.appendChild(a);
+
+        // #759: a "vaata kaardil" affordance that deep-links into
+        // Õiguskaart centred on this cited entity. Mirrors the
+        // server-rendered _rag_sources_block in app/chat/routes.py.
+        if (uri) {
+          const mapLink = document.createElement('a');
+          mapLink.href = '/explorer?focus=' + encodeURIComponent(uri);
+          mapLink.className = 'chat-source-map-link';
+          mapLink.title = 'Ava see allikas Õiguskaardil.';
+          mapLink.textContent = 'vaata kaardil →';
+          li.appendChild(mapLink);
+        }
 
         const p = document.createElement('p');
         // Use textContent to escape snippet — no raw HTML
         p.textContent = snippet;
-
-        li.appendChild(a);
         if (snippet) li.appendChild(p);
         ul.appendChild(li);
       }

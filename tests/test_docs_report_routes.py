@@ -924,3 +924,40 @@ class TestExplorerFocusUrl:
         url = explorer_focus_url("https://data.riik.ee/ontology/estleg#X", draft_id="abc-123")
         assert "&draft=abc-123" in url
         assert url.index("focus=") < url.index("draft=")
+
+
+# ---------------------------------------------------------------------------
+# explorer_draft_url — /explorer?draft=<id> deep-link helper (#759)
+# ---------------------------------------------------------------------------
+
+
+class TestExplorerDraftUrl:
+    def test_builds_explorer_draft_query(self):
+        from app.docs.report_routes import explorer_draft_url
+
+        draft_id = "11111111-2222-3333-4444-555555555555"
+        url = explorer_draft_url(draft_id)
+        assert url == f"/explorer?draft={draft_id}"
+
+    def test_url_encodes_non_uuid_input(self):
+        from urllib.parse import parse_qs, urlsplit
+
+        from app.docs.report_routes import explorer_draft_url
+
+        url = explorer_draft_url("a b/c#d")
+        # The space / slash / hash must be percent-encoded so the whole
+        # value survives the round-trip through the query string.
+        assert " " not in url
+        assert "#" not in url
+        assert url.startswith("/explorer?draft=")
+        q = parse_qs(urlsplit(url).query)
+        assert q["draft"] == ["a b/c#d"]
+
+    def test_accepts_uuid_object(self):
+        import uuid
+
+        from app.docs.report_routes import explorer_draft_url
+
+        u = uuid.uuid4()
+        url = explorer_draft_url(u)  # type: ignore[arg-type]
+        assert url == f"/explorer?draft={u}"
