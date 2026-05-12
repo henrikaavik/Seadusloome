@@ -1008,6 +1008,7 @@ class TestDraftStatusFragment:
 class TestDeleteDraftHandler:
     @patch("app.docs.routes._lifecycle.JobQueue")
     @patch("app.docs.routes._lifecycle.log_draft_delete")
+    @patch("app.docs.routes._lifecycle.get_draft_artifact_paths")
     @patch("app.docs.routes._lifecycle.delete_draft")
     @patch("app.docs.routes._lifecycle._connect")
     @patch("app.docs.routes._lifecycle.fetch_draft")
@@ -1018,6 +1019,7 @@ class TestDeleteDraftHandler:
         mock_fetch: MagicMock,
         mock_connect: MagicMock,
         mock_delete: MagicMock,
+        mock_artifacts: MagicMock,
         mock_log: MagicMock,
         mock_queue_cls: MagicMock,
     ):
@@ -1033,6 +1035,7 @@ class TestDeleteDraftHandler:
         mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
         mock_connect.return_value.__exit__ = MagicMock(return_value=False)
         mock_delete.return_value = "/tmp/ciphertext.enc"
+        mock_artifacts.return_value = (["/tmp/ciphertext.enc"], [draft.graph_uri])
 
         queue_instance = MagicMock()
         queue_instance.enqueue.return_value = 99
@@ -1045,6 +1048,10 @@ class TestDeleteDraftHandler:
         assert resp.headers["location"] == "/drafts"
         mock_delete.assert_called_once()
         mock_log.assert_called_once()
+
+        # #736: artifact paths are snapshotted BEFORE the row delete so
+        # the cascade-deleted draft_versions rows are still readable.
+        mock_artifacts.assert_called_once()
 
         # #628: a single _connect() transaction covers row delete,
         # rag_chunks clearing and job cancellation. The handler opens
@@ -1064,16 +1071,74 @@ class TestDeleteDraftHandler:
         # #478: running jobs must also be in the status filter.
         assert "'running'" in delete_call.args[0]
 
-        # #628: the external cleanup is enqueued as a background job
-        # with the storage_path + graph_uri payload so the worker can
-        # retry independently.
+        # #628/#736: the external cleanup is enqueued as a background job
+        # with ARRAYS of storage_paths + graph_uris (one per version) so
+        # the worker can retry independently and purge every artifact.
         queue_instance.enqueue.assert_called_once()
         args, kwargs = queue_instance.enqueue.call_args
         assert args[0] == "draft_cleanup"
         payload = args[1]
         assert payload["draft_id"] == str(draft.id)
+        assert payload["storage_paths"] == ["/tmp/ciphertext.enc"]
+        assert payload["graph_uris"] == [draft.graph_uri]
+        # legacy singular keys still present for backward compat
         assert payload["storage_path"] == "/tmp/ciphertext.enc"
         assert payload["graph_uri"] == draft.graph_uri
+
+    @patch("app.docs.routes._lifecycle.JobQueue")
+    @patch("app.docs.routes._lifecycle.log_draft_delete")
+    @patch("app.docs.routes._lifecycle.get_draft_artifact_paths")
+    @patch("app.docs.routes._lifecycle.delete_draft")
+    @patch("app.docs.routes._lifecycle._connect")
+    @patch("app.docs.routes._lifecycle.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_delete_versioned_draft_enqueues_every_version_artifact(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_connect: MagicMock,
+        mock_delete: MagicMock,
+        mock_artifacts: MagicMock,
+        mock_log: MagicMock,
+        mock_queue_cls: MagicMock,
+    ):
+        """#736: deleting a draft with >=2 versions must enqueue cleanup
+        for EVERY version's storage path AND named graph URI, not just
+        the latest — older draft_versions rows cascade away on delete,
+        so their files/graphs would otherwise orphan on disk and in Jena.
+        """
+        mock_get_provider.return_value = _stub_provider()
+        draft = _make_draft()
+        mock_fetch.return_value = draft
+
+        mock_conn = MagicMock()
+        mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+        mock_delete.return_value = "/tmp/v2.enc"
+        v1_path, v2_path = "/tmp/v1.enc", "/tmp/v2.enc"
+        v1_graph = f"{draft.graph_uri}/v1"
+        v2_graph = f"{draft.graph_uri}/v2"
+        mock_artifacts.return_value = ([v1_path, v2_path], [v1_graph, v2_graph])
+
+        queue_instance = MagicMock()
+        queue_instance.enqueue.return_value = 7
+        mock_queue_cls.return_value = queue_instance
+
+        client = _authed_client()
+        resp = client.post(f"/drafts/{draft.id}/delete")
+
+        assert resp.status_code == 303
+        mock_artifacts.assert_called_once()
+        queue_instance.enqueue.assert_called_once()
+        payload = queue_instance.enqueue.call_args.args[1]
+        # BOTH version files queued for deletion.
+        assert payload["storage_paths"] == [v1_path, v2_path]
+        # BOTH named graphs queued for deletion...
+        assert v1_graph in payload["graph_uris"]
+        assert v2_graph in payload["graph_uris"]
+        # ...plus the "current" draft.graph_uri (defensively unioned by
+        # the handler in case it differs from every version row).
+        assert draft.graph_uri in payload["graph_uris"]
 
     @patch("app.docs.routes._lifecycle.fetch_draft")
     @patch("app.auth.middleware._get_provider")
@@ -1113,6 +1178,7 @@ class TestDeleteDraftHandler:
 
     @patch("app.docs.routes._lifecycle.JobQueue")
     @patch("app.docs.routes._lifecycle.log_draft_delete")
+    @patch("app.docs.routes._lifecycle.get_draft_artifact_paths")
     @patch("app.docs.routes._lifecycle.delete_draft")
     @patch("app.docs.routes._lifecycle._connect")
     @patch("app.docs.routes._lifecycle.fetch_draft")
@@ -1123,6 +1189,7 @@ class TestDeleteDraftHandler:
         mock_fetch: MagicMock,
         mock_connect: MagicMock,
         mock_delete: MagicMock,
+        mock_artifacts: MagicMock,
         mock_log: MagicMock,
         mock_queue_cls: MagicMock,
     ):
@@ -1145,6 +1212,7 @@ class TestDeleteDraftHandler:
         mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
         mock_connect.return_value.__exit__ = MagicMock(return_value=False)
         mock_delete.return_value = "/tmp/ciphertext.enc"
+        mock_artifacts.return_value = (["/tmp/ciphertext.enc"], [draft.graph_uri])
 
         client = _authed_client()
         resp = client.post(f"/drafts/{draft.id}/delete")
@@ -1155,6 +1223,7 @@ class TestDeleteDraftHandler:
 
     @patch("app.docs.routes._lifecycle.JobQueue")
     @patch("app.docs.routes._lifecycle.log_draft_delete")
+    @patch("app.docs.routes._lifecycle.get_draft_artifact_paths")
     @patch("app.docs.routes._lifecycle.delete_draft")
     @patch("app.docs.routes._lifecycle._connect")
     @patch("app.docs.routes._lifecycle.fetch_draft")
@@ -1165,6 +1234,7 @@ class TestDeleteDraftHandler:
         mock_fetch: MagicMock,
         mock_connect: MagicMock,
         mock_delete: MagicMock,
+        mock_artifacts: MagicMock,
         mock_log: MagicMock,
         mock_queue_cls: MagicMock,
     ):
@@ -1185,6 +1255,7 @@ class TestDeleteDraftHandler:
         mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
         mock_connect.return_value.__exit__ = MagicMock(return_value=False)
         mock_delete.return_value = "/tmp/ciphertext.enc"
+        mock_artifacts.return_value = (["/tmp/ciphertext.enc"], [draft.graph_uri])
         queue_instance = MagicMock()
         queue_instance.enqueue.return_value = 99
         mock_queue_cls.return_value = queue_instance

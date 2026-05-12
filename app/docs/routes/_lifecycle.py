@@ -33,6 +33,7 @@ from app.docs.audit import log_draft_delete
 from app.docs.draft_model import (
     delete_draft,
     fetch_draft,
+    get_draft_artifact_paths,
     touch_draft_access,
 )
 from app.jobs.queue import JobQueue
@@ -82,10 +83,20 @@ def delete_draft_handler(req: Request, draft_id: str):
     # every DB mutation into ONE transactional block and hands the
     # slow/flaky external cleanup off to a background ``draft_cleanup``
     # job that can retry independently.
-    storage_path: str | None = None
+    storage_paths: list[str] = []
+    graph_uris: list[str] = []
     try:
         with _connect() as conn:
-            storage_path = delete_draft(conn, parsed)
+            # #736: a draft can carry multiple ``draft_versions`` rows,
+            # each with its own encrypted file + per-version Jena named
+            # graph. Those rows cascade-delete with the parent ``drafts``
+            # row, so we MUST snapshot every artifact path BEFORE the
+            # delete — otherwise older versions' files/graphs become
+            # undiscoverable orphans. ``get_draft_artifact_paths`` reads
+            # ``draft_versions`` + the legacy ``drafts`` columns and
+            # de-dupes.
+            storage_paths, graph_uris = get_draft_artifact_paths(conn, parsed)
+            delete_draft(conn, parsed)
             # #576: polymorphic soft reference — clear any rag_chunks rows
             # tied to this draft inside the same transaction as the row
             # delete so either both land or neither does. Today no private
@@ -121,18 +132,35 @@ def delete_draft_handler(req: Request, draft_id: str):
     # blocks the user flow or leaves the DB inconsistent. Failure to
     # enqueue is logged but non-fatal — the DB is already clean and
     # the operator can always delete the file/graph manually.
+    #
+    # #736: the payload carries arrays — one entry per draft version —
+    # so the handler purges every file + named graph, not just the
+    # latest. ``draft.graph_uri`` (the latest version's URI) is folded
+    # into ``graph_uris`` by ``get_draft_artifact_paths`` already, but
+    # we union it again defensively in case the snapshot raced an edit.
+    # The legacy singular ``storage_path``/``graph_uri`` keys are kept
+    # so the older handler shape (if a worker hasn't redeployed yet)
+    # still cleans up at least the primary artifact.
+    if draft.graph_uri and draft.graph_uri not in graph_uris:
+        graph_uris.append(draft.graph_uri)
+    primary_path = storage_paths[0] if storage_paths else None
+    primary_graph = graph_uris[0] if graph_uris else draft.graph_uri
     cleanup_payload = {
         "draft_id": str(parsed),
-        "storage_path": storage_path,
-        "graph_uri": draft.graph_uri,
+        "storage_paths": storage_paths,
+        "graph_uris": graph_uris,
+        # Backward-compat for an older in-flight handler build:
+        "storage_path": primary_path,
+        "graph_uri": primary_graph,
     }
     try:
         cleanup_job_id = JobQueue().enqueue("draft_cleanup", cleanup_payload, priority=0)
         logger.info(
-            "Orphan cleanup job enqueued draft=%s job_id=%s storage_path=%s",
+            "Orphan cleanup job enqueued draft=%s job_id=%s files=%d graphs=%d",
             parsed,
             cleanup_job_id,
-            storage_path,
+            len(storage_paths),
+            len(graph_uris),
         )
     except Exception:
         logger.exception(

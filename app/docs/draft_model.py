@@ -234,14 +234,95 @@ def update_draft_parent_vtk(
     return (result.rowcount or 0) > 0
 
 
+def get_draft_artifact_paths(
+    conn: Any,
+    draft_id: uuid.UUID | str,
+) -> tuple[list[str], list[str]]:
+    """Return every encrypted-file path + Jena named-graph URI for *draft_id*.
+
+    A draft can carry **multiple** versions (``draft_versions`` — one row
+    per legislative reading), each with its own ``storage_path`` and
+    per-version ``graph_uri`` (#618 §9.5). Because ``draft_versions`` is
+    ``ON DELETE CASCADE`` from ``drafts``, those rows vanish the instant
+    the parent draft row is deleted — so the caller MUST collect the
+    artifact paths *before* calling :func:`delete_draft`, then hand them
+    to the ``draft_cleanup`` background job so every file on disk and
+    every named graph in Fuseki is purged (#736).
+
+    The legacy ``drafts.storage_path`` / ``drafts.graph_uri`` columns are
+    folded in too: for v1 rows they equal the version row's values, but a
+    draft that somehow predates migration 030's backfill (or a test fake)
+    would otherwise leak its only file. Results are de-duplicated while
+    preserving first-seen order so the cleanup job never deletes the same
+    path twice.
+
+    Returns:
+        ``(storage_paths, graph_uris)`` — two parallel-purpose lists of
+        non-empty strings. Empty lists when the draft does not exist or
+        the query fails (logged) — the caller treats an empty result as
+        "nothing external to clean up".
+    """
+    storage_paths: list[str] = []
+    graph_uris: list[str] = []
+    seen_paths: set[str] = set()
+    seen_graphs: set[str] = set()
+
+    def _add_path(value: Any) -> None:
+        if value and str(value) not in seen_paths:
+            seen_paths.add(str(value))
+            storage_paths.append(str(value))
+
+    def _add_graph(value: Any) -> None:
+        if value and str(value) not in seen_graphs:
+            seen_graphs.add(str(value))
+            graph_uris.append(str(value))
+
+    try:
+        # Legacy per-draft columns first so they take priority in the
+        # de-dup ordering (they are the v1 values in practice).
+        legacy = conn.execute(
+            "select storage_path, graph_uri from drafts where id = %s",
+            (str(draft_id),),
+        ).fetchone()
+        if legacy is not None:
+            _add_path(legacy[0])
+            _add_graph(legacy[1])
+
+        version_rows = conn.execute(
+            """
+            select storage_path, graph_uri
+            from draft_versions
+            where draft_id = %s
+            order by version_number asc
+            """,
+            (str(draft_id),),
+        ).fetchall()
+        for row in version_rows:
+            _add_path(row[0])
+            _add_graph(row[1])
+    except Exception:
+        logger.exception("Failed to collect artifact paths for draft=%s", draft_id)
+        return [], []
+
+    return storage_paths, graph_uris
+
+
 def delete_draft(conn: Any, draft_id: uuid.UUID | str) -> str | None:
     """Delete a draft row and return its ``storage_path`` for file cleanup.
 
-    The ``drafts`` table has ``ON DELETE CASCADE`` into ``draft_entities``
-    and ``impact_reports``, so removing the row here automatically clears
-    related records. The returned ``storage_path`` lets the caller delete
-    the encrypted file *after* the DB row is gone so we never orphan
-    ciphertext while the DB still points at it.
+    The ``drafts`` table has ``ON DELETE CASCADE`` into ``draft_entities``,
+    ``draft_versions`` and ``impact_reports``, so removing the row here
+    automatically clears related records. The returned ``storage_path``
+    lets the caller delete the encrypted file *after* the DB row is gone
+    so we never orphan ciphertext while the DB still points at it.
+
+    .. note::
+        This returns only the *legacy* ``drafts.storage_path``. Callers
+        that need to clean up **every** version's file + named graph must
+        first call :func:`get_draft_artifact_paths` (which also reads
+        ``draft_versions``) — see ``app/docs/routes/_lifecycle.py`` and
+        #736. ``delete_draft``'s single-path return is kept for backward
+        compatibility with callers that only want the row gone.
 
     Returns ``None`` when the draft did not exist.
     """
