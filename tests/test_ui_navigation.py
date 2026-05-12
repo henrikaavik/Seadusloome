@@ -1,5 +1,7 @@
 """Smoke tests for Breadcrumb, Tabs, and TabPanel navigation components."""
 
+import re
+
 from fasthtml.common import to_xml
 
 from app.ui.navigation import Breadcrumb, TabPanel, Tabs
@@ -54,6 +56,33 @@ def test_tabs_explicit_active_selects_given_tab():
     assert 'data-tab-id="b"' in html
     assert html.count('aria-selected="true"') == 1
     assert html.count('aria-selected="false"') == 2
+
+
+def test_tabs_initial_roving_tabindex_invariant():
+    """Server render must seed the roving tabindex correctly: exactly one
+    tab is the tab-stop (``tabindex="0"``) and it is the selected tab — the
+    rest are ``tabindex="-1"``. This is the invariant ``tabs.js``'s
+    ``setRovingTabindex`` maintains as arrow keys move focus (issue #744:
+    roving tabindex must follow focus, not only activation). ``aria-selected``
+    stays pinned to the *selected* tab regardless of where focus roams.
+    """
+    html = to_xml(
+        Tabs(
+            [("a", "Alpha"), ("b", "Beta"), ("c", "Gamma")],
+            active="b",
+        )
+    )
+    assert html.count('tabindex="0"') == 1
+    assert html.count('tabindex="-1"') == 2
+    # The single tab-stop is the selected tab: both attributes land on tab-b.
+    tab_tags = re.findall(r"<button[^>]*\brole=\"tab\"[^>]*>", html)
+    assert len(tab_tags) == 3
+    selected_tag = next(t for t in tab_tags if 'id="tab-b"' in t)
+    assert 'aria-selected="true"' in selected_tag
+    assert 'tabindex="0"' in selected_tag
+    for other in (t for t in tab_tags if 'id="tab-b"' not in t):
+        assert 'aria-selected="false"' in other
+        assert 'tabindex="-1"' in other
 
 
 def test_tabs_vertical_orientation_sets_classes():
