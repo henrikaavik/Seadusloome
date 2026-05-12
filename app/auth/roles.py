@@ -8,10 +8,33 @@ from collections.abc import Callable
 from typing import Any
 
 from fasthtml.common import *
+from fasthtml.common import to_xml
 from starlette.requests import Request
-from starlette.responses import RedirectResponse
+from starlette.responses import HTMLResponse, RedirectResponse
 
 logger = logging.getLogger(__name__)
+
+
+def _forbidden_page(message: str) -> HTMLResponse:
+    """Render the shared 403 page wrapped in an ``HTMLResponse``.
+
+    Returning a bare ``Titled(...)`` FT element here let FastHTML serve
+    it as ``200 OK`` (#739) — API clients and HTMX callers could not
+    distinguish a role/membership denial from success. Wrapping it in an
+    explicit ``HTMLResponse`` with ``status_code=403`` keeps the same
+    rendered body (the Estonian "Ligipääs keelatud" page) but emits the
+    correct status code.
+    """
+    return HTMLResponse(
+        to_xml(
+            Titled(
+                "Ligipääs keelatud",
+                P(message),
+                A("Tagasi avalehele", href="/"),
+            )
+        ),
+        status_code=403,
+    )
 
 
 def _get_auth(req: Request) -> dict | None:  # type: ignore[type-arg]
@@ -48,11 +71,7 @@ def require_role(*roles: str) -> Callable[..., Any]:
 
             user_role = auth.get("role", "")
             if user_role not in roles:
-                return Titled(
-                    "Ligipääs keelatud",
-                    P("Teil puudub õigus selle lehe vaatamiseks."),
-                    A("Tagasi avalehele", href="/"),
-                )
+                return _forbidden_page("Teil puudub õigus selle lehe vaatamiseks.")
 
             return fn(*args, **kwargs)
 
@@ -93,10 +112,8 @@ def require_org_member(org_id_param: str = "org_id") -> Callable[..., Any]:
 
             user_org_id = auth.get("org_id")
             if not user_org_id or str(user_org_id) != str(route_org_id):
-                return Titled(
-                    "Ligipääs keelatud",
-                    P("Teil puudub õigus selle organisatsiooni andmete vaatamiseks."),
-                    A("Tagasi avalehele", href="/"),
+                return _forbidden_page(
+                    "Teil puudub õigus selle organisatsiooni andmete vaatamiseks."
                 )
 
             return fn(*args, **kwargs)

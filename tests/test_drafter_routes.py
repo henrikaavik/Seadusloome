@@ -395,7 +395,7 @@ class TestStepPage:
         client = _authed_client()
         resp = client.get(f"/drafter/{_SESSION_ID}/step/1")
 
-        assert resp.status_code == 200
+        assert resp.status_code == 404
         assert "ei leitud" in resp.text
 
     @patch("app.drafter.routes.fetch_session")
@@ -415,7 +415,7 @@ class TestStepPage:
         client = _authed_client()
         resp = client.get(f"/drafter/{_SESSION_ID}/step/1")
 
-        assert resp.status_code == 200
+        assert resp.status_code == 404
         assert "ei leitud" in resp.text
 
     @patch("app.drafter.routes.fetch_session")
@@ -433,8 +433,26 @@ class TestStepPage:
         client = _authed_client()
         resp = client.get(f"/drafter/{_SESSION_ID}/step/1")
 
-        assert resp.status_code == 200
+        assert resp.status_code == 404
         assert "ei leitud" in resp.text
+
+    @patch("app.drafter.routes.fetch_session")
+    @patch("app.auth.middleware._get_provider")
+    def test_invalid_session_uuid_returns_404(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+    ):
+        """A malformed session id never hits the DB and 404s (#739)."""
+        mock_get_provider.return_value = _stub_provider()
+
+        client = _authed_client()
+        resp = client.get("/drafter/not-a-uuid/step/1")
+
+        assert resp.status_code == 404
+        assert resp.headers["content-type"].startswith("text/html")
+        assert "ei leitud" in resp.text
+        mock_fetch.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
