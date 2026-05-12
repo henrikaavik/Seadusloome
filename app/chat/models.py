@@ -756,6 +756,41 @@ def delete_messages_after(
     return int(getattr(cursor, "rowcount", 0) or 0)
 
 
+def delete_messages_from(
+    conn: Any,
+    conv_id: uuid.UUID | str,
+    from_created_at: datetime,
+) -> int:
+    """Delete every message at or after *from_created_at* (inclusive).
+
+    The companion of :func:`delete_messages_after`. Where the latter keeps
+    the boundary message (used by the edit / regenerate-from-a-user-turn
+    flow), this one *removes* the boundary too. Used by the regenerate
+    flow's degenerate fallback: when an assistant bubble has no preceding
+    user turn we cannot regenerate "from the user message", so we drop the
+    orphan assistant reply (and anything after it) outright before the
+    next turn replays — otherwise the stale reply would survive a reload
+    (issue #737). Returns the number of rows deleted; returns ``0`` on DB
+    error (logged) so callers can treat the operation as a no-op.
+    """
+    try:
+        cursor = conn.execute(
+            """
+            DELETE FROM messages
+            WHERE conversation_id = %s AND created_at >= %s
+            """,
+            (str(conv_id), from_created_at),
+        )
+    except Exception:
+        logger.exception(
+            "Failed to delete messages from %s for conversation=%s",
+            from_created_at,
+            conv_id,
+        )
+        return 0
+    return int(getattr(cursor, "rowcount", 0) or 0)
+
+
 # ---------------------------------------------------------------------------
 # Fork a conversation (migration 017)
 # ---------------------------------------------------------------------------

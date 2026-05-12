@@ -21,6 +21,7 @@ from app.chat.models import (
     create_message,
     delete_conversation,
     delete_messages_after,
+    delete_messages_from,
     fork_conversation,
     get_conversation,
     list_conversations_for_user,
@@ -628,6 +629,37 @@ class TestDeleteMessagesAfter:
         conn.execute.side_effect = RuntimeError("boom")
 
         result = delete_messages_after(conn, uuid.uuid4(), datetime.now(UTC))
+        assert result == 0
+
+
+# ---------------------------------------------------------------------------
+# delete_messages_from (#737 — drop the boundary too)
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteMessagesFrom:
+    def test_delete_uses_inclusive_greater_or_equal(self):
+        """Unlike :func:`delete_messages_after`, the boundary row IS deleted —
+        used by the regenerate flow's orphan-assistant fallback (#737)."""
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.rowcount = 4
+        conn.execute.return_value = cursor
+        boundary = datetime(2026, 4, 14, 10, 0, 0, tzinfo=UTC)
+
+        result = delete_messages_from(conn, uuid.uuid4(), boundary)
+
+        assert result == 4
+        sql, params = conn.execute.call_args.args
+        assert "DELETE" in sql
+        assert "created_at >= %s" in sql
+        assert params[1] == boundary
+
+    def test_returns_zero_on_db_error(self):
+        conn = MagicMock()
+        conn.execute.side_effect = RuntimeError("boom")
+
+        result = delete_messages_from(conn, uuid.uuid4(), datetime.now(UTC))
         assert result == 0
 
 

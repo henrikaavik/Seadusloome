@@ -574,25 +574,154 @@ class TestFeedback:
 
 
 class TestRegenerate:
-    def test_regenerate_deletes_and_returns_204(self, provider_patch, mock_conn):
+    def test_regenerate_from_user_message_keeps_pivot(self, provider_patch, mock_conn):
+        """Clicking regenerate on a user bubble (defensive path): the
+        pivot resolves to that user message itself, only downstream rows
+        are deleted, and the JSON body names that user message as the
+        replay pivot (#737)."""
         conv = _make_conversation()
         msg = _make_message(role="user")
         with (
             patch("app.chat.handlers.get_conversation", return_value=conv),
             patch("app.chat.handlers.list_messages", return_value=[msg]),
             patch("app.chat.handlers._delete_messages_after_pivot", return_value=2) as mock_del,
+            patch("app.chat.handlers._delete_messages_from_pivot") as mock_del_from,
         ):
             client = _authed_client()
             resp = client.post(f"/chat/{_CONV_ID}/messages/{_MSG_ID}/regenerate")
-            assert resp.status_code == 204
-            assert resp.headers.get("HX-Trigger") == "chat:message-regenerate"
+            assert resp.status_code == 200
+            assert resp.json() == {
+                "conversation_id": str(_CONV_ID),
+                "pivot_message_id": str(_MSG_ID),
+            }
             mock_del.assert_called_once()
+            mock_del_from.assert_not_called()
+
+    def test_regenerate_from_assistant_resolves_to_preceding_user(self, provider_patch, mock_conn):
+        """#737: the regenerate affordance lives on assistant bubbles. The
+        server resolves the clicked assistant row to its preceding *user*
+        message, deletes the assistant reply + downstream (keeping the
+        user turn), and returns that user turn as the replay pivot — so
+        the old assistant reply is gone and no duplicate user turn is
+        re-sent."""
+        user_id = uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+        asst_id = uuid.UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+        # created_at must differ so "delete strictly after the user turn"
+        # actually removes the assistant reply.
+        user_msg = Message(
+            id=user_id,
+            conversation_id=_CONV_ID,
+            role="user",
+            content="Mis on TsÜS?",
+            tool_name=None,
+            tool_input=None,
+            tool_output=None,
+            rag_context=None,
+            tokens_input=None,
+            tokens_output=None,
+            model=None,
+            created_at=datetime(2026, 4, 14, 9, 30, tzinfo=UTC),
+        )
+        asst_msg = Message(
+            id=asst_id,
+            conversation_id=_CONV_ID,
+            role="assistant",
+            content="TsÜS on tsiviilseadustiku üldosa seadus.",
+            tool_name=None,
+            tool_input=None,
+            tool_output=None,
+            rag_context=None,
+            tokens_input=None,
+            tokens_output=None,
+            model=None,
+            created_at=datetime(2026, 4, 14, 9, 31, tzinfo=UTC),
+        )
+
+        captured: dict[str, Any] = {}
+
+        def _fake_delete_after(conn, conv_id, pivot_msg):
+            captured["after_pivot_id"] = pivot_msg.id
+            return 1
+
+        with (
+            patch("app.chat.handlers.get_conversation", return_value=_make_conversation()),
+            patch(
+                "app.chat.handlers.list_messages",
+                return_value=[user_msg, asst_msg],
+            ),
+            patch(
+                "app.chat.handlers._delete_messages_after_pivot",
+                side_effect=_fake_delete_after,
+            ),
+            patch("app.chat.handlers._delete_messages_from_pivot") as mock_del_from,
+        ):
+            client = _authed_client()
+            resp = client.post(f"/chat/{_CONV_ID}/messages/{asst_id}/regenerate")
+            assert resp.status_code == 200
+            # The replay pivot is the preceding USER message, not the
+            # clicked assistant row.
+            assert resp.json() == {
+                "conversation_id": str(_CONV_ID),
+                "pivot_message_id": str(user_id),
+            }
+            # And the delete was anchored on the user turn (so the
+            # assistant reply, which is strictly after it, is removed).
+            assert captured["after_pivot_id"] == user_id
+            mock_del_from.assert_not_called()
+
+    def test_regenerate_orphan_assistant_drops_reply(self, provider_patch, mock_conn):
+        """Degenerate case: an assistant reply with no preceding user turn
+        cannot be regenerated *from* a user message — so the orphan reply
+        itself (and anything after it) is deleted and the JSON pivot is
+        ``None`` (the client then just reloads)."""
+        asst_id = uuid.UUID("cccccccc-cccc-cccc-cccc-cccccccccccc")
+        asst_msg = Message(
+            id=asst_id,
+            conversation_id=_CONV_ID,
+            role="assistant",
+            content="orphan",
+            tool_name=None,
+            tool_input=None,
+            tool_output=None,
+            rag_context=None,
+            tokens_input=None,
+            tokens_output=None,
+            model=None,
+            created_at=datetime(2026, 4, 14, 9, 30, tzinfo=UTC),
+        )
+        with (
+            patch("app.chat.handlers.get_conversation", return_value=_make_conversation()),
+            patch("app.chat.handlers.list_messages", return_value=[asst_msg]),
+            patch("app.chat.handlers._delete_messages_after_pivot") as mock_del_after,
+            patch(
+                "app.chat.handlers._delete_messages_from_pivot", return_value=1
+            ) as mock_del_from,
+        ):
+            client = _authed_client()
+            resp = client.post(f"/chat/{_CONV_ID}/messages/{asst_id}/regenerate")
+            assert resp.status_code == 200
+            assert resp.json() == {
+                "conversation_id": str(_CONV_ID),
+                "pivot_message_id": None,
+            }
+            mock_del_from.assert_called_once()
+            mock_del_after.assert_not_called()
 
     def test_regenerate_bad_msg_id_404(self, provider_patch, mock_conn):
         conv = _make_conversation()
         with patch("app.chat.handlers.get_conversation", return_value=conv):
             client = _authed_client()
             resp = client.post(f"/chat/{_CONV_ID}/messages/not-a-uuid/regenerate")
+            assert resp.status_code == 404
+
+    def test_regenerate_unknown_msg_404(self, provider_patch, mock_conn):
+        conv = _make_conversation()
+        with (
+            patch("app.chat.handlers.get_conversation", return_value=conv),
+            patch("app.chat.handlers.list_messages", return_value=[]),
+        ):
+            client = _authed_client()
+            resp = client.post(f"/chat/{_CONV_ID}/messages/{_MSG_ID}/regenerate")
             assert resp.status_code == 404
 
     def test_regenerate_cross_org_404(self, provider_patch, mock_conn):
@@ -609,23 +738,32 @@ class TestRegenerate:
 
 
 class TestEditMessage:
-    def test_edit_user_message_success(self, provider_patch, mock_conn):
+    def test_edit_user_message_returns_replay_pivot(self, provider_patch, mock_conn):
+        """#738: a successful edit persists the rewrite, drops downstream
+        rows, and returns JSON naming the edited user message as the
+        replay pivot — the client then fires the same WS ``regenerate``
+        action used by the regenerate button, so a fresh answer is
+        generated for the rewritten prompt (no duplicate user row)."""
         conv = _make_conversation()
         msg = _make_message(role="user", content="vana")
         with (
             patch("app.chat.handlers.get_conversation", return_value=conv),
             patch("app.chat.handlers.list_messages", return_value=[msg]),
             patch("app.chat.handlers._update_message_content") as mock_update,
-            patch("app.chat.handlers._delete_messages_after_pivot", return_value=0),
+            patch("app.chat.handlers._delete_messages_after_pivot", return_value=0) as mock_del,
         ):
             client = _authed_client()
             resp = client.post(
                 f"/chat/{_CONV_ID}/messages/{_MSG_ID}/edit",
                 data={"content": "uus sisu"},
             )
-            assert resp.status_code == 204
-            assert resp.headers.get("HX-Trigger") == "chat:message-edited"
+            assert resp.status_code == 200
+            assert resp.json() == {
+                "conversation_id": str(_CONV_ID),
+                "pivot_message_id": str(_MSG_ID),
+            }
             mock_update.assert_called_once()
+            mock_del.assert_called_once()
 
     def test_edit_rejects_assistant_message(self, provider_patch, mock_conn):
         conv = _make_conversation()

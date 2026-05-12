@@ -17,6 +17,15 @@ Phase UX polish additions (issue #594):
   cancels the currently-running orchestrator task for the connection.
   The orchestrator catches ``CancelledError`` and persists the partial
   assistant turn with ``is_truncated=True``.
+- **Regenerate**: a ``{"type": "regenerate", "conversation_id": "<uuid>",
+  "pivot_message_id": "<uuid>"?}`` message re-runs generation from the
+  existing conversation history *up to and including* the pivot user
+  message — **no new user message is inserted** (issues #737 / #738). The
+  HTTP regenerate/edit endpoints (``app.chat.handlers``) own the prior
+  rewind (delete the stale assistant reply + downstream) so it cannot
+  race against an in-flight stream; this WS action only drives the
+  replay. It reuses the same active-task registry as ``send_message`` so
+  ``stop_generation`` can cancel a regenerate too.
 """
 
 from __future__ import annotations
@@ -113,7 +122,8 @@ async def ws_chat(
 
     Expected message formats::
 
-        {"type": "send_message", "conversation_id": "<uuid>", "content": "..."}
+        {"type": "send_message",    "conversation_id": "<uuid>", "content": "..."}
+        {"type": "regenerate",      "conversation_id": "<uuid>", "pivot_message_id": "<uuid>"?}
         {"type": "stop_generation", "conversation_id": "<uuid>"}
 
     All other message types are silently ignored.
@@ -129,8 +139,9 @@ async def ws_chat(
         test harness or passed from the WS handler wrapper).
     active_tasks:
         Optional per-connection mapping of ``conversation_id -> Task``
-        so that ``stop_generation`` can cancel an in-flight stream.
-        When omitted the stop handler is a no-op.
+        so that ``stop_generation`` can cancel an in-flight stream
+        (both ``send_message`` and ``regenerate`` register here). When
+        omitted the stop handler is a no-op.
     """
     # Parse JSON
     try:
@@ -148,6 +159,11 @@ async def ws_chat(
     # --- stop_generation -------------------------------------------------
     if msg_type == "stop_generation":
         await _handle_stop_generation(data, send, active_tasks)
+        return
+
+    # --- regenerate ------------------------------------------------------
+    if msg_type == "regenerate":
+        await _handle_regenerate(data, send, scope, active_tasks)
         return
 
     if msg_type != "send_message":
@@ -190,15 +206,55 @@ async def ws_chat(
         return
 
     # Extract auth from scope
-    auth: dict[str, Any] = {}
-    if scope is not None:
-        auth = scope.get("auth") or {}
-
-    if not auth or not auth.get("id"):
+    auth = _auth_from_scope(scope)
+    if not auth:
         await send(json.dumps({"type": "error", "message": "Autentimine nõutav."}))
         return
 
-    # Create orchestrator and handle message
+    await _drive_orchestrator(
+        conversation_id,
+        auth,
+        send,
+        active_tasks,
+        user_message=content,
+    )
+
+
+def _auth_from_scope(scope: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return the auth dict from the ASGI *scope*, or ``None`` if absent."""
+    auth: dict[str, Any] = {}
+    if scope is not None:
+        auth = scope.get("auth") or {}
+    if not auth or not auth.get("id"):
+        return None
+    return auth
+
+
+async def _drive_orchestrator(
+    conversation_id: uuid.UUID,
+    auth: dict[str, Any],
+    send: Any,
+    active_tasks: dict[str, asyncio.Task[Any]] | None,
+    *,
+    user_message: str | None = None,
+    regenerate: bool = False,
+    regenerate_pivot_message_id: uuid.UUID | None = None,
+) -> None:
+    """Run one orchestrator turn (new message *or* regenerate) for a socket.
+
+    Shared by the ``send_message`` and ``regenerate`` paths.
+
+    * ``send_message`` → pass *user_message* (non-empty) and
+      ``regenerate=False``; the orchestrator is invoked with the classic
+      4-arg signature so existing callers/tests are unaffected.
+    * ``regenerate`` → pass ``regenerate=True`` and optionally
+      *regenerate_pivot_message_id*; the orchestrator re-runs generation
+      from the existing history up to and including that user message and
+      persists no new user row (issues #737 / #738).
+
+    Both paths register the task in *active_tasks* so ``stop_generation``
+    can cancel an in-flight turn.
+    """
     orchestrator = ChatOrchestrator(get_default_provider())
 
     async def send_event(event: dict[str, Any]) -> None:
@@ -207,14 +263,33 @@ async def ws_chat(
 
     conv_key = str(conversation_id)
 
-    async def _run() -> None:
-        try:
-            await orchestrator.handle_message(conversation_id, content, auth, send_event)
-        finally:
-            if active_tasks is not None:
-                active_tasks.pop(conv_key, None)
+    async def _invoke() -> None:
+        if regenerate:
+            # Empty ``user_message`` is the orchestrator's regenerate-mode
+            # sentinel; the prompt is the persisted pivot turn.
+            await orchestrator.handle_message(
+                conversation_id,
+                "",
+                auth,
+                send_event,
+                regenerate_pivot_message_id=regenerate_pivot_message_id,
+            )
+        else:
+            await orchestrator.handle_message(
+                conversation_id,
+                user_message or "",
+                auth,
+                send_event,
+            )
 
     if active_tasks is not None:
+
+        async def _run() -> None:
+            try:
+                await _invoke()
+            finally:
+                active_tasks.pop(conv_key, None)
+
         task = asyncio.create_task(_run())
         active_tasks[conv_key] = task
         try:
@@ -226,7 +301,7 @@ async def ws_chat(
             logger.info("Chat stream cancelled for conversation %s", conv_key)
     else:
         # No task registry (test path) — run inline.
-        await orchestrator.handle_message(conversation_id, content, auth, send_event)
+        await _invoke()
 
 
 async def _handle_stop_generation(
@@ -276,6 +351,57 @@ async def _handle_stop_generation(
         # CancelledError is expected; any other exception has already
         # been logged inside the orchestrator.
         pass
+
+
+async def _handle_regenerate(
+    data: dict[str, Any],
+    send: Any,
+    scope: dict[str, Any] | None,
+    active_tasks: dict[str, asyncio.Task[Any]] | None,
+) -> None:
+    """Re-run generation from an existing user turn (issues #737 / #738).
+
+    Carries ``conversation_id`` and an optional ``pivot_message_id`` (the
+    user message to regenerate from; the HTTP regenerate/edit endpoints
+    resolve the clicked assistant bubble to that boundary and have
+    already deleted the stale reply + downstream). When ``pivot_message_id``
+    is omitted the orchestrator regenerates from the conversation's last
+    user message. **No new user message is inserted** — the existing
+    history *is* the prompt.
+    """
+    raw_conv_id = data.get("conversation_id")
+    if not raw_conv_id:
+        await send(json.dumps({"type": "error", "message": "Puudub conversation_id."}))
+        return
+
+    try:
+        conversation_id = uuid.UUID(str(raw_conv_id))
+    except (ValueError, TypeError):
+        await send(json.dumps({"type": "error", "message": "Vigane conversation_id."}))
+        return
+
+    raw_pivot = data.get("pivot_message_id")
+    pivot_message_id: uuid.UUID | None = None
+    if raw_pivot:
+        try:
+            pivot_message_id = uuid.UUID(str(raw_pivot))
+        except (ValueError, TypeError):
+            await send(json.dumps({"type": "error", "message": "Vigane pivot_message_id."}))
+            return
+
+    auth = _auth_from_scope(scope)
+    if not auth:
+        await send(json.dumps({"type": "error", "message": "Autentimine nõutav."}))
+        return
+
+    await _drive_orchestrator(
+        conversation_id,
+        auth,
+        send,
+        active_tasks,
+        regenerate=True,
+        regenerate_pivot_message_id=pivot_message_id,
+    )
 
 
 def _extract_cookie_from_headers(headers: list[tuple[bytes, bytes]], name: str) -> str | None:

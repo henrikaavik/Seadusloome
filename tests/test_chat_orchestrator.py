@@ -2262,3 +2262,194 @@ class TestTurnDeadline:
         # No stopped event — only error.
         assert not any(e.get("type") == "stopped" for e in collector.events)
         assert any(e.get("type") == "error" for e in collector.events)
+
+
+# ---------------------------------------------------------------------------
+# #737 / #738: regenerate mode
+# ---------------------------------------------------------------------------
+
+
+class _RegenConn:
+    """Minimal conn whose ``fetchone`` always yields a valid message row.
+
+    Used by the regenerate-mode tests where ``_load_conversation`` /
+    ``_load_history`` are patched out, so the only DB traffic is the
+    fresh assistant-message INSERT ... RETURNING + the conversation
+    ``updated_at`` bump.
+    """
+
+    def __init__(self) -> None:
+        self.executed: list[str] = []
+        self._result = MagicMock()
+        self._result.fetchone.side_effect = lambda: _make_message_row(role="assistant")
+        self._result.fetchall.return_value = []
+
+    def execute(self, sql: str, params: Any = None) -> Any:  # noqa: ANN401
+        if isinstance(sql, str):
+            self.executed.append(sql)
+        return self._result
+
+    def commit(self) -> None:
+        return None
+
+    def rollback(self) -> None:
+        return None
+
+    def __enter__(self) -> _RegenConn:
+        return self
+
+    def __exit__(self, *exc: Any) -> bool:
+        return False
+
+
+class TestRegenerateMode:
+    """The WS ``regenerate`` action re-runs generation from the persisted
+    user turn — it must NOT insert a new user message (issue #737, the
+    duplicate-turn bug) and is the shared primitive behind the edit flow
+    (issue #738)."""
+
+    @patch("app.chat.orchestrator._persist_user_message")
+    @patch("app.chat.orchestrator._load_history")
+    @patch("app.chat.orchestrator._load_conversation")
+    @patch("app.chat.orchestrator.check_org_cost_budget")
+    @patch("app.chat.orchestrator.check_message_rate")
+    @patch("app.chat.orchestrator.get_connection")
+    def test_regenerate_skips_user_persist_and_replays_pivot(
+        self,
+        mock_get_conn,
+        mock_rate,
+        mock_cost,
+        mock_load_conv,
+        mock_load_hist,
+        mock_persist,
+    ):
+        conn = _RegenConn()
+        mock_get_conn.return_value = conn
+        mock_load_conv.return_value = _make_conversation()
+        # The HTTP regenerate endpoint already deleted the stale assistant
+        # reply + downstream, so handle_message sees a history that ends at
+        # the user turn we are regenerating from.
+        user_msg = _make_message("user", "Mis on TsÜS?")
+        mock_load_hist.return_value = [user_msg]
+
+        captured: dict[str, str] = {}
+
+        class _RecordingLLM(FakeLLM):
+            async def astream(self, prompt: str, **kwargs: Any):  # type: ignore[override]
+                captured["prompt"] = prompt
+                async for ev in super().astream(prompt, **kwargs):
+                    yield ev
+
+        collector = _Collector()
+        orch = ChatOrchestrator(_RecordingLLM(), FakeSparql())
+        asyncio.run(
+            orch.handle_message(
+                _CONV_ID,
+                "",  # empty content == regenerate-mode sentinel
+                _auth(),
+                collector,
+                regenerate_pivot_message_id=user_msg.id,
+            )
+        )
+
+        # #737: the user message was NOT re-persisted — it already exists
+        # as the pivot, so a fresh INSERT would be the duplicate turn.
+        mock_persist.assert_not_called()
+        # A regenerated assistant turn streamed to completion.
+        assert any(e.get("type") == "content_delta" for e in collector.events)
+        assert any(e.get("type") == "done" for e in collector.events)
+        # The prompt the LLM saw contains the pivot user message exactly
+        # once (it is re-appended by ``_build_llm_messages``, not doubled).
+        assert captured["prompt"].count("Mis on TsÜS?") == 1
+        # And the fresh assistant reply was persisted.
+        assert any("INSERT INTO messages" in sql for sql in conn.executed)
+
+    @patch("app.chat.orchestrator._persist_user_message")
+    @patch("app.chat.orchestrator._load_history")
+    @patch("app.chat.orchestrator._load_conversation")
+    @patch("app.chat.orchestrator.check_org_cost_budget")
+    @patch("app.chat.orchestrator.check_message_rate")
+    @patch("app.chat.orchestrator.get_connection")
+    def test_regenerate_resolves_assistant_pivot_to_preceding_user(
+        self,
+        mock_get_conn,
+        mock_rate,
+        mock_cost,
+        mock_load_conv,
+        mock_load_hist,
+        mock_persist,
+    ):
+        """Defence in depth: even if a stale assistant id reaches the
+        orchestrator (e.g. the history view differs slightly from what the
+        HTTP endpoint trimmed), it resolves to the preceding user turn and
+        the trailing assistant content is not fed back into the prompt."""
+        conn = _RegenConn()
+        mock_get_conn.return_value = conn
+        mock_load_conv.return_value = _make_conversation()
+        user_msg = _make_message("user", "Selgita lepingu tühisust")
+        asst_msg = _make_message("assistant", "Leping on tühine kui ...")
+        mock_load_hist.return_value = [user_msg, asst_msg]
+
+        captured: dict[str, str] = {}
+
+        class _RecordingLLM(FakeLLM):
+            async def astream(self, prompt: str, **kwargs: Any):  # type: ignore[override]
+                captured["prompt"] = prompt
+                async for ev in super().astream(prompt, **kwargs):
+                    yield ev
+
+        collector = _Collector()
+        orch = ChatOrchestrator(_RecordingLLM(), FakeSparql())
+        asyncio.run(
+            orch.handle_message(
+                _CONV_ID,
+                "",
+                _auth(),
+                collector,
+                regenerate_pivot_message_id=asst_msg.id,
+            )
+        )
+
+        mock_persist.assert_not_called()
+        assert any(e.get("type") == "done" for e in collector.events)
+        # The pivot user message is present once; the stale assistant reply
+        # is NOT re-sent into the prompt (it was after the pivot).
+        assert captured["prompt"].count("Selgita lepingu tühisust") == 1
+        assert "Leping on tühine kui" not in captured["prompt"]
+
+    @patch("app.chat.orchestrator._persist_user_message")
+    @patch("app.chat.orchestrator._load_history")
+    @patch("app.chat.orchestrator._load_conversation")
+    @patch("app.chat.orchestrator.check_org_cost_budget")
+    @patch("app.chat.orchestrator.check_message_rate")
+    @patch("app.chat.orchestrator.get_connection")
+    def test_regenerate_with_no_user_turn_errors(
+        self,
+        mock_get_conn,
+        mock_rate,
+        mock_cost,
+        mock_load_conv,
+        mock_load_hist,
+        mock_persist,
+    ):
+        conn = _RegenConn()
+        mock_get_conn.return_value = conn
+        mock_load_conv.return_value = _make_conversation()
+        mock_load_hist.return_value = []  # nothing to replay
+
+        collector = _Collector()
+        orch = ChatOrchestrator(FakeLLM(), FakeSparql())
+        asyncio.run(
+            orch.handle_message(
+                _CONV_ID,
+                "",
+                _auth(),
+                collector,
+                regenerate_pivot_message_id=_MSG_ID,
+            )
+        )
+
+        mock_persist.assert_not_called()
+        # No generation happened; the user gets a friendly error event.
+        assert any(e.get("type") == "error" for e in collector.events)
+        assert not any(e.get("type") == "content_delta" for e in collector.events)

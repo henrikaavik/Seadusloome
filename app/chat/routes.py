@@ -29,7 +29,7 @@ from typing import Any
 
 from fasthtml.common import *  # noqa: F403
 from starlette.requests import ClientDisconnect, Request
-from starlette.responses import RedirectResponse, Response
+from starlette.responses import HTMLResponse, RedirectResponse, Response
 
 from app.auth.helpers import require_auth as _require_auth
 from app.auth.policy import can_access_conversation
@@ -92,11 +92,22 @@ def _format_timestamp(value: Any) -> str:
     return format_tallinn(value)
 
 
-def _not_found_page(req: Request):
-    """Render the 404 page for missing or cross-org conversations."""
+def _not_found_page(req: Request) -> HTMLResponse:
+    """Render the themed 404 page for missing or cross-org conversations.
+
+    Returns a ``starlette`` :class:`HTMLResponse` with an explicit
+    ``404`` status (issue #739): the module's security model treats
+    missing / cross-org conversations as not-found, and a bare FT element
+    rendered through FastHTML's default path answers ``200 OK`` — which
+    lets these pages be cached, crawled, or mistaken for success by HTMX /
+    API callers. Wrapping the ``PageShell`` in an explicit response keeps
+    the themed body *and* the correct status code.
+    """
+    from fasthtml.common import to_xml
+
     auth = req.scope.get("auth")
     theme = get_theme_from_request(req)
-    return PageShell(
+    page = PageShell(
         H1("Vestlust ei leitud", cls="page-title"),  # noqa: F405
         Alert(
             "Otsitud vestlust ei ole olemas või Teil puudub selle vaatamise õigus.",
@@ -107,7 +118,9 @@ def _not_found_page(req: Request):
         user=auth,
         theme=theme,
         active_nav="/chat",
+        request=req,
     )
+    return HTMLResponse(to_xml(page), status_code=404)
 
 
 def _get_message_count(conv_id: uuid.UUID) -> int:

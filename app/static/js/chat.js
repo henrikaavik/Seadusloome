@@ -12,7 +12,15 @@
  * CLIENT → SERVER  (JSON objects)
  * --------------------------------
  *   {type: "send_message",    conversation_id, content}
+ *   {type: "regenerate",      conversation_id, pivot_message_id?}
  *   {type: "stop_generation", conversation_id}
+ *
+ * `regenerate` re-runs generation from the conversation's persisted history
+ * up to and including the pivot *user* message — NO text is re-sent and NO
+ * new user turn is inserted (issues #737 / #738). The HTTP regenerate/edit
+ * endpoints own the prior rewind (delete the stale assistant reply +
+ * downstream rows) and return the pivot id; this client then fires the WS
+ * `regenerate` action and updates the DOM optimistically.
  *
  * SERVER → CLIENT  (JSON objects, all have `type`)
  * --------------------------------
@@ -1298,33 +1306,72 @@
         showToast('Taasgenereerimine ebaõnnestus', 'error');
         return;
       }
-      // Locate the preceding user message text and replay it via WS
-      const msgEl = messagesEl
-        ? messagesEl.querySelector('[data-message-id="' + msgId + '"]')
-        : null;
-      let userText = '';
-      if (msgEl) {
-        // Walk backwards through siblings to find the previous user bubble
-        let prev = msgEl.previousElementSibling;
-        while (prev) {
-          if (prev.classList.contains('chat-message-user')) {
-            const t = prev.querySelector('.chat-message-text');
-            if (t) userText = t.innerText || t.textContent || '';
-            break;
-          }
-          prev = prev.previousElementSibling;
-        }
-        // Remove the assistant bubble we just asked to regenerate
-        if (msgEl.parentNode) msgEl.parentNode.removeChild(msgEl);
+      return res.json().catch(function () { return null; });
+    }).then(function (data) {
+      if (data === undefined) return; // !res.ok branch already handled
+      // The server has resolved the clicked assistant bubble to its
+      // preceding user turn and already deleted the stale reply +
+      // everything downstream. ``pivot_message_id`` is the user turn to
+      // replay from (issue #737); ``null`` is the degenerate "orphan
+      // reply, nothing to replay" case — fall back to a reload so the
+      // authoritative (trimmed) history is rendered.
+      const pivotId = data && data.pivot_message_id;
+      if (!pivotId) {
+        location.reload();
+        return;
       }
-
-      if (userText && inputEl) {
-        inputEl.value = userText;
-        sendMessage();
-      }
+      replayFromPivot(pivotId, null);
     }).catch(function () {
       showToast('Taasgenereerimine ebaõnnestus', 'error');
     });
+  }
+
+  /**
+   * Optimistically rewind the transcript to the pivot user bubble and
+   * kick off a fresh generation over the WebSocket.
+   *
+   * @param {string} pivotMsgId  message id of the user turn to replay from
+   * @param {?string} newUserText  when set, re-render the pivot bubble's
+   *   text with this string (the edit flow); when null, leave it as-is
+   *   (the regenerate flow).
+   */
+  function replayFromPivot(pivotMsgId, newUserText) {
+    const pivotEl = messagesEl
+      ? messagesEl.querySelector('[data-message-id="' + pivotMsgId + '"]')
+      : null;
+
+    if (pivotEl) {
+      // Drop every bubble / tool-activity / sources block after the pivot
+      // — they belong to the turn(s) the server just deleted.
+      let sib = pivotEl.nextElementSibling;
+      while (sib) {
+        const next = sib.nextElementSibling;
+        if (sib.parentNode) sib.parentNode.removeChild(sib);
+        sib = next;
+      }
+      if (typeof newUserText === 'string') {
+        const textEl = pivotEl.querySelector('.chat-message-text');
+        if (textEl) textEl.textContent = newUserText;
+      }
+    }
+
+    // Clear any transient streaming state from a prior turn before we open
+    // a new thinking bubble for the regenerated reply.
+    for (const k in msgBubbles) delete msgBubbles[k];
+    for (const k in msgBuffers) delete msgBuffers[k];
+    pendingBubble = null;
+    pendingMsgId = null;
+
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      showToast('Ühendus puudub — palun oodake...', 'warning');
+      return;
+    }
+
+    hideEmptyState();
+    wsSend({ type: 'regenerate', conversation_id: convId, pivot_message_id: pivotMsgId });
+    disableInput();
+    startThinking();
+    if (inputEl) inputEl.focus();
   }
 
   function handleEdit(msgId, msgEl, btn) {
@@ -1367,6 +1414,18 @@
       bubble.innerHTML = originalHtml;
     });
 
+    // Replace the inline edit form with a plain rendered user bubble
+    // (a <p class="chat-message-text"> child, exactly like the server
+    // renders user turns). Uses textContent — never innerHTML — so the
+    // rewritten text cannot inject markup.
+    function restorePivotBubble(text) {
+      while (bubble.firstChild) bubble.removeChild(bubble.firstChild);
+      const p = document.createElement('p');
+      p.className = 'chat-message-text';
+      p.textContent = text;
+      bubble.appendChild(p);
+    }
+
     saveBtn.addEventListener('click', function () {
       const newContent = textarea.value.trim();
       if (!newContent) return;
@@ -1379,17 +1438,26 @@
         body: formData,
         credentials: 'same-origin',
       }).then(function (res) {
-        if (res.ok) {
-          // Simplest correct approach: reload the page so server-rendered
-          // history is authoritative (per spec).
-          location.reload();
-        } else {
+        if (!res.ok) {
           showToast('Muutmine ebaõnnestus', 'error');
-          bubble.innerHTML = originalHtml;
+          restorePivotBubble(originalText);
+          return undefined; // signal: the !res.ok branch already handled it
         }
+        // The edit persisted. The body names the replay pivot, but even
+        // if it fails to parse we still regenerate (the edit is committed).
+        return res.json().catch(function () { return {}; });
+      }).then(function (data) {
+        if (data === undefined) return; // !res.ok branch already handled
+        // Render the edited prompt in place, then rewind + regenerate via
+        // the SAME WS primitive the regenerate button uses (issue #738):
+        // #737 and #738 share one path — "persist the edit, re-generate
+        // from that user message", no duplicate user row inserted.
+        restorePivotBubble(newContent);
+        const pivotId = (data && data.pivot_message_id) || msgId;
+        replayFromPivot(pivotId, newContent);
       }).catch(function () {
         showToast('Muutmine ebaõnnestus', 'error');
-        bubble.innerHTML = originalHtml;
+        restorePivotBubble(originalText);
       });
     });
   }

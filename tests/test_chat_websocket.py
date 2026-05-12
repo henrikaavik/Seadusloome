@@ -519,6 +519,137 @@ class TestWsChatStopGeneration:
         assert parsed["type"] == "stopped"
 
 
+# ---------------------------------------------------------------------------
+# #737 / #738: regenerate action
+# ---------------------------------------------------------------------------
+
+
+class TestWsChatRegenerate:
+    """The ``regenerate`` action re-runs generation from the persisted
+    history (no re-sent text, no new user message) — issues #737 / #738."""
+
+    @patch("app.chat.websocket.ChatOrchestrator")
+    @patch("app.chat.websocket.get_default_provider")
+    def test_regenerate_calls_orchestrator_in_regenerate_mode(self, mock_provider, mock_orch_cls):
+        mock_instance = MagicMock()
+        mock_instance.handle_message = AsyncMock()
+        mock_orch_cls.return_value = mock_instance
+
+        pivot_id = "44444444-4444-4444-4444-444444444444"
+        collector = _Collector()
+        msg = json.dumps(
+            {
+                "type": "regenerate",
+                "conversation_id": _CONV_ID,
+                "pivot_message_id": pivot_id,
+            }
+        )
+        asyncio.run(ws_chat(msg, collector, _auth_scope()))
+
+        mock_instance.handle_message.assert_called_once()
+        call = mock_instance.handle_message.call_args
+        # conversation_id, then the empty-string regenerate sentinel.
+        assert str(call[0][0]) == _CONV_ID
+        assert call[0][1] == ""
+        assert call[0][2]["id"] == _USER_ID
+        # The pivot is forwarded as a UUID keyword arg.
+        assert str(call.kwargs["regenerate_pivot_message_id"]) == pivot_id
+
+    @patch("app.chat.websocket.ChatOrchestrator")
+    @patch("app.chat.websocket.get_default_provider")
+    def test_regenerate_without_pivot_passes_none(self, mock_provider, mock_orch_cls):
+        mock_instance = MagicMock()
+        mock_instance.handle_message = AsyncMock()
+        mock_orch_cls.return_value = mock_instance
+
+        collector = _Collector()
+        msg = json.dumps({"type": "regenerate", "conversation_id": _CONV_ID})
+        asyncio.run(ws_chat(msg, collector, _auth_scope()))
+
+        mock_instance.handle_message.assert_called_once()
+        call = mock_instance.handle_message.call_args
+        assert call[0][1] == ""
+        assert call.kwargs["regenerate_pivot_message_id"] is None
+
+    @patch("app.chat.websocket.ChatOrchestrator")
+    @patch("app.chat.websocket.get_default_provider")
+    def test_regenerate_bad_pivot_id_sends_error(self, mock_provider, mock_orch_cls):
+        mock_instance = MagicMock()
+        mock_instance.handle_message = AsyncMock()
+        mock_orch_cls.return_value = mock_instance
+
+        collector = _Collector()
+        msg = json.dumps(
+            {
+                "type": "regenerate",
+                "conversation_id": _CONV_ID,
+                "pivot_message_id": "not-a-uuid",
+            }
+        )
+        asyncio.run(ws_chat(msg, collector, _auth_scope()))
+
+        mock_instance.handle_message.assert_not_called()
+        assert len(collector.sent) == 1
+        assert json.loads(collector.sent[0])["type"] == "error"
+
+    def test_regenerate_missing_conversation_id_sends_error(self):
+        collector = _Collector()
+        asyncio.run(ws_chat(json.dumps({"type": "regenerate"}), collector, _auth_scope()))
+        assert len(collector.sent) == 1
+        parsed = json.loads(collector.sent[0])
+        assert parsed["type"] == "error"
+        assert "conversation_id" in parsed["message"].lower()
+
+    def test_regenerate_unauthenticated_sends_error(self):
+        collector = _Collector()
+        msg = json.dumps({"type": "regenerate", "conversation_id": _CONV_ID})
+        asyncio.run(ws_chat(msg, collector, scope={}))
+        assert len(collector.sent) == 1
+        parsed = json.loads(collector.sent[0])
+        assert parsed["type"] == "error"
+        assert "autentimine" in parsed["message"].lower()
+
+    def test_regenerate_stop_can_cancel_it(self):
+        """``stop_generation`` cancels an in-flight ``regenerate`` too —
+        both paths share the active-task registry."""
+        cancel_observed: dict[str, bool] = {"called": False}
+
+        async def slow_handle(conv_id, content, auth, send_event, **kwargs):
+            try:
+                await send_event({"type": "content_delta", "delta": "partial"})
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                cancel_observed["called"] = True
+                await send_event({"type": "stopped", "message_id": None})
+                raise
+
+        mock_instance = MagicMock()
+        mock_instance.handle_message = AsyncMock(side_effect=slow_handle)
+
+        collector = _Collector()
+
+        async def scenario():
+            with (
+                patch("app.chat.websocket.ChatOrchestrator", return_value=mock_instance),
+                patch("app.chat.websocket.get_default_provider"),
+            ):
+                tasks: dict[str, Any] = {}
+                regen_msg = json.dumps({"type": "regenerate", "conversation_id": _CONV_ID})
+                stop_msg = json.dumps({"type": "stop_generation", "conversation_id": _CONV_ID})
+
+                regen_task = asyncio.create_task(
+                    ws_chat(regen_msg, collector, _auth_scope(), active_tasks=tasks)
+                )
+                await asyncio.sleep(0.05)
+                await ws_chat(stop_msg, collector, _auth_scope(), active_tasks=tasks)
+                await regen_task
+
+        asyncio.run(scenario())
+
+        assert cancel_observed["called"] is True
+        assert any(json.loads(s).get("type") == "stopped" for s in collector.sent)
+
+
 class TestWsHandlerDisconnectCleanup:
     """Disconnect mid-stream must cancel pending tasks and drop the registry key."""
 
