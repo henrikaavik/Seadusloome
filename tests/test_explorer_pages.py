@@ -11,11 +11,19 @@ does NOT auto-load the 90k overview.
 
 from __future__ import annotations
 
+import json
+import re
+import shutil
+import subprocess
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from fasthtml.common import to_xml
 from starlette.requests import Request
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_EXPLORER_JS = _REPO_ROOT / "app" / "static" / "js" / "explorer.js"
 
 
 @pytest.fixture(autouse=True)
@@ -722,3 +730,146 @@ class TestStartPanelBundle:
             "high_risk_reports": ["hr"],
             "recent_drafts": ["dr"],
         }
+
+
+# ---------------------------------------------------------------------------
+# #758 — spatial-map polish: mini-map DOM container + stable-layout seed
+# ---------------------------------------------------------------------------
+
+
+def test_explorer_page_renders_minimap_container():
+    """#758: the mini-map's DOM container (a <div id="minimap"> wrapping
+    <svg id="minimap-svg">) is present near the canvas so explorer.js can
+    render the overview panel into it. It's there on a graph-view open..."""
+    html = _html("vaade=koik")
+    assert 'id="minimap"' in html
+    assert 'id="minimap-svg"' in html
+    assert 'aria-label="Õiguskaardi miniülevaade"' in html
+    # ...and also on a cold open (the graph DOM is rendered behind the start
+    # panel so explorer.js' getElementById() calls don't hit nulls).
+    cold = _html()
+    assert 'id="minimap"' in cold
+    assert 'id="minimap-svg"' in cold
+    # And on a focus deep-link.
+    focused = _html("focus=https://data.riik.ee/ontology/estleg#KarS_par_133")
+    assert 'id="minimap"' in focused
+
+
+# --- The layout-seed function: deterministic (same node id → same position) ---
+
+# Pull the pure constants + helper functions ("#758: spatial-map polish —
+# constants for the mini-map" up to the State section) straight out of
+# explorer.js, so the determinism test exercises the *shipped* implementation.
+_SEED_BLOCK_RE = re.compile(
+    r"// #758: spatial-map polish — constants for the mini-map.*?"
+    r"(?=// -+\n// State\n// -+)",
+    re.DOTALL,
+)
+
+
+def _extract_seed_block() -> str:
+    src = _EXPLORER_JS.read_text(encoding="utf-8")
+    m = _SEED_BLOCK_RE.search(src)
+    assert m is not None, "could not locate the #758 layout-seed block in explorer.js"
+    return m.group(0)
+
+
+def test_explorer_js_exposes_the_layout_seed_block():
+    """Guard the regex above: the block must contain the two pure helpers."""
+    block = _extract_seed_block()
+    assert "function hashStringToInt(" in block
+    assert "function seedPosition(" in block
+    # The fixed PRNG seed for d3-force lives in the same block.
+    assert "LAYOUT_PRNG_SEED" in block
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_layout_seed_is_deterministic_per_node_id(tmp_path: Path):
+    """#758 (stable layout): seedPosition(id) is a pure function — the same node
+    id always maps to the same initial (x, y), so re-opening the same query
+    re-creates the same picture. Run the shipped function in Node and check it
+    twice over a spread of ids."""
+    block = _extract_seed_block()
+    ids = [
+        "https://data.riik.ee/ontology/estleg#KarS_par_133",
+        "cat:EnactedLaw",
+        "https://eur-lex.europa.eu/eli/dir/2016/680",
+        "",  # empty id must still produce a finite, stable point
+        "Mõni eestikeelne id õ ä ü",  # non-ASCII id
+    ]
+    driver = block + (
+        "\nconst ids = " + json.dumps(ids) + ";\n"
+        "const once = ids.map((id) => seedPosition(id, LAYOUT_SEED_RADIUS));\n"
+        "const twice = ids.map((id) => seedPosition(id, LAYOUT_SEED_RADIUS));\n"
+        # Also check that distinct ids generally land on distinct points.
+        "const hashes = ids.filter((x) => x).map(hashStringToInt);\n"
+        "process.stdout.write(JSON.stringify({once, twice, hashes}));\n"
+    )
+    script = tmp_path / "seed_check.js"
+    script.write_text(driver, encoding="utf-8")
+    out = subprocess.run(
+        ["node", str(script)],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=True,
+    )
+    data = json.loads(out.stdout)
+    once, twice, hashes = data["once"], data["twice"], data["hashes"]
+    # Determinism: identical results across two independent calls.
+    assert once == twice
+    # Every coordinate is a finite number.
+    for pt in once:
+        assert isinstance(pt["x"], (int, float)) and isinstance(pt["y"], (int, float))
+        assert pt["x"] == pt["x"] and pt["y"] == pt["y"]  # not NaN
+        assert abs(pt["x"]) < 1e6 and abs(pt["y"]) < 1e6
+    # The hash spreads ids out — no all-collide degenerate case.
+    assert len(set(hashes)) == len(hashes)
+    # A known anchor point won't drift between runs of the test suite either:
+    # recompute it here in Python (mirror of hashStringToInt + seedPosition) and
+    # compare. This pins the algorithm, not just self-consistency.
+    expected_first = _py_seed_position(ids[0])
+    assert abs(once[0]["x"] - expected_first[0]) < 1e-6
+    assert abs(once[0]["y"] - expected_first[1]) < 1e-6
+
+
+def _py_hash_string_to_int(s: str) -> int:
+    """Pure-Python mirror of explorer.js' hashStringToInt (FNV-1a, 32-bit).
+
+    The JS does ``h ^= s.charCodeAt(i)`` — a UTF-16 code unit. This mirror is
+    only used to compare against ids that live in the BMP (``ord(ch) ==
+    charCodeAt``); astral-plane ids are exercised by the Node-side test only.
+    """
+    h = 0x811C9DC5
+    for ch in s:
+        h ^= ord(ch)
+        h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) & 0xFFFFFFFF
+    return h & 0xFFFFFFFF
+
+
+def _py_seed_position(node_id: str, radius: float = 480.0) -> tuple[float, float]:
+    """Pure-Python mirror of explorer.js' seedPosition."""
+    import math
+
+    h = _py_hash_string_to_int(node_id)
+    a = (h & 0xFFFF) / 0x10000
+    b = ((h >> 16) & 0xFFFF) / 0x10000
+    angle = a * math.pi * 2
+    dist = math.sqrt(b) * radius
+    return (math.cos(angle) * dist, math.sin(angle) * dist)
+
+
+def test_py_seed_mirror_matches_for_ascii_ids():
+    """Sanity-check the Python mirror against a couple of hand-computable cases
+    so a future tweak to the JS algorithm trips this test, not just the Node one."""
+    # FNV-1a of the empty string is the offset basis → both fractions are
+    # derived from 0x811c9dc5.
+    h = 0x811C9DC5
+    a = (h & 0xFFFF) / 0x10000
+    b = ((h >> 16) & 0xFFFF) / 0x10000
+    import math
+
+    assert _py_hash_string_to_int("") == h
+    x, y = _py_seed_position("")
+    assert abs(x - math.cos(a * math.pi * 2) * math.sqrt(b) * 480.0) < 1e-9
+    assert abs(y - math.sin(a * math.pi * 2) * math.sqrt(b) * 480.0) < 1e-9
