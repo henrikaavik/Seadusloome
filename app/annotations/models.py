@@ -242,16 +242,24 @@ def create_annotation(
 ) -> Annotation:
     """Insert a new ``annotations`` row and return the created annotation.
 
+    The body text is encrypted via Fernet (:func:`encrypt_text`) and written
+    to ``content_encrypted``; the legacy plaintext ``content`` column is left
+    NULL, matching :func:`create_row_annotation` (#772). Read paths fall back
+    to plaintext for rows written before this change.
+
     The caller is responsible for committing the transaction.
     """
     if target_type not in VALID_TARGET_TYPES:
         raise ValueError(f"Invalid target_type: {target_type!r}")
 
+    ciphertext = encrypt_text(content)
+
     row = conn.execute(
         f"""
         INSERT INTO annotations
-            (user_id, org_id, target_type, target_id, target_metadata, content)
-        VALUES (%s, %s, %s, %s, %s::jsonb, %s)
+            (user_id, org_id, target_type, target_id, target_metadata,
+             content, content_encrypted)
+        VALUES (%s, %s, %s, %s, %s::jsonb, NULL, %s)
         RETURNING {_ANNOTATION_COLUMNS}
         """,
         (
@@ -260,7 +268,7 @@ def create_annotation(
             target_type,
             target_id,
             json.dumps(target_metadata) if target_metadata is not None else None,
-            content,
+            ciphertext,
         ),
     ).fetchone()
     if row is None:
@@ -373,18 +381,26 @@ def create_reply(
 ) -> AnnotationReply:
     """Insert a new ``annotation_replies`` row and return the created reply.
 
+    The body text is encrypted via Fernet (:func:`encrypt_text`) and written
+    to ``content_encrypted``; the legacy plaintext ``content`` column is left
+    NULL (#772). Read paths fall back to plaintext for rows written before
+    this change.
+
     The caller is responsible for committing the transaction.
     """
+    ciphertext = encrypt_text(content)
+
     row = conn.execute(
         f"""
-        INSERT INTO annotation_replies (annotation_id, user_id, content)
-        VALUES (%s, %s, %s)
+        INSERT INTO annotation_replies
+            (annotation_id, user_id, content, content_encrypted)
+        VALUES (%s, %s, NULL, %s)
         RETURNING {_REPLY_COLUMNS}
         """,
         (
             str(annotation_id),
             str(user_id),
-            content,
+            ciphertext,
         ),
     ).fetchone()
     if row is None:

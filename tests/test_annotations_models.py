@@ -156,6 +156,69 @@ class TestCreateAnnotation:
         with pytest.raises(ValueError, match="Invalid target_type"):
             create_annotation(conn, _USER_ID, _ORG_ID, "invalid_type", "some-id", "Kommentaar")
 
+    # ------------------------------------------------------------------
+    # #772 — encryption-at-rest for generic annotation writes
+    # ------------------------------------------------------------------
+
+    def test_create_writes_ciphertext_and_no_plaintext(self):
+        """create_annotation() must populate content_encrypted and leave
+        content NULL in the INSERT, mirroring create_row_annotation()."""
+        from app.storage import decrypt_text
+
+        conn = MagicMock()
+        # Mock the RETURNING row with the encrypted column populated so
+        # _row_to_annotation reads back the ciphertext path.
+        captured_ciphertext: dict[str, bytes] = {}
+
+        def _execute(sql: str, params: tuple[Any, ...]) -> Any:
+            # The encrypted byte payload is the LAST positional param in the
+            # new (NULL, %s) tail of the INSERT.
+            ciphertext_param = params[-1]
+            assert isinstance(ciphertext_param, bytes)
+            captured_ciphertext["bytes"] = ciphertext_param
+            row = _make_annotation_row(
+                content=None,
+                content_encrypted=ciphertext_param,
+            )
+            cursor = MagicMock()
+            cursor.fetchone.return_value = row
+            return cursor
+
+        conn.execute.side_effect = _execute
+
+        plaintext = "See on tundlik märkus."
+        result = create_annotation(conn, _USER_ID, _ORG_ID, "draft", "draft-id", plaintext)
+
+        # The ciphertext round-trips through encrypt/decrypt.
+        assert decrypt_text(captured_ciphertext["bytes"]) == plaintext
+        # The Annotation surface object reports the decrypted plaintext.
+        assert result.content == plaintext
+
+        # The INSERT SQL writes NULL for content and the ciphertext for
+        # content_encrypted — guarantees no plaintext lands in the legacy
+        # column even on a half-rolled-back deploy.
+        sql_used = conn.execute.call_args.args[0]
+        assert "content_encrypted" in sql_used
+        assert "NULL" in sql_used
+
+    def test_create_does_not_pass_plaintext_to_query(self):
+        """The plaintext body must never appear in the SQL parameters."""
+        conn = MagicMock()
+        plaintext = "Salajane juriidiline arvamus § 3 kohta."
+        row = _make_annotation_row(content=None, content_encrypted=b"unused")
+        conn.execute.return_value.fetchone.return_value = row
+
+        # Patch encrypt_text inside the model module so the assertion below
+        # is independent of the actual ciphertext format.
+        with patch("app.annotations.models.encrypt_text", return_value=b"CIPHER") as mock_enc:
+            create_annotation(conn, _USER_ID, _ORG_ID, "draft", "draft-id", plaintext)
+
+        mock_enc.assert_called_once_with(plaintext)
+        params = conn.execute.call_args.args[1]
+        assert plaintext not in params
+        # The ciphertext bytes ARE in the params tail.
+        assert b"CIPHER" in params
+
 
 # ---------------------------------------------------------------------------
 # get_annotation
@@ -303,6 +366,89 @@ class TestCreateReply:
         with pytest.raises(RuntimeError, match="produced no row"):
             create_reply(conn, _ANN_ID, _USER_ID, "Vastus")
 
+    # ------------------------------------------------------------------
+    # #772 — encryption-at-rest for reply writes
+    # ------------------------------------------------------------------
+
+    def test_create_reply_writes_ciphertext_and_no_plaintext(self):
+        """create_reply() must populate content_encrypted and leave
+        content NULL in the INSERT."""
+        from app.storage import decrypt_text
+
+        conn = MagicMock()
+        captured_ciphertext: dict[str, bytes] = {}
+
+        def _execute(sql: str, params: tuple[Any, ...]) -> Any:
+            ciphertext_param = params[-1]
+            assert isinstance(ciphertext_param, bytes)
+            captured_ciphertext["bytes"] = ciphertext_param
+            row = _make_reply_row(content=None, content_encrypted=ciphertext_param)
+            cursor = MagicMock()
+            cursor.fetchone.return_value = row
+            return cursor
+
+        conn.execute.side_effect = _execute
+
+        plaintext = "Vastus tundlikule märkusele."
+        result = create_reply(conn, _ANN_ID, _USER_ID, plaintext)
+
+        # Ciphertext round-trips.
+        assert decrypt_text(captured_ciphertext["bytes"]) == plaintext
+        # The returned object exposes the decrypted plaintext.
+        assert result.content == plaintext
+
+        # The INSERT SQL writes NULL for content and the ciphertext for
+        # content_encrypted.
+        sql_used = conn.execute.call_args.args[0]
+        assert "content_encrypted" in sql_used
+        assert "NULL" in sql_used
+
+    def test_create_reply_does_not_pass_plaintext_to_query(self):
+        """The reply plaintext body must never appear in the SQL parameters."""
+        conn = MagicMock()
+        plaintext = "Salajane vastus § 5 kohta."
+        row = _make_reply_row(content=None, content_encrypted=b"unused")
+        conn.execute.return_value.fetchone.return_value = row
+
+        with patch("app.annotations.models.encrypt_text", return_value=b"CIPHER") as mock_enc:
+            create_reply(conn, _ANN_ID, _USER_ID, plaintext)
+
+        mock_enc.assert_called_once_with(plaintext)
+        params = conn.execute.call_args.args[1]
+        assert plaintext not in params
+        assert b"CIPHER" in params
+
+    # ------------------------------------------------------------------
+    # Legacy plaintext fallback reads still work for both shapes
+    # ------------------------------------------------------------------
+
+    def test_legacy_plaintext_annotation_round_trips_through_get(self):
+        """A pre-encryption row (content set, content_encrypted NULL) is
+        readable through get_annotation()."""
+        conn = MagicMock()
+        legacy_row = _make_annotation_row(
+            content="Vana plaintekst rida",
+            content_encrypted=None,
+        )
+        conn.execute.return_value.fetchone.return_value = legacy_row
+
+        ann = get_annotation(conn, _ANN_ID)
+        assert ann is not None
+        assert ann.content == "Vana plaintekst rida"
+
+    def test_legacy_plaintext_reply_round_trips_through_list(self):
+        """A pre-encryption reply row reads back via list_replies()."""
+        conn = MagicMock()
+        legacy_row = _make_reply_row(
+            content="Vana vastus plaintextina",
+            content_encrypted=None,
+        )
+        conn.execute.return_value.fetchall.return_value = [legacy_row]
+
+        replies = list_replies(conn, _ANN_ID)
+        assert len(replies) == 1
+        assert replies[0].content == "Vana vastus plaintextina"
+
 
 # ---------------------------------------------------------------------------
 # list_replies
@@ -407,9 +553,16 @@ _VERSION_ID = uuid.UUID("77777777-7777-7777-7777-777777777777")
 _OTHER_USER_ID = uuid.UUID("88888888-8888-8888-8888-888888888888")
 
 
-@pytest.fixture(autouse=False)
+@pytest.fixture(autouse=True)
 def _fernet_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Install a fresh Fernet key for encryption tests in this class."""
+    """Install a fresh Fernet key for every test in this module.
+
+    Autouse because create_annotation() and create_reply() now call
+    encrypt_text() at write time (#772), so even the existing CRUD tests
+    need a key available; tests that previously didn't request the
+    fixture still work because the fixture is a no-op aside from the
+    env-var setup.
+    """
     from cryptography.fernet import Fernet
 
     monkeypatch.setenv("APP_ENV", "development")
