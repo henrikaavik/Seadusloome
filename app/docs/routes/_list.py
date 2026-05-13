@@ -68,6 +68,7 @@ from app.docs.status import (
 from app.docs.status import (
     VALID_STATUSES as _VALID_STATUSES,
 )
+from app.docs.upload import max_upload_mb_display
 from app.ui.data.data_table import Column, DataTable
 from app.ui.data.pagination import Pagination
 from app.ui.feedback.empty_state import EmptyState
@@ -655,10 +656,10 @@ def drafts_list_page(req: Request):
             ),
             P(
                 "Vajutage „Laadi üles uus eelnõu“, et alustada. "
-                "Maksimaalne failisuurus on 50 MB. Eelnõud säilivad kuni "
-                "nende kustutamiseni; tundlikud failid on krüpteeritud "
-                "puhkeolekus ja nähtavad ainult teie organisatsiooni "
-                "liikmetele."
+                f"Maksimaalne failisuurus on {max_upload_mb_display()}. "
+                "Eelnõud säilivad kuni nende kustutamiseni; tundlikud failid "
+                "on krüpteeritud puhkeolekus ja nähtavad ainult teie "
+                "organisatsiooni liikmetele."
             ),
             variant="info",
             dismissible=True,
