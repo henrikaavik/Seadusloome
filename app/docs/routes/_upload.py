@@ -14,9 +14,10 @@ Routes registered (wired by :func:`app.docs.routes.register_draft_routes`):
 Public-ish helpers re-exported by ``app.docs.routes.__init__`` for
 back-compat:
 
-    ``_UPLOAD_MAX_BYTES`` / ``_FILE_PICKER_SCRIPT`` / ``_DOC_TYPE_TOGGLE_SCRIPT``
+    ``_DOC_TYPE_TOGGLE_SCRIPT``
     ``_VALID_DOC_TYPES``
     ``_doc_type_radio``
+    ``_file_picker_script`` — renders the upload-size-aware picker JS (#776)
     ``_vtk_picker``         — also used by the link-vtk modal in __init__.py
     ``_version_picker``
     ``_upload_form``
@@ -52,7 +53,12 @@ from app.docs.draft_model import (
     list_versionable_drafts_for_org,
     list_vtks_for_org,
 )
-from app.docs.upload import DraftUploadError, handle_upload
+from app.docs.upload import (
+    DraftUploadError,
+    handle_upload,
+    max_upload_bytes,
+    max_upload_mb_display,
+)
 from app.ui.feedback.flash import push_flash
 from app.ui.layout import PageShell
 from app.ui.primitives.button import Button
@@ -66,55 +72,63 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Client-side upload helpers (#602, #640)
+# Client-side upload helpers (#602, #640, #776)
 # ---------------------------------------------------------------------------
 
 
-# #602: client-side 50 MB cap matches the server-side limit in
-# ``app/docs/upload.py``. Surfaced in the browser so users don't wait
-# for a large upload to transfer before being told it's too big. The
-# inline script also renders "filename — 12.3 MB" below the picker so
-# there is immediate visual confirmation of the selection.
-_UPLOAD_MAX_BYTES = 50 * 1024 * 1024
+def _file_picker_script() -> str:
+    """Render the file-picker JS with the *current* upload-size limit (#776).
 
-_FILE_PICKER_SCRIPT = (
-    "(function () {\n"
-    "  var input = document.getElementById('field-file');\n"
-    "  if (!input) return;\n"
-    "  var info = document.getElementById('field-file-info');\n"
-    "  var err = document.getElementById('field-file-error');\n"
-    "  var submit = document.getElementById('upload-submit');\n"
-    f"  var MAX = {_UPLOAD_MAX_BYTES};\n"
-    "  function fmt(bytes) {\n"
-    "    if (bytes < 1024) return bytes + ' B';\n"
-    "    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';\n"
-    "    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';\n"
-    "  }\n"
-    "  input.addEventListener('change', function () {\n"
-    "    var file = input.files && input.files[0];\n"
-    "    if (!file) {\n"
-    "      if (info) info.textContent = '';\n"
-    "      if (err) { err.textContent = ''; err.hidden = true; }\n"
-    "      if (submit) submit.disabled = false;\n"
-    "      return;\n"
-    "    }\n"
-    "    if (info) info.textContent = file.name + ' \\u2014 ' + fmt(file.size);\n"
-    "    if (file.size > MAX) {\n"
-    "      if (err) {\n"
-    "        err.textContent = 'Fail on liiga suur (' + fmt(file.size) "
-    "+ '). Maksimaalne suurus on 50 MB.';\n"
-    "        err.hidden = false;\n"
-    "      }\n"
-    "      if (submit) submit.disabled = true;\n"
-    "      input.value = '';\n"
-    "      if (info) info.textContent = '';\n"
-    "    } else {\n"
-    "      if (err) { err.textContent = ''; err.hidden = true; }\n"
-    "      if (submit) submit.disabled = false;\n"
-    "    }\n"
-    "  });\n"
-    "})();\n"
-)
+    #602: client-side size cap matches the server-side limit in
+    ``app/docs/upload.py`` so users don't wait for a large upload to
+    transfer before being told it's too big. The inline script also
+    renders "filename — 12.3 MB" below the picker so there is immediate
+    visual confirmation of the selection.
+
+    The byte constant and the user-facing error string both derive from
+    the same ``MAX_UPLOAD_SIZE_MB`` read (#776) so the JS gate and the
+    server-side validator are guaranteed to agree.
+    """
+    max_bytes = max_upload_bytes()
+    max_label = max_upload_mb_display()
+    return (
+        "(function () {\n"
+        "  var input = document.getElementById('field-file');\n"
+        "  if (!input) return;\n"
+        "  var info = document.getElementById('field-file-info');\n"
+        "  var err = document.getElementById('field-file-error');\n"
+        "  var submit = document.getElementById('upload-submit');\n"
+        f"  var MAX = {max_bytes};\n"
+        "  function fmt(bytes) {\n"
+        "    if (bytes < 1024) return bytes + ' B';\n"
+        "    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';\n"
+        "    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';\n"
+        "  }\n"
+        "  input.addEventListener('change', function () {\n"
+        "    var file = input.files && input.files[0];\n"
+        "    if (!file) {\n"
+        "      if (info) info.textContent = '';\n"
+        "      if (err) { err.textContent = ''; err.hidden = true; }\n"
+        "      if (submit) submit.disabled = false;\n"
+        "      return;\n"
+        "    }\n"
+        "    if (info) info.textContent = file.name + ' \\u2014 ' + fmt(file.size);\n"
+        "    if (file.size > MAX) {\n"
+        "      if (err) {\n"
+        "        err.textContent = 'Fail on liiga suur (' + fmt(file.size) "
+        f"+ '). Maksimaalne suurus on {max_label}.';\n"
+        "        err.hidden = false;\n"
+        "      }\n"
+        "      if (submit) submit.disabled = true;\n"
+        "      input.value = '';\n"
+        "      if (info) info.textContent = '';\n"
+        "    } else {\n"
+        "      if (err) { err.textContent = ''; err.hidden = true; }\n"
+        "      if (submit) submit.disabled = false;\n"
+        "    }\n"
+        "  });\n"
+        "})();\n"
+    )
 
 
 # #640: inline toggle that disables the "Seotud VTK" picker when the
@@ -374,13 +388,17 @@ def _upload_form(
                 cls="input input-file",
             ),
             Small(  # noqa: F405
-                "Toetatud failitüübid: .docx, .pdf. Maksimaalne suurus 50 MB.",
+                f"Toetatud failitüübid: .docx, .pdf. "
+                f"Maksimaalne suurus {max_upload_mb_display()}.",
                 cls="form-field-help",
             ),
             # #602: client-side picker feedback — filename + formatted
             # size, plus an inline error when the picked file exceeds
-            # 50 MB so the user is not forced to wait for a large
-            # upload to transfer before being told it's too big.
+            # the configured limit so the user is not forced to wait
+            # for a large upload to transfer before being told it's too
+            # big. The actual byte cap is derived at render time so a
+            # change to ``MAX_UPLOAD_SIZE_MB`` propagates without a
+            # redeploy of the routes module (#776).
             P("", id="field-file-info", cls="form-field-help muted-text"),  # noqa: F405
             Div(  # noqa: F405
                 "",
@@ -406,7 +424,7 @@ def _upload_form(
             Span("", cls="btn-spinner upload-spinner", aria_hidden="true"),  # noqa: F405
             cls="form-actions",
         ),
-        Script(_FILE_PICKER_SCRIPT),  # noqa: F405
+        Script(_file_picker_script()),  # noqa: F405
         Script(_DOC_TYPE_TOGGLE_SCRIPT),  # noqa: F405
         method="post",
         action="/drafts",
@@ -467,7 +485,7 @@ def new_draft_page(req: Request):
         H1("Uus eelnõu", cls="page-title"),  # noqa: F405
         InfoBox(
             P(
-                "Valige fail (.docx või .pdf, kuni 50 MB) ja andke sellele "
+                f"Valige fail (.docx või .pdf, kuni {max_upload_mb_display()}) ja andke sellele "
                 "pealkiri. Pärast üleslaadimist analüüsib "
                 "süsteem eelnõu automaatselt."
             ),

@@ -116,21 +116,51 @@ class _UploadLike(Protocol):
 # ---------------------------------------------------------------------------
 
 
-def _max_upload_bytes() -> int:
-    """Return the maximum accepted upload size in bytes.
+_DEFAULT_MAX_UPLOAD_MB = 50
+
+
+def _max_upload_mb() -> int:
+    """Return the configured ``MAX_UPLOAD_SIZE_MB`` clamped to ``[1, ∞)``.
 
     Controlled by ``MAX_UPLOAD_SIZE_MB`` so ops can raise/lower the limit
     per environment without a redeploy. Defaults to 50 MB — Phase 2 spec
     §3 calls for 25 MB but 50 MB leaves headroom for scanned PDFs and is
     still well below the encryption overhead budget.
     """
-    raw = os.environ.get("MAX_UPLOAD_SIZE_MB", "50")
+    raw = os.environ.get("MAX_UPLOAD_SIZE_MB", str(_DEFAULT_MAX_UPLOAD_MB))
     try:
         mb = int(raw)
     except ValueError:
-        logger.warning("Invalid MAX_UPLOAD_SIZE_MB=%r, falling back to 50", raw)
-        mb = 50
-    return max(1, mb) * 1024 * 1024
+        logger.warning(
+            "Invalid MAX_UPLOAD_SIZE_MB=%r, falling back to %d",
+            raw,
+            _DEFAULT_MAX_UPLOAD_MB,
+        )
+        mb = _DEFAULT_MAX_UPLOAD_MB
+    return max(1, mb)
+
+
+def max_upload_bytes() -> int:
+    """Return the maximum accepted upload size in bytes.
+
+    Single source of truth shared between server-side validation
+    (:func:`_validate_size`) and the upload-form UI (#776). Reads
+    ``MAX_UPLOAD_SIZE_MB`` from the environment on every call so a
+    runtime override (e.g. ``monkeypatch.setenv`` in tests, or a Coolify
+    env-var change) is picked up without a restart.
+    """
+    return _max_upload_mb() * 1024 * 1024
+
+
+def max_upload_mb_display() -> str:
+    """Return the configured upload size as a user-facing ``"<N> MB"`` label.
+
+    Companion helper to :func:`max_upload_bytes` — both derive from the
+    same ``MAX_UPLOAD_SIZE_MB`` read so the JS byte constant and the
+    Estonian copy in the upload form / listing page stay in lockstep
+    (#776).
+    """
+    return f"{_max_upload_mb()} MB"
 
 
 # ---------------------------------------------------------------------------
@@ -180,15 +210,15 @@ def _validate_size(size: int | None, contents: bytes) -> int:
     actual = len(contents)
     # Prefer the post-read length — ``UploadFile.size`` is advisory and
     # some clients lie about it.
-    limit = _max_upload_bytes()
+    limit = max_upload_bytes()
     if actual == 0:
         raise DraftUploadError("Üleslaaditud fail on tühi.")
     if actual > limit:
-        mb = limit // (1024 * 1024)
-        raise DraftUploadError(f"Fail on liiga suur. Maksimaalne lubatud suurus on {mb} MB.")
+        label = max_upload_mb_display()
+        raise DraftUploadError(f"Fail on liiga suur. Maksimaalne lubatud suurus on {label}.")
     if size is not None and size > limit:
-        mb = limit // (1024 * 1024)
-        raise DraftUploadError(f"Fail on liiga suur. Maksimaalne lubatud suurus on {mb} MB.")
+        label = max_upload_mb_display()
+        raise DraftUploadError(f"Fail on liiga suur. Maksimaalne lubatud suurus on {label}.")
     return actual
 
 

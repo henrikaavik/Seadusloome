@@ -140,10 +140,9 @@ from app.docs.routes._shared import (
 from app.docs.routes._status_tracker import _status_tracker
 from app.docs.routes._upload import (
     _DOC_TYPE_TOGGLE_SCRIPT,
-    _FILE_PICKER_SCRIPT,
-    _UPLOAD_MAX_BYTES,
     _VALID_DOC_TYPES,
     _doc_type_radio,
+    _file_picker_script,
     _upload_form,
     _validate_parent_vtk_fk,
     _version_picker,
@@ -174,11 +173,10 @@ __all__ = [
     "_status_tracker",
     # _upload.py constants
     "_DOC_TYPE_TOGGLE_SCRIPT",
-    "_FILE_PICKER_SCRIPT",
-    "_UPLOAD_MAX_BYTES",
     "_VALID_DOC_TYPES",
     # _upload.py helpers
     "_doc_type_radio",
+    "_file_picker_script",
     "_upload_form",
     "_validate_parent_vtk_fk",
     "_version_picker",
