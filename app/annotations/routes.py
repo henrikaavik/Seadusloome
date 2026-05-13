@@ -47,6 +47,7 @@ from app.annotations.models import (
     resolve_annotation,
     resolve_row_thread,
 )
+from app.annotations.row_keys import decode_row_key, safe_row_key
 from app.auth.helpers import require_auth as _require_auth
 from app.auth.provider import UserDict
 from app.auth.users import get_user
@@ -585,6 +586,16 @@ def delete_annotation_handler(req: Request, id: str):
 #
 # row_kind is validated against ``VALID_ROW_KINDS`` at the handler boundary
 # so a malformed value short-circuits before any DB call.
+#
+# #773 / #781 follow-up: row_key arrives base64url-encoded for every
+# row kind, including entity / EU rows whose raw values are ontology URIs
+# (and sometimes contain literal ``%XX`` substrings, e.g. CELEX). The
+# route uses Starlette's ``:path`` converter so the matcher accepts the
+# whole opaque segment, and each handler calls :func:`decode_row_key` to
+# recover the raw row key before any DB / renderer work. The encoder /
+# decoder pair is the only encode/decode the app performs — base64url
+# uses ``[A-Za-z0-9_-]`` so no transport layer (httpx, Starlette
+# TestClient, uvicorn, reverse proxies) mutates the value in flight.
 # ---------------------------------------------------------------------------
 
 
@@ -742,7 +753,12 @@ def _row_panel_fragment(
     whole inner fragment via ``outerHTML`` from the resolve/reopen
     handlers).
     """
-    base = f"/annotations/version/{draft_version_id}/{row_kind}/{row_key}"
+    # #773: the URLs the fragment's buttons / form POST to must carry
+    # the SAME percent-encoded form the report renderer mints, otherwise
+    # the resolve/reopen/compose actions submit to a path containing raw
+    # ``/`` and ``#`` (the keys here are the already-decoded raw URIs).
+    encoded_row_key = safe_row_key(row_key)
+    base = f"/annotations/version/{draft_version_id}/{row_kind}/{encoded_row_key}"
 
     # Resolve mention UUIDs → display names once per fragment so each
     # message item can render badges without re-querying.
@@ -924,6 +940,12 @@ def get_row_panel_handler(
         return resolved
     version_uuid, _org_id = resolved
 
+    # #781 follow-up: base64url → raw row key. Malformed input → 400.
+    try:
+        row_key = decode_row_key(row_key)
+    except (ValueError, UnicodeDecodeError):
+        return Response(status_code=400)
+
     messages = _load_panel_messages(version_uuid, row_kind, row_key)
     return _row_panel_fragment(version_uuid, row_kind, row_key, messages, auth)
 
@@ -958,6 +980,12 @@ async def post_row_message_handler(
     if isinstance(resolved, Response):
         return resolved
     version_uuid, org_id = resolved
+
+    # #781 follow-up: base64url → raw row key. Malformed input → 400.
+    try:
+        row_key = decode_row_key(row_key)
+    except (ValueError, UnicodeDecodeError):
+        return Response(status_code=400)
 
     raw_content, parse_error = await _read_content(req)
     if parse_error is not None:
@@ -1035,6 +1063,12 @@ def post_row_resolve_handler(
         return resolved
     version_uuid, _org_id = resolved
 
+    # #781 follow-up: base64url → raw row key. Malformed input → 400.
+    try:
+        row_key = decode_row_key(row_key)
+    except (ValueError, UnicodeDecodeError):
+        return Response(status_code=400)
+
     try:
         with _connect() as conn:
             updated = resolve_row_thread(
@@ -1081,6 +1115,12 @@ def post_row_reopen_handler(
         return resolved
     version_uuid, _org_id = resolved
 
+    # #781 follow-up: base64url → raw row key. Malformed input → 400.
+    try:
+        row_key = decode_row_key(row_key)
+    except (ValueError, UnicodeDecodeError):
+        return Response(status_code=400)
+
     try:
         with _connect() as conn:
             updated = reopen_row_thread(
@@ -1117,7 +1157,24 @@ def register_annotation_routes(rt) -> None:  # type: ignore[no-untyped-def]
     # §9.4 row-annotation routes (PR-B).  The unprefixed ``/annotations``
     # path matches the sprint plan §6 contract; PR-C wires it up from the
     # impact-report side panel.
-    base = "/annotations/version/{draft_version_id}/{row_kind}/{row_key}"
+    #
+    # #773: ``row_key`` uses the ``:path`` converter because affected-entity
+    # and EU-compliance rows store the raw ontology URI as the key, and URIs
+    # contain ``/``, ``:``, and ``#`` which Starlette decodes BEFORE routing
+    # — a plain ``{row_key}`` segment would 404 once a URI key arrives.
+    # ``:path`` matches greedily; the actual segment is base64url so it
+    # never contains ``/`` in practice (base64url alphabet is
+    # ``[A-Za-z0-9_-]``), but the ``:path`` converter is kept because
+    # older URLs encoded with the previous percent-encoding scheme may
+    # still be in flight during a rolling deploy. Outbound encoding goes
+    # through :func:`app.annotations.row_keys.safe_row_key`; inbound
+    # decoding goes through :func:`app.annotations.row_keys.decode_row_key`.
+    #
+    # The POST sub-routes (``/messages``, ``/resolve``, ``/reopen``) keep
+    # their own methods so no greedy ``:path`` ambiguity arises — Starlette
+    # routes by ``(path, method)`` and the GET base + POST tail-suffix
+    # patterns each match only on their own verb.
+    base = "/annotations/version/{draft_version_id}/{row_kind}/{row_key:path}"
     rt(base, methods=["GET"])(get_row_panel_handler)
     rt(f"{base}/messages", methods=["POST"])(post_row_message_handler)
     rt(f"{base}/resolve", methods=["POST"])(post_row_resolve_handler)

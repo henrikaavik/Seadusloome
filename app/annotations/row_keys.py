@@ -17,10 +17,41 @@ ARE the annotation contract: both the report renderer (UI side) and the
 analyze pipeline (stale-flag side) consume them, and pulling them out
 of :mod:`app.docs.report_routes` keeps the analyze handler free of the
 FastHTML/UI import baggage.
+
+URL + CSS safety (#773):
+
+The ``entity`` and ``eu`` row keys are raw ontology URIs that contain
+``/``, ``:``, ``#``, and sometimes literal ``%XX`` substrings (e.g. EU
+CELEX identifiers stored as ``CELEX%3A32016R0679``). Embedding them
+directly into URL path segments (e.g.
+``/annotations/version/<v>/<kind>/<row_key>``) or CSS id selectors
+(``#annotation-popover-entity-<row_key>``) breaks routing and DOM
+lookups. Three helpers mediate the boundary:
+
+* :func:`safe_row_key` — base64url-encode for opaque path embedding.
+* :func:`decode_row_key` — server-side decode at the handler boundary.
+* :func:`target_dom_id` — derive a CSS-safe DOM id from any raw target.
+
+The original URI stays the round-trip identity; only the URL path
+segment and the DOM id use the encoded / hashed form.
+
+Why base64url instead of percent-encoding (#781 follow-up):
+
+Percent-encoding only round-trips if the raw value contains no
+literal ``%XX`` substrings. CELEX URIs like ``CELEX%3A32016R0679``
+break that invariant — ``quote`` turns the ``%`` into ``%25``, then
+the ASGI server (and Starlette's TestClient, on top of httpx) decodes
+percent sequences along the transport chain. The number of decodes is
+not contractually fixed by ASGI servers and known to differ between
+uvicorn, Starlette's TestClient, and reverse proxies. Base64url uses
+only ``[A-Za-z0-9_-]`` — none of which are special in any URL, CSS,
+or HTML context — so the encoded form is opaque to every transport
+layer and the only encode/decode happens in this module.
 """
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 from typing import Any
@@ -106,3 +137,66 @@ def collect_row_specs(findings: dict[str, Any]) -> list[tuple[str, str]]:
         if key:
             specs.append(("gap", key))
     return specs
+
+
+# ---------------------------------------------------------------------------
+# URL- and CSS-safety helpers (#773)
+# ---------------------------------------------------------------------------
+
+
+def safe_row_key(raw: str) -> str:
+    """Base64url-encode a row_key for opaque, transport-safe path embedding.
+
+    Returns a string drawn from the alphabet ``[A-Za-z0-9_-]`` — none of
+    which are reserved in URL path segments, query strings, CSS selectors,
+    or HTML attribute values — so the encoded form passes through the
+    entire request pipeline (browser → reverse proxy → ASGI server →
+    Starlette router) with zero transport-layer mutation. The matching
+    decoder is :func:`decode_row_key`; the pair is the only encode /
+    decode the application performs on this value.
+
+    Trailing ``=`` padding is stripped to keep URLs short and clean. The
+    decoder pads it back before decoding.
+
+    Empty / falsy input returns the empty string so a missing row key
+    doesn't become the encoding of ``""``.
+    """
+    if not raw:
+        return ""
+    return base64.urlsafe_b64encode(str(raw).encode("utf-8")).rstrip(b"=").decode("ascii")
+
+
+def decode_row_key(encoded: str) -> str:
+    """Inverse of :func:`safe_row_key`. Returns the original raw row key.
+
+    Adds back the stripped base64 padding before decoding so any 1-4
+    char tail length is accepted. Decoding errors propagate as
+    ``binascii.Error`` / ``UnicodeDecodeError`` so route handlers can
+    surface them as 400 responses if a client sends a malformed value
+    — the helper itself does not catch them.
+    """
+    if not encoded:
+        return ""
+    padded = encoded + "=" * (-len(encoded) % 4)
+    return base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
+
+
+def target_dom_id(target_kind: str, target_id: str) -> str:
+    """Return a CSS-safe DOM id for an annotation container.
+
+    The id must be selectable via ``getElementById`` AND via CSS
+    selectors / HTMX ``hx-target="#..."`` queries.  Raw ontology URIs
+    contain ``/``, ``:``, ``#``, and ``%`` (after percent-encoding) —
+    all of which are CSS structural characters that need backslash
+    escapes inside a selector.  Hashing the raw ``target_id`` into a
+    sha256-truncated hex digest sidesteps the problem entirely: the
+    result is ``[0-9a-f]+`` and therefore always a valid CSS identifier.
+
+    The 16-char digest gives ~64 bits of collision resistance which is
+    plenty for one report page worth of rows.  Data attributes still
+    carry the original URI for round-trip identification — only the
+    DOM id is the hashed form.
+    """
+    raw = f"{target_kind}:{target_id or ''}"
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+    return f"annotation-popover-{target_kind}-{digest}"

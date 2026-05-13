@@ -44,6 +44,9 @@ from app.annotations.row_keys import (
 from app.annotations.row_keys import (
     row_key_for_gap as _row_key_for_gap,
 )
+from app.annotations.row_keys import (
+    safe_row_key as _safe_row_key,
+)
 from app.auth.audit import log_action
 from app.auth.helpers import require_auth as _require_auth
 from app.auth.policy import can_view_draft
@@ -236,7 +239,14 @@ def _row_annotation_button(
             cls="annotation-count-badge",
         )
 
-    base = f"/annotations/version/{draft_version_id}/{row_kind}/{row_key}"
+    # #773 / #781 follow-up: ``row_key`` for ``entity`` / ``eu`` rows is
+    # the raw ontology URI (contains ``/``, ``:``, ``#``, and sometimes
+    # literal ``%XX``). Base64url-encode it before embedding in the path
+    # segment so the encoded form is opaque to every transport layer
+    # (httpx, Starlette TestClient, uvicorn, reverse proxies) — none of
+    # them will decode or re-encode the value in flight.
+    encoded_row_key = _safe_row_key(row_key)
+    base = f"/annotations/version/{draft_version_id}/{row_kind}/{encoded_row_key}"
     return Button(  # noqa: F405
         NotStr("&#128172;"),  # noqa: F405  # speech balloon glyph
         badge,
@@ -248,7 +258,8 @@ def _row_annotation_button(
         aria_label=f"Ava märkuste paneel ({unresolved_count} lahendamata)",
         title="Ava märkuste paneel",
         # Data attrs make the button addressable from tests + future JS
-        # without parsing the URL again.
+        # without parsing the URL again. Note: data attrs keep the raw
+        # (non-encoded) row_key so JS callers don't have to decode.
         data_row_kind=row_kind,
         data_row_key=row_key,
         data_draft_version_id=draft_version_id,
