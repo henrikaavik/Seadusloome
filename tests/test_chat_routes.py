@@ -932,6 +932,88 @@ class TestChatListPolish:
             kwargs = mock_list.call_args.kwargs
             assert kwargs.get("search") == "karistus"
 
+    # ------------------------------------------------------------------
+    # #775: pagination URLs preserve the active filter set
+    # ------------------------------------------------------------------
+
+    @patch("app.chat.routes._count_conversations_for_user", return_value=60)
+    @patch("app.chat.routes._get_last_message_at", return_value=None)
+    @patch("app.chat.routes._get_message_count", return_value=0)
+    @patch("app.chat.routes._connect")
+    @patch("app.auth.middleware._get_provider")
+    def test_pagination_links_preserve_q_and_archived(
+        self,
+        mock_provider,
+        mock_connect,
+        _mock_msg_count,
+        _mock_last,
+        _mock_total,
+    ):
+        """`/chat?q=…&archived=1` page-2 link must keep both filters.
+
+        Before #775, pagination's ``base_url="/chat"`` dropped ``q`` and
+        ``archived`` on every page jump, silently widening the result
+        set when the user clicked "Järgmine".
+        """
+        mock_provider.return_value = _stub_provider()
+        conn = MagicMock()
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+        conv = _make_conversation()
+        with patch("app.chat.routes.list_conversations_for_user", return_value=[conv]):
+            client = _authed_client()
+            resp = client.get("/chat?q=tere&archived=1")
+        assert resp.status_code == 200
+        # 60 rows / 25 per page = 3 pages, current=1 → "Järgmine" link
+        # must point at page=2 with q + archived still attached.
+        # Both ``&amp;`` (escaped) and ``&`` shapes are accepted because
+        # HTMX renders attribute values with HTML escaping.
+        body = resp.text
+        assert (
+            "/chat?q=tere&archived=1&page=2" in body
+            or "/chat?q=tere&amp;archived=1&amp;page=2" in body
+        )
+
+    @patch("app.chat.routes._count_conversations_for_user", return_value=60)
+    @patch("app.chat.routes._get_last_message_at", return_value=None)
+    @patch("app.chat.routes._get_message_count", return_value=0)
+    @patch("app.chat.routes._connect")
+    @patch("app.auth.middleware._get_provider")
+    def test_pagination_links_preserve_q_only(
+        self,
+        mock_provider,
+        mock_connect,
+        _mock_msg_count,
+        _mock_last,
+        _mock_total,
+    ):
+        """A search without ``archived=1`` keeps only ``q`` on page links."""
+        mock_provider.return_value = _stub_provider()
+        conn = MagicMock()
+        mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+        conv = _make_conversation()
+        with patch("app.chat.routes.list_conversations_for_user", return_value=[conv]):
+            client = _authed_client()
+            resp = client.get("/chat?q=karistus")
+        assert resp.status_code == 200
+        body = resp.text
+        assert "/chat?q=karistus&page=2" in body or "/chat?q=karistus&amp;page=2" in body
+        # archived must NOT have leaked in.
+        assert "archived=1" not in body or "archived=1&" not in body.replace("&amp;", "&")
+
+    def test_chat_list_base_url_helper(self):
+        """Unit test the ``_chat_list_base_url`` helper used by pagination."""
+        from app.chat.routes import _chat_list_base_url
+
+        assert _chat_list_base_url(search_q="", include_archived=False) == "/chat"
+        assert _chat_list_base_url(search_q="foo", include_archived=False) == "/chat?q=foo"
+        assert _chat_list_base_url(search_q="", include_archived=True) == "/chat?archived=1"
+        assert (
+            _chat_list_base_url(search_q="foo bar", include_archived=True)
+            == "/chat?q=foo+bar&archived=1"
+        )
+
 
 class TestChatRouteOrdering:
     """Route-registration order regression tests.
@@ -964,11 +1046,18 @@ class TestChatRouteOrdering:
         # And should be a 2xx or the documented 303 redirect for non-HTMX.
         assert resp.status_code in (200, 303)
 
-    @patch("app.chat.handlers._search_conversations_impl", return_value=[])
-    @patch("app.chat.handlers._connect")
+    @patch("app.chat.routes._count_conversations_for_user", return_value=0)
+    @patch("app.chat.routes.list_conversations_for_user", return_value=[])
+    @patch("app.chat.routes._connect")
     @patch("app.auth.middleware._get_provider")
-    def test_search_path_htmx_returns_fragment(self, mock_provider, mock_connect, _mock_search):
-        """HTMX request hits the search handler directly (no redirect)."""
+    def test_search_path_htmx_returns_fragment(
+        self, mock_provider, mock_connect, _mock_list, _mock_count
+    ):
+        """HTMX request hits the search handler directly (no redirect).
+
+        Post-#775: the response is the ``#chat-list-body`` fragment,
+        not the old ``#chat-search-results`` shape.
+        """
         mock_provider.return_value = _stub_provider()
         conn = MagicMock()
         mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
@@ -977,7 +1066,7 @@ class TestChatRouteOrdering:
         client = _authed_client()
         resp = client.get("/chat/search?q=foo", headers={"HX-Request": "true"})
         assert resp.status_code == 200
-        assert "chat-search-results" in resp.text
+        assert 'id="chat-list-body"' in resp.text
 
 
 # ---------------------------------------------------------------------------

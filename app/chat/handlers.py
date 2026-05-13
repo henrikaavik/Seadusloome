@@ -56,7 +56,6 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from fasthtml.common import A, Div, Li, P, Ul
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse, Response
 
@@ -71,7 +70,6 @@ from app.chat.models import (
     delete_messages_from,
     fork_conversation,
     get_conversation,
-    list_conversations_for_user,
     list_messages,
     set_conversation_archived,
     set_conversation_pinned,
@@ -991,82 +989,79 @@ def export_docx_handler(req: Request, conv_id: str):
 # ---------------------------------------------------------------------------
 
 
-def _search_conversations_impl(
-    conn: Any, user_id: str, term: str, limit: int = 25
-) -> list[Conversation]:
-    """Return conversations whose title matches *term* (case-insensitive).
+def _build_chat_redirect_target(*, q: str, archived: bool) -> str:
+    """Compose the ``/chat?…`` redirect target for the non-HTMX search path."""
+    from urllib.parse import urlencode
 
-    Delegates to :func:`list_conversations_for_user` with the ``search``
-    kwarg which performs an ILIKE substring match against ``title``.
-    Full-text search on message bodies is out of scope for this sweep;
-    that would need a tsvector column migration.
-    """
-    try:
-        return list_conversations_for_user(conn, user_id, limit=limit, search=term)
-    except Exception:
-        logger.exception("Search failed for term=%r user=%s", term, user_id)
-        return []
-
-
-def _render_search_results(conversations: list[Conversation], term: str) -> Any:
-    """Render an HTML fragment suitable for ``hx-target`` replacement."""
-    if not conversations:
-        return Div(
-            P(f'Otsingule "{term}" ei vastanud ukski vestlus.', cls="muted-text"),
-            id="chat-search-results",
-            cls="chat-search-results chat-search-empty",
-        )
-    items = []
-    for conv in conversations:
-        items.append(
-            Li(
-                A(
-                    conv.title or "Nõustamine",
-                    href=f"/chat/{conv.id}",
-                    cls="chat-search-result-link",
-                ),
-                cls="chat-search-result-item",
-            )
-        )
-    return Div(
-        Ul(*items, cls="chat-search-result-list"),
-        id="chat-search-results",
-        cls="chat-search-results",
-    )
+    params: list[tuple[str, str]] = []
+    if q:
+        params.append(("q", q))
+    if archived:
+        params.append(("archived", "1"))
+    if not params:
+        return "/chat"
+    return "/chat?" + urlencode(params)
 
 
 def search_conversations_handler(req: Request):
-    """GET /chat/search?q=<term>.
+    """GET /chat/search?q=<term>&archived=<0|1>&page=<n>.
 
-    HTMX callers get an HTML fragment keyed on ``#chat-search-results``;
-    plain browsers are redirected to ``/chat?q=<term>`` so the main list
-    renderer (owned by ``routes.py``) can handle the query parameter.
+    #775: HTMX callers now receive the same ``#chat-list-body`` fragment
+    that :func:`app.chat.routes.chat_list_page` renders for the full GET
+    page. The fragment carries the conversation table (pin / archive /
+    rename / delete row controls) and pagination footer with ``q`` +
+    ``archived`` preserved, so the toolbar's HTMX swap behaves exactly
+    like the standard ``/chat`` reload — just without the page chrome.
+
+    The previous lightweight ``#chat-search-results`` fragment is gone:
+    it dropped the row action controls and ignored the archived toggle,
+    which made the HTMX swap a regression compared to the full page
+    render (#775 evidence).
+
+    Plain browsers (no HTMX) are still redirected to ``/chat?q=…`` so
+    the main list renderer owns the page-level state. The redirect
+    target now carries the ``archived`` toggle too so a non-JS user
+    who unticks ``Näita arhiveeritud`` and submits keeps that intent
+    on the redirected page.
     """
     auth_or_redirect = _require_auth(req)
     if isinstance(auth_or_redirect, Response):
         return auth_or_redirect
     auth = auth_or_redirect
 
-    term = (req.query_params.get("q") or "").strip()
-    if not _is_htmx(req):
-        target = f"/chat?q={term}" if term else "/chat"
-        return RedirectResponse(url=target, status_code=303)
+    # Read q + archived + page from the request the same way the full
+    # GET /chat page does, so the HTMX swap and the redirected page
+    # share one filter contract.
+    from app.chat.routes import (  # imported lazily to avoid the routes <-> handlers cycle
+        _chat_list_state_from_request,
+        _render_chat_list_body,
+    )
 
-    if not term:
-        return _render_search_results([], "")
+    page, search_q, include_archived = _chat_list_state_from_request(req)
+
+    if not _is_htmx(req):
+        return RedirectResponse(
+            url=_build_chat_redirect_target(q=search_q, archived=include_archived),
+            status_code=303,
+        )
 
     user_id = auth.get("id")
     if not user_id:
-        return _render_search_results([], term)
+        # No user identity — render an empty list-body fragment so the
+        # HTMX swap still hits a stable ``#chat-list-body`` anchor.
+        return _render_chat_list_body(
+            "",
+            page=1,
+            search_q="",
+            include_archived=False,
+        )
 
-    try:
-        with _connect() as conn:
-            conversations = _search_conversations_impl(conn, str(user_id), term)
-    except Exception:
-        logger.exception("Failed to search conversations for term=%r", term)
-        conversations = []
-
-    return _render_search_results(conversations, term)
+    return _render_chat_list_body(
+        str(user_id),
+        page=page,
+        search_q=search_q,
+        include_archived=include_archived,
+    )
 
 
 # ---------------------------------------------------------------------------

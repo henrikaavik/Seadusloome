@@ -353,6 +353,27 @@ def _count_conversations_for_user(
         return 0
 
 
+def _chat_list_base_url(*, search_q: str, include_archived: bool) -> str:
+    """Build the ``/chat`` base URL with the active filter params preserved.
+
+    Used as :class:`Pagination`'s ``base_url`` so paging through search
+    results / archived views keeps the same filter set (#775). The
+    :func:`app.ui.data.pagination._build_url` helper strips any
+    pre-existing ``page=`` value and appends the requested page, so
+    ``q`` / ``archived`` survive unchanged across page links.
+    """
+    from urllib.parse import urlencode
+
+    params: list[tuple[str, str]] = []
+    if search_q:
+        params.append(("q", search_q))
+    if include_archived:
+        params.append(("archived", "1"))
+    if not params:
+        return "/chat"
+    return "/chat?" + urlencode(params)
+
+
 def _render_chat_list_body(
     user_id: str,
     *,
@@ -373,6 +394,13 @@ def _render_chat_list_body(
     footer inside a single ``#chat-list-body`` div so one swap updates
     both. Empty-state and "no results" branches are shaped so the
     parent container stays stable.
+
+    #775: the toolbar's HTMX search now delegates to this same renderer
+    so the swapped fragment carries the full conversation table
+    (pin / archive / rename / delete row actions) and respects the
+    ``Näita arhiveeritud`` toggle. Pagination links carry ``q`` and
+    ``archived`` so paging through filtered results does not silently
+    drop the filters.
 
     Args:
         user_id: caller's user UUID (already validated by the caller).
@@ -425,7 +453,10 @@ def _render_chat_list_body(
         Pagination(
             current_page=page,
             total_pages=total_pages,
-            base_url="/chat",
+            base_url=_chat_list_base_url(
+                search_q=search_q,
+                include_archived=include_archived,
+            ),
             page_size=_PAGE_SIZE,
             total=total,
         )
@@ -507,7 +538,21 @@ def chat_list_page(req: Request):
             include_archived=include_archived,
         )
 
-    # Search + archived toolbar
+    # Search + archived toolbar.
+    #
+    # #775: the form serialises ``q`` and ``archived`` together so HTMX
+    # search requests carry both \u2014 the same filter contract the full
+    # ``/chat`` GET page uses. The hidden ``page=1`` input resets the
+    # offset on every keystroke / toggle change so a search executed
+    # while standing on page 5 doesn't try to render "page 5 of the
+    # filtered set". ``hx-swap=outerHTML`` matches the swap shape
+    # ``_render_chat_list_body`` already uses for the archive / delete
+    # HTMX paths so the ``#chat-list-body`` wrapper is replaced in one
+    # go. (We deliberately do not push the URL on the HTMX path: the
+    # toolbar input is updated as the user types, and the in-fragment
+    # pagination links carry the filters server-side \u2014 keeping the
+    # address bar pinned to ``/chat`` avoids exposing the internal
+    # ``/chat/search`` endpoint via browser history.)
     toolbar = Form(  # noqa: F405
         Input(  # noqa: F405
             type="search",
@@ -527,11 +572,14 @@ def chat_list_page(req: Request):
             " N\u00e4ita arhiveeritud",
             cls="chat-archived-toggle",
         ),
+        # Hidden marker so the HTMX search request resets the offset.
+        Input(type="hidden", name="page", value="1"),  # noqa: F405
         Button("Otsi", variant="secondary", size="sm", type="submit"),
         method="get",
         action="/chat",
         hx_get="/chat/search",
         hx_target="#chat-list-body",
+        hx_swap="outerHTML",
         hx_trigger=(
             "input changed delay:300ms from:input[name='q'], "
             "change from:input[name='archived'], submit"
