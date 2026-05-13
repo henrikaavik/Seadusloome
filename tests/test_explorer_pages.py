@@ -717,6 +717,28 @@ def test_explorer_detail_panel_keeps_back_link_and_metadata_sections():
     assert 'id="panel-link"' in html
 
 
+def test_panel_annotation_script_uses_css_safe_hx_target():
+    """#773: the entity-detail annotation script must NOT inject HTMX
+    targets that interpolate the entity URI (or its percent-encoded form)
+    into a CSS selector — ``%``, ``/``, and ``#`` all break the selector.
+
+    The fix uses a fixed ``#panel-annotation-popover`` id for the
+    container regardless of which entity is focused, since only one
+    detail panel is open at any time.
+    """
+    html = _html("focus=https://data.riik.ee/ontology/estleg#KarS")
+    # The CSS-safe fixed id appears in the page.
+    assert "panel-annotation-popover" in html
+    # The old broken pattern (concatenating an encoded URI into the
+    # hx-target selector) must NOT be present anywhere.
+    assert "'#annotation-popover-entity-'+safeId" not in html
+    assert "'#annotation-popover-entity-'+encUri" not in html
+    # The script still URL-encodes the URI for the QUERY STRING value —
+    # ``encodeURIComponent`` of the URI is used for the ``target_id=``
+    # parameter, not the CSS selector.
+    assert "encodeURIComponent" in html
+
+
 # ---------------------------------------------------------------------------
 # #754 — app/explorer/start_panel.py: the org-scoped data queries
 # ---------------------------------------------------------------------------

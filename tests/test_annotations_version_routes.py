@@ -1007,3 +1007,203 @@ class TestRowKindWhitelist:
                 row_kind="bogus",
                 row_key="x",
             )
+
+
+# ---------------------------------------------------------------------------
+# #773: URL-encoded URI row_key round-trip
+# ---------------------------------------------------------------------------
+
+
+class TestUriRowKeyRoundTrip:
+    """Affected-entity + EU rows store the raw ontology URI as the row_key.
+
+    These URIs carry ``/``, ``:``, and ``#`` characters — all of which
+    Starlette decodes BEFORE routing, so a plain ``{row_key}`` path
+    segment 404s. The route uses the ``:path`` converter + the handler
+    decodes the percent-encoded segment so the original URI reaches the
+    DB layer intact.
+    """
+
+    _URI_ROW_KEY = "https://data.riik.ee/ontology/estleg#KarS"
+
+    @patch("app.annotations.routes._load_panel_messages")
+    @patch("app.annotations.routes._connect")
+    @patch("app.auth.middleware._get_provider")
+    def test_get_panel_resolves_encoded_uri_to_original(self, mock_prov, mock_connect, mock_load):
+        from urllib.parse import quote
+
+        mock_prov.return_value = _stub_provider()
+        mock_conn, _ = _patch_acl_lookup(owning_org_id=_ORG_ID)
+        mock_connect.side_effect = mock_conn
+        mock_load.return_value = []
+
+        encoded = quote(self._URI_ROW_KEY, safe="")
+        url = f"/annotations/version/{_VERSION_ID}/entity/{encoded}"
+
+        client = _authed_client()
+        resp = client.get(url)
+
+        assert resp.status_code == 200
+        # _load_panel_messages received the DECODED URI, not the
+        # percent-encoded path segment.
+        assert mock_load.call_args is not None
+        _, kwargs = mock_load.call_args
+        if kwargs:
+            decoded_arg = kwargs.get("row_key")
+        else:
+            decoded_arg = mock_load.call_args.args[2]
+        assert decoded_arg == self._URI_ROW_KEY
+
+    @patch("app.annotations.routes._load_panel_messages")
+    @patch("app.annotations.routes._connect")
+    @patch("app.auth.middleware._get_provider")
+    def test_uri_row_key_handler_renders_fragment(self, mock_prov, mock_connect, mock_load):
+        """The handler renders the panel without raising for a URI row_key."""
+        from urllib.parse import quote
+
+        mock_prov.return_value = _stub_provider()
+        mock_conn, _ = _patch_acl_lookup(owning_org_id=_ORG_ID)
+        mock_connect.side_effect = mock_conn
+        mock_load.return_value = []
+
+        encoded = quote(self._URI_ROW_KEY, safe="")
+        # Use "entity" row_kind because entity URIs are the real-world
+        # source of URI row keys.
+        url = f"/annotations/version/{_VERSION_ID}/entity/{encoded}"
+
+        client = _authed_client()
+        resp = client.get(url)
+
+        assert resp.status_code == 200
+        # The fragment carries the original URI in its data attribute so
+        # JS / tests can round-trip it.
+        assert self._URI_ROW_KEY in resp.text
+
+    @patch("app.annotations.routes._load_panel_messages")
+    @patch("app.annotations.routes.create_row_annotation")
+    @patch("app.annotations.routes._connect")
+    @patch("app.auth.middleware._get_provider")
+    def test_post_message_with_uri_row_key(self, mock_prov, mock_connect, mock_create, mock_load):
+        from urllib.parse import quote
+
+        mock_prov.return_value = _stub_provider()
+        mock_conn, _ = _patch_acl_lookup(owning_org_id=_ORG_ID)
+        mock_connect.side_effect = mock_conn
+
+        new_ann = _make_annotation(
+            target_id=f"entity:{self._URI_ROW_KEY}",
+            content="Märkus URI rea kohta.",
+        )
+        # Pre-count empty, after-write returns the new ann.
+        mock_load.side_effect = [[], [new_ann]]
+        mock_create.return_value = new_ann
+
+        encoded = quote(self._URI_ROW_KEY, safe="")
+        url = f"/annotations/version/{_VERSION_ID}/entity/{encoded}/messages"
+
+        with patch(
+            "app.annotations.routes._user_display_name",
+            return_value="Test Kasutaja",
+        ):
+            client = _authed_client()
+            resp = client.post(url, json={"content": "Märkus URI rea kohta."})
+
+        assert resp.status_code == 200
+        # The create call received the DECODED URI as row_key, not the
+        # percent-encoded form.
+        _, create_kwargs = mock_create.call_args
+        assert create_kwargs.get("row_key") == self._URI_ROW_KEY
+
+    @patch("app.annotations.routes._load_panel_messages")
+    @patch("app.annotations.routes.resolve_row_thread")
+    @patch("app.annotations.routes._connect")
+    @patch("app.auth.middleware._get_provider")
+    def test_post_resolve_with_uri_row_key(self, mock_prov, mock_connect, mock_resolve, mock_load):
+        from urllib.parse import quote
+
+        mock_prov.return_value = _stub_provider()
+        mock_conn, _ = _patch_acl_lookup(owning_org_id=_ORG_ID)
+        mock_connect.side_effect = mock_conn
+        mock_resolve.return_value = 1
+        mock_load.return_value = []
+
+        encoded = quote(self._URI_ROW_KEY, safe="")
+        url = f"/annotations/version/{_VERSION_ID}/entity/{encoded}/resolve"
+
+        client = _authed_client()
+        resp = client.post(url)
+
+        assert resp.status_code == 200
+        _, kwargs = mock_resolve.call_args
+        assert kwargs.get("row_key") == self._URI_ROW_KEY
+
+
+# ---------------------------------------------------------------------------
+# #773: safe_row_key / decode_row_key / target_dom_id helpers
+# ---------------------------------------------------------------------------
+
+
+class TestRowKeyEncodingHelpers:
+    """Unit tests for the URL- + CSS-safety helpers."""
+
+    _URI = "https://data.riik.ee/ontology/estleg#KarS"
+
+    def test_safe_row_key_percent_encodes_slash_colon_hash(self):
+        from app.annotations.row_keys import safe_row_key
+
+        encoded = safe_row_key(self._URI)
+        # No literal ``/``, ``#``, or ``:`` in the encoded form.
+        assert "/" not in encoded
+        assert "#" not in encoded
+        assert ":" not in encoded
+        # The Estonian provision name still round-trips.
+        assert "KarS" in encoded
+
+    def test_decode_row_key_inverts_safe_row_key(self):
+        from app.annotations.row_keys import decode_row_key, safe_row_key
+
+        assert decode_row_key(safe_row_key(self._URI)) == self._URI
+
+    def test_safe_row_key_is_noop_for_hashed_keys(self):
+        """sha256-32 hex digests contain only [0-9a-f] so safe_row_key is a no-op."""
+        from app.annotations.row_keys import safe_row_key
+
+        digest = "abcdef0123456789abcdef0123456789"
+        assert safe_row_key(digest) == digest
+
+    def test_target_dom_id_is_css_safe(self):
+        """The returned id contains only chars valid in CSS / HTMX selectors."""
+        from app.annotations.row_keys import target_dom_id
+
+        dom_id = target_dom_id("entity", self._URI)
+        # No reserved characters that need backslash-escaping in CSS.
+        for ch in ("/", ":", "#", "%", "?", "&", "="):
+            assert ch not in dom_id
+        # Stable prefix so callers can grep / identify it.
+        assert dom_id.startswith("annotation-popover-entity-")
+
+    def test_target_dom_id_is_deterministic(self):
+        """Same input always yields the same id."""
+        from app.annotations.row_keys import target_dom_id
+
+        a = target_dom_id("entity", self._URI)
+        b = target_dom_id("entity", self._URI)
+        assert a == b
+
+    def test_target_dom_id_distinguishes_kind(self):
+        """Same target_id under different kinds yields different ids."""
+        from app.annotations.row_keys import target_dom_id
+
+        a = target_dom_id("entity", self._URI)
+        b = target_dom_id("conflict", self._URI)
+        assert a != b
+
+    def test_target_dom_id_handles_empty(self):
+        """Empty target_id still produces a valid CSS id (no crash)."""
+        from app.annotations.row_keys import target_dom_id
+
+        dom_id = target_dom_id("entity", "")
+        assert dom_id.startswith("annotation-popover-entity-")
+        # No invalid chars.
+        for ch in ("/", ":", "#", "%"):
+            assert ch not in dom_id

@@ -432,6 +432,13 @@ _DRAFT_OVERLAY_INIT_SCRIPT = (
 # popover container) into #panel-annotation-btn via HTMX — keeping
 # explorer.js itself untouched. Built with DOM methods (no innerHTML);
 # hx-get defaults its swap to innerHTML so no hx-swap attribute is needed.
+#
+# #773: the popover container uses a STATIC id (``panel-annotation-popover``)
+# instead of an id derived from the entity URI. Only one detail panel is
+# open at any moment, so a single, fixed CSS-safe id is the simplest fix
+# for "raw URI characters in CSS selectors break HTMX hx-target". The
+# raw URI is still encoded for the ?target_id= query string via
+# encodeURIComponent so the GET payload reaches the server intact.
 _PANEL_ANNOTATION_SCRIPT = (
     "(function(){"
     "var panelBtn=document.getElementById('panel-annotation-btn');"
@@ -440,19 +447,28 @@ _PANEL_ANNOTATION_SCRIPT = (
     "var obs=new MutationObserver(function(){"
     "var uri=panelTitle.dataset.entityUri||panelTitle.textContent.trim();"
     "if(!uri){panelBtn.style.display='none';return;}"
-    "var safeId=encodeURIComponent(uri).replace(/'/g,'%27');"
+    # encodeURIComponent for the query-string value only; the popover
+    # container id below is a fixed string so CSS selectors stay valid.
+    "var encUri=encodeURIComponent(uri);"
     "while(panelBtn.firstChild){panelBtn.removeChild(panelBtn.firstChild);}"
     "var wrap=document.createElement('div');"
     "wrap.className='annotation-button-wrapper';"
+    # data-target-id carries the original URI so JS callers can recover
+    # the raw identity without re-decoding.
+    "wrap.setAttribute('data-target-type','entity');"
+    "wrap.setAttribute('data-target-id',uri);"
     "var btn=document.createElement('button');"
     "btn.type='button';btn.className='annotation-button';"
-    "btn.setAttribute('hx-get','/api/annotations?target_type=entity&target_id='+safeId);"
-    "btn.setAttribute('hx-target','#annotation-popover-entity-'+safeId);"
+    "btn.setAttribute('hx-get','/api/annotations?target_type=entity&target_id='+encUri);"
+    "btn.setAttribute('hx-target','#panel-annotation-popover');"
+    "btn.setAttribute('hx-swap','innerHTML');"
     "btn.setAttribute('aria-label','Markused');"
     "btn.setAttribute('title','Markused');"
     "btn.textContent='\\uD83D\\uDCAC';"
     "var pop=document.createElement('div');"
-    "pop.id='annotation-popover-entity-'+safeId;"
+    # Fixed CSS-safe id — see header comment.  hx-target above resolves
+    # to this element regardless of which entity is focused.
+    "pop.id='panel-annotation-popover';"
     "pop.className='annotation-popover-container';"
     "wrap.appendChild(btn);wrap.appendChild(pop);"
     "panelBtn.appendChild(wrap);"

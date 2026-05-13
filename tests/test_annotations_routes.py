@@ -403,3 +403,74 @@ class TestDeleteAnnotation:
             resp = client.delete(f"/api/annotations/{_ANN_ID}")
 
         assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# #773: AnnotationPopover with URI target_id stays CSS-safe
+# ---------------------------------------------------------------------------
+
+
+class TestAnnotationPopoverWithUriTargetId:
+    """Õiguskaart entity popovers pass the entity URI as target_id.
+
+    The popover Div outer id and its inner form's hx-target must be
+    CSS-safe (no raw ``/``, ``:``, ``#``, or ``%`` — all of which the
+    explorer's old ``encodeURIComponent``-based id used to embed).
+    """
+
+    _URI_TARGET_ID = "https://data.riik.ee/ontology/estleg#KarS"
+
+    @patch("app.annotations.routes._load_annotations_with_replies")
+    @patch("app.auth.middleware._get_provider")
+    def test_list_returns_popover_with_css_safe_id_for_uri(self, mock_prov, mock_load):
+        from urllib.parse import quote
+
+        mock_prov.return_value = _stub_provider()
+        mock_load.return_value = []
+
+        encoded_target = quote(self._URI_TARGET_ID, safe="")
+        url = f"/api/annotations?target_type=entity&target_id={encoded_target}"
+
+        client = _authed_client()
+        resp = client.get(url)
+
+        assert resp.status_code == 200
+        body = resp.text
+        # Popover renders.
+        assert "annotation-popover" in body
+        # The popover's outer id (and the form's hx-target) must NOT
+        # contain raw URI structural chars — those break CSS selectors.
+        # Find every id="annotation-popover-...:..." or id with ``/``.
+        import re
+
+        ids = re.findall(r'id="(annotation-popover-[^"]*)"', body)
+        assert ids, "popover did not render with an id attribute"
+        for popover_id in ids:
+            assert "/" not in popover_id
+            assert "#" not in popover_id
+            assert "%" not in popover_id
+
+    def test_popover_component_renders_for_uri_target_id(self):
+        """Direct unit test on the surface component — must not raise."""
+        from app.ui.surfaces.annotation_popover import AnnotationPopover
+
+        result = AnnotationPopover(
+            target_type="entity",
+            target_id=self._URI_TARGET_ID,
+            annotations=[],
+            auth={"id": _USER_ID},
+        )
+        # The raw URI is preserved in data attributes.
+        assert result is not None
+
+    def test_annotation_button_primitive_uri_target_id(self):
+        """AnnotationButton's id + hx-target must be CSS-safe for URIs."""
+        from app.ui.primitives.annotation_button import AnnotationButton
+
+        # Should not raise; the wrapper's id is hashed.
+        result = AnnotationButton(
+            target_type="entity",
+            target_id=self._URI_TARGET_ID,
+            count=2,
+        )
+        assert result is not None

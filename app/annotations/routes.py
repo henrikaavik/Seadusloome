@@ -47,6 +47,7 @@ from app.annotations.models import (
     resolve_annotation,
     resolve_row_thread,
 )
+from app.annotations.row_keys import decode_row_key, safe_row_key
 from app.auth.helpers import require_auth as _require_auth
 from app.auth.provider import UserDict
 from app.auth.users import get_user
@@ -585,6 +586,14 @@ def delete_annotation_handler(req: Request, id: str):
 #
 # row_kind is validated against ``VALID_ROW_KINDS`` at the handler boundary
 # so a malformed value short-circuits before any DB call.
+#
+# #773: row_key arrives percent-encoded for entity / EU rows because the
+# raw ontology URIs contain ``/``, ``:``, and ``#`` characters. The route
+# uses Starlette's ``:path`` converter so a multi-segment URI matches one
+# parameter; each handler then calls :func:`decode_row_key` to recover the
+# original URI for DB reads. The matching encoder is
+# :func:`app.annotations.row_keys.safe_row_key`, used by the report
+# renderer when minting ``hx-get`` URLs.
 # ---------------------------------------------------------------------------
 
 
@@ -742,7 +751,12 @@ def _row_panel_fragment(
     whole inner fragment via ``outerHTML`` from the resolve/reopen
     handlers).
     """
-    base = f"/annotations/version/{draft_version_id}/{row_kind}/{row_key}"
+    # #773: the URLs the fragment's buttons / form POST to must carry
+    # the SAME percent-encoded form the report renderer mints, otherwise
+    # the resolve/reopen/compose actions submit to a path containing raw
+    # ``/`` and ``#`` (the keys here are the already-decoded raw URIs).
+    encoded_row_key = safe_row_key(row_key)
+    base = f"/annotations/version/{draft_version_id}/{row_kind}/{encoded_row_key}"
 
     # Resolve mention UUIDs → display names once per fragment so each
     # message item can render badges without re-querying.
@@ -924,6 +938,11 @@ def get_row_panel_handler(
         return resolved
     version_uuid, _org_id = resolved
 
+    # #773: row_key arrives percent-encoded so URI characters (``/``, ``#``,
+    # ``:``) survive the path-segment round trip. Decode back to the raw
+    # ontology URI before any DB / renderer work.
+    row_key = decode_row_key(row_key)
+
     messages = _load_panel_messages(version_uuid, row_kind, row_key)
     return _row_panel_fragment(version_uuid, row_kind, row_key, messages, auth)
 
@@ -958,6 +977,10 @@ async def post_row_message_handler(
     if isinstance(resolved, Response):
         return resolved
     version_uuid, org_id = resolved
+
+    # #773: see ``get_row_panel_handler`` — decode the URL-encoded URI row
+    # key before persisting / replaying it through the renderer.
+    row_key = decode_row_key(row_key)
 
     raw_content, parse_error = await _read_content(req)
     if parse_error is not None:
@@ -1035,6 +1058,9 @@ def post_row_resolve_handler(
         return resolved
     version_uuid, _org_id = resolved
 
+    # #773: row_key arrives percent-encoded; decode before DB writes.
+    row_key = decode_row_key(row_key)
+
     try:
         with _connect() as conn:
             updated = resolve_row_thread(
@@ -1081,6 +1107,9 @@ def post_row_reopen_handler(
         return resolved
     version_uuid, _org_id = resolved
 
+    # #773: row_key arrives percent-encoded; decode before DB writes.
+    row_key = decode_row_key(row_key)
+
     try:
         with _connect() as conn:
             updated = reopen_row_thread(
@@ -1117,7 +1146,20 @@ def register_annotation_routes(rt) -> None:  # type: ignore[no-untyped-def]
     # §9.4 row-annotation routes (PR-B).  The unprefixed ``/annotations``
     # path matches the sprint plan §6 contract; PR-C wires it up from the
     # impact-report side panel.
-    base = "/annotations/version/{draft_version_id}/{row_kind}/{row_key}"
+    #
+    # #773: ``row_key`` uses the ``:path`` converter because affected-entity
+    # and EU-compliance rows store the raw ontology URI as the key, and URIs
+    # contain ``/``, ``:``, and ``#`` which Starlette decodes BEFORE routing
+    # — a plain ``{row_key}`` segment would 404 once a URI key arrives.
+    # ``:path`` matches greedily (incl. ``/``) so percent-encoded URIs
+    # round-trip via :func:`app.annotations.row_keys.safe_row_key` /
+    # :func:`decode_row_key` at the handler boundary.
+    #
+    # The POST sub-routes (``/messages``, ``/resolve``, ``/reopen``) keep
+    # their own methods so no greedy ``:path`` ambiguity arises — Starlette
+    # routes by ``(path, method)`` and the GET base + POST tail-suffix
+    # patterns each match only on their own verb.
+    base = "/annotations/version/{draft_version_id}/{row_kind}/{row_key:path}"
     rt(base, methods=["GET"])(get_row_panel_handler)
     rt(f"{base}/messages", methods=["POST"])(post_row_message_handler)
     rt(f"{base}/resolve", methods=["POST"])(post_row_resolve_handler)

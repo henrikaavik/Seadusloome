@@ -355,7 +355,13 @@ class TestReportPageRendersAnnotationButtons:
         assert resp.status_code == 200
         # Per-row buttons must use the version-scoped path; the
         # affected-entities row_key for "urn:entity:0" is the URI itself.
-        expected = f"/annotations/version/{_VERSION_ID}/entity/urn:entity:0"
+        # #773: URI chars (``:``) are percent-encoded so the path segment
+        # survives the browser-to-server round trip even when URIs contain
+        # ``/`` and ``#``.
+        from urllib.parse import quote
+
+        encoded_key = quote("urn:entity:0", safe="")
+        expected = f"/annotations/version/{_VERSION_ID}/entity/{encoded_key}"
         assert expected in resp.text
 
     @patch("app.docs.report_routes._load_unresolved_counts")
@@ -410,7 +416,11 @@ class TestReportPageRendersAnnotationButtons:
         resp = client.get(f"/drafts/{_DRAFT_ID}/report")
 
         assert resp.status_code == 200
-        assert f"/annotations/version/{_VERSION_ID}/eu/urn:eu:act:0" in resp.text
+        # #773: URI characters (``:``) percent-encoded into the path segment.
+        from urllib.parse import quote
+
+        encoded_key = quote("urn:eu:act:0", safe="")
+        assert f"/annotations/version/{_VERSION_ID}/eu/{encoded_key}" in resp.text
 
     @patch("app.docs.report_routes._load_unresolved_counts")
     @patch("app.docs.report_routes._fetch_latest_report_version_id")
@@ -899,7 +909,11 @@ class TestSectionPagerFragment:
 
         assert resp.status_code == 200
         # The fragment renders a per-row button targeting the version-scoped route.
-        assert f"/annotations/version/{_VERSION_ID}/entity/urn:entity:1" in resp.text
+        # #773: URI characters (``:``) percent-encoded into the path segment.
+        from urllib.parse import quote
+
+        encoded_key = quote("urn:entity:1", safe="")
+        assert f"/annotations/version/{_VERSION_ID}/entity/{encoded_key}" in resp.text
 
 
 # ===========================================================================
@@ -939,3 +953,118 @@ def test_findings_json_roundtrip_preserves_keys():
     assert row_key_for_conflict(findings["conflicts"][0]) == row_key_for_conflict(
         roundtripped["conflicts"][0]
     )
+
+
+# ===========================================================================
+# #773: Report rows with URI row_keys (entity / eu) render safe URLs
+# ===========================================================================
+
+
+class TestReportRowWithUriRowKey:
+    """Affected-entity and EU rows carry raw ontology URIs as row_keys.
+
+    The rendered ``hx_get`` must percent-encode the URI so the path
+    segment survives the browser-to-server round trip (URIs contain
+    ``/``, ``:``, and ``#`` — all routing-significant characters).
+    """
+
+    _URI_ROW_KEY = "https://data.riik.ee/ontology/estleg#KarS"
+
+    @patch("app.docs.report_routes._load_unresolved_counts")
+    @patch("app.docs.report_routes._fetch_latest_report_version_id")
+    @patch("app.docs.report_routes._fetch_latest_report")
+    @patch("app.docs.report_routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_entity_row_with_uri_renders_encoded_path(
+        self,
+        mock_provider,
+        mock_fetch_draft,
+        mock_fetch_report,
+        mock_fetch_version,
+        mock_load_counts,
+    ):
+        """An entity row whose URI contains ``/`` and ``#`` must produce
+        an HTMX URL with the URI percent-encoded — the literal URI must
+        NOT appear inside the ``hx-get`` path segment, since the browser
+        would otherwise fragment on ``#`` before sending."""
+        from urllib.parse import quote
+
+        mock_provider.return_value = _stub_provider()
+        mock_fetch_draft.return_value = _make_draft()
+        findings = {
+            "affected_entities": [
+                {
+                    "uri": self._URI_ROW_KEY,
+                    "label": "KarS",
+                    "type": "https://data.riik.ee/ontology/estleg#EnactedLaw",
+                }
+            ],
+            "conflicts": [],
+            "eu_compliance": [],
+            "gaps": [],
+        }
+        mock_fetch_report.return_value = _make_report_row(findings)
+        mock_fetch_version.return_value = str(_VERSION_ID)
+        mock_load_counts.return_value = {}
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{_DRAFT_ID}/report")
+
+        assert resp.status_code == 200
+        # The percent-encoded URI appears in the HTMX URL.
+        encoded = quote(self._URI_ROW_KEY, safe="")
+        expected = f"/annotations/version/{_VERSION_ID}/entity/{encoded}"
+        assert expected in resp.text
+        # And the raw URI must NOT appear inside any hx-get path — the
+        # browser would treat ``#`` as a fragment marker.
+        assert (
+            f'hx-get="/annotations/version/{_VERSION_ID}/entity/{self._URI_ROW_KEY}'
+            not in resp.text
+        )
+
+    @patch("app.docs.report_routes._load_unresolved_counts")
+    @patch("app.docs.report_routes._fetch_latest_report_version_id")
+    @patch("app.docs.report_routes._fetch_latest_report")
+    @patch("app.docs.report_routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_eu_row_with_uri_renders_encoded_path(
+        self,
+        mock_provider,
+        mock_fetch_draft,
+        mock_fetch_report,
+        mock_fetch_version,
+        mock_load_counts,
+    ):
+        """EU compliance rows pass the EU directive URI as the row_key —
+        same encoding contract as the entity rows."""
+        from urllib.parse import quote
+
+        eu_uri = "https://eur-lex.europa.eu/eli/dir/2016/679/oj#article-1"
+
+        mock_provider.return_value = _stub_provider()
+        mock_fetch_draft.return_value = _make_draft()
+        findings = {
+            "affected_entities": [],
+            "conflicts": [],
+            "eu_compliance": [
+                {
+                    "eu_act": eu_uri,
+                    "eu_label": "GDPR",
+                    "estonian_provision": "urn:ee:0",
+                    "provision_label": "§ 1",
+                    "transposition_status": "linked",
+                }
+            ],
+            "gaps": [],
+        }
+        mock_fetch_report.return_value = _make_report_row(findings)
+        mock_fetch_version.return_value = str(_VERSION_ID)
+        mock_load_counts.return_value = {}
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{_DRAFT_ID}/report")
+
+        assert resp.status_code == 200
+        encoded = quote(eu_uri, safe="")
+        expected = f"/annotations/version/{_VERSION_ID}/eu/{encoded}"
+        assert expected in resp.text
