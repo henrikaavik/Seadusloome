@@ -857,34 +857,121 @@ class TestExport:
 
 
 class TestSearch:
+    """Issue #775: ``/chat/search`` now returns the same ``#chat-list-body``
+    fragment ``/chat`` renders, so the HTMX swap keeps the conversation
+    action controls (pin / archive / rename / delete) and respects the
+    archived toggle. The old lightweight ``#chat-search-results`` shape
+    is gone.
+    """
+
     def test_search_non_htmx_redirects(self, provider_patch, mock_conn):
         client = _authed_client()
         resp = client.get("/chat/search?q=eelnou")
         assert resp.status_code == 303
         assert resp.headers["location"] == "/chat?q=eelnou"
 
-    def test_search_htmx_returns_fragment(self, provider_patch, mock_conn):
+    def test_search_non_htmx_redirect_preserves_archived(self, provider_patch, mock_conn):
+        """#775: the non-HTMX redirect carries ``archived`` through too."""
+        client = _authed_client()
+        resp = client.get("/chat/search?q=eelnou&archived=1")
+        assert resp.status_code == 303
+        # urlencode renders the params in insertion order.
+        assert resp.headers["location"] == "/chat?q=eelnou&archived=1"
+
+    def test_search_htmx_returns_chat_list_body_fragment(self, provider_patch, mock_conn):
+        """HTMX search swap renders the conversation table — same anchor
+        ``/chat`` uses — so pin/archive/rename/delete forms are present.
+        """
         conv = _make_conversation(title="Eelnou X analuus")
-        with patch("app.chat.handlers._search_conversations_impl", return_value=[conv]):
+        with (
+            patch("app.chat.routes._connect", mock_conn[0]),
+            patch("app.chat.routes.list_conversations_for_user", return_value=[conv]),
+            patch("app.chat.routes._count_conversations_for_user", return_value=1),
+            patch("app.chat.routes._get_message_count", return_value=0),
+            patch("app.chat.routes._get_last_message_at", return_value=None),
+        ):
             client = _authed_client()
             resp = client.get("/chat/search?q=eelnou", headers={"HX-Request": "true"})
+        assert resp.status_code == 200
+        # Same anchor the toolbar swaps in /chat — replaces the table
+        # carrier in one go.
+        assert 'id="chat-list-body"' in resp.text
+        # The matching conversation row is rendered.
+        assert "Eelnou X analuus" in resp.text
+        # And the row carries the action controls — pin / archive /
+        # rename / delete — which the old fragment dropped (#775).
+        assert f"/chat/{_CONV_ID}/pin" in resp.text
+        assert f"/chat/{_CONV_ID}/archive" in resp.text
+        assert f"/chat/{_CONV_ID}/rename" in resp.text
+        assert f"/chat/{_CONV_ID}/delete" in resp.text
+
+    def test_search_htmx_archived_toggle_is_respected(self, provider_patch, mock_conn):
+        """``?archived=1`` flips ``include_archived=True`` on the query."""
+        conv = _make_conversation(title="Vana vestlus")
+        with (
+            patch("app.chat.routes._connect", mock_conn[0]),
+            patch("app.chat.routes.list_conversations_for_user", return_value=[conv]) as mock_list,
+            patch("app.chat.routes._count_conversations_for_user", return_value=1),
+            patch("app.chat.routes._get_message_count", return_value=0),
+            patch("app.chat.routes._get_last_message_at", return_value=None),
+        ):
+            client = _authed_client()
+            resp = client.get(
+                "/chat/search?q=vana&archived=1",
+                headers={"HX-Request": "true"},
+            )
+        assert resp.status_code == 200
+        # The kwargs that hit the model layer carry the archived flag.
+        kwargs = mock_list.call_args.kwargs
+        assert kwargs.get("include_archived") is True
+        assert kwargs.get("search") == "vana"
+
+    def test_search_htmx_archived_defaults_to_false(self, provider_patch, mock_conn):
+        """Without ``archived=1`` archived rows stay hidden (the default)."""
+        with (
+            patch("app.chat.routes._connect", mock_conn[0]),
+            patch("app.chat.routes.list_conversations_for_user", return_value=[]) as mock_list,
+            patch("app.chat.routes._count_conversations_for_user", return_value=0),
+        ):
+            client = _authed_client()
+            resp = client.get("/chat/search?q=tere", headers={"HX-Request": "true"})
             assert resp.status_code == 200
-            assert "chat-search-results" in resp.text
-            assert "Eelnou X analuus" in resp.text
+            assert mock_list.call_args.kwargs.get("include_archived") is False
 
     def test_search_htmx_empty_term_returns_fragment(self, provider_patch, mock_conn):
-        client = _authed_client()
-        resp = client.get("/chat/search?q=", headers={"HX-Request": "true"})
+        """Empty term: the request still goes through the shared renderer
+        and returns the ``#chat-list-body`` anchor (or the genuine empty
+        state when the user has no conversations).
+        """
+        with (
+            patch("app.chat.routes._connect", mock_conn[0]),
+            patch("app.chat.routes.list_conversations_for_user", return_value=[]),
+            patch("app.chat.routes._count_conversations_for_user", return_value=0),
+        ):
+            client = _authed_client()
+            resp = client.get("/chat/search?q=", headers={"HX-Request": "true"})
         assert resp.status_code == 200
-        # No term → empty state fragment.
-        assert "chat-search-results" in resp.text
+        # Either the empty-state Div (id="chat-list-body") or the
+        # "Vestlusi pole" copy is rendered — both come from the shared
+        # helper so the swap target stays stable.
+        assert 'id="chat-list-body"' in resp.text
+        assert "Vestlusi pole" in resp.text
 
-    def test_search_htmx_no_matches(self, provider_patch, mock_conn):
-        with patch("app.chat.handlers._search_conversations_impl", return_value=[]):
+    def test_search_htmx_no_matches_renders_empty_table_state(self, provider_patch, mock_conn):
+        """No matches with an active query: the table-level empty copy
+        is rendered (and the anchor stays stable).
+        """
+        with (
+            patch("app.chat.routes._connect", mock_conn[0]),
+            patch("app.chat.routes.list_conversations_for_user", return_value=[]),
+            patch("app.chat.routes._count_conversations_for_user", return_value=0),
+        ):
             client = _authed_client()
             resp = client.get("/chat/search?q=zzz", headers={"HX-Request": "true"})
-            assert resp.status_code == 200
-            assert "ei vastanud" in resp.text
+        assert resp.status_code == 200
+        assert 'id="chat-list-body"' in resp.text
+        # DataTable's empty-message string lives in routes.py.
+        assert "Vestlusi ei leitud" in resp.text
 
 
 # ---------------------------------------------------------------------------
@@ -969,13 +1056,20 @@ class TestRouteOrdering:
         ``register_chat_handler_routes`` first, so the reorder is a
         no-op. This test locks in the registration order.
         """
-        client = _authed_client()
-        resp = client.get("/chat/search?q=test", headers={"HX-Request": "true"})
-        # The search handler responds 200 with the results fragment; the
-        # dynamic conv_id route would either 404 (bad UUID "search") or
-        # render a completely different page.
+        # Stub the model layer so the search renderer doesn't try to
+        # talk to a real DB while we only care about the routing path.
+        with (
+            patch("app.chat.routes._connect", mock_conn[0]),
+            patch("app.chat.routes.list_conversations_for_user", return_value=[]),
+            patch("app.chat.routes._count_conversations_for_user", return_value=0),
+        ):
+            client = _authed_client()
+            resp = client.get("/chat/search?q=test", headers={"HX-Request": "true"})
+        # The search handler responds 200 with the chat-list-body
+        # fragment (#775); the dynamic conv_id route would either 404
+        # (bad UUID "search") or render a completely different page.
         assert resp.status_code == 200
-        assert "chat-search-results" in resp.text
+        assert 'id="chat-list-body"' in resp.text
 
 
 # ---------------------------------------------------------------------------
