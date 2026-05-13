@@ -239,12 +239,12 @@ def _row_annotation_button(
             cls="annotation-count-badge",
         )
 
-    # #773: ``row_key`` for ``entity`` / ``eu`` rows is the raw ontology
-    # URI (contains ``/``, ``:``, ``#``). Percent-encode it before
-    # embedding in the path segment so the browser / router delivers
-    # the whole URI to the handler instead of fragmenting on ``#`` or
-    # treating ``/`` as a sub-path. Conflict / gap rows are already
-    # sha256-32 hex digests so this is a no-op for them.
+    # #773 / #781 follow-up: ``row_key`` for ``entity`` / ``eu`` rows is
+    # the raw ontology URI (contains ``/``, ``:``, ``#``, and sometimes
+    # literal ``%XX``). Base64url-encode it before embedding in the path
+    # segment so the encoded form is opaque to every transport layer
+    # (httpx, Starlette TestClient, uvicorn, reverse proxies) — none of
+    # them will decode or re-encode the value in flight.
     encoded_row_key = _safe_row_key(row_key)
     base = f"/annotations/version/{draft_version_id}/{row_kind}/{encoded_row_key}"
     return Button(  # noqa: F405

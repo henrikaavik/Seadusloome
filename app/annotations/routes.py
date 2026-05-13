@@ -587,13 +587,15 @@ def delete_annotation_handler(req: Request, id: str):
 # row_kind is validated against ``VALID_ROW_KINDS`` at the handler boundary
 # so a malformed value short-circuits before any DB call.
 #
-# #773: row_key arrives percent-encoded for entity / EU rows because the
-# raw ontology URIs contain ``/``, ``:``, and ``#`` characters. The route
-# uses Starlette's ``:path`` converter so a multi-segment URI matches one
-# parameter; each handler then calls :func:`decode_row_key` to recover the
-# original URI for DB reads. The matching encoder is
-# :func:`app.annotations.row_keys.safe_row_key`, used by the report
-# renderer when minting ``hx-get`` URLs.
+# #773 / #781 follow-up: row_key arrives base64url-encoded for every
+# row kind, including entity / EU rows whose raw values are ontology URIs
+# (and sometimes contain literal ``%XX`` substrings, e.g. CELEX). The
+# route uses Starlette's ``:path`` converter so the matcher accepts the
+# whole opaque segment, and each handler calls :func:`decode_row_key` to
+# recover the raw row key before any DB / renderer work. The encoder /
+# decoder pair is the only encode/decode the app performs — base64url
+# uses ``[A-Za-z0-9_-]`` so no transport layer (httpx, Starlette
+# TestClient, uvicorn, reverse proxies) mutates the value in flight.
 # ---------------------------------------------------------------------------
 
 
@@ -938,10 +940,11 @@ def get_row_panel_handler(
         return resolved
     version_uuid, _org_id = resolved
 
-    # #773: row_key arrives percent-encoded so URI characters (``/``, ``#``,
-    # ``:``) survive the path-segment round trip. Decode back to the raw
-    # ontology URI before any DB / renderer work.
-    row_key = decode_row_key(row_key)
+    # #781 follow-up: base64url → raw row key. Malformed input → 400.
+    try:
+        row_key = decode_row_key(row_key)
+    except (ValueError, UnicodeDecodeError):
+        return Response(status_code=400)
 
     messages = _load_panel_messages(version_uuid, row_kind, row_key)
     return _row_panel_fragment(version_uuid, row_kind, row_key, messages, auth)
@@ -978,9 +981,11 @@ async def post_row_message_handler(
         return resolved
     version_uuid, org_id = resolved
 
-    # #773: see ``get_row_panel_handler`` — decode the URL-encoded URI row
-    # key before persisting / replaying it through the renderer.
-    row_key = decode_row_key(row_key)
+    # #781 follow-up: base64url → raw row key. Malformed input → 400.
+    try:
+        row_key = decode_row_key(row_key)
+    except (ValueError, UnicodeDecodeError):
+        return Response(status_code=400)
 
     raw_content, parse_error = await _read_content(req)
     if parse_error is not None:
@@ -1058,8 +1063,11 @@ def post_row_resolve_handler(
         return resolved
     version_uuid, _org_id = resolved
 
-    # #773: row_key arrives percent-encoded; decode before DB writes.
-    row_key = decode_row_key(row_key)
+    # #781 follow-up: base64url → raw row key. Malformed input → 400.
+    try:
+        row_key = decode_row_key(row_key)
+    except (ValueError, UnicodeDecodeError):
+        return Response(status_code=400)
 
     try:
         with _connect() as conn:
@@ -1107,8 +1115,11 @@ def post_row_reopen_handler(
         return resolved
     version_uuid, _org_id = resolved
 
-    # #773: row_key arrives percent-encoded; decode before DB writes.
-    row_key = decode_row_key(row_key)
+    # #781 follow-up: base64url → raw row key. Malformed input → 400.
+    try:
+        row_key = decode_row_key(row_key)
+    except (ValueError, UnicodeDecodeError):
+        return Response(status_code=400)
 
     try:
         with _connect() as conn:
@@ -1151,9 +1162,13 @@ def register_annotation_routes(rt) -> None:  # type: ignore[no-untyped-def]
     # and EU-compliance rows store the raw ontology URI as the key, and URIs
     # contain ``/``, ``:``, and ``#`` which Starlette decodes BEFORE routing
     # — a plain ``{row_key}`` segment would 404 once a URI key arrives.
-    # ``:path`` matches greedily (incl. ``/``) so percent-encoded URIs
-    # round-trip via :func:`app.annotations.row_keys.safe_row_key` /
-    # :func:`decode_row_key` at the handler boundary.
+    # ``:path`` matches greedily; the actual segment is base64url so it
+    # never contains ``/`` in practice (base64url alphabet is
+    # ``[A-Za-z0-9_-]``), but the ``:path`` converter is kept because
+    # older URLs encoded with the previous percent-encoding scheme may
+    # still be in flight during a rolling deploy. Outbound encoding goes
+    # through :func:`app.annotations.row_keys.safe_row_key`; inbound
+    # decoding goes through :func:`app.annotations.row_keys.decode_row_key`.
     #
     # The POST sub-routes (``/messages``, ``/resolve``, ``/reopen``) keep
     # their own methods so no greedy ``:path`` ambiguity arises — Starlette

@@ -21,25 +21,40 @@ FastHTML/UI import baggage.
 URL + CSS safety (#773):
 
 The ``entity`` and ``eu`` row keys are raw ontology URIs that contain
-``/``, ``:``, and ``#`` characters. Embedding them directly into URL
-path segments (e.g. ``/annotations/version/<v>/<kind>/<row_key>``) or
-CSS id selectors (``#annotation-popover-entity-<row_key>``) breaks
-routing and DOM lookups. Three helpers mediate the boundary:
+``/``, ``:``, ``#``, and sometimes literal ``%XX`` substrings (e.g. EU
+CELEX identifiers stored as ``CELEX%3A32016R0679``). Embedding them
+directly into URL path segments (e.g.
+``/annotations/version/<v>/<kind>/<row_key>``) or CSS id selectors
+(``#annotation-popover-entity-<row_key>``) breaks routing and DOM
+lookups. Three helpers mediate the boundary:
 
-* :func:`safe_row_key` — percent-encode for URL path embedding.
+* :func:`safe_row_key` — base64url-encode for opaque path embedding.
 * :func:`decode_row_key` — server-side decode at the handler boundary.
 * :func:`target_dom_id` — derive a CSS-safe DOM id from any raw target.
 
 The original URI stays the round-trip identity; only the URL path
 segment and the DOM id use the encoded / hashed form.
+
+Why base64url instead of percent-encoding (#781 follow-up):
+
+Percent-encoding only round-trips if the raw value contains no
+literal ``%XX`` substrings. CELEX URIs like ``CELEX%3A32016R0679``
+break that invariant — ``quote`` turns the ``%`` into ``%25``, then
+the ASGI server (and Starlette's TestClient, on top of httpx) decodes
+percent sequences along the transport chain. The number of decodes is
+not contractually fixed by ASGI servers and known to differ between
+uvicorn, Starlette's TestClient, and reverse proxies. Base64url uses
+only ``[A-Za-z0-9_-]`` — none of which are special in any URL, CSS,
+or HTML context — so the encoded form is opaque to every transport
+layer and the only encode/decode happens in this module.
 """
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 from typing import Any
-from urllib.parse import quote, unquote
 
 
 def stable_hash(parts: list[str]) -> str:
@@ -130,33 +145,40 @@ def collect_row_specs(findings: dict[str, Any]) -> list[tuple[str, str]]:
 
 
 def safe_row_key(raw: str) -> str:
-    """Percent-encode a row_key for safe embedding in URL path segments.
+    """Base64url-encode a row_key for opaque, transport-safe path embedding.
 
-    Entity and EU row keys are raw ontology URIs like
-    ``https://data.riik.ee/ontology/estleg#KarS`` — they contain ``/``,
-    ``:``, and ``#`` which a browser treats as path separators / fragment
-    markers if left unescaped, so the path segment never reaches the
-    server intact.  ``quote(..., safe="")`` percent-encodes every reserved
-    character so the encoded form is a single, opaque path segment that
-    round-trips through :func:`decode_row_key`.
+    Returns a string drawn from the alphabet ``[A-Za-z0-9_-]`` — none of
+    which are reserved in URL path segments, query strings, CSS selectors,
+    or HTML attribute values — so the encoded form passes through the
+    entire request pipeline (browser → reverse proxy → ASGI server →
+    Starlette router) with zero transport-layer mutation. The matching
+    decoder is :func:`decode_row_key`; the pair is the only encode /
+    decode the application performs on this value.
 
-    Hashed row_keys (conflict / gap) are sha256-32 hex digests so this is
-    a no-op for them — they only contain ``[0-9a-f]`` — but applying the
-    helper uniformly keeps the call sites simple.
+    Trailing ``=`` padding is stripped to keep URLs short and clean. The
+    decoder pads it back before decoding.
+
+    Empty / falsy input returns the empty string so a missing row key
+    doesn't become the encoding of ``""``.
     """
-    return quote(str(raw or ""), safe="")
+    if not raw:
+        return ""
+    return base64.urlsafe_b64encode(str(raw).encode("utf-8")).rstrip(b"=").decode("ascii")
 
 
-def decode_row_key(quoted: str) -> str:
-    """Reverse :func:`safe_row_key` server-side at the route handler boundary.
+def decode_row_key(encoded: str) -> str:
+    """Inverse of :func:`safe_row_key`. Returns the original raw row key.
 
-    Starlette decodes a path segment once by default, but ``%23`` in the
-    raw URI (``#``) survives the first decode step because routing
-    matches on the *encoded* segment when the path includes reserved
-    characters. The handler should call ``decode_row_key`` to recover
-    the original URI before reading the DB / passing to the renderer.
+    Adds back the stripped base64 padding before decoding so any 1-4
+    char tail length is accepted. Decoding errors propagate as
+    ``binascii.Error`` / ``UnicodeDecodeError`` so route handlers can
+    surface them as 400 responses if a client sends a malformed value
+    — the helper itself does not catch them.
     """
-    return unquote(str(quoted or ""))
+    if not encoded:
+        return ""
+    padded = encoded + "=" * (-len(encoded) % 4)
+    return base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
 
 
 def target_dom_id(target_kind: str, target_id: str) -> str:

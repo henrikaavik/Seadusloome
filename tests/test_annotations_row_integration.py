@@ -355,12 +355,12 @@ class TestReportPageRendersAnnotationButtons:
         assert resp.status_code == 200
         # Per-row buttons must use the version-scoped path; the
         # affected-entities row_key for "urn:entity:0" is the URI itself.
-        # #773: URI chars (``:``) are percent-encoded so the path segment
-        # survives the browser-to-server round trip even when URIs contain
-        # ``/`` and ``#``.
-        from urllib.parse import quote
+        # #773 / #781 follow-up: URI chars (``:``, ``/``, ``#``, and any
+        # literal ``%XX``) go through opaque base64url encoding so the
+        # path segment is transport-safe end to end.
+        from app.annotations.row_keys import safe_row_key
 
-        encoded_key = quote("urn:entity:0", safe="")
+        encoded_key = safe_row_key("urn:entity:0")
         expected = f"/annotations/version/{_VERSION_ID}/entity/{encoded_key}"
         assert expected in resp.text
 
@@ -388,8 +388,12 @@ class TestReportPageRendersAnnotationButtons:
         resp = client.get(f"/drafts/{_DRAFT_ID}/report")
 
         assert resp.status_code == 200
-        # The conflict row's row_key is a sha256-32 hex digest.
-        expected_key = row_key_for_conflict(findings["conflicts"][0])
+        # The conflict row's row_key is a sha256-32 hex digest; the URL
+        # carries its base64url-encoded form because the encoder is
+        # applied uniformly to every row kind.
+        from app.annotations.row_keys import safe_row_key
+
+        expected_key = safe_row_key(row_key_for_conflict(findings["conflicts"][0]))
         assert f"/annotations/version/{_VERSION_ID}/conflict/{expected_key}" in resp.text
 
     @patch("app.docs.report_routes._load_unresolved_counts")
@@ -416,10 +420,11 @@ class TestReportPageRendersAnnotationButtons:
         resp = client.get(f"/drafts/{_DRAFT_ID}/report")
 
         assert resp.status_code == 200
-        # #773: URI characters (``:``) percent-encoded into the path segment.
-        from urllib.parse import quote
+        # #773 / #781 follow-up: URI chars (``:``) go through opaque
+        # base64url so the path segment is transport-safe.
+        from app.annotations.row_keys import safe_row_key
 
-        encoded_key = quote("urn:eu:act:0", safe="")
+        encoded_key = safe_row_key("urn:eu:act:0")
         assert f"/annotations/version/{_VERSION_ID}/eu/{encoded_key}" in resp.text
 
     @patch("app.docs.report_routes._load_unresolved_counts")
@@ -446,7 +451,9 @@ class TestReportPageRendersAnnotationButtons:
         resp = client.get(f"/drafts/{_DRAFT_ID}/report")
 
         assert resp.status_code == 200
-        expected_key = row_key_for_gap(findings["gaps"][0])
+        from app.annotations.row_keys import safe_row_key
+
+        expected_key = safe_row_key(row_key_for_gap(findings["gaps"][0]))
         assert f"/annotations/version/{_VERSION_ID}/gap/{expected_key}" in resp.text
 
     @patch("app.docs.report_routes._load_unresolved_counts")
@@ -909,10 +916,10 @@ class TestSectionPagerFragment:
 
         assert resp.status_code == 200
         # The fragment renders a per-row button targeting the version-scoped route.
-        # #773: URI characters (``:``) percent-encoded into the path segment.
-        from urllib.parse import quote
+        # #773 / #781 follow-up: URI chars go through opaque base64url encoding.
+        from app.annotations.row_keys import safe_row_key
 
-        encoded_key = quote("urn:entity:1", safe="")
+        encoded_key = safe_row_key("urn:entity:1")
         assert f"/annotations/version/{_VERSION_ID}/entity/{encoded_key}" in resp.text
 
 
@@ -963,9 +970,10 @@ def test_findings_json_roundtrip_preserves_keys():
 class TestReportRowWithUriRowKey:
     """Affected-entity and EU rows carry raw ontology URIs as row_keys.
 
-    The rendered ``hx_get`` must percent-encode the URI so the path
-    segment survives the browser-to-server round trip (URIs contain
-    ``/``, ``:``, and ``#`` — all routing-significant characters).
+    The rendered ``hx_get`` must base64url-encode the URI so the path
+    segment is opaque end to end (URIs contain ``/``, ``:``, ``#``, and
+    sometimes literal ``%XX`` — all routing-significant characters or
+    transport-layer ambiguities).
     """
 
     _URI_ROW_KEY = "https://data.riik.ee/ontology/estleg#KarS"
@@ -984,10 +992,10 @@ class TestReportRowWithUriRowKey:
         mock_load_counts,
     ):
         """An entity row whose URI contains ``/`` and ``#`` must produce
-        an HTMX URL with the URI percent-encoded — the literal URI must
+        an HTMX URL with the URI base64url-encoded — the literal URI must
         NOT appear inside the ``hx-get`` path segment, since the browser
         would otherwise fragment on ``#`` before sending."""
-        from urllib.parse import quote
+        from app.annotations.row_keys import safe_row_key
 
         mock_provider.return_value = _stub_provider()
         mock_fetch_draft.return_value = _make_draft()
@@ -1011,8 +1019,8 @@ class TestReportRowWithUriRowKey:
         resp = client.get(f"/drafts/{_DRAFT_ID}/report")
 
         assert resp.status_code == 200
-        # The percent-encoded URI appears in the HTMX URL.
-        encoded = quote(self._URI_ROW_KEY, safe="")
+        # The base64url-encoded URI appears in the HTMX URL.
+        encoded = safe_row_key(self._URI_ROW_KEY)
         expected = f"/annotations/version/{_VERSION_ID}/entity/{encoded}"
         assert expected in resp.text
         # And the raw URI must NOT appear inside any hx-get path — the
@@ -1037,7 +1045,7 @@ class TestReportRowWithUriRowKey:
     ):
         """EU compliance rows pass the EU directive URI as the row_key —
         same encoding contract as the entity rows."""
-        from urllib.parse import quote
+        from app.annotations.row_keys import safe_row_key
 
         eu_uri = "https://eur-lex.europa.eu/eli/dir/2016/679/oj#article-1"
 
@@ -1065,6 +1073,6 @@ class TestReportRowWithUriRowKey:
         resp = client.get(f"/drafts/{_DRAFT_ID}/report")
 
         assert resp.status_code == 200
-        encoded = quote(eu_uri, safe="")
+        encoded = safe_row_key(eu_uri)
         expected = f"/annotations/version/{_VERSION_ID}/eu/{encoded}"
         assert expected in resp.text

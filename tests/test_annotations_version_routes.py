@@ -48,8 +48,14 @@ _OTHER_VERSION_ID = uuid.UUID("66666666-6666-6666-6666-666666666666")
 _ANN_ID = uuid.UUID("77777777-7777-7777-7777-777777777777")
 
 _ROW_KIND = "conflict"
-_ROW_KEY = "abc-123"
-_ROW_BASE = f"/annotations/version/{_VERSION_ID}/{_ROW_KIND}/{_ROW_KEY}"
+_ROW_KEY = "abc-123"  # the raw row_key the handler should see
+# The URL path segment is the base64url encoding of _ROW_KEY (#781 follow-up).
+# Built inline rather than importing here to keep this fixture block free of
+# app imports at module load.
+import base64 as _base64  # noqa: E402
+
+_ROW_KEY_ENCODED = _base64.urlsafe_b64encode(_ROW_KEY.encode("utf-8")).rstrip(b"=").decode("ascii")
+_ROW_BASE = f"/annotations/version/{_VERSION_ID}/{_ROW_KIND}/{_ROW_KEY_ENCODED}"
 
 
 def _authed_user(
@@ -1017,11 +1023,11 @@ class TestRowKindWhitelist:
 class TestUriRowKeyRoundTrip:
     """Affected-entity + EU rows store the raw ontology URI as the row_key.
 
-    These URIs carry ``/``, ``:``, and ``#`` characters — all of which
-    Starlette decodes BEFORE routing, so a plain ``{row_key}`` path
-    segment 404s. The route uses the ``:path`` converter + the handler
-    decodes the percent-encoded segment so the original URI reaches the
-    DB layer intact.
+    These URIs carry ``/``, ``:``, ``#``, and sometimes literal ``%XX``
+    substrings. Encoding goes through :func:`safe_row_key` (base64url,
+    opaque to every transport layer); decoding goes through
+    :func:`decode_row_key` at the handler boundary. The pair is the only
+    encode/decode the app performs on this value.
     """
 
     _URI_ROW_KEY = "https://data.riik.ee/ontology/estleg#KarS"
@@ -1030,14 +1036,14 @@ class TestUriRowKeyRoundTrip:
     @patch("app.annotations.routes._connect")
     @patch("app.auth.middleware._get_provider")
     def test_get_panel_resolves_encoded_uri_to_original(self, mock_prov, mock_connect, mock_load):
-        from urllib.parse import quote
+        from app.annotations.row_keys import safe_row_key
 
         mock_prov.return_value = _stub_provider()
         mock_conn, _ = _patch_acl_lookup(owning_org_id=_ORG_ID)
         mock_connect.side_effect = mock_conn
         mock_load.return_value = []
 
-        encoded = quote(self._URI_ROW_KEY, safe="")
+        encoded = safe_row_key(self._URI_ROW_KEY)
         url = f"/annotations/version/{_VERSION_ID}/entity/{encoded}"
 
         client = _authed_client()
@@ -1045,7 +1051,7 @@ class TestUriRowKeyRoundTrip:
 
         assert resp.status_code == 200
         # _load_panel_messages received the DECODED URI, not the
-        # percent-encoded path segment.
+        # base64url path segment.
         assert mock_load.call_args is not None
         _, kwargs = mock_load.call_args
         if kwargs:
@@ -1059,14 +1065,14 @@ class TestUriRowKeyRoundTrip:
     @patch("app.auth.middleware._get_provider")
     def test_uri_row_key_handler_renders_fragment(self, mock_prov, mock_connect, mock_load):
         """The handler renders the panel without raising for a URI row_key."""
-        from urllib.parse import quote
+        from app.annotations.row_keys import safe_row_key
 
         mock_prov.return_value = _stub_provider()
         mock_conn, _ = _patch_acl_lookup(owning_org_id=_ORG_ID)
         mock_connect.side_effect = mock_conn
         mock_load.return_value = []
 
-        encoded = quote(self._URI_ROW_KEY, safe="")
+        encoded = safe_row_key(self._URI_ROW_KEY)
         # Use "entity" row_kind because entity URIs are the real-world
         # source of URI row keys.
         url = f"/annotations/version/{_VERSION_ID}/entity/{encoded}"
@@ -1084,7 +1090,7 @@ class TestUriRowKeyRoundTrip:
     @patch("app.annotations.routes._connect")
     @patch("app.auth.middleware._get_provider")
     def test_post_message_with_uri_row_key(self, mock_prov, mock_connect, mock_create, mock_load):
-        from urllib.parse import quote
+        from app.annotations.row_keys import safe_row_key
 
         mock_prov.return_value = _stub_provider()
         mock_conn, _ = _patch_acl_lookup(owning_org_id=_ORG_ID)
@@ -1098,7 +1104,7 @@ class TestUriRowKeyRoundTrip:
         mock_load.side_effect = [[], [new_ann]]
         mock_create.return_value = new_ann
 
-        encoded = quote(self._URI_ROW_KEY, safe="")
+        encoded = safe_row_key(self._URI_ROW_KEY)
         url = f"/annotations/version/{_VERSION_ID}/entity/{encoded}/messages"
 
         with patch(
@@ -1110,7 +1116,7 @@ class TestUriRowKeyRoundTrip:
 
         assert resp.status_code == 200
         # The create call received the DECODED URI as row_key, not the
-        # percent-encoded form.
+        # base64url-encoded form.
         _, create_kwargs = mock_create.call_args
         assert create_kwargs.get("row_key") == self._URI_ROW_KEY
 
@@ -1119,7 +1125,7 @@ class TestUriRowKeyRoundTrip:
     @patch("app.annotations.routes._connect")
     @patch("app.auth.middleware._get_provider")
     def test_post_resolve_with_uri_row_key(self, mock_prov, mock_connect, mock_resolve, mock_load):
-        from urllib.parse import quote
+        from app.annotations.row_keys import safe_row_key
 
         mock_prov.return_value = _stub_provider()
         mock_conn, _ = _patch_acl_lookup(owning_org_id=_ORG_ID)
@@ -1127,7 +1133,7 @@ class TestUriRowKeyRoundTrip:
         mock_resolve.return_value = 1
         mock_load.return_value = []
 
-        encoded = quote(self._URI_ROW_KEY, safe="")
+        encoded = safe_row_key(self._URI_ROW_KEY)
         url = f"/annotations/version/{_VERSION_ID}/entity/{encoded}/resolve"
 
         client = _authed_client()
@@ -1139,7 +1145,109 @@ class TestUriRowKeyRoundTrip:
 
 
 # ---------------------------------------------------------------------------
-# #773: safe_row_key / decode_row_key / target_dom_id helpers
+# #781 follow-up: regression — raw row keys carrying literal %XX bytes
+# ---------------------------------------------------------------------------
+
+
+class TestUriRowKeyWithPercentBytes:
+    """CELEX URIs and similar already contain percent-encoded bytes.
+
+    Example: an EU directive row_key stored as ``CELEX%3A32016R0679``
+    (the ``%3A`` is part of the raw URI, not transport-layer encoding).
+    With percent-encoding, the literal ``%`` would have to be escaped to
+    ``%25`` and the round-trip depended on every transport layer
+    decoding the path exactly once — which httpx + Starlette TestClient
+    do NOT do (they decode twice), and reverse proxies sometimes don't
+    either. Base64url encoding is opaque, so the raw row key reaches the
+    handler intact regardless of how many transport-layer decodes happen.
+    """
+
+    _PERCENT_ROW_KEY = "CELEX%3A32016R0679"
+
+    @patch("app.annotations.routes._load_panel_messages")
+    @patch("app.annotations.routes._connect")
+    @patch("app.auth.middleware._get_provider")
+    def test_get_panel_preserves_literal_percent_bytes(self, mock_prov, mock_connect, mock_load):
+        from app.annotations.row_keys import safe_row_key
+
+        mock_prov.return_value = _stub_provider()
+        mock_conn, _ = _patch_acl_lookup(owning_org_id=_ORG_ID)
+        mock_connect.side_effect = mock_conn
+        mock_load.return_value = []
+
+        encoded = safe_row_key(self._PERCENT_ROW_KEY)
+        # base64url emits only [A-Za-z0-9_-] so no transport layer mutates it.
+        assert "%" not in encoded
+        url = f"/annotations/version/{_VERSION_ID}/eu/{encoded}"
+
+        client = _authed_client()
+        resp = client.get(url)
+
+        assert resp.status_code == 200
+        # Handler must receive the ORIGINAL raw row key (with %3A still
+        # in it), NOT the double-decoded "CELEX:32016R0679".
+        if mock_load.call_args.kwargs:
+            received = mock_load.call_args.kwargs.get("row_key")
+        else:
+            received = mock_load.call_args.args[2]
+        assert received == self._PERCENT_ROW_KEY
+        assert received != "CELEX:32016R0679"
+
+    @patch("app.annotations.routes._load_panel_messages")
+    @patch("app.annotations.routes.create_row_annotation")
+    @patch("app.annotations.routes._connect")
+    @patch("app.auth.middleware._get_provider")
+    def test_post_message_preserves_literal_percent_bytes(
+        self, mock_prov, mock_connect, mock_create, mock_load
+    ):
+        from app.annotations.row_keys import safe_row_key
+
+        mock_prov.return_value = _stub_provider()
+        mock_conn, _ = _patch_acl_lookup(owning_org_id=_ORG_ID)
+        mock_connect.side_effect = mock_conn
+
+        new_ann = _make_annotation(
+            target_id=f"eu:{self._PERCENT_ROW_KEY}",
+            content="Märkus CELEX rea kohta.",
+        )
+        mock_load.side_effect = [[], [new_ann]]
+        mock_create.return_value = new_ann
+
+        encoded = safe_row_key(self._PERCENT_ROW_KEY)
+        url = f"/annotations/version/{_VERSION_ID}/eu/{encoded}/messages"
+
+        with patch(
+            "app.annotations.routes._user_display_name",
+            return_value="Test Kasutaja",
+        ):
+            client = _authed_client()
+            resp = client.post(url, json={"content": "Märkus CELEX rea kohta."})
+
+        assert resp.status_code == 200
+        _, create_kwargs = mock_create.call_args
+        # Writes must land on the raw CELEX row key, not a double-decoded
+        # variant — otherwise the create + the later read would target
+        # different threads.
+        assert create_kwargs.get("row_key") == self._PERCENT_ROW_KEY
+
+    @patch("app.annotations.routes._connect")
+    @patch("app.auth.middleware._get_provider")
+    def test_malformed_base64url_returns_400(self, mock_prov, mock_connect):
+        """A row_key that isn't decodable base64url surfaces as 400, not 500."""
+        mock_prov.return_value = _stub_provider()
+        mock_conn, _ = _patch_acl_lookup(owning_org_id=_ORG_ID)
+        mock_connect.side_effect = mock_conn
+
+        # "%" is not in the base64url alphabet; decode raises binascii.Error.
+        url = f"/annotations/version/{_VERSION_ID}/entity/not%25valid"
+
+        client = _authed_client()
+        resp = client.get(url)
+        assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# #773: safe_row_key / target_dom_id helpers
 # ---------------------------------------------------------------------------
 
 
@@ -1148,28 +1256,49 @@ class TestRowKeyEncodingHelpers:
 
     _URI = "https://data.riik.ee/ontology/estleg#KarS"
 
-    def test_safe_row_key_percent_encodes_slash_colon_hash(self):
+    def test_safe_row_key_uses_base64url_alphabet(self):
+        """Encoded form draws only from ``[A-Za-z0-9_-]`` — no URL/CSS specials."""
+        import re
+
         from app.annotations.row_keys import safe_row_key
 
         encoded = safe_row_key(self._URI)
-        # No literal ``/``, ``#``, or ``:`` in the encoded form.
-        assert "/" not in encoded
-        assert "#" not in encoded
-        assert ":" not in encoded
-        # The Estonian provision name still round-trips.
-        assert "KarS" in encoded
+        # None of the chars that would force escaping in URLs / CSS.
+        for ch in ("/", "#", ":", "%", "+", "=", "?", "&"):
+            assert ch not in encoded, f"unexpected {ch!r} in {encoded!r}"
+        # Strict base64url alphabet check (no padding — we strip it).
+        assert re.fullmatch(r"[A-Za-z0-9_-]+", encoded), encoded
 
     def test_decode_row_key_inverts_safe_row_key(self):
+        """The opaque encoder/decoder pair round-trips for any raw value."""
         from app.annotations.row_keys import decode_row_key, safe_row_key
 
-        assert decode_row_key(safe_row_key(self._URI)) == self._URI
+        for raw in [
+            self._URI,
+            "CELEX%3A32016R0679",  # #781 — literal %XX in the raw row key
+            "x%2Fy",  # encoded slash inside a raw value
+            "ÕIE/§5",  # non-ASCII (UTF-8 round-trip)
+            "abcdef0123456789abcdef0123456789",  # sha256-32 hashed key
+        ]:
+            assert decode_row_key(safe_row_key(raw)) == raw, raw
 
-    def test_safe_row_key_is_noop_for_hashed_keys(self):
-        """sha256-32 hex digests contain only [0-9a-f] so safe_row_key is a no-op."""
-        from app.annotations.row_keys import safe_row_key
+    def test_safe_row_key_round_trip_for_hashed_keys(self):
+        """sha256-32 hex digests round-trip through the encoder/decoder pair.
+
+        The encoded form differs from the input (base64url is not a no-op
+        on hex digits), but the inverse must recover the original digest.
+        """
+        from app.annotations.row_keys import decode_row_key, safe_row_key
 
         digest = "abcdef0123456789abcdef0123456789"
-        assert safe_row_key(digest) == digest
+        assert decode_row_key(safe_row_key(digest)) == digest
+
+    def test_safe_row_key_empty_input_round_trips(self):
+        """Empty / falsy input encodes to '' and decodes back to ''."""
+        from app.annotations.row_keys import decode_row_key, safe_row_key
+
+        assert safe_row_key("") == ""
+        assert decode_row_key("") == ""
 
     def test_target_dom_id_is_css_safe(self):
         """The returned id contains only chars valid in CSS / HTMX selectors."""
