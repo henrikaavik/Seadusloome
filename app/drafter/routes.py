@@ -1054,6 +1054,93 @@ def _step_4_page(session: DraftingSession, auth: UserDict):
 # ---------------------------------------------------------------------------
 
 
+def _render_clause_card(
+    clause: dict[str, Any],
+    session_id: uuid.UUID,
+    idx: int,
+    *,
+    success_alert: bool = False,
+):
+    """Render a single drafter step-5 clause card.
+
+    Shared renderer (#774) for the initial step-5 page and the
+    ``regenerate_clause_status`` HTMX success fragment. Both paths MUST
+    emit identical markup so HTMX outerHTML swaps keep the
+    ``.clause-actions`` row (Muuda + Genereeri uuesti + AnnotationButton)
+    after a regeneration — otherwise the user loses the ability to edit,
+    regenerate again, or annotate the clause until they navigate away.
+
+    Parameters
+    ----------
+    clause:
+        Decoded clause dict from ``session.draft_content_encrypted``.
+    session_id:
+        Drafting session UUID — used to build the edit/regenerate URLs.
+    idx:
+        Position of the clause in the list — used to build the DOM id
+        (``clause-{idx}``) and HTMX targets.
+    success_alert:
+        When ``True``, append a ``"Uuesti genereeritud."`` success Alert
+        below the citations. Used by ``regenerate_clause_status`` after
+        a successful regeneration so the user gets feedback.
+    """
+    chapter = clause.get("chapter", "")
+    chapter_title = clause.get("chapter_title", "")
+    para = clause.get("paragraph", "")
+    title = clause.get("title", "")
+    text = clause.get("text", "")
+    citations = clause.get("citations", [])
+    notes = clause.get("notes", "")
+
+    citation_links: list[Any] = []
+    for cit in citations:
+        citation_links.append(
+            A(
+                cit,
+                href=f"/explorer?search={url_quote(cit)}",
+                cls="citation-link",
+                target="_blank",
+            )  # noqa: F405
+        )
+
+    return Div(  # noqa: F405
+        H4(f"{para} {title}", cls="clause-heading"),  # noqa: F405
+        Small(  # noqa: F405
+            f"Peatükk: {chapter} {chapter_title}",
+            cls="clause-chapter-ref muted-text",
+        ),
+        Div(  # noqa: F405
+            P(text, cls="clause-text") if text else P("(Sisu puudub)", cls="muted-text"),  # noqa: F405
+            cls="clause-body",
+        ),
+        Div(*citation_links, cls="clause-citations") if citation_links else None,  # noqa: F405
+        P(Em(f"Märkus: {notes}"), cls="clause-notes muted-text") if notes else None,  # noqa: F405
+        Alert("Uuesti genereeritud.", variant="success") if success_alert else None,
+        Div(  # noqa: F405
+            Button(  # noqa: F405
+                "Muuda",
+                hx_get=f"/drafter/{session_id}/step/5/edit/{idx}",
+                hx_target=f"#clause-{idx}",
+                hx_swap="outerHTML",
+                variant="ghost",
+                size="sm",
+            ),
+            Button(  # noqa: F405
+                "Genereeri uuesti",
+                hx_post=f"/drafter/{session_id}/step/5/regenerate/{idx}",
+                hx_target=f"#clause-{idx}",
+                hx_swap="outerHTML",
+                variant="ghost",
+                size="sm",
+            ),
+            AnnotationButton("provision", f"{session_id}-clause-{idx}"),
+            cls="clause-actions",
+        ),
+        id=f"clause-{idx}",
+        cls="clause-item",
+    )
+
+
 def _step_5_page(session: DraftingSession, auth: UserDict):
     """Render Step 5: Drafted clauses with inline editing."""
     if session.draft_content_encrypted is None:
@@ -1077,61 +1164,9 @@ def _step_5_page(session: DraftingSession, auth: UserDict):
         except Exception:
             logger.warning("Could not decrypt draft content for session %s", session.id)
 
-    clause_items: list[Any] = []
-    for i, clause in enumerate(clauses):
-        chapter = clause.get("chapter", "")
-        chapter_title = clause.get("chapter_title", "")
-        para = clause.get("paragraph", "")
-        title = clause.get("title", "")
-        text = clause.get("text", "")
-        citations = clause.get("citations", [])
-        notes = clause.get("notes", "")
-
-        citation_links: list[Any] = []
-        for cit in citations:
-            citation_links.append(
-                A(
-                    cit,
-                    href=f"/explorer?search={url_quote(cit)}",
-                    cls="citation-link",
-                    target="_blank",
-                )  # noqa: F405
-            )
-
-        clause_items.append(
-            Div(  # noqa: F405
-                H4(f"{para} {title}", cls="clause-heading"),  # noqa: F405
-                Small(f"Peatükk: {chapter} {chapter_title}", cls="clause-chapter-ref muted-text"),  # noqa: F405
-                Div(  # noqa: F405
-                    P(text, cls="clause-text") if text else P("(Sisu puudub)", cls="muted-text"),  # noqa: F405
-                    cls="clause-body",
-                ),
-                Div(*citation_links, cls="clause-citations") if citation_links else None,  # noqa: F405
-                P(Em(f"Märkus: {notes}"), cls="clause-notes muted-text") if notes else None,  # noqa: F405
-                Div(  # noqa: F405
-                    Button(  # noqa: F405
-                        "Muuda",
-                        hx_get=f"/drafter/{session.id}/step/5/edit/{i}",
-                        hx_target=f"#clause-{i}",
-                        hx_swap="outerHTML",
-                        variant="ghost",
-                        size="sm",
-                    ),
-                    Button(  # noqa: F405
-                        "Genereeri uuesti",
-                        hx_post=f"/drafter/{session.id}/step/5/regenerate/{i}",
-                        hx_target=f"#clause-{i}",
-                        hx_swap="outerHTML",
-                        variant="ghost",
-                        size="sm",
-                    ),
-                    AnnotationButton("provision", f"{session.id}-clause-{i}"),
-                    cls="clause-actions",
-                ),
-                id=f"clause-{i}",
-                cls="clause-item",
-            )
-        )
+    clause_items: list[Any] = [
+        _render_clause_card(clause, session.id, i) for i, clause in enumerate(clauses)
+    ]
 
     # Advance form
     advance_form = AppForm(
@@ -2376,36 +2411,14 @@ def regenerate_clause_status(req: Request, session_id: str, clause_idx: str):
                 pass
 
         if 0 <= idx < len(clauses):
-            clause = clauses[idx]
-            citations = clause.get("citations", [])
-            citation_links: list[Any] = []
-            for cit in citations:
-                citation_links.append(
-                    A(
-                        cit,
-                        href=f"/explorer?search={url_quote(cit)}",
-                        cls="citation-link",
-                        target="_blank",
-                    )  # noqa: F405
-                )
-
-            return Div(  # noqa: F405
-                H4(
-                    f"{clause.get('paragraph', '')} {clause.get('title', '')}",
-                    cls="clause-heading",
-                ),  # noqa: F405
-                Small(  # noqa: F405
-                    f"Peatükk: {clause.get('chapter', '')} {clause.get('chapter_title', '')}",
-                    cls="clause-chapter-ref muted-text",
-                ),
-                Div(  # noqa: F405
-                    P(clause.get("text", ""), cls="clause-text"),  # noqa: F405
-                    cls="clause-body",
-                ),
-                Div(*citation_links, cls="clause-citations") if citation_links else None,  # noqa: F405
-                Alert("Uuesti genereeritud.", variant="success"),
-                id=f"clause-{clause_idx}",
-                cls="clause-item",
+            # #774: render via the shared helper so the regenerated clause
+            # keeps its Muuda / Genereeri uuesti / AnnotationButton action
+            # row after the HTMX outerHTML swap. Before, this branch
+            # emitted a stripped-down clause Div without ``.clause-actions``
+            # and the user lost the ability to edit / regenerate / annotate
+            # the clause until they refreshed the page.
+            return _render_clause_card(
+                clause=clauses[idx], session_id=parsed, idx=idx, success_alert=True
             )
 
     if job and job["status"] == "failed":
