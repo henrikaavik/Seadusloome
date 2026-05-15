@@ -305,6 +305,73 @@ class TestFindSimilarSanctions:
         stub_client.query.side_effect = RuntimeError("jena down")
         assert find_similar_sanctions(seed, sparql_client=stub_client) == []
 
+    def test_query_template_casts_seed_bounds_to_xsd_decimal(self):
+        """Regression for F2 (2026-05-15 review).
+
+        The SPARQL bindings injection emits VALUES with string literals
+        (``"100.0"``, not ``"100.0"^^xsd:decimal``). The FILTER must
+        therefore cast through ``xsd:decimal()`` before comparing
+        against the candidate row's decimal ``?maxAmount`` /
+        ``?minAmount``. Without the cast the comparison evaluates as
+        ``string <= decimal``, which silently returns no rows even
+        when the ranges genuinely overlap.
+        """
+        from app.analyysikeskus.sanctions import _SIMILAR_SANCTIONS_QUERY
+
+        assert "xsd:decimal(?seedMin)" in _SIMILAR_SANCTIONS_QUERY
+        assert "xsd:decimal(?seedMax)" in _SIMILAR_SANCTIONS_QUERY
+
+    def test_similar_sanctions_query_finds_overlap_against_rdflib(self):
+        """End-to-end regression for F2 against an in-memory rdflib graph.
+
+        Mirrors :class:`app.ontology.SparqlClient`'s VALUES injection
+        (string literals) and asserts the FILTER returns the
+        overlapping row. Catches the original bug: without the
+        ``xsd:decimal`` casts, string-vs-decimal comparison drops the
+        row even though [100, 500] genuinely overlaps [150, 300].
+        """
+        from rdflib import Graph
+
+        from app.analyysikeskus.sanctions import _SIMILAR_SANCTIONS_QUERY
+
+        graph_data = """
+        @prefix estleg: <https://data.riik.ee/ontology/estleg#> .
+        @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+        @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+        estleg:OtherAct rdfs:label "Different act" .
+        estleg:OtherProvision rdfs:label "§1 OtherAct" ;
+            estleg:partOf estleg:OtherAct ;
+            estleg:hasSanction estleg:OtherSanction .
+        estleg:OtherSanction estleg:sanctionType "fine" ;
+            estleg:minPenaltyAmount "150"^^xsd:decimal ;
+            estleg:maxPenaltyAmount "300"^^xsd:decimal .
+        """
+
+        g = Graph()
+        g.parse(data=graph_data, format="turtle")
+
+        # Mirror ``SparqlClient._inject_bindings``: string literals via VALUES.
+        values_block = (
+            'VALUES ?type { "fine" }\n'
+            'VALUES ?seedMin { "100.0" }\n'
+            'VALUES ?seedMax { "500.0" }\n'
+            'VALUES ?seedAct { "https://example.org/seed-act" }\n'
+        )
+        last_brace = _SIMILAR_SANCTIONS_QUERY.rfind("}")
+        query = (
+            _SIMILAR_SANCTIONS_QUERY[:last_brace]
+            + "\n"
+            + values_block
+            + "\n"
+            + _SIMILAR_SANCTIONS_QUERY[last_brace:]
+        )
+
+        results = list(g.query(query))
+        # Seed range [100, 500] overlaps candidate [150, 300] → expect 1.
+        # With the F2 bug (no ``xsd:decimal`` cast) this is 0.
+        assert len(results) == 1
+
 
 # ---------------------------------------------------------------------------
 # 3. Input parser pinning — A1 must accept the same input vocabulary as Normi

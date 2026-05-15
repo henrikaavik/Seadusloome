@@ -252,9 +252,17 @@ LIMIT """
 # Similar sanctions — same sanctionType, other acts only, with a
 # range-overlap filter on the amount bounds. We bind ``?type`` /
 # ``?seedMin`` / ``?seedMax`` / ``?seedAct`` via
-# :meth:`SparqlClient._inject_bindings` (string literals — safe
-# escape). The range-overlap maths: two ranges [a, b] and [c, d]
-# overlap iff a <= d AND c <= b, i.e. ``?seedMin <= ?maxAmount`` AND
+# :meth:`SparqlClient._inject_bindings`. The injector emits VALUES
+# with **string literals** (it has to — the same injector is used for
+# URI strings, language tags, etc.), so the numeric comparisons in the
+# FILTER cast explicitly through ``xsd:decimal(?seedMin)`` and
+# ``xsd:decimal(?seedMax)``. Without the cast SPARQL compares lex order
+# string-to-decimal, which silently returns no overlapping rows (F2,
+# 2026-05-15 review repro: rdflib confirmed 0 rows for string vs 1 row
+# for typed decimal).
+#
+# The range-overlap maths: two ranges [a, b] and [c, d] overlap iff
+# a <= d AND c <= b, i.e. ``?seedMin <= ?maxAmount`` AND
 # ``?minAmount <= ?seedMax``. Either bound missing on the candidate
 # row passes the filter (treated as open-ended), so we don't lose
 # rows that have only one numeric bound.
@@ -285,8 +293,8 @@ WHERE {
   OPTIONAL { ?sanction estleg:isStatutoryDefault ?isStatutoryDefault }
   FILTER(STR(?sanctionType) = ?type)
   FILTER(!BOUND(?act) || STR(?act) != ?seedAct)
-  FILTER(!BOUND(?maxAmount) || ?seedMin <= ?maxAmount)
-  FILTER(!BOUND(?minAmount) || ?minAmount <= ?seedMax)
+  FILTER(!BOUND(?maxAmount) || xsd:decimal(?seedMin) <= ?maxAmount)
+  FILTER(!BOUND(?minAmount) || ?minAmount <= xsd:decimal(?seedMax))
 }
 ORDER BY ?act ?provision
 LIMIT """
