@@ -363,6 +363,7 @@ def list_overdue_or_upcoming_transpositions(
     *,
     sparql_client: SparqlClient | None = None,
     today: date | None = None,
+    timeout_s: float | None = None,
 ) -> list[TranspositionDeadlineRow]:
     """Return EU directives whose transposition deadline is approaching or passed.
 
@@ -394,6 +395,13 @@ def list_overdue_or_upcoming_transpositions(
             inject one whose ``.query`` is mocked).
         today: Optional ``date`` override (tests freeze the clock).
             Defaults to :meth:`date.today`.
+        timeout_s: When constructing a default :class:`SparqlClient`,
+            cap the underlying HTTP request at this many seconds. The
+            dashboard helper passes its own soft timeout here so a stuck
+            Jena fails fast at the network layer rather than holding the
+            worker thread alive in the background (F8, 2026-05-15
+            review). Ignored when ``sparql_client`` is provided — the
+            caller owns the timeout in that case.
 
     Returns:
         A list of :class:`TranspositionDeadlineRow`, ordered by deadline
@@ -409,7 +417,12 @@ def list_overdue_or_upcoming_transpositions(
     # Reference it explicitly to silence ruff's unused-arg lint.
     _ = org_id
 
-    client = sparql_client if sparql_client is not None else SparqlClient()
+    if sparql_client is not None:
+        client = sparql_client
+    elif timeout_s is not None:
+        client = SparqlClient(timeout=timeout_s)
+    else:
+        client = SparqlClient()
     query = _build_deadlines_query(cutoff)
 
     try:

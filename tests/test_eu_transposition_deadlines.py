@@ -602,7 +602,7 @@ class TestDeadlinesHelperTimeout:
         bound wall-clock time. Previously the function used ``with
         ThreadPoolExecutor(...)`` which calls ``shutdown(wait=True)`` on
         exit, blocking the return until the slow query finished — so the
-        function ran for ~SLOW_QUERY_S instead of ~TIMEOUT_S. The fix
+        function ran for ~slow_query_s instead of ~timeout_s. The fix
         switches to a manual lifecycle with ``shutdown(wait=False,
         cancel_futures=True)`` so the dashboard render is bounded.
         """
@@ -610,14 +610,14 @@ class TestDeadlinesHelperTimeout:
 
         from app.templates.dashboard import _get_eu_transposition_deadlines
 
-        SLOW_QUERY_S = 1.5
-        TIMEOUT_S = 0.1
+        slow_query_s = 1.5
+        timeout_s = 0.1
         # CI sometimes runs slow; allow up to ~0.5s of scheduling jitter
         # before declaring the timeout broken. The bug case would be ~1.5s.
-        TOLERANCE_S = 0.5
+        tolerance_s = 0.5
 
         def _very_slow_query(*args, **kwargs):
-            _time.sleep(SLOW_QUERY_S)
+            _time.sleep(slow_query_s)
             return []
 
         start = _time.perf_counter()
@@ -627,14 +627,14 @@ class TestDeadlinesHelperTimeout:
         ):
             out = _get_eu_transposition_deadlines(
                 "11111111-1111-1111-1111-111111111111",
-                timeout_s=TIMEOUT_S,
+                timeout_s=timeout_s,
             )
         elapsed = _time.perf_counter() - start
 
         assert out == []
-        assert elapsed < TIMEOUT_S + TOLERANCE_S, (
-            f"Expected return within ~{TIMEOUT_S}s + jitter but got {elapsed:.2f}s. "
-            f"Slow query was {SLOW_QUERY_S}s — if elapsed ≈ that, the "
+        assert elapsed < timeout_s + tolerance_s, (
+            f"Expected return within ~{timeout_s}s + jitter but got {elapsed:.2f}s. "
+            f"Slow query was {slow_query_s}s — if elapsed ≈ that, the "
             "ThreadPoolExecutor shutdown is blocking again (regression of F1)."
         )
 
