@@ -398,12 +398,28 @@ class TestFixtureGraphSparql:
         assert len(rows) == 1
 
     def test_transposes_directive_and_inverse(self, fixture_graph: Graph):
-        forward = list(
+        # The fixture seeds both shapes the SHACL allows:
+        #   Provision_1 estleg:transposesDirective EU_Dir_1   (SHACL 158-163)
+        #   Act_1       estleg:transposesDirective EU_Dir_2   (SHACL 62-66)
+        # ...so a free ``?subject estleg:transposesDirective ?eu`` query
+        # matches both. Tighten each branch with a specific subject so the
+        # test stays diagnostic when more transposition data is added.
+        provision_level = list(
             fixture_graph.query(
                 """
                 PREFIX estleg: <https://data.riik.ee/ontology/estleg#>
-                SELECT ?prov ?eu WHERE {
-                    ?prov estleg:transposesDirective ?eu .
+                SELECT ?eu WHERE {
+                    estleg:Provision_1 estleg:transposesDirective ?eu .
+                }
+                """
+            )
+        )
+        act_level = list(
+            fixture_graph.query(
+                """
+                PREFIX estleg: <https://data.riik.ee/ontology/estleg#>
+                SELECT ?eu WHERE {
+                    estleg:Act_1 estleg:transposesDirective ?eu .
                 }
                 """
             )
@@ -418,7 +434,8 @@ class TestFixtureGraphSparql:
                 """
             )
         )
-        assert len(forward) == 1
+        assert len(provision_level) == 1
+        assert len(act_level) == 1
         assert len(inverse) == 1
 
     def test_harmonised_with_query(self, fixture_graph: Graph):
