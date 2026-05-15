@@ -12,13 +12,24 @@ is re-bound in the ``routes`` namespace at import time.
 
 Call-time indirection
 ---------------------
-A small number of dependencies live in ``routes.py`` (``_step_tracker``)
-or are imported there from sibling modules (``decrypt_text``,
-``_find_latest_job``). To keep ``patch("app.drafter.routes.<name>")``
-working from inside these renderers, those three references are looked
-up on the ``routes`` module at *call* time rather than bound at module
-import time. That avoids a circular import and means a test patch on
-the routes module takes effect on the very next call from here.
+To keep ``patch("app.drafter.routes.<name>")`` working from inside
+these renderers, references to helpers that are *also* re-exported on
+``app.drafter.routes`` are looked up on that module at *call* time via
+:func:`_routes_attr`, rather than bound at module import time. That
+avoids a circular import while ensuring a test patch on the routes
+module takes effect on the very next call from here. The pattern
+covers two kinds of dependency:
+
+* Helpers that live in ``routes.py`` (``_step_tracker``) or are
+  imported there from sibling modules (``decrypt_text``,
+  ``_find_latest_job``) — the original motivation for the indirection.
+* Sibling renderers in this very module (``_step_1_content``,
+  ``_step_waiting_page``, ``_step_error_page``,
+  ``_research_category_card``, ``_render_clause_card``) — these *are*
+  defined here but are also re-imported into ``routes.py``, so a
+  ``patch("app.drafter.routes.<helper>")`` must take effect on the
+  intra-module calls that follow, exactly as it did pre-extraction
+  when caller and callee were both in ``routes.py``.
 """
 
 from __future__ import annotations
@@ -77,7 +88,7 @@ def _routes_attr(name: str):
 
 def _step_1_page(session: DraftingSession, auth: UserDict):
     """Render Step 1: Intent Capture form."""
-    return _step_1_content(session, auth)
+    return _routes_attr("_step_1_content")(session, auth)
 
 
 def _step_1_content(
@@ -222,15 +233,16 @@ def _step_2_page(session: DraftingSession, auth: UserDict):
     # If no clarifications yet, check job status
     if not clarifications:
         job = _routes_attr("_find_latest_job")(session.id, "drafter_clarify")
+        _waiting = _routes_attr("_step_waiting_page")
         if job is None:
             # No job enqueued yet — shouldn't happen, but show a waiting state
-            return _step_waiting_page(session, 2, auth, "Küsimuste genereerimine...")
+            return _waiting(session, 2, auth, "Küsimuste genereerimine...")
 
         if job["status"] in ("pending", "claimed", "running"):
-            return _step_waiting_page(session, 2, auth, "Küsimuste genereerimine...")
+            return _waiting(session, 2, auth, "Küsimuste genereerimine...")
 
         if job["status"] == "failed":
-            return _step_error_page(
+            return _routes_attr("_step_error_page")(
                 session,
                 2,
                 auth,
@@ -353,9 +365,9 @@ def _step_3_page(session: DraftingSession, auth: UserDict):
         # Check job status
         job = _routes_attr("_find_latest_job")(session.id, "drafter_research")
         if job is None or job["status"] in ("pending", "claimed", "running"):
-            return _step_waiting_page(session, 3, auth, "Ontoloogia uurimine...")
+            return _routes_attr("_step_waiting_page")(session, 3, auth, "Ontoloogia uurimine...")
         if job["status"] == "failed":
-            return _step_error_page(
+            return _routes_attr("_step_error_page")(
                 session,
                 3,
                 auth,
@@ -378,10 +390,11 @@ def _step_3_page(session: DraftingSession, auth: UserDict):
     cards: list[Any] = []
 
     # Summary cards for each category
-    cards.append(_research_category_card("Õigusaktide sätted", provisions, "provision"))
-    cards.append(_research_category_card("EL-i õigusaktid", eu_directives, "eu"))
-    cards.append(_research_category_card("Kohtulahendid", court_decisions, "court"))
-    cards.append(_research_category_card("Teemaklastrid", topic_clusters, "cluster"))
+    _category_card = _routes_attr("_research_category_card")
+    cards.append(_category_card("Õigusaktide sätted", provisions, "provision"))
+    cards.append(_category_card("EL-i õigusaktid", eu_directives, "eu"))
+    cards.append(_category_card("Kohtulahendid", court_decisions, "court"))
+    cards.append(_category_card("Teemaklastrid", topic_clusters, "cluster"))
 
     # Advance button
     advance_form = AppForm(
@@ -472,9 +485,11 @@ def _step_4_page(session: DraftingSession, auth: UserDict):
         # Check job status
         job = _routes_attr("_find_latest_job")(session.id, "drafter_structure")
         if job is None or job["status"] in ("pending", "claimed", "running"):
-            return _step_waiting_page(session, 4, auth, "Struktuuri genereerimine...")
+            return _routes_attr("_step_waiting_page")(
+                session, 4, auth, "Struktuuri genereerimine..."
+            )
         if job["status"] == "failed":
-            return _step_error_page(
+            return _routes_attr("_step_error_page")(
                 session,
                 4,
                 auth,
@@ -680,9 +695,11 @@ def _step_5_page(session: DraftingSession, auth: UserDict):
     if session.draft_content_encrypted is None:
         job = _routes_attr("_find_latest_job")(session.id, "drafter_draft")
         if job is None or job["status"] in ("pending", "claimed", "running"):
-            return _step_waiting_page(session, 5, auth, "Seaduseteksti koostamine...")
+            return _routes_attr("_step_waiting_page")(
+                session, 5, auth, "Seaduseteksti koostamine..."
+            )
         if job["status"] == "failed":
-            return _step_error_page(
+            return _routes_attr("_step_error_page")(
                 session,
                 5,
                 auth,
@@ -698,8 +715,9 @@ def _step_5_page(session: DraftingSession, auth: UserDict):
         except Exception:
             logger.warning("Could not decrypt draft content for session %s", session.id)
 
+    _clause_card = _routes_attr("_render_clause_card")
     clause_items: list[Any] = [
-        _render_clause_card(clause, session.id, i) for i, clause in enumerate(clauses)
+        _clause_card(clause, session.id, i) for i, clause in enumerate(clauses)
     ]
 
     # Advance form
