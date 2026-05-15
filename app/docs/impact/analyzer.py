@@ -102,7 +102,13 @@ class ImpactAnalyzer:
     # ------------------------------------------------------------------
 
     def _find_affected(self, graph_uri: str) -> list[dict[str, str]]:
-        """Run the 2-hop BFS query and shape the results."""
+        """Run the 2-hop BFS query and shape the results.
+
+        Each row carries a ``relation`` field — the canonical predicate
+        URI that linked the entity to the draft reference. C5 uses this
+        to render the relation type in legal language; older callers can
+        ignore it.
+        """
         try:
             query = build_affected_entities_query(graph_uri)
             rows = self.client.query(query)
@@ -114,13 +120,17 @@ class ImpactAnalyzer:
                 "uri": row.get("entity", ""),
                 "label": row.get("label", ""),
                 "type": row.get("type", ""),
+                "relation": row.get("relation", ""),
             }
             for row in rows
             if row.get("entity")
         ]
 
     def _detect_conflicts(self, graph_uri: str) -> list[dict[str, str]]:
-        """Run the conflict query and return one dict per hit."""
+        """Run the conflict query and return one dict per hit.
+
+        Each row carries a ``relation`` field for C5 rendering.
+        """
         try:
             query = build_conflicts_query(graph_uri)
             rows = self.client.query(query)
@@ -133,6 +143,7 @@ class ImpactAnalyzer:
                 "conflicting_entity": row.get("conflictEntity", ""),
                 "conflicting_label": row.get("conflictLabel", ""),
                 "reason": row.get("reason", ""),
+                "relation": row.get("relation", ""),
             }
             for row in rows
             if row.get("draftRef")
@@ -166,7 +177,12 @@ class ImpactAnalyzer:
         return out
 
     def _check_eu_compliance(self, graph_uri: str) -> list[dict[str, str]]:
-        """Run the EU compliance query and return one dict per link."""
+        """Run the EU compliance query and return one dict per link.
+
+        Each row carries a ``relation`` field — typically
+        ``estleg:transposesDirective``, ``estleg:transposedBy``, or
+        ``estleg:harmonisedWith`` — so C5 can render the relation type.
+        """
         try:
             query = build_eu_compliance_query(graph_uri)
             rows = self.client.query(query)
@@ -180,6 +196,7 @@ class ImpactAnalyzer:
                 "estonian_provision": row.get("estonianProvision", ""),
                 "provision_label": row.get("provisionLabel", ""),
                 "transposition_status": "linked",
+                "relation": row.get("relation", ""),
             }
             for row in rows
             if row.get("euAct")

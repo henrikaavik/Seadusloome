@@ -89,9 +89,11 @@ class TestAnalyzeHappyPath:
         assert findings.gap_count == 1
         assert len(findings.eu_compliance) == 1
 
-        # Check reshaping: affected entities become (uri, label, type) dicts.
+        # Check reshaping: affected entities become (uri, label, type, relation) dicts.
+        # ``relation`` is the canonical predicate URI projected by C0 — empty
+        # string when the canned row didn't supply one.
         first = findings.affected_entities[0]
-        assert set(first.keys()) == {"uri", "label", "type"}
+        assert set(first.keys()) == {"uri", "label", "type", "relation"}
         assert first["label"] == "KarS § 133"
 
         # Conflicts reshape draftRef/conflictEntity into snake_case.
