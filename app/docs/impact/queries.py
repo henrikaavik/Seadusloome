@@ -292,12 +292,32 @@ EU_COMPLIANCE = (
 SELECT DISTINCT ?euAct ?euLabel ?estonianProvision ?provisionLabel ?relation WHERE {{
   GRAPH <{graph_uri}> {{ ?draft estleg:references ?estonianProvision . }}
   {{
+    # Provision-level transposition (SHACL lines 158-163 allow this).
     ?estonianProvision estleg:transposesDirective ?euAct .
     BIND(estleg:transposesDirective AS ?relation)
   }} UNION {{
-    ?euAct estleg:transposedBy ?estonianProvision .
+    # Act-level transposition (canonical per SHACL lines 62-66): chain via
+    # the provision's parent act (``sourceAct`` is the populated edge;
+    # ``partOf`` is the SHACL alias — UNION both for forward compatibility).
+    {{
+      ?estonianProvision estleg:sourceAct ?_parentAct .
+    }} UNION {{
+      ?estonianProvision estleg:partOf ?_parentAct .
+    }}
+    ?_parentAct estleg:transposesDirective ?euAct .
+    BIND(estleg:transposesDirective AS ?relation)
+  }} UNION {{
+    # Inverse — ``transposedBy`` is on EULegislation → Act (SHACL 687-692),
+    # so chain from provision → parent act first.
+    {{
+      ?estonianProvision estleg:sourceAct ?_parentAct .
+    }} UNION {{
+      ?estonianProvision estleg:partOf ?_parentAct .
+    }}
+    ?euAct estleg:transposedBy ?_parentAct .
     BIND(estleg:transposedBy AS ?relation)
   }} UNION {{
+    # Provision-level harmonisation (SHACL 226-230).
     ?estonianProvision estleg:harmonisedWith ?euAct .
     BIND(estleg:harmonisedWith AS ?relation)
   }}

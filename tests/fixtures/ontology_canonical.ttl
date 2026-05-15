@@ -74,6 +74,9 @@ estleg:AmendmentEvent_1 a estleg:AmendmentEvent ;
 estleg:EU_Dir_1 a estleg:EULegislation ;
     rdfs:label "EU Directive 1" .
 
+estleg:EU_Dir_2 a estleg:EULegislation ;
+    rdfs:label "EU Directive 2 — act-level transposition" .
+
 estleg:Cluster_1 a estleg:TopicCluster ;
     rdfs:label "Topic Cluster 1" .
 
@@ -105,9 +108,20 @@ estleg:Provision_1 estleg:requestedCluster estleg:Cluster_1 .
 estleg:Provision_2 estleg:topicCluster     estleg:Cluster_1 .
 
 # EU transposition + harmonisation.
+#
+# Per the ontology audit (section 2.5 of the plan), ``transposesDirective`` is
+# canonical on Estonian *Act* → EULegislation, but SHACL (lines 62-66 + 158-163)
+# also allows it on Provision-level. Both shapes are tested below:
+#
+#   EU_Dir_1 — Provision-level (direct edge on Provision_1)
+#   EU_Dir_2 — Act-level (edge on Act_1; Provision_1 is part of Act_1 via sourceAct)
+#
+# The impact query must surface BOTH via the appropriate UNION arm.
 estleg:Provision_1 estleg:transposesDirective estleg:EU_Dir_1 .
 estleg:EU_Dir_1    estleg:transposedBy        estleg:Act_1 .
 estleg:Provision_1 estleg:harmonisedWith      estleg:EU_Dir_1 .
+
+estleg:Act_1       estleg:transposesDirective estleg:EU_Dir_2 .
 
 # References / similarity.
 estleg:Provision_1 estleg:references            estleg:Provision_3 .

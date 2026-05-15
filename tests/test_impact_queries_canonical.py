@@ -262,9 +262,11 @@ class TestGapsQuery:
 
 
 class TestEuComplianceQuery:
-    """The EU compliance query should find transposesDirective + harmonisedWith."""
+    """The EU compliance query should find transposesDirective + harmonisedWith
+    at both provision-level (EU_Dir_1) and act-level (EU_Dir_2, via sourceAct chain)."""
 
-    def test_transposes_directive_branch(self, seeded_dataset: Dataset):
+    def test_provision_level_transposes_directive(self, seeded_dataset: Dataset):
+        # Direct ``Provision_1 transposesDirective EU_Dir_1``.
         query = build_eu_compliance_query(DRAFT_GRAPH_URI)
         rows = _rows(seeded_dataset, query)
         td = [
@@ -273,6 +275,35 @@ class TestEuComplianceQuery:
             if r["euAct"].endswith("EU_Dir_1") and r["relation"].endswith("transposesDirective")
         ]
         assert len(td) == 1
+
+    def test_act_level_transposes_directive_via_source_act(self, seeded_dataset: Dataset):
+        # ``Act_1 transposesDirective EU_Dir_2`` reached via
+        # ``Provision_1 sourceAct Act_1``. This is the canonical
+        # direction per SHACL lines 62-66 and was the F3 bug from review.
+        query = build_eu_compliance_query(DRAFT_GRAPH_URI)
+        rows = _rows(seeded_dataset, query)
+        td = [
+            r
+            for r in rows
+            if r["euAct"].endswith("EU_Dir_2") and r["relation"].endswith("transposesDirective")
+        ]
+        assert len(td) == 1, (
+            "Act-level transposesDirective (EU_Dir_2) should be reachable via the "
+            "sourceAct/partOf chain — see F3 in the 2026-05-15 review."
+        )
+
+    def test_act_level_transposed_by_via_source_act(self, seeded_dataset: Dataset):
+        # Inverse: ``EU_Dir_1 transposedBy Act_1`` reached via
+        # ``Provision_1 sourceAct Act_1``. transposedBy is on EU → Act
+        # (SHACL 687-692), not EU → Provision — must chain.
+        query = build_eu_compliance_query(DRAFT_GRAPH_URI)
+        rows = _rows(seeded_dataset, query)
+        tb = [
+            r
+            for r in rows
+            if r["euAct"].endswith("EU_Dir_1") and r["relation"].endswith("transposedBy")
+        ]
+        assert len(tb) == 1
 
     def test_harmonised_with_branch(self, seeded_dataset: Dataset):
         query = build_eu_compliance_query(DRAFT_GRAPH_URI)
@@ -290,6 +321,7 @@ class TestEuComplianceQuery:
         rows = _rows(seeded_dataset, query)
         labelled = [r for r in rows if r.get("euLabel")]
         assert any("EU Directive 1" in r["euLabel"] for r in labelled)
+        assert any("EU Directive 2" in r["euLabel"] for r in labelled)
 
 
 # ---------------------------------------------------------------------------
