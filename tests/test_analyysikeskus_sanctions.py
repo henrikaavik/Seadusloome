@@ -270,8 +270,12 @@ class TestFindSimilarSanctions:
         find_similar_sanctions(seed, sparql_client=stub_client)
         bindings = stub_client.query.call_args.kwargs["bindings"]
         assert bindings["type"] == "fine"
-        assert bindings["seedMin"] == "100.0"
-        assert bindings["seedMax"] == "500.0"
+        # ``_xsd_decimal_literal`` strips trailing ``.0`` from integral
+        # floats so the binding stays a tight xsd:decimal lexical form.
+        assert float(bindings["seedMin"]) == 100.0
+        assert float(bindings["seedMax"]) == 500.0
+        assert "e" not in bindings["seedMin"].lower()
+        assert "e" not in bindings["seedMax"].lower()
         assert bindings["seedAct"] == _KARS_URI
 
     def test_missing_seed_bounds_default_to_open_range(self):
@@ -283,10 +287,95 @@ class TestFindSimilarSanctions:
         stub_client.query.return_value = []
         find_similar_sanctions(seed, sparql_client=stub_client)
         bindings = stub_client.query.call_args.kwargs["bindings"]
-        # 0.0 lower bound and a huge upper bound — the SPARQL FILTER
-        # treats unbounded candidate rows as "overlapping".
-        assert float(bindings["seedMin"]) == 0.0
+        # F7 regression: seedMax sentinel must serialise as a plain
+        # integer string ("1000000000000000000"), never exponential.
+        # Apache Jena's xsd:decimal(...) constructor rejects "1e+18".
+        assert bindings["seedMin"] == "0"
+        assert bindings["seedMax"] == "1000000000000000000"
+        assert "e" not in bindings["seedMax"].lower()
         assert float(bindings["seedMax"]) >= 1e17
+
+    def test_xsd_decimal_literal_helper(self):
+        """Direct unit test for the F7 helper: plain integer strings, no
+        exponent, no trailing zeros."""
+        from app.analyysikeskus.sanctions import _xsd_decimal_literal
+
+        assert _xsd_decimal_literal(0) == "0"
+        assert _xsd_decimal_literal(0.0) == "0"
+        assert _xsd_decimal_literal(100) == "100"
+        assert _xsd_decimal_literal(100.0) == "100"
+        assert _xsd_decimal_literal(100.5) == "100.5"
+        assert _xsd_decimal_literal(10**18) == "1000000000000000000"
+        # Float 1e18 is the original bug case — must never emit "1e+18".
+        assert "e" not in _xsd_decimal_literal(1.0e18).lower()
+        assert _xsd_decimal_literal(1.0e18) == "1000000000000000000"
+
+    def test_min_only_seed_finds_overlap_against_rdflib(self):
+        """End-to-end regression for F7 against rdflib.
+
+        With only ``min_amount`` set (``max_amount = None``), the sentinel
+        upper bound used to render as ``"1e+18"`` which Apache Jena
+        rejects with the ``xsd:decimal()`` cast — the filter then dropped
+        every overlapping row. The F7 fix uses ``_xsd_decimal_literal``
+        which emits a plain integer string. This test exercises the same
+        path with rdflib (which is also strict about the constructor).
+        """
+        from rdflib import Graph
+
+        from app.analyysikeskus.sanctions import (
+            _SIMILAR_SANCTIONS_QUERY,
+            SanctionRow,
+            _xsd_decimal_literal,
+        )
+
+        graph_data = """
+        @prefix estleg: <https://data.riik.ee/ontology/estleg#> .
+        @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+        @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+        estleg:OtherAct rdfs:label "Different act" .
+        estleg:OtherProvision rdfs:label "§1 OtherAct" ;
+            estleg:partOf estleg:OtherAct ;
+            estleg:hasSanction estleg:OtherSanction .
+        estleg:OtherSanction estleg:sanctionType "fine" ;
+            estleg:minPenaltyAmount "150"^^xsd:decimal ;
+            estleg:maxPenaltyAmount "300"^^xsd:decimal .
+        """
+
+        g = Graph()
+        g.parse(data=graph_data, format="turtle")
+
+        seed = SanctionRow(
+            sanction_type="fine",
+            act_uri="https://example.org/seed-act",
+            min_amount=100.0,
+            max_amount=None,  # the F7 case — sentinel kicks in
+        )
+        seed_min_str = _xsd_decimal_literal(
+            seed.min_amount if seed.min_amount is not None else 0.0
+        )
+        seed_max_str = _xsd_decimal_literal(
+            seed.max_amount if seed.max_amount is not None else 10**18
+        )
+        values_block = (
+            'VALUES ?type { "fine" }\n'
+            f'VALUES ?seedMin {{ "{seed_min_str}" }}\n'
+            f'VALUES ?seedMax {{ "{seed_max_str}" }}\n'
+            'VALUES ?seedAct { "https://example.org/seed-act" }\n'
+        )
+        last_brace = _SIMILAR_SANCTIONS_QUERY.rfind("}")
+        query = (
+            _SIMILAR_SANCTIONS_QUERY[:last_brace]
+            + "\n"
+            + values_block
+            + "\n"
+            + _SIMILAR_SANCTIONS_QUERY[last_brace:]
+        )
+
+        results = list(g.query(query))
+        # min-only seed [100, +inf] overlaps candidate [150, 300] → expect 1.
+        # With the F7 bug (str(1e18) == "1e+18") this was 0.
+        assert len(results) == 1
 
     def test_respects_limit(self):
         from app.analyysikeskus.sanctions import SanctionRow, find_similar_sanctions

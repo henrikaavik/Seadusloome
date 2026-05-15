@@ -424,10 +424,21 @@ def find_similar_sanctions(
         return []
 
     # Treat missing seed bounds as fully open so they overlap any
-    # range. Using huge sentinel-like floats keeps the FILTER simple
+    # range. Using huge sentinel-like values keeps the FILTER simple
     # (no nested BOUND checks on the seed side).
+    #
+    # F7 (2026-05-15 review): the upper-bound sentinel must be an
+    # **integer**, not a float. ``str(1.0e18)`` emits ``"1e+18"`` and
+    # ``xsd:decimal`` does not accept exponential notation in its
+    # lexical form (the grammar is ``[+-]?[0-9]+(\\.[0-9]+)?``) — Apache
+    # Jena's ``xsd:decimal(?seedMax)`` cast then returns an empty
+    # binding and the min-only-seed row count goes to zero. An ``int``
+    # large enough to dominate any real penalty range serialises as a
+    # plain run of digits and stays a valid xsd:decimal lexical form.
     seed_min = sanction_row.min_amount if sanction_row.min_amount is not None else 0.0
-    seed_max = sanction_row.max_amount if sanction_row.max_amount is not None else 1.0e18
+    seed_max: float | int = (
+        sanction_row.max_amount if sanction_row.max_amount is not None else 10**18
+    )
 
     client = sparql_client if sparql_client is not None else SparqlClient()
     try:
@@ -435,8 +446,8 @@ def find_similar_sanctions(
             _SIMILAR_SANCTIONS_QUERY,
             bindings={
                 "type": sanction_type,
-                "seedMin": str(seed_min),
-                "seedMax": str(seed_max),
+                "seedMin": _xsd_decimal_literal(seed_min),
+                "seedMax": _xsd_decimal_literal(seed_max),
                 "seedAct": sanction_row.act_uri or "",
             },
         )
@@ -493,6 +504,51 @@ def _rows_to_sanctions(rows: list[dict[str, str]]) -> list[SanctionRow]:
             )
         )
     return out
+
+
+def _xsd_decimal_literal(value: float | int) -> str:
+    """Format ``value`` as a valid ``xsd:decimal`` lexical form.
+
+    ``xsd:decimal``'s grammar is ``[+-]?[0-9]+(\\.[0-9]+)?`` — no
+    exponent allowed. Python's ``str()`` emits exponential notation
+    for large floats (``str(1.0e18) == "1e+18"``), which Apache Jena
+    rejects when used with the ``xsd:decimal(?seedMax)`` constructor
+    inside the similar-sanctions FILTER and silently drops the row
+    (F7, 2026-05-15 review).
+
+    This helper:
+
+    * Returns ``"0"`` for ``0`` (any flavour) — the shortest valid form.
+    * Returns ``str(int(v))`` when ``v`` is integral — no trailing
+      ``.0``, never an exponent.
+    * Otherwise renders the float in non-exponential fixed-point form
+      and trims trailing zeros / lone decimal points.
+
+    Examples:
+        >>> _xsd_decimal_literal(0)
+        '0'
+        >>> _xsd_decimal_literal(0.0)
+        '0'
+        >>> _xsd_decimal_literal(100.0)
+        '100'
+        >>> _xsd_decimal_literal(100.5)
+        '100.5'
+        >>> _xsd_decimal_literal(10**18)
+        '1000000000000000000'
+        >>> _xsd_decimal_literal(1.0e18)
+        '1000000000000000000'
+    """
+    if value == 0:
+        return "0"
+    if isinstance(value, int) or value == int(value):
+        return str(int(value))
+    # repr() keeps the original precision for small/normal floats; for
+    # extremes (1e20) it switches to exponential, so we force fixed-point
+    # and prune the trailing zero/period.
+    s = repr(value)
+    if "e" in s or "E" in s:
+        s = f"{value:.10f}"
+    return s.rstrip("0").rstrip(".") or "0"
 
 
 def _as_float(value: Any) -> float | None:
