@@ -579,6 +579,11 @@ The fix to `app/docs/impact/queries.py` will *change* what existing impact repor
 
 *Mitigation:* before merging C0, run the new queries against a sample of recent `impact_reports` and diff the results; communicate the change to active users; if differences are large, add a "report re-run available" banner on old reports.
 
+**R6 (new) — Direction A workflows + B3 capability dictionary need merge-time coordination.**
+B3 (`app/ui/capabilities.py`) declares every Direction A workflow with `status="planned"` and omits its `_ANALYYSIKESKUS_INPUTS` metadata. When each A workflow PR merges (A1 first, then A2/A3/A4/A5/A6), the live route exists but `/analyysikeskus` will still render a "Tulekul" placeholder card unless the capability is flipped to `"live"` and the input metadata is added in the same merge.
+
+*Mitigation:* the A-workflow PR that merges second (after B3) carries the small "make it discoverable" bridge — flip the corresponding capability `status` to `"live"` in `app/ui/capabilities.py` and append the input metadata in `app/analyysikeskus/routes.py::_ANALYYSIKESKUS_INPUTS`. Documented in inline comments on issues #794 (B3) and #795 (A1) — see also F4 from the 2026-05-15 review. Same pattern applies to every subsequent A workflow.
+
 ### Open questions
 
 **Q1 — ~~Direction A predicate confirmation: meta-task or per-workflow?~~** ✅ **Done 2026-05-15.** Audit completed; results in section 2.5.
