@@ -322,18 +322,34 @@ async def _exec_get_provision_details(
             )
         }
 
+    # C0 (2026-05-15): the legacy ``estleg:relatedTo`` predicate does not
+    # exist in the source ontology — the audit (plan doc section 2.5)
+    # confirmed it always returned zero rows. The "related" list is now
+    # populated from the three canonical "is meaningfully connected"
+    # predicates: ``references``, ``semanticallySimilarTo``, and
+    # ``harmonisedWith``. Each row's ``?relation`` projection lets the
+    # caller render the relation type in legal language.
     query = f"""
         PREFIX estleg: <https://data.riik.ee/ontology/estleg#>
         PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 
-        SELECT ?uri ?text ?sourceAct ?paragrahv ?related ?relLabel
+        SELECT ?uri ?text ?sourceAct ?paragrahv ?related ?relLabel ?relation
         WHERE {{
             {filter_clause}
             OPTIONAL {{ ?uri estleg:text ?text . }}
             OPTIONAL {{ ?uri estleg:sourceAct ?sourceAct . }}
             OPTIONAL {{ ?uri estleg:paragrahv ?paragrahv . }}
             OPTIONAL {{
-                ?uri estleg:relatedTo ?related .
+                {{
+                    ?uri estleg:references ?related .
+                    BIND(estleg:references AS ?relation)
+                }} UNION {{
+                    ?uri estleg:semanticallySimilarTo ?related .
+                    BIND(estleg:semanticallySimilarTo AS ?relation)
+                }} UNION {{
+                    ?uri estleg:harmonisedWith ?related .
+                    BIND(estleg:harmonisedWith AS ?relation)
+                }}
                 OPTIONAL {{ ?related rdfs:label ?relLabel . }}
             }}
         }}
@@ -345,13 +361,16 @@ async def _exec_get_provision_details(
 
     first = results[0]
     related_list = []
+    seen_related: set[str] = set()
     for row in results:
         rel = row.get("related", "")
-        if rel:
+        if rel and rel not in seen_related:
+            seen_related.add(rel)
             related_list.append(
                 {
                     "uri": rel,
                     "label": row.get("relLabel", ""),
+                    "relation": row.get("relation", ""),
                 }
             )
 
