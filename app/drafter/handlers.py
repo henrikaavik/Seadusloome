@@ -49,6 +49,15 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # SPARQL helpers
 # ---------------------------------------------------------------------------
+#
+# C0 audit (2026-05-15): the four research queries below were
+# cross-checked against the canonical ontology vocabulary
+# (``app.ontology.relations``). They use only ``estleg:sourceAct``,
+# ``estleg:paragrahv``, ``estleg:EULegislation``, ``estleg:CourtDecision``,
+# ``estleg:TopicCluster``, and ``rdfs:label`` — all canonical. No rename
+# needed. If C2 later extends these queries to project relation types,
+# import predicate constants from ``app.ontology.relations`` rather than
+# hard-coding new ``estleg:foo`` strings.
 
 _RELATED_LAWS_QUERY = """\
 PREFIX estleg: <https://data.riik.ee/ontology/estleg#>
