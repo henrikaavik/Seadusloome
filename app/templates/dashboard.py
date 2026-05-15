@@ -439,24 +439,38 @@ def _get_eu_transposition_deadlines(
     ``org_id`` is forwarded for forward-compatibility (the underlying helper
     accepts it today but does not yet scope by responsible ministry — the
     ontology doesn't expose that predicate yet).
+
+    Implementation note (F1 fix, 2026-05-15): we deliberately do **not**
+    use ``with ThreadPoolExecutor(...)``. Python's executor ``__exit__``
+    calls ``shutdown(wait=True)`` which blocks until in-flight tasks
+    complete — that defeats the soft timeout because a stuck Jena query
+    would still hold the dashboard render. Instead we manage the lifecycle
+    manually and shut down with ``wait=False, cancel_futures=True`` in
+    ``finally`` so the dashboard renders within ``timeout_s`` regardless of
+    Jena state. The orphaned worker thread is daemonised by the default
+    ``ThreadPoolExecutor`` factory and will exit when the request thread
+    exits.
     """
+    pool = ThreadPoolExecutor(max_workers=1)
     try:
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(
-                list_overdue_or_upcoming_transpositions,
-                horizon_days=horizon_days,
-                org_id=org_id,
+        future = pool.submit(
+            list_overdue_or_upcoming_transpositions,
+            horizon_days=horizon_days,
+            org_id=org_id,
+        )
+        try:
+            return future.result(timeout=timeout_s)
+        except FuturesTimeoutError:
+            logger.warning(
+                "EU transposition deadlines query exceeded %.1fs — hiding widget", timeout_s
             )
-            try:
-                return future.result(timeout=timeout_s)
-            except FuturesTimeoutError:
-                logger.warning(
-                    "EU transposition deadlines query exceeded %.1fs — hiding widget", timeout_s
-                )
-                return []
+            future.cancel()
+            return []
     except Exception:
         logger.exception("Failed to fetch EU transposition deadlines")
         return []
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 # ---------------------------------------------------------------------------
