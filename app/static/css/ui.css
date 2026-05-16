@@ -282,6 +282,191 @@
   }
 }
 
+/* ---- Global search bar (B1, epic #784) ----
+   Two-row TopBar on desktop/tablet: row 1 holds the bar, row 2 holds nav.
+   On ≤768px the inline bar collapses (display:none) and the icon button
+   inside .top-actions takes over (→ /search full-screen page). */
+
+.top-bar--two-row .top-bar-inner--row2 {
+  height: auto;
+  padding-top: 0;
+  padding-bottom: var(--space-2);
+  border-top: 1px solid var(--color-border);
+}
+.top-bar--two-row .top-bar-inner--row2 .top-nav {
+  margin-left: 0; /* row 2 starts flush with the logo column */
+}
+
+.top-bar-search {
+  flex: 1 1 auto;
+  display: flex;
+  justify-content: center;
+  padding: 0 var(--space-4);
+  min-width: 0; /* allow shrink inside flex row */
+}
+
+.global-search {
+  position: relative;
+  width: 100%;
+  max-width: 400px;
+  min-width: 240px;
+}
+
+.global-search-input-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.global-search-icon {
+  position: absolute;
+  left: var(--space-3);
+  top: 50%;
+  transform: translateY(-50%);
+  width: 16px;
+  height: 16px;
+  color: var(--color-text-muted);
+  pointer-events: none;
+}
+
+.global-search-input {
+  width: 100%;
+  height: 40px;
+  padding: 0 var(--space-3) 0 calc(var(--space-3) * 2 + 16px);
+  background: var(--color-surface);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  font-size: var(--text-sm);
+  font-family: var(--font-family);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+.global-search-input:focus-visible {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 2px var(--color-focus-ring);
+}
+.global-search-input::placeholder { color: var(--color-text-muted); }
+
+.global-search-dropdown {
+  display: none;
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + var(--space-1));
+  max-height: 60vh;
+  overflow-y: auto;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  z-index: var(--z-dropdown);
+  padding: var(--space-2) 0;
+}
+.global-search--open .global-search-dropdown { display: block; }
+
+.global-search-group-header {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-text-muted);
+  padding: var(--space-2) var(--space-4);
+  font-weight: var(--font-bold);
+}
+
+.global-search-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  min-height: 44px; /* touch-target floor */
+  padding: var(--space-2) var(--space-4);
+  text-decoration: none;
+  color: var(--color-text);
+  cursor: pointer;
+  border: 0;
+  background: transparent;
+}
+.global-search-row:hover,
+.global-search-row--active,
+.global-search-row:focus-visible {
+  background: var(--color-primary-subtle);
+  outline: none;
+}
+.global-search-row-icon {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  color: var(--color-text-muted);
+  margin-top: 3px;
+}
+.global-search-row-body { display: flex; flex-direction: column; min-width: 0; }
+.global-search-row-label {
+  font-size: var(--text-sm);
+  font-weight: var(--font-medium);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.global-search-row-meta {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.global-search-empty {
+  padding: var(--space-3) var(--space-4);
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+
+.global-search-summary { display: none; }
+
+/* Mobile button — shown only on ≤768px in the .top-actions cluster. */
+.global-search-mobile-trigger {
+  display: none;
+  width: 44px;
+  height: 44px;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius);
+  color: var(--color-text);
+  text-decoration: none;
+}
+.global-search-mobile-trigger:hover,
+.global-search-mobile-trigger:focus-visible {
+  background: var(--color-primary-subtle);
+  outline: none;
+}
+
+/* Tablet (768–1024px): keep the bar but narrower with the shortened placeholder. */
+@media (min-width: 769px) and (max-width: 1024px) {
+  .global-search { max-width: 200px; min-width: 160px; }
+  .global-search-input { font-size: var(--text-xs); }
+}
+
+/* Mobile (≤768px): hide inline bar, show icon button, collapse to single row. */
+@media (max-width: 768px) {
+  .top-bar-search { display: none; }
+  .global-search-mobile-trigger { display: inline-flex; }
+  .top-bar--two-row .top-bar-inner--row2 { display: none; }
+}
+
+/* Very small phones — keep touch targets but trim paddings. */
+@media (max-width: 400px) {
+  .top-bar-inner { padding: 0 var(--space-3); gap: var(--space-2); }
+}
+
+/* Mobile full-screen /search page wrapper. */
+.mobile-search-page {
+  padding: var(--space-4);
+}
+.mobile-search-page .global-search {
+  max-width: 100%;
+  min-width: 0;
+}
+
 /* ---- Toast container ---- */
 
 .toast-container {

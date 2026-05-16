@@ -1,8 +1,27 @@
-"""TopBar — site header with logo, nav, user menu."""
+"""TopBar — site header with logo, nav, user menu.
+
+Layout contract (post-B1, epic #784)
+------------------------------------
+Authenticated pages render a **two-row** TopBar on desktop and tablet:
+
+* Row 1 — logo (left) · global search bar (centre) · notifications + user
+  menu (right). The search bar is the visible-bar B1 affordance; see
+  :mod:`app.ui.components.global_search` for the why.
+* Row 2 — primary nav (Analüüsikeskus, Eelnõud, Õiguskaart, Koostaja,
+  Nõustaja). Sits directly under the search bar so the nav stays prominent
+  even with the new search.
+
+On viewports ``≤768px`` the layout collapses to a single row: logo · search
+icon button · user menu. The icon button links to ``/search`` (full-screen
+input page); the nav drops into the sidebar (already mobile-hidden).
+Unauthenticated visits (no ``user``) render only the logo + user menu —
+no search bar, no nav row.
+"""
 
 from fasthtml.common import *  # noqa: F403
 
 from app.auth.provider import UserDict
+from app.ui.components.global_search import GlobalSearchBar, GlobalSearchMobileButton
 from app.ui.forms.app_form import AppForm
 
 
@@ -101,13 +120,48 @@ def TopBar(  # noqa: ANN201
 ):
     """Site topbar with logo, nav, notifications, user menu."""
     del theme  # dark-only UI; accepted for back-compat with existing callers
-    return Header(  # noqa: F405
-        Div(  # noqa: F405
-            A(  # noqa: F405
-                Span("Seadusloome", cls="logo-text"),  # noqa: F405
-                href="/",
-                cls="logo",
+
+    logo = A(  # noqa: F405
+        Span("Seadusloome", cls="logo-text"),  # noqa: F405
+        href="/",
+        cls="logo",
+    )
+
+    if not user:
+        # Unauthenticated TopBar — only logo + login link, single row.
+        return Header(  # noqa: F405
+            Div(  # noqa: F405
+                logo,
+                Div(  # noqa: F405
+                    UserMenu(user),
+                    cls="top-actions",
+                ),
+                cls="top-bar-inner",
             ),
+            cls="top-bar",
+        )
+
+    return Header(  # noqa: F405
+        # Row 1 — logo · search bar · actions. Search slots in for tablet
+        # and up; on mobile the inline bar is hidden via CSS and the
+        # mobile button (lives in .top-actions) takes its place.
+        Div(  # noqa: F405
+            logo,
+            Div(  # noqa: F405
+                GlobalSearchBar(),
+                cls="top-bar-search",
+            ),
+            Div(  # noqa: F405
+                GlobalSearchMobileButton(),
+                NotificationBell(unread_count),
+                UserMenu(user),
+                cls="top-actions",
+            ),
+            cls="top-bar-inner top-bar-inner--row1",
+        ),
+        # Row 2 — primary nav. Drops on mobile (sidebar already hidden too;
+        # the mobile nav story lives outside this issue).
+        Div(  # noqa: F405
             Nav(  # noqa: F405
                 A("Analüüsikeskus", href="/analyysikeskus"),  # noqa: F405
                 A("Eelnõud", href="/drafts"),  # noqa: F405
@@ -115,15 +169,9 @@ def TopBar(  # noqa: ANN201
                 A("Koostaja", href="/drafter"),  # noqa: F405
                 A("Nõustaja", href="/chat"),  # noqa: F405
                 cls="top-nav",
-            )
-            if user
-            else None,
-            Div(  # noqa: F405
-                NotificationBell(unread_count) if user else None,
-                UserMenu(user),
-                cls="top-actions",
+                aria_label="Põhinavigatsioon",
             ),
-            cls="top-bar-inner",
+            cls="top-bar-inner top-bar-inner--row2",
         ),
-        cls="top-bar",
+        cls="top-bar top-bar--two-row",
     )

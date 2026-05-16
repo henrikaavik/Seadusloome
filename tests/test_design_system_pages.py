@@ -95,7 +95,10 @@ def test_index_renders_with_admin_scope():
 def test_index_uses_page_shell():
     rendered = ds.design_system_index(_admin_request())
     body = "".join(str(part) for part in rendered)
-    assert 'class="top-bar"' in body
+    # The TopBar root carries the ``top-bar`` class, plus the
+    # ``top-bar--two-row`` modifier on authenticated pages (post-B1, #784).
+    # Match the class token, not the exact attribute value.
+    assert 'class="top-bar' in body
     assert "Seadusloome" in body
 
 
@@ -104,7 +107,7 @@ def test_section_page_renders(slug: str):
     handler = _SLUG_TO_HANDLER[slug]
     rendered = handler(_admin_request(f"/design-system/{slug}"))
     body = "".join(str(part) for part in rendered)
-    assert 'class="top-bar"' in body
+    assert 'class="top-bar' in body
     assert "Disainisüsteem" in body
 
 

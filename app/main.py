@@ -30,6 +30,7 @@ from app.explorer.websocket import register_ws_routes
 from app.notifications.routes import register_notification_routes
 from app.sync.webhook import register_webhook_routes
 from app.templates.dashboard import register_dashboard_routes
+from app.ui.components.search_routes import register_search_routes
 from app.ui.design_system_pages import register_design_system_routes
 from app.ui.forms.live_validation import register_validation_routes
 from app.ui.primitives.button import Button  # noqa: F401  -- shadow guard #419
@@ -157,6 +158,10 @@ _HDRS = (
     # card on /chat list page and the conversation view both pick it up without
     # needing per-route <head> injection (which would land in <body> in FastHTML).
     Link(rel="stylesheet", href="/static/css/chat.css"),
+    # B1 global search bar (epic #784) — small (~5 KB), loaded globally so the
+    # bar renders on every PageShell page. Defer so it doesn't block first paint;
+    # the script binds on DOMContentLoaded.
+    Script(src="/static/js/global_search.js", defer=True),
 )
 
 # Initialize Sentry before the ASGI app is created so that the Starlette
@@ -253,6 +258,7 @@ register_draft_ws_routes(app)
 register_export_progress_ws_routes(app)
 register_annotation_routes(rt)
 register_notification_routes(rt)
+register_search_routes(rt)
 
 
 @rt("/")
