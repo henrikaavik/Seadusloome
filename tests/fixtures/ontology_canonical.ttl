@@ -238,3 +238,33 @@ estleg:Provision_3
 estleg:Provision_4 estleg:competentAuthority estleg:Institution_2 .
 estleg:Provision_5 estleg:competentAuthority estleg:Institution_2 .
 estleg:Provision_5 estleg:competentAuthority estleg:Institution_3 .
+
+# ---------------------------------------------------------------------------
+# A4 — Temporal validity (Ajalooline kehtivus)
+# ---------------------------------------------------------------------------
+#
+# Act-level temporal envelope on Act_1 (jõustumine + viimane muudatus
+# + hetkestaatus). The AmendmentEvent already exists above
+# (estleg:AmendmentEvent_1 amends estleg:Provision_1); we extend it
+# with date / rtReference literals so the A4 timeline query has
+# something to render.
+
+estleg:Act_1 estleg:entryIntoForce    "2010-01-01"^^xsd:date ;
+             estleg:lastAmendmentDate "2023-03-15"^^xsd:date ;
+             estleg:temporalStatus    "in_force" .
+
+estleg:AmendmentEvent_1 estleg:eventDate          "2023-03-15"^^xsd:date ;
+                        estleg:entryIntoForceDate "2023-04-01"^^xsd:date ;
+                        estleg:rtReference        "RT I, 04.01.2023, 12" .
+
+# Court decision date so the interpretation row carries an
+# orderable date.
+estleg:CourtDecision_1 estleg:decisionDate "2022-06-10"^^xsd:date .
+
+# A pending DraftLegislation that amends Provision_1 — the forward
+# look section. ``submittedDate`` carries the date the draft was
+# submitted to the Riigikogu.
+estleg:Draft_1 a estleg:DraftLegislation ;
+    rdfs:label "Eelnõu 1 — fixture" ;
+    estleg:amends        estleg:Provision_1 ;
+    estleg:submittedDate "2024-02-20"^^xsd:date .

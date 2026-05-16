@@ -358,8 +358,15 @@ class TestFixtureGraphSparql:
                 """
             )
         )
-        assert len(rows) == 1
-        assert str(rows[0].ev).endswith("AmendmentEvent_1")  # type: ignore[attr-defined]
+        # AmendmentEvent_1 + Draft_1 both amend Provision_1 (the A4
+        # fixture extension added the pending-draft forward-look edge).
+        # The original fixture asserts that the AmendmentEvent edge is
+        # present; we also accept the Draft edge alongside it.
+        subjects = {str(r.ev) for r in rows}  # type: ignore[attr-defined]
+        assert any(s.endswith("AmendmentEvent_1") for s in subjects)
+        # Every amends target in the fixture is Provision_1.
+        targets = {str(r.prov) for r in rows}  # type: ignore[attr-defined]
+        assert all(t.endswith("Provision_1") for t in targets)
 
     def test_amended_by_query(self, fixture_graph: Graph):
         rows = list(
