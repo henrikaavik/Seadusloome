@@ -45,6 +45,7 @@ from app.docs.entity_extractor import ExtractedRef
 from app.docs.error_mapping import map_failure_to_user_message
 from app.docs.graph_builder import build_draft_graph, write_doc_lineage
 from app.docs.impact import ImpactAnalyzer, calculate_impact_score
+from app.docs.impact.analyzer import analyze_burden_delta, analyze_sanctions_delta
 from app.docs.reference_resolver import ResolvedRef
 from app.docs.similarity import (
     compute_entity_set_hash,
@@ -141,7 +142,42 @@ def analyze_impact(
 
         report_id = uuid4()
         ontology_version = _get_current_ontology_version()
-        report_data = json.dumps(dataclasses.asdict(findings))
+        # C6 (#791): extend the JSONB ``report_data`` blob with
+        # sanctions + burden delta sections. Each helper returns an
+        # empty/baseline dataclass on Jena failure so the analyze
+        # pipeline never fails because of an A1/A2 hiccup. Legacy
+        # reports without these keys remain readable via the
+        # renderer's ``.get(...)`` fallback.
+        affected_uris = [
+            str(e.get("uri") or "").strip()
+            for e in (findings.affected_entities or [])
+            if (e.get("uri") or "").strip()
+        ]
+        try:
+            sanctions_delta = analyze_sanctions_delta(draft.graph_uri, affected_uris)
+        except Exception:
+            logger.warning(
+                "analyze_sanctions_delta failed for draft=%s; continuing without it",
+                draft_id,
+                exc_info=True,
+            )
+            sanctions_delta = None
+        try:
+            burden_delta = analyze_burden_delta(draft.graph_uri)
+        except Exception:
+            logger.warning(
+                "analyze_burden_delta failed for draft=%s; continuing without it",
+                draft_id,
+                exc_info=True,
+            )
+            burden_delta = None
+
+        findings_dict_for_report = dataclasses.asdict(findings)
+        if sanctions_delta is not None:
+            findings_dict_for_report["sanctions_delta"] = dataclasses.asdict(sanctions_delta)
+        if burden_delta is not None:
+            findings_dict_for_report["burden_delta"] = dataclasses.asdict(burden_delta)
+        report_data = json.dumps(findings_dict_for_report)
 
         with get_connection() as conn:
             # #618 PR-B: bind the impact report to the latest

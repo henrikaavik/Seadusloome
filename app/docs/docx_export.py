@@ -611,6 +611,147 @@ def build_impact_report_docx(
     return out_path
 
 
+# ---------------------------------------------------------------------------
+# C6 (#791) — executive summary printout
+# ---------------------------------------------------------------------------
+
+
+def _coerce_int(value: Any, default: int = 0) -> int:
+    """Lenient int coercion — empty / None / malformed lands on *default*."""
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def export_executive_summary(
+    draft: Draft,
+    report_row: tuple,
+) -> Path:
+    """Render a 1-2 page executive-summary ``.docx`` for *draft* / *report_row*.
+
+    Intended to be attached to the seletuskiri front matter (the full
+    impact report remains as appendix via
+    :func:`build_impact_report_docx`).
+
+    Content layout (per the C6 plan section, lines 468-472):
+
+      1. Title: "Mõjuanalüüsi kokkuvõte"
+      2. Draft title + author (best-effort from :attr:`Draft.user_id`)
+        + generation date.
+      3. One-page summary block:
+
+         * Affected provisions count
+         * Conflicts count
+         * Gaps count
+         * Sanctions delta numbers (X uut · Y muudetud · Z eemaldatud)
+         * Burden score (before / after / delta-pct) — falls back
+           gracefully when the report's ``report_data`` is from before
+           C6 and the keys are absent.
+
+    Writes to ``EXPORT_DIR/<draft_id>-<report_id>-summary.docx``.
+
+    Args:
+        draft: The owning draft dataclass.
+        report_row: Raw ``impact_reports`` tuple keyed by
+            :data:`_REPORT_COLUMN_INDEX`.
+
+    Returns:
+        Absolute :class:`pathlib.Path` to the generated file.
+    """
+    export_dir = _get_export_dir()
+    export_dir.mkdir(parents=True, exist_ok=True)
+
+    report_id = report_row[_REPORT_COLUMN_INDEX["id"]]
+    out_path = export_dir / f"{draft.id}-{report_id}-summary.docx"
+
+    report_data = _parse_report_data(report_row[_REPORT_COLUMN_INDEX["report_data"]])
+
+    doc = Document()
+
+    # --- Title block ------------------------------------------------------
+    doc.add_heading("Mõjuanalüüsi kokkuvõte", level=0)
+    doc.add_heading(draft.title or "Pealkirjastamata eelnõu", level=1)
+
+    meta1 = doc.add_paragraph()
+    meta1.add_run("Üles laaditud: ").bold = True
+    meta1.add_run(_format_timestamp(draft.created_at))
+
+    generated_at = report_row[_REPORT_COLUMN_INDEX["generated_at"]]
+    meta2 = doc.add_paragraph()
+    meta2.add_run("Aruanne koostatud: ").bold = True
+    meta2.add_run(_format_timestamp(generated_at))
+
+    # Best-effort "author" line (the draft model carries user_id only;
+    # the explicit author name lives in the user table and is not always
+    # available to the export job). Render the UUID so the printed
+    # summary has a non-empty author field; a future iteration can join
+    # ``users.full_name`` once the export handler is wired to the user
+    # service.
+    author = doc.add_paragraph()
+    author.add_run("Autor (kasutaja id): ").bold = True
+    author.add_run(str(draft.user_id or "—"))
+
+    # --- One-page summary -------------------------------------------------
+    doc.add_heading("Kokkuvõte", level=1)
+
+    score = _coerce_int(report_row[_REPORT_COLUMN_INDEX["impact_score"]])
+    affected = _coerce_int(report_row[_REPORT_COLUMN_INDEX["affected_count"]])
+    conflicts = _coerce_int(report_row[_REPORT_COLUMN_INDEX["conflict_count"]])
+    gaps = _coerce_int(report_row[_REPORT_COLUMN_INDEX["gap_count"]])
+
+    score_para = doc.add_paragraph()
+    score_run = score_para.add_run(f"Mõjuskoor: {score}/100")
+    score_run.bold = True
+    score_run.font.size = Pt(14)
+
+    doc.add_paragraph(f"Mõjutatud sätete arv: {affected}")
+    doc.add_paragraph(f"Tuvastatud konfliktide arv: {conflicts}")
+    doc.add_paragraph(f"Tuvastatud lünkade arv: {gaps}")
+
+    # Sanctions delta (graceful fallback when the key is missing).
+    sanctions_delta = report_data.get("sanctions_delta") or {}
+    new_s = _coerce_int(sanctions_delta.get("new_count"))
+    mod_s = _coerce_int(sanctions_delta.get("modified_count"))
+    rem_s = _coerce_int(sanctions_delta.get("removed_count"))
+    sanctions_line = f"Sanktsioonide muutus: {new_s} uut · {mod_s} muudetud · {rem_s} eemaldatud"
+    doc.add_paragraph(sanctions_line)
+
+    # Burden score (graceful fallback when missing).
+    burden_delta = report_data.get("burden_delta") or {}
+    before_score = _coerce_int(burden_delta.get("before_score"))
+    after_score_raw = burden_delta.get("after_score")
+    delta_pct_raw = burden_delta.get("score_delta_pct")
+    if after_score_raw is None and delta_pct_raw is None:
+        burden_line = f"Koormuse skoor (kehtivas õiguses, mõjutatud sätete üle): {before_score}"
+    else:
+        after_str = str(_coerce_int(after_score_raw)) if after_score_raw is not None else "—"
+        if delta_pct_raw is None:
+            delta_str = "—"
+        else:
+            d = _coerce_int(delta_pct_raw)
+            delta_str = f"{d:+d}%"
+        burden_line = (
+            f"Koormuse skoor: enne {before_score} · pärast {after_str} · muutus {delta_str}"
+        )
+    doc.add_paragraph(burden_line)
+
+    # Footer page numbers — reuses the same OOXML helper as the full
+    # report so the printed page has a consistent "Lk X / Y" footer.
+    _add_footer_page_numbers(doc)
+
+    doc.save(str(out_path))
+    logger.info(
+        "docx_export: wrote executive summary draft=%s report=%s path=%s",
+        draft.id,
+        report_id,
+        out_path,
+    )
+    return out_path
+
+
 _SOFFICE_TIMEOUT_SECONDS = 60
 
 

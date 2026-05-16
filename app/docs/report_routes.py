@@ -939,6 +939,330 @@ def _gaps_section(
     )
 
 
+# ---------------------------------------------------------------------------
+# C6 (#791) — Sanctions delta + Burden delta + Executive summary
+# ---------------------------------------------------------------------------
+
+
+def _sanctions_delta_summary_line(delta: dict[str, Any]) -> str:
+    """Format the one-line sanctions-delta summary in Estonian.
+
+    Always renders all three counters, even when zero — keeps the line
+    width predictable across reports and signals "no change" explicitly
+    ("0 uut sanktsiooni · 0 muudetud · 0 eemaldatud") rather than
+    silently omitting buckets.
+    """
+    new_count = int(delta.get("new_count") or 0)
+    modified_count = int(delta.get("modified_count") or 0)
+    removed_count = int(delta.get("removed_count") or 0)
+    return f"{new_count} uut sanktsiooni · {modified_count} muudetud · {removed_count} eemaldatud"
+
+
+def _burden_delta_summary_line(delta: dict[str, Any]) -> str:
+    """Format the one-line burden-delta summary in Estonian.
+
+    Example: ``"5 uut kohustust · 2 keeldu · 1 õigus — koormus skoor
+    +12% vs current law"``. The score-delta segment renders ``"—"``
+    when the v1 baseline is zero or the after-score is unavailable.
+    """
+    counts = delta.get("counts") or {}
+    obligations = int(counts.get("obligation") or 0)
+    prohibitions = int(counts.get("prohibition") or 0)
+    rights = int(counts.get("right") or 0)
+    delta_pct = delta.get("score_delta_pct")
+    if delta_pct is None:
+        delta_text = "—"
+    else:
+        try:
+            delta_text = f"{int(delta_pct):+d}%"
+        except (TypeError, ValueError):
+            delta_text = "—"
+    return (
+        f"{obligations} uut kohustust · "
+        f"{prohibitions} keeldu · "
+        f"{rights} õigus — koormus skoor {delta_text} vs kehtiv õigus"
+    )
+
+
+def _sanctions_delta_section(findings: dict[str, Any], draft_id: str = "") -> Any:
+    """Render the C6 sanctions-delta collapsible block (default open).
+
+    Wrapped in ``<details open>`` so the section is expanded by
+    default but the lawyer can collapse it on long reports. The
+    section is omitted entirely when ``sanctions_delta`` is missing
+    from the findings (legacy reports persisted before C6 stay
+    readable without an empty block cluttering the page).
+    """
+    delta = findings.get("sanctions_delta")
+    if delta is None:
+        return ""
+    if not isinstance(delta, dict):
+        return ""
+
+    rows = list(delta.get("rows") or [])
+    summary_line = _sanctions_delta_summary_line(delta)
+
+    if not rows:
+        body: Any = P(  # noqa: F405
+            "Eelnõu ei muuda ühtegi sanktsiooni.",
+            cls="muted-text",
+        )
+    else:
+        table_rows = [
+            {
+                "provision_label": str(r.get("provision_label") or r.get("provision_uri") or "—"),
+                "provision_uri": str(r.get("provision_uri") or ""),
+                "sanction_type": str(
+                    r.get("sanction_type_label") or r.get("sanction_type") or "—"
+                ),
+                "penalty_range": str(r.get("penalty_range") or "—"),
+                "before_summary": str(r.get("before_summary") or "—"),
+                "after_summary": str(r.get("after_summary") or "—"),
+                "change": str(r.get("change") or "new"),
+            }
+            for r in rows[:_MAX_INLINE_ROWS]
+        ]
+
+        def _provision_cell(row: dict[str, Any]):
+            uri = str(row.get("provision_uri") or "")
+            label = str(row.get("provision_label") or uri or "—")
+            if not uri:
+                return label
+            return A(  # noqa: F405
+                label,
+                href=explorer_focus_url(uri),
+                cls="data-table-link",
+            )
+
+        cols = [
+            Column(
+                key="provision_label",
+                label="Säte",
+                sortable=False,
+                render=_provision_cell,
+            ),
+            Column(
+                key="sanction_type",
+                label="Sanktsiooni liik",
+                sortable=False,
+                render=lambda row: str(row.get("sanction_type") or "—"),
+            ),
+            Column(
+                key="penalty_range",
+                label="Karistuse vahemik",
+                sortable=False,
+                render=lambda row: str(row.get("penalty_range") or "—"),
+            ),
+            Column(
+                key="before_summary",
+                label="Enne",
+                sortable=False,
+                render=lambda row: str(row.get("before_summary") or "—"),
+            ),
+            Column(
+                key="after_summary",
+                label="Pärast",
+                sortable=False,
+                render=lambda row: str(row.get("after_summary") or "—"),
+            ),
+        ]
+        body = DataTable(
+            columns=cols,
+            rows=table_rows,
+            empty_message="Sanktsioonide muutusi ei tuvastatud.",
+        )
+
+    return Details(  # noqa: F405
+        Summary(  # noqa: F405
+            Span("Sanktsioonide muutused", cls="report-collapsible-title"),  # noqa: F405
+            Span(summary_line, cls="muted-text report-collapsible-summary"),  # noqa: F405
+        ),
+        Div(body, cls="report-collapsible-body"),  # noqa: F405
+        open=True,
+        cls="report-collapsible report-sanctions-delta",
+        # data-section drives localStorage state in the inline script
+        # appended to the page (see ``_collapsible_state_script``).
+        data_section="sanctions_delta",
+    )
+
+
+def _burden_delta_section(findings: dict[str, Any], draft_id: str = "") -> Any:
+    """Render the C6 burden-delta collapsible block (default open).
+
+    Same shape as :func:`_sanctions_delta_section` — wrapped in a
+    ``<details open>`` so the section is expanded by default; omitted
+    entirely when the ``burden_delta`` key is missing (legacy reports).
+
+    Each row's target-group column uses the dutyHolder literal with
+    the v1 fallback label "Kohustatud isik (esialgne, vt #214)" until
+    ontology issue #214 backfills the ``targetGroup`` enum.
+    """
+    delta = findings.get("burden_delta")
+    if delta is None:
+        return ""
+    if not isinstance(delta, dict):
+        return ""
+
+    rows = list(delta.get("rows") or [])
+    summary_line = _burden_delta_summary_line(delta)
+
+    # Lazy import — see app/docs/impact/analyzer.py for the same
+    # circular-import workaround. ``app.analyysikeskus.__init__`` pulls
+    # in routes.py which imports ``explorer_focus_url`` from this very
+    # module, so we can't import burden helpers at module top.
+    from app.analyysikeskus.burden import burden_label as _burden_label
+
+    if not rows:
+        body: Any = P(  # noqa: F405
+            "Eelnõu ei muuda ühtegi sätte deontilist liiki.",
+            cls="muted-text",
+        )
+    else:
+        table_rows = [
+            {
+                "provision_label": str(r.get("provision_label") or r.get("provision_uri") or "—"),
+                "provision_uri": str(r.get("provision_uri") or ""),
+                "burden_label": str(
+                    r.get("burden_label") or _burden_label(str(r.get("burden_key") or ""))
+                ),
+                "duty_holder": str(r.get("duty_holder") or "—"),
+            }
+            for r in rows[:_MAX_INLINE_ROWS]
+        ]
+
+        def _provision_cell(row: dict[str, Any]):
+            uri = str(row.get("provision_uri") or "")
+            label = str(row.get("provision_label") or uri or "—")
+            if not uri:
+                return label
+            return A(  # noqa: F405
+                label,
+                href=explorer_focus_url(uri),
+                cls="data-table-link",
+            )
+
+        cols = [
+            Column(
+                key="provision_label",
+                label="Säte",
+                sortable=False,
+                render=_provision_cell,
+            ),
+            Column(
+                key="burden_label",
+                label="Liik",
+                sortable=False,
+                render=lambda row: str(row.get("burden_label") or "—"),
+            ),
+            Column(
+                key="duty_holder",
+                # v1 label per the plan — replaced by ``targetGroup``
+                # enum column once ontology issue #214 backfills.
+                label="Kohustatud isik (esialgne, vt #214)",
+                sortable=False,
+                render=lambda row: str(row.get("duty_holder") or "—"),
+            ),
+        ]
+        body = DataTable(
+            columns=cols,
+            rows=table_rows,
+            empty_message="Koormuse muutusi ei tuvastatud.",
+        )
+
+    return Details(  # noqa: F405
+        Summary(  # noqa: F405
+            Span("Koormuse muutused", cls="report-collapsible-title"),  # noqa: F405
+            Span(summary_line, cls="muted-text report-collapsible-summary"),  # noqa: F405
+        ),
+        Div(body, cls="report-collapsible-body"),  # noqa: F405
+        open=True,
+        cls="report-collapsible report-burden-delta",
+        data_section="burden_delta",
+    )
+
+
+def _collapsible_state_script() -> Any:
+    """Return the inline script that persists collapsible open/closed state.
+
+    The script is appended once per report page and binds to every
+    ``<details data-section>`` element. It reads / writes localStorage
+    under the key ``report.collapsible.<section>`` so the lawyer's
+    expand/collapse choice survives page reloads (e.g. opening a row
+    in a new tab via ``Ctrl-click`` and coming back).
+
+    Failure modes (localStorage disabled in a private window, exotic
+    browser without ``details`` support) silently fall back to the
+    server-rendered ``open=True`` default — never throws.
+    """
+    return Script(  # noqa: F405
+        """
+(function() {
+  try {
+    var nodes = document.querySelectorAll('details[data-section]');
+    nodes.forEach(function(d) {
+      var key = 'report.collapsible.' + d.getAttribute('data-section');
+      try {
+        var stored = window.localStorage.getItem(key);
+        if (stored === 'closed') { d.removeAttribute('open'); }
+        else if (stored === 'open') { d.setAttribute('open', ''); }
+      } catch (e) { /* localStorage disabled */ }
+      d.addEventListener('toggle', function() {
+        try {
+          window.localStorage.setItem(key, d.open ? 'open' : 'closed');
+        } catch (e) { /* localStorage disabled */ }
+      });
+    });
+  } catch (e) { /* old browser, fall back to server default */ }
+})();
+""".strip()
+    )
+
+
+def _print_stylesheet() -> Any:
+    """Return the C6 print stylesheet — expand collapsibles when printing.
+
+    The user prints via ``Prindi kokkuvõte`` (a .docx download — the
+    primary path) OR via browser-native print of the inline report
+    page. The latter must show every section's body even when the user
+    has collapsed it on-screen; we force ``display: block`` inside the
+    print-media context so the printed page is a complete record.
+    """
+    return Style(  # noqa: F405
+        """
+@media print {
+  details.report-collapsible > summary {
+    list-style: none;
+  }
+  details.report-collapsible > *:not(summary) {
+    display: block !important;
+  }
+  details.report-collapsible[open] > *:not(summary),
+  details.report-collapsible:not([open]) > *:not(summary) {
+    display: block !important;
+  }
+}
+""".strip()
+    )
+
+
+def _print_summary_button(draft: Draft) -> Any:
+    """Render the "Prindi kokkuvõte" button (C6, #791).
+
+    Triggers a direct download of the executive-summary .docx via a
+    standard ``<a download>`` link — the route handler streams the
+    file synchronously (1-2 pages → no need for the export-job queue
+    machinery used by the full report).
+    """
+    return LinkButton(
+        "Prindi kokkuvõte",
+        href=f"/drafts/{draft.id}/report/summary.docx",
+        variant="secondary",
+        title="Laadi alla 1-2 leheküljeline kokkuvõte (.docx) seletuskirja jaoks.",
+        # ``download`` attr asks the browser to save rather than render.
+        download="kokkuvote.docx",
+    )
+
+
 def _export_form(draft: Draft, *, fmt: str, label: str, variant: ButtonVariant) -> Any:
     """Render one export-trigger form for a single output format (#613).
 
@@ -1112,6 +1436,10 @@ def draft_report_page(req: Request, draft_id: str):
                     variant="secondary",
                     title="Ava nõustaja vestlus selle eelnõu kontekstis.",
                 ),
+                # C6 (#791): standalone 1-2 page executive summary for
+                # the seletuskiri front page (full report stays as
+                # appendix via the /export buttons below).
+                _print_summary_button(draft),
                 # #614: one-line helper below the button so reviewers
                 # know what "Ava õiguskaardil" actually does before clicking.
                 Small(  # noqa: F405
@@ -1148,6 +1476,14 @@ def draft_report_page(req: Request, draft_id: str):
         # Every row's AnnotationButton swaps the PR-B fragment into this
         # element.  Empty-state skeleton until the user clicks a row.
         _annotation_side_panel_container(),
+        # C6 (#791): sanctions + burden delta collapsibles. Rendered
+        # BEFORE the four classic sections so the lawyer sees the
+        # criminal-law / burden picture up front — these dimensions
+        # are the most "what changed?" relevant for VTK / seletuskiri.
+        # Both helpers return "" when the corresponding key is missing
+        # (legacy reports), so old reports stay unchanged.
+        _sanctions_delta_section(findings, draft_id=str(draft.id)),
+        _burden_delta_section(findings, draft_id=str(draft.id)),
         _affected_entities_section(
             findings,
             draft_id=str(draft.id),
@@ -1173,6 +1509,12 @@ def draft_report_page(req: Request, draft_id: str):
             counts=unresolved_counts,
         ),
         _export_section(draft),
+        # C6 (#791): print stylesheet expands collapsibles in print
+        # media so a browser-native print of the page shows full
+        # content. The localStorage script persists user choice on
+        # screen.
+        _print_stylesheet(),
+        _collapsible_state_script(),
         # #610: progressive enhancement — opens a WebSocket subscription
         # to /ws/drafts/export-progress when the spinner fragment lands
         # in the DOM. Falls back silently to the existing HTMX polling
@@ -1776,6 +2118,80 @@ def download_export_handler(req: Request, draft_id: str, job_id: str):
 
 
 # ---------------------------------------------------------------------------
+# GET /drafts/{draft_id}/report/summary.docx — C6 (#791) executive summary
+# ---------------------------------------------------------------------------
+
+
+def executive_summary_download_handler(req: Request, draft_id: str):
+    """GET /drafts/{draft_id}/report/summary.docx — synchronous .docx download.
+
+    Renders a 1-2 page executive-summary on the fly via
+    :func:`app.docs.docx_export.export_executive_summary` and streams
+    the file to the client. No background job queue is needed because
+    the summary is short enough to render in well under the request
+    timeout (no per-row SPARQL — every input is already cached in the
+    ``impact_reports`` row).
+
+    Auth + org-scoping mirror :func:`draft_report_page`: a missing /
+    cross-org draft resolves to the 404 page.
+    """
+    auth_or_redirect = _require_auth(req)
+    if isinstance(auth_or_redirect, Response):
+        return auth_or_redirect
+    auth = auth_or_redirect
+
+    parsed = _parse_uuid(draft_id)
+    if parsed is None:
+        return _not_found_page(req)
+
+    draft = fetch_draft(parsed)
+    if draft is None or not can_view_draft(auth, draft):
+        return _not_found_page(req)
+
+    report_row = _fetch_latest_report(parsed)
+    if report_row is None:
+        return _not_found_page(req)
+
+    # Lazy import keeps the top-level module light and avoids a cycle
+    # with the export handler that also imports from docx_export.
+    from app.docs.docx_export import export_executive_summary
+
+    try:
+        out_path = export_executive_summary(draft, report_row)
+    except Exception:
+        logger.exception(
+            "executive_summary_download_handler failed for draft=%s",
+            parsed,
+        )
+        return Div(
+            Alert(
+                "Kokkuvõtte koostamine ebaõnnestus. Palun proovige uuesti.",
+                variant="danger",
+            ),
+            cls="alert",
+        )
+
+    filename = f"kokkuvote_{_slugify(draft.title)}.docx"
+    log_action(
+        auth.get("id"),
+        "draft.report.summary.download",
+        {
+            "draft_id": str(parsed),
+            "report_id": str(report_row[0]),
+            "filename": filename,
+        },
+    )
+    # #572: download counts as access; reset the archive clock.
+    touch_draft_access_conn(parsed)
+
+    return FileResponse(
+        path=str(out_path),
+        media_type=_DOCX_MIME,
+        filename=filename,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Route registration
 # ---------------------------------------------------------------------------
 
@@ -1788,6 +2204,10 @@ def register_report_routes(rt) -> None:  # type: ignore[no-untyped-def]
     # #612: "Analüüsi uuesti" when the ontology has drifted past the
     # snapshot the report ran against.
     rt("/drafts/{draft_id}/report/reanalyze", methods=["POST"])(reanalyze_report_handler)
+    # C6 (#791): standalone 1-2 page executive summary printout.
+    rt("/drafts/{draft_id}/report/summary.docx", methods=["GET"])(
+        executive_summary_download_handler
+    )
     rt("/drafts/{draft_id}/export", methods=["POST"])(export_draft_report_handler)
     rt("/drafts/{draft_id}/export-status/{job_id}", methods=["GET"])(export_status_fragment)
     rt("/drafts/{draft_id}/export/{job_id}/download", methods=["GET"])(download_export_handler)
