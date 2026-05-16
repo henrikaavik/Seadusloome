@@ -33,6 +33,7 @@ from starlette.responses import HTMLResponse, RedirectResponse, Response
 
 from app.auth.helpers import require_auth as _require_auth
 from app.auth.policy import can_access_conversation
+from app.chat.actions import chat_actions_block
 from app.chat.audit import (
     log_chat_conversation_create,
     log_chat_conversation_delete,
@@ -1034,6 +1035,13 @@ def _render_message(msg: Any):
         sources = _rag_sources_block(getattr(msg, "rag_context", None))
         if sources:
             extras.append(sources)
+        # C1: outbound action links per cited entity type (provision →
+        # Normi mõjuahel, EU act → EL ülevõtt, court decision → chat
+        # seed). Renders nothing when no sources are cited or no
+        # entity type maps to an action.
+        actions = chat_actions_block(getattr(msg, "rag_context", None))
+        if actions:
+            extras.append(actions)
 
         conv_id_str = str(getattr(msg, "conversation_id", "") or "")
         return Div(  # noqa: F405
