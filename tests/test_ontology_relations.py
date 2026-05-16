@@ -496,6 +496,10 @@ class TestFixtureGraphSparql:
         assert len(terms) == 1
 
     def test_competent_authority_query(self, fixture_graph: Graph):
+        # Pin the canonical edge for the original PREDICATE smoke; the
+        # fixture also carries A3 (Pädevuste kaardistus) edges so the
+        # row count is > 1. We assert that the Provision_1 →
+        # Institution_1 edge is present (the canonical fixture row).
         rows = list(
             fixture_graph.query(
                 """
@@ -504,4 +508,9 @@ class TestFixtureGraphSparql:
                 """
             )
         )
-        assert len(rows) == 1
+        assert len(rows) >= 1
+        pairs = {(str(r.p), str(r.i)) for r in rows}  # type: ignore[attr-defined]
+        assert (
+            "https://data.riik.ee/ontology/estleg#Provision_1",
+            "https://data.riik.ee/ontology/estleg#Institution_1",
+        ) in pairs

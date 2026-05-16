@@ -89,6 +89,43 @@ estleg:Term_1 a estleg:Term ;
 estleg:Institution_1 a estleg:Institution ;
     rdfs:label "Institution 1" .
 
+# Two extra Institutions (A3 — Pädevuste kaardistus) so the competence
+# overlap query has at least one provision with multiple competent
+# authorities. Institution_2 names a recognisable agency-style body so
+# the label-search test can exercise CONTAINS/LCASE filtering.
+estleg:Institution_2 a estleg:Institution ;
+    rdfs:label "Andmekaitse Inspektsioon" .
+
+estleg:Institution_3 a estleg:Institution ;
+    rdfs:label "Tarbijakaitse ja Tehnilise Järelevalve Amet" .
+
+# A second provision attached to Act_1 so the A3 by-act bucketing has
+# more than one row per act on at least one bucket.
+estleg:Provision_4 a estleg:LegalProvision ;
+    rdfs:label "Provision 4 — Institution_2 competence" ;
+    estleg:partOf estleg:Act_1 ;
+    estleg:paragrahv "4" .
+
+# Two more provisions for A3 — one with a single competent authority
+# (Institution_2), one with two competent authorities (Institution_2 +
+# Institution_3) to exercise the overlap query.
+estleg:Provision_5 a estleg:LegalProvision ;
+    rdfs:label "Provision 5 — overlap on Institution_2" ;
+    estleg:partOf estleg:Act_2 ;
+    estleg:paragrahv "5" .
+
+# Reified Competence node — present so future v2 queries that need
+# Competence's structure (institution / competenceType /
+# appliesToProvision / appliesToProvisionCount per the audit) can be
+# unit-tested without re-touching the fixture. v1 does **not** depend
+# on this node.
+estleg:Competence_1 a estleg:Competence ;
+    rdfs:label "Competence 1 — Institution_2 over Provision_4" ;
+    estleg:institution estleg:Institution_2 ;
+    estleg:competenceType "supervisory" ;
+    estleg:appliesToProvision estleg:Provision_4 ;
+    estleg:appliesToProvisionCount 1 .
+
 # ---------------------------------------------------------------------------
 # Canonical relation edges — one per predicate
 # ---------------------------------------------------------------------------
@@ -133,3 +170,16 @@ estleg:Provision_1 estleg:definesTerm    estleg:Term_1 .
 
 # Competence.
 estleg:Provision_1 estleg:competentAuthority estleg:Institution_1 .
+
+# A3 — Pädevuste kaardistus: extra competentAuthority edges so the
+# institution-level queries return non-trivial rows.
+#
+#   Provision_4 → Institution_2          (single competence, Act_1)
+#   Provision_5 → Institution_2          (single competence, Act_2)
+#   Provision_5 → Institution_3          (overlap with Institution_2)
+#
+# Net: Institution_2 holds 2 powers across 2 acts and overlaps with
+# Institution_3 on Provision_5. Institution_3 holds 1 power.
+estleg:Provision_4 estleg:competentAuthority estleg:Institution_2 .
+estleg:Provision_5 estleg:competentAuthority estleg:Institution_2 .
+estleg:Provision_5 estleg:competentAuthority estleg:Institution_3 .
