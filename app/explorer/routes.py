@@ -24,6 +24,7 @@ from app.ontology.queries import (
     ENTITY_METADATA,
     SEARCH_ENTITIES,
 )
+from app.ontology.relations import legal_phrase as _legal_phrase
 from app.ontology.sparql_client import SparqlClient
 
 logger = logging.getLogger(__name__)
@@ -38,53 +39,14 @@ _MAX_SEARCH_LIMIT = 50
 #
 # The node detail panel turns into an "evidence card": source / date-version /
 # relation-type-in-legal-language / a deterministic "why it matters" line / four
-# actions. The relation-phrase map and the "why it matters" rule table below are
-# *small static rule tables* — there is deliberately no LLM call here. Both are
-# keyed on the ontology relation's local name (the bit after ``#`` / ``/``),
-# matched case-insensitively so ``estleg:amendsProvision`` and a bare ``amends``
-# both resolve.
-
-#: Ontology relation local-name → Estonian *legal* phrase. The values read as a
-#: legal lawyer would name the relationship ("muudab", "tunnistab kehtetuks",
-#: "võtab üle direktiivi", …) rather than as a raw predicate name. Keys are
-#: lower-cased for the case-insensitive lookup in :func:`relation_legal_phrase`.
-_RELATION_LEGAL_PHRASES: dict[str, str] = {
-    # Amendments / repeals.
-    "amendsprovision": "muudab",
-    "amends": "muudab",
-    "amendedby": "muudetud õigusaktiga",
-    "repealsprovision": "tunnistab kehtetuks",
-    "repeals": "tunnistab kehtetuks",
-    "repealedby": "tunnistatud kehtetuks õigusaktiga",
-    "replaces": "asendab",
-    "replacedby": "asendatud õigusaktiga",
-    # EU transposition / harmonisation.
-    "transposesdirective": "võtab üle direktiivi",
-    "transposes": "võtab üle",
-    "transposedby": "üle võetud õigusaktiga",
-    "implementseu": "rakendab EL õigust",
-    "implementseulaw": "rakendab EL õigust",
-    "harmonisedwith": "on harmoneeritud õigusaktiga",
-    "harmonizedwith": "on harmoneeritud õigusaktiga",
-    # Citations / references.
-    "references": "viitab",
-    "cites": "viitab",
-    "citedby": "viidatud õigusaktiga",
-    "relatedto": "on seotud",
-    "basedon": "tugineb",
-    # Court-decision relations.
-    "appliesprovision": "kohaldab",
-    "applies": "kohaldab",
-    "interpretsprovision": "tõlgendab",
-    "interprets": "tõlgendab",
-    # Structure / membership.
-    "sourceact": "kuulub õigusakti",
-    "partof": "on osa",
-    "hasprovision": "sisaldab sätet",
-    "hastopic": "kuulub teemavaldkonda",
-    "topiccluster": "kuulub teemavaldkonda",
-    "definesconcept": "määratleb mõiste",
-}
+# actions.
+#
+# C0 (2026-05-15): the inline ``_RELATION_LEGAL_PHRASES`` dict was migrated
+# verbatim into ``app.ontology.relations`` so the predicate-vocabulary lives in
+# one place (impact queries, chat tools, explorer, drafter all import from
+# there). The ``relation_legal_phrase`` wrapper below preserves the original
+# signature and fallback behaviour. The ``_WHY_IT_MATTERS`` rule table stays
+# here because it's explorer-specific UX copy, not vocabulary.
 
 
 #: The "why it matters" rule table — a deterministic one-line plain-language
@@ -162,23 +124,14 @@ def relation_legal_phrase(name_or_uri: str) -> str:
     ``relation_legal_phrase("repeals")`` → ``"tunnistab kehtetuks"``. Unknown
     relations fall back to the bare local name so the panel never shows an
     empty "Seose liik" slot.
+
+    C0 (2026-05-15): delegates to ``app.ontology.relations.legal_phrase`` so
+    every surface (impact queries, chat tools, explorer, drafter) shares one
+    vocabulary. Kept here as a thin wrapper to preserve the existing import
+    path used by callers in this module and by tests in
+    ``tests/test_explorer_routes.py``.
     """
-    key = _relation_key(name_or_uri)
-    if not key:
-        return ""
-    phrase = _RELATION_LEGAL_PHRASES.get(key)
-    if phrase:
-        return phrase
-    # Fallback: the short name from the original input, un-mangled by the
-    # lower-casing the key needed.
-    s = str(name_or_uri).strip()
-    if "#" in s:
-        s = s.rsplit("#", 1)[-1]
-    elif "/" in s:
-        s = s.rsplit("/", 1)[-1]
-    if ":" in s:
-        s = s.rsplit(":", 1)[-1]
-    return s
+    return _legal_phrase(name_or_uri)
 
 
 def why_it_matters(name_or_uri: str, band: str | None = None) -> str:

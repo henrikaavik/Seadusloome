@@ -48,6 +48,7 @@ select = ["E", "F", "I", "N", "W", "UP"]
 [tool.pytest.ini_options]
 markers = [
     "integration: integration tests that require a live database (skipped without DATABASE_URL)",
+    "smoke: smoke tests that run against live infrastructure when available (skipped otherwise)",
 ]
 
 [tool.pyright]

@@ -11,20 +11,32 @@ and a runaway traversal could return tens of thousands of rows. The
 limits are deliberately conservative so the impact report stays
 responsive; callers that need more can paginate in the analyzer.
 
-Predicates used (cross-checked against the loaded ontology via the
-explorer queries in ``app/explorer/routes.py`` and
-``app/ontology/queries.py``):
+Predicates used (canonical names, verified against the
+``henrikaavik/estonian-legal-ontology`` source on 2026-05-15 — see
+``docs/2026-05-15-ontology-six-use-cases-plan.md`` section 2.5):
 
     estleg:references          draft-side link from DraftLegislation to any entity
-    estleg:interpretsProvision CourtDecision -> LegalProvision
-    estleg:transposesDirective LegalProvision -> EULegislation
-    estleg:implementsEU        alias used in the design doc
-    estleg:hasTopic            LegalProvision -> TopicCluster
-    estleg:topicCluster        alias surfaced on some older data
-    estleg:amendsProvision     Amendment -> LegalProvision
+    estleg:interpretsLaw       CourtDecision -> LegalProvision
+    estleg:interpretedBy       LegalProvision -> CourtDecision (inverse)
+    estleg:transposesDirective Estonian Act -> EULegislation
+    estleg:transposedBy        EULegislation -> Estonian Act (inverse)
+    estleg:harmonisedWith      LegalProvision -> EU act
+    estleg:requestedCluster    LegalProvision -> TopicCluster (populated)
+    estleg:topicCluster        SHACL-defined alias (unused in current data)
+    estleg:amends              AmendmentEvent -> LegalProvision
+    estleg:amendedBy           LegalProvision -> Act / Draft (inverse)
     estleg:definesConcept      LegalProvision -> LegalConcept
     rdfs:label                 human label
     rdf:type                   RDF type
+
+#C0 (2026-05-15): the legacy predicates ``interpretsProvision``,
+``amendsProvision``, ``hasTopic``, and ``implementsEU`` were verified
+not to exist in the source ontology. Every UNION branch using those
+names returned zero rows, so impact reports under-reported conflicts
+and amendments. The queries now project a ``?relation`` variable on
+each row so downstream renderers can show the relation type in legal
+language (C5). The canonical predicate URIs are defined in
+:mod:`app.ontology.relations`.
 
 Security: every ``{graph_uri}`` interpolation goes through
 :func:`_validate_graph_uri` (#465). The draft graph URI is generated
@@ -91,39 +103,55 @@ PREFIX estleg: <https://data.riik.ee/ontology/estleg#>
 # edges. We pivot from each referenced entity out one more hop via
 # the common relational predicates the ontology uses:
 #
-#   hasTopic / topicCluster     — LegalProvision -> TopicCluster
-#   amendsProvision             — Amendment -> LegalProvision
-#   definesConcept              — LegalProvision -> LegalConcept
-#   interpretsProvision         — CourtDecision -> LegalProvision
-#   transposesDirective         — LegalProvision -> EULegislation
-#   implementsEU                — alias
+#   requestedCluster / topicCluster  — LegalProvision -> TopicCluster
+#   amends / amendedBy               — AmendmentEvent -> Provision (and inverse)
+#   definesConcept                   — LegalProvision -> LegalConcept
+#   interpretsLaw / interpretedBy    — CourtDecision -> Provision (and inverse)
+#   transposesDirective              — Estonian Act -> EULegislation
+#   harmonisedWith                   — Provision -> EU act
 #
 # The UNION pattern keeps the query flat (property-path expressions
 # across incoming+outgoing edges make Jena's planner unhappy on 1M
 # triples) and the DISTINCT projection drops duplicates from the
-# cartesian product.
+# cartesian product. Each branch BINDs a ``?relation`` literal so the
+# analyzer / renderer can show the relation type in legal language
+# (epic C5, ``app.ontology.relations.legal_phrase``).
 
 AFFECTED_ENTITIES = (
     PREFIXES
     + """
-SELECT DISTINCT ?entity ?label ?type WHERE {{
+SELECT DISTINCT ?entity ?label ?type ?relation WHERE {{
   GRAPH <{graph_uri}> {{ ?draft estleg:references ?ref . }}
   {{
     BIND(?ref AS ?entity)
+    BIND(estleg:references AS ?relation)
   }} UNION {{
-    ?ref estleg:hasTopic ?entity .
+    ?ref estleg:requestedCluster ?entity .
+    BIND(estleg:requestedCluster AS ?relation)
   }} UNION {{
     ?ref estleg:topicCluster ?entity .
+    BIND(estleg:topicCluster AS ?relation)
   }} UNION {{
     ?ref estleg:definesConcept ?entity .
+    BIND(estleg:definesConcept AS ?relation)
   }} UNION {{
     ?ref estleg:transposesDirective ?entity .
+    BIND(estleg:transposesDirective AS ?relation)
   }} UNION {{
-    ?ref estleg:implementsEU ?entity .
+    ?ref estleg:harmonisedWith ?entity .
+    BIND(estleg:harmonisedWith AS ?relation)
   }} UNION {{
-    ?entity estleg:interpretsProvision ?ref .
+    ?ref estleg:interpretedBy ?entity .
+    BIND(estleg:interpretedBy AS ?relation)
   }} UNION {{
-    ?entity estleg:amendsProvision ?ref .
+    ?entity estleg:interpretsLaw ?ref .
+    BIND(estleg:interpretsLaw AS ?relation)
+  }} UNION {{
+    ?ref estleg:amendedBy ?entity .
+    BIND(estleg:amendedBy AS ?relation)
+  }} UNION {{
+    ?entity estleg:amends ?ref .
+    BIND(estleg:amends AS ?relation)
   }}
   OPTIONAL {{ ?entity rdfs:label ?label }}
   OPTIONAL {{ ?entity rdf:type ?type }}
@@ -156,7 +184,7 @@ LIMIT 500
 CONFLICTS = (
     PREFIXES
     + """
-SELECT DISTINCT ?draftRef ?conflictEntity ?conflictLabel ?reason WHERE {{
+SELECT DISTINCT ?draftRef ?conflictEntity ?conflictLabel ?reason ?relation WHERE {{
   GRAPH <{graph_uri}> {{ ?draft estleg:references ?draftRef . }}
   {{
     # Another draft references the same entity.
@@ -168,11 +196,20 @@ SELECT DISTINCT ?draftRef ?conflictEntity ?conflictLabel ?reason WHERE {{
     BIND(?otherDraft AS ?conflictEntity)
     OPTIONAL {{ ?conflictEntity rdfs:label ?conflictLabel }}
     BIND("Teine eelnõu viitab juba sellele sättele" AS ?reason)
+    BIND(estleg:references AS ?relation)
   }} UNION {{
-    # A Supreme Court decision interprets this provision.
-    ?conflictEntity estleg:interpretsProvision ?draftRef .
+    # A Supreme Court decision interprets this provision —
+    # CourtDecision estleg:interpretsLaw Provision (forward) OR
+    # Provision estleg:interpretedBy CourtDecision (inverse).
+    ?conflictEntity estleg:interpretsLaw ?draftRef .
     OPTIONAL {{ ?conflictEntity rdfs:label ?conflictLabel }}
     BIND("Kohtulahend tõlgendab seda sätet" AS ?reason)
+    BIND(estleg:interpretsLaw AS ?relation)
+  }} UNION {{
+    ?draftRef estleg:interpretedBy ?conflictEntity .
+    OPTIONAL {{ ?conflictEntity rdfs:label ?conflictLabel }}
+    BIND("Kohtulahend tõlgendab seda sätet" AS ?reason)
+    BIND(estleg:interpretedBy AS ?relation)
   }}
 }}
 LIMIT 200
@@ -185,7 +222,9 @@ LIMIT 200
 # ---------------------------------------------------------------------------
 #
 # For every topic cluster reachable from the draft's references (via
-# the provisions' hasTopic edge), count how many sibling provisions
+# the provisions' requestedCluster edge — the canonical populated
+# predicate; ``topicCluster`` is its SHACL alias and currently empty
+# but queried for forward-compat), count how many sibling provisions
 # exist in that cluster and how many the draft actually references.
 # A cluster is flagged as a "gap" when the draft references less
 # than 20% of its provisions — strongly suggesting the drafter is
@@ -194,6 +233,11 @@ LIMIT 200
 # We use a HAVING clause rather than a post-filter so the engine can
 # prune early. The 20% threshold is a heuristic — Phase 3 may tighten
 # it with topic-specific weights.
+#
+# C0 (2026-05-15): the previous ``estleg:hasTopic`` predicate does not
+# exist in the source ontology, so this query returned zero rows. Now
+# the UNION over ``requestedCluster`` / ``topicCluster`` matches the
+# canonical vocabulary.
 
 GAPS = (
     PREFIXES
@@ -201,14 +245,18 @@ GAPS = (
 SELECT ?cluster ?clusterLabel ?totalProvisions ?referencedProvisions WHERE {{
   {{
     SELECT ?cluster (COUNT(DISTINCT ?p) AS ?totalProvisions) WHERE {{
-      ?p estleg:hasTopic ?cluster .
+      {{ ?p estleg:requestedCluster ?cluster . }}
+      UNION
+      {{ ?p estleg:topicCluster ?cluster . }}
     }}
     GROUP BY ?cluster
   }}
   {{
     SELECT ?cluster (COUNT(DISTINCT ?p) AS ?referencedProvisions) WHERE {{
       GRAPH <{graph_uri}> {{ ?draft estleg:references ?p . }}
-      ?p estleg:hasTopic ?cluster .
+      {{ ?p estleg:requestedCluster ?cluster . }}
+      UNION
+      {{ ?p estleg:topicCluster ?cluster . }}
     }}
     GROUP BY ?cluster
   }}
@@ -232,21 +280,46 @@ LIMIT 100
 # simply surfaces the link so a human reviewer can assess the
 # transposition impact.
 #
-# We include both ``transposesDirective`` (the canonical predicate
-# from the ontology data model) and ``implementsEU`` (an alias used
-# in the Phase 1 sync output) so the query works regardless of which
-# predicate the loaded data uses. The UNION is flat so Jena's planner
-# can push the bindings through quickly.
+# C0 (2026-05-15): the ``estleg:implementsEU`` alias was dropped
+# because the predicate does not exist in the source ontology. The
+# query now uses ``transposesDirective`` (forward), ``transposedBy``
+# (inverse, in case data only carries one direction), and
+# ``harmonisedWith`` (provision-level harmonisation).
 
 EU_COMPLIANCE = (
     PREFIXES
     + """
-SELECT DISTINCT ?euAct ?euLabel ?estonianProvision ?provisionLabel WHERE {{
+SELECT DISTINCT ?euAct ?euLabel ?estonianProvision ?provisionLabel ?relation WHERE {{
   GRAPH <{graph_uri}> {{ ?draft estleg:references ?estonianProvision . }}
   {{
+    # Provision-level transposition (SHACL lines 158-163 allow this).
     ?estonianProvision estleg:transposesDirective ?euAct .
+    BIND(estleg:transposesDirective AS ?relation)
   }} UNION {{
-    ?estonianProvision estleg:implementsEU ?euAct .
+    # Act-level transposition (canonical per SHACL lines 62-66): chain via
+    # the provision's parent act (``sourceAct`` is the populated edge;
+    # ``partOf`` is the SHACL alias — UNION both for forward compatibility).
+    {{
+      ?estonianProvision estleg:sourceAct ?_parentAct .
+    }} UNION {{
+      ?estonianProvision estleg:partOf ?_parentAct .
+    }}
+    ?_parentAct estleg:transposesDirective ?euAct .
+    BIND(estleg:transposesDirective AS ?relation)
+  }} UNION {{
+    # Inverse — ``transposedBy`` is on EULegislation → Act (SHACL 687-692),
+    # so chain from provision → parent act first.
+    {{
+      ?estonianProvision estleg:sourceAct ?_parentAct .
+    }} UNION {{
+      ?estonianProvision estleg:partOf ?_parentAct .
+    }}
+    ?euAct estleg:transposedBy ?_parentAct .
+    BIND(estleg:transposedBy AS ?relation)
+  }} UNION {{
+    # Provision-level harmonisation (SHACL 226-230).
+    ?estonianProvision estleg:harmonisedWith ?euAct .
+    BIND(estleg:harmonisedWith AS ?relation)
   }}
   ?euAct a estleg:EULegislation .
   OPTIONAL {{ ?euAct rdfs:label ?euLabel }}

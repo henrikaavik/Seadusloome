@@ -1,0 +1,135 @@
+@prefix rdf:    <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:   <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:    <http://www.w3.org/2001/XMLSchema#> .
+@prefix estleg: <https://data.riik.ee/ontology/estleg#> .
+
+#
+# C0 fixture (2026-05-15) — a minimal Turtle graph that exercises every
+# canonical predicate from ``app.ontology.relations`` exactly once.
+#
+# Designed to be loaded into a transient ``rdflib.Graph`` so unit tests
+# can prove that:
+#
+#   1. Each canonical predicate is queryable.
+#   2. The impact-engine SELECT templates return the expected rows when
+#      seeded with this graph plus a synthetic draft named graph.
+#
+# Topology (one of each shape):
+#
+#                ┌──────────────────┐
+#                │ CourtDecision_1  │
+#                └──────────────────┘
+#                         │
+#                         │ interpretsLaw / interpretedBy (inverse)
+#                         ▼
+#   AmendmentEvent_1 ──amends──▶ Provision_1 ──amendedBy──▶ Act_2
+#                                    │
+#                                    │ requestedCluster / topicCluster
+#                                    ▼
+#                                Cluster_1
+#                                    │
+#                                    │ semanticallySimilarTo
+#                                    ▼
+#                                Provision_2
+#
+#   Provision_1 ──transposesDirective──▶ EU_Dir_1 ──transposedBy──▶ Act_1
+#   Provision_1 ──harmonisedWith──▶ EU_Dir_1
+#   Provision_1 ──references──▶ Provision_3
+#   Provision_1 ──definesConcept──▶ Concept_1
+#   Provision_1 ──definesTerm──▶ Term_1
+#   Provision_1 ──competentAuthority──▶ Institution_1
+#
+
+# ---------------------------------------------------------------------------
+# Entities (just enough types + labels to make label-projecting queries work)
+# ---------------------------------------------------------------------------
+
+estleg:Provision_1 a estleg:LegalProvision ;
+    rdfs:label "Provision 1 — fixture" ;
+    estleg:sourceAct estleg:Act_1 ;
+    estleg:paragrahv "1" .
+
+estleg:Provision_2 a estleg:LegalProvision ;
+    rdfs:label "Provision 2 — similar" ;
+    estleg:sourceAct estleg:Act_2 ;
+    estleg:paragrahv "2" .
+
+estleg:Provision_3 a estleg:LegalProvision ;
+    rdfs:label "Provision 3 — referenced" ;
+    estleg:sourceAct estleg:Act_1 ;
+    estleg:paragrahv "3" .
+
+estleg:Act_1 a estleg:Act ;
+    rdfs:label "Act 1 — fixture host" .
+
+estleg:Act_2 a estleg:Act ;
+    rdfs:label "Act 2 — amender" .
+
+estleg:CourtDecision_1 a estleg:CourtDecision ;
+    rdfs:label "Court Decision 1" .
+
+estleg:AmendmentEvent_1 a estleg:AmendmentEvent ;
+    rdfs:label "Amendment Event 1" .
+
+estleg:EU_Dir_1 a estleg:EULegislation ;
+    rdfs:label "EU Directive 1" .
+
+estleg:EU_Dir_2 a estleg:EULegislation ;
+    rdfs:label "EU Directive 2 — act-level transposition" .
+
+estleg:Cluster_1 a estleg:TopicCluster ;
+    rdfs:label "Topic Cluster 1" .
+
+estleg:Concept_1 a estleg:LegalConcept ;
+    rdfs:label "Concept 1" .
+
+estleg:Term_1 a estleg:Term ;
+    rdfs:label "Term 1" .
+
+estleg:Institution_1 a estleg:Institution ;
+    rdfs:label "Institution 1" .
+
+# ---------------------------------------------------------------------------
+# Canonical relation edges — one per predicate
+# ---------------------------------------------------------------------------
+
+# Interpretation (court decisions) — both directions present so the
+# impact query's UNION covers either-side data.
+estleg:CourtDecision_1 estleg:interpretsLaw estleg:Provision_1 .
+estleg:Provision_1     estleg:interpretedBy estleg:CourtDecision_1 .
+
+# Amendments.
+estleg:AmendmentEvent_1 estleg:amends    estleg:Provision_1 .
+estleg:Provision_1      estleg:amendedBy estleg:Act_2 .
+
+# Topic clustering — populated edge is ``requestedCluster``; ``topicCluster``
+# is the SHACL alias (queried for forward compatibility).
+estleg:Provision_1 estleg:requestedCluster estleg:Cluster_1 .
+estleg:Provision_2 estleg:topicCluster     estleg:Cluster_1 .
+
+# EU transposition + harmonisation.
+#
+# Per the ontology audit (section 2.5 of the plan), ``transposesDirective`` is
+# canonical on Estonian *Act* → EULegislation, but SHACL (lines 62-66 + 158-163)
+# also allows it on Provision-level. Both shapes are tested below:
+#
+#   EU_Dir_1 — Provision-level (direct edge on Provision_1)
+#   EU_Dir_2 — Act-level (edge on Act_1; Provision_1 is part of Act_1 via sourceAct)
+#
+# The impact query must surface BOTH via the appropriate UNION arm.
+estleg:Provision_1 estleg:transposesDirective estleg:EU_Dir_1 .
+estleg:EU_Dir_1    estleg:transposedBy        estleg:Act_1 .
+estleg:Provision_1 estleg:harmonisedWith      estleg:EU_Dir_1 .
+
+estleg:Act_1       estleg:transposesDirective estleg:EU_Dir_2 .
+
+# References / similarity.
+estleg:Provision_1 estleg:references            estleg:Provision_3 .
+estleg:Provision_1 estleg:semanticallySimilarTo estleg:Provision_2 .
+
+# Concepts / terms.
+estleg:Provision_1 estleg:definesConcept estleg:Concept_1 .
+estleg:Provision_1 estleg:definesTerm    estleg:Term_1 .
+
+# Competence.
+estleg:Provision_1 estleg:competentAuthority estleg:Institution_1 .
