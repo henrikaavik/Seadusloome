@@ -39,12 +39,15 @@ from app.auth.audit import log_action
 from app.db import get_connection as _connect
 from app.docs.impact.scoring import IMPACT_BAND_LABELS_ET, ImpactBand, impact_band
 from app.drafter.state_machine import STEP_LABELS_ET, Step
+from app.ui.capabilities import CAPABILITIES, Capability
+from app.ui.components.capability_card import CapabilityCard
 from app.ui.data.data_table import Column, DataTable
 from app.ui.forms.app_form import AppForm
 from app.ui.forms.form_field import FormField
 from app.ui.layout import PageShell
 from app.ui.primitives.badge import Badge, BadgeVariant
 from app.ui.primitives.button import Button
+from app.ui.primitives.icon import Icon
 from app.ui.primitives.link_button import LinkButton
 from app.ui.surfaces.card import Card, CardBody, CardHeader
 from app.ui.theme import get_theme_from_request
@@ -619,6 +622,135 @@ def _section_card(title: str, body):  # type: ignore[no-untyped-def]
 
 
 # ---------------------------------------------------------------------------
+# Section 0: "Mida soovid teha?" — capability discovery map (B2, issue #793)
+# ---------------------------------------------------------------------------
+#
+# Sits at the very top of /dashboard above the operational work queue. The
+# point is to give a brand-new lawyer with no drafts and no findings an
+# immediate answer to "what can this system do?" — the work-queue widgets
+# below are useless to them on day 1.
+#
+# The card list is derived from the B3 capability dictionary
+# (:data:`app.ui.capabilities.CAPABILITIES`). We exclude two entries to
+# avoid duplicating dashboard chrome that already exists:
+#
+#   * ``globaalne-otsing``  → target is ``/`` (handled by the top-bar search
+#     bar B1 once that lands; would just bounce back to /dashboard today).
+#   * ``el-tahtajad``       → already covered by the EU transposition
+#     deadlines widget (A6) further down the page.
+#
+# Live capabilities render first (so a user landing fresh sees real entry
+# points), then planned ones with a "Tulekul" badge — matching the
+# Analüüsikeskus directory's affordance for consistency. We cap at
+# :data:`_MAX_CAPABILITY_CARDS` so the section fits one screen on a laptop.
+
+_MAX_CAPABILITY_CARDS = 9
+
+# Slugs deliberately omitted from the capability map — see commentary above.
+_CAPABILITY_MAP_EXCLUDED_SLUGS: frozenset[str] = frozenset(
+    {
+        "globaalne-otsing",
+        "el-tahtajad",
+    }
+)
+
+
+def _dashboard_capabilities() -> list[Capability]:
+    """Return the capability list rendered in the Töölaud discovery map.
+
+    Live entries first (preserving their canonical order from
+    :data:`app.ui.capabilities.CAPABILITIES`), then planned entries. Excludes
+    capabilities that would duplicate existing dashboard chrome and caps the
+    result at :data:`_MAX_CAPABILITY_CARDS` so the grid stays compact.
+    """
+    live: list[Capability] = []
+    planned: list[Capability] = []
+    for cap in CAPABILITIES:
+        if cap.slug in _CAPABILITY_MAP_EXCLUDED_SLUGS:
+            continue
+        if cap.status == "live":
+            live.append(cap)
+        elif cap.status == "planned":
+            planned.append(cap)
+        # Other statuses ("deferred", …) are not advertised.
+    return (live + planned)[:_MAX_CAPABILITY_CARDS]
+
+
+# Tiny inline script: honour a stored open/closed preference in localStorage,
+# default to open on desktop and collapsed on mobile (≤768 px). Runs once on
+# DOMContentLoaded; cheap enough to inline so the dashboard doesn't need yet
+# another /static file.
+_CAPABILITY_MAP_SCRIPT = """
+(function () {
+  var STORAGE_KEY = 'dashboard.capabilityMap.open';
+  function apply(el) {
+    var stored = null;
+    try { stored = localStorage.getItem(STORAGE_KEY); } catch (e) { /* private mode */ }
+    if (stored === 'true') {
+      el.open = true;
+    } else if (stored === 'false') {
+      el.open = false;
+    } else {
+      // No stored preference → default open on desktop, collapsed on mobile.
+      el.open = window.matchMedia('(min-width: 769px)').matches;
+    }
+    el.addEventListener('toggle', function () {
+      try { localStorage.setItem(STORAGE_KEY, el.open ? 'true' : 'false'); }
+      catch (e) { /* private mode */ }
+    });
+  }
+  function init() {
+    var el = document.getElementById('capability-map');
+    if (el) { apply(el); }
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();
+"""
+
+
+def _capability_map_section(capabilities: list[Capability]):  # type: ignore[no-untyped-def]
+    """Render the collapsible "Mida soovid teha?" discovery section.
+
+    Uses a native ``<details>`` element wrapped in a card so the collapsible
+    state works without JavaScript (progressive enhancement). The companion
+    inline script then layers localStorage persistence + a smart default
+    (open on desktop, collapsed on mobile) on top.
+
+    Returns ``None`` when there are no capabilities to show (keeps the empty-
+    state policy uniform with the EU deadlines widget — never render an
+    empty decorative box).
+    """
+    if not capabilities:
+        return None
+
+    cards = [CapabilityCard(cap) for cap in capabilities]
+
+    # ``open`` is left out so the script is the single source of truth for
+    # default state; without JS, browsers render <details> as closed.
+    return Card(
+        Details(  # noqa: F405
+            Summary(  # noqa: F405
+                Span("Mida soovid teha?", cls="capability-map__title"),
+                Icon("chevron-down", cls="capability-map__chevron", aria_hidden=True),
+                cls="capability-map__summary",
+                # aria-label is announced by VoiceOver in place of the
+                # summary's children — keeps the disclosure verb explicit.
+                aria_label="Mida soovid teha? Töövoogude valik.",
+            ),
+            Div(*cards, cls="capability-map__grid"),  # noqa: F405
+            id="capability-map",
+            cls="capability-map",
+        ),
+        Script(_CAPABILITY_MAP_SCRIPT),  # noqa: F405
+        cls="capability-map-card",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Section 1: Minu järgmised tegevused
 # ---------------------------------------------------------------------------
 
@@ -1145,12 +1277,24 @@ def dashboard_page(req: Request):
     # (no decorative empty box), so it's spliced in only when present.
     eu_deadlines_card = _eu_deadlines_card(eu_deadlines)
 
+    # B2: "Mida soovid teha?" capability discovery map sits above the queue
+    # so first-time users see what the system can do before scanning their
+    # (possibly empty) work-queue. Hidden entirely when no capabilities are
+    # eligible (keeps the empty-state policy uniform).
+    capability_map_card = _capability_map_section(_dashboard_capabilities())
+
     content_parts: list[Any] = [
         H1(f"Tere, {first_name}", cls="page-title"),
         subtitle,
-        _next_actions_card(next_actions),
-        _high_risk_card(high_risk),
     ]
+    if capability_map_card is not None:
+        content_parts.append(capability_map_card)
+    content_parts.extend(
+        [
+            _next_actions_card(next_actions),
+            _high_risk_card(high_risk),
+        ]
+    )
     if eu_deadlines_card is not None:
         content_parts.append(eu_deadlines_card)
     content_parts.extend(

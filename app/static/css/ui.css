@@ -2640,3 +2640,154 @@ details.sync-error pre {
   gap: var(--space-2);
   flex-wrap: wrap;
 }
+
+/* ===========================================================================
+   Töölaud "Mida soovid teha?" capability map (B2, issue #793)
+   ===========================================================================
+   Collapsible discovery section at the top of /dashboard. The grid is
+   responsive: 1 col on ≤768 px, 2 cols on tablet, 3 cols on ≥1024 px. Cards
+   are full-bleed clickable links — the touch-target is the whole card, well
+   above the 44×44 px WCAG minimum.
+*/
+
+.capability-map {
+  /* Padding-zero <details> so the summary's own padding controls spacing. */
+  padding: 0;
+}
+
+.capability-map__summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+  margin: calc(-1 * var(--space-5));
+  margin-bottom: 0;
+  border-radius: var(--radius);
+  font-weight: var(--font-bold);
+  min-height: 44px;
+}
+
+/* Drop the default browser marker (Safari uses ::-webkit-details-marker). */
+.capability-map__summary::-webkit-details-marker { display: none; }
+.capability-map__summary::marker { content: ""; }
+
+.capability-map__summary:hover,
+.capability-map__summary:focus-visible {
+  background-color: var(--color-surface-hover, var(--color-surface));
+  outline: none;
+}
+
+.capability-map__title {
+  font-size: var(--text-lg);
+  margin: 0;
+}
+
+.capability-map__chevron {
+  transition: transform 150ms ease;
+}
+
+.capability-map[open] .capability-map__chevron {
+  transform: rotate(180deg);
+}
+
+.capability-map__grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--space-4);
+  margin-top: var(--space-4);
+}
+
+@media (min-width: 768px) {
+  .capability-map__grid { grid-template-columns: repeat(2, 1fr); }
+}
+
+@media (min-width: 1024px) {
+  .capability-map__grid { grid-template-columns: repeat(3, 1fr); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .capability-map__chevron { transition: none; }
+}
+
+/* ---- Individual capability card ---- */
+
+.capability-card {
+  display: flex;
+  gap: var(--space-3);
+  align-items: flex-start;
+  padding: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background-color: var(--color-surface);
+  color: var(--color-text);
+  text-decoration: none;
+  min-height: 96px; /* well over the 44 px touch-target minimum */
+  transition:
+    border-color 150ms ease,
+    transform 150ms ease,
+    box-shadow 150ms ease;
+}
+
+.capability-card:hover,
+.capability-card:focus-visible {
+  border-color: var(--color-primary, var(--color-text));
+  box-shadow: var(--shadow);
+  outline: none;
+  transform: translateY(-1px);
+  text-decoration: none;
+}
+
+.capability-card--planned {
+  /* Slightly muted so a live card always wins the eye first. */
+  opacity: 0.85;
+}
+
+.capability-card__icon {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius);
+  background-color: var(--color-surface-muted, transparent);
+  color: var(--color-primary, var(--color-text));
+}
+
+.capability-card__body {
+  flex: 1 1 auto;
+  min-width: 0; /* lets long words wrap inside the flex item */
+}
+
+.capability-card__title {
+  font-size: var(--text-base);
+  font-weight: var(--font-bold);
+  margin: 0 0 var(--space-1) 0;
+  line-height: var(--leading-snug, 1.3);
+}
+
+.capability-card__desc {
+  margin: 0 0 var(--space-2) 0;
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal, 1.5);
+}
+
+.capability-card__example {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+}
+
+.capability-card__example-label {
+  font-weight: var(--font-bold);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .capability-card { transition: none; }
+  .capability-card:hover,
+  .capability-card:focus-visible { transform: none; }
+}
