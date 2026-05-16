@@ -66,7 +66,30 @@ estleg:Act_2 a estleg:Act ;
     rdfs:label "Act 2 — amender" .
 
 estleg:CourtDecision_1 a estleg:CourtDecision ;
-    rdfs:label "Court Decision 1" .
+    rdfs:label "Court Decision 1" ;
+    estleg:caseNumber "3-1-1-63-15" ;
+    estleg:decisionDate "2015-11-30" ;
+    estleg:court estleg:Court_Riigikohus .
+
+estleg:CourtDecision_2 a estleg:CourtDecision ;
+    rdfs:label "Court Decision 2 — newer Riigikohus" ;
+    estleg:caseNumber "3-1-1-10-20" ;
+    estleg:decisionDate "2020-06-12" ;
+    estleg:court estleg:Court_Riigikohus ;
+    estleg:interpretsLaw estleg:Provision_1 .
+
+estleg:CourtDecision_3 a estleg:EUCourtDecision ;
+    rdfs:label "EU Court Decision 1" ;
+    estleg:caseNumber "C-131/12" ;
+    estleg:decisionDate "2014-05-13" ;
+    estleg:court estleg:Court_EuroopaKohus ;
+    estleg:interpretsLaw estleg:Provision_1 .
+
+estleg:Court_Riigikohus a estleg:Court ;
+    rdfs:label "Riigikohus" .
+
+estleg:Court_EuroopaKohus a estleg:Court ;
+    rdfs:label "Euroopa Kohus" .
 
 estleg:AmendmentEvent_1 a estleg:AmendmentEvent ;
     rdfs:label "Amendment Event 1" .

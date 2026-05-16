@@ -322,11 +322,16 @@ class TestFixtureGraphSparql:
                 """
             )
         )
-        assert len(rows) == 1
-        court_uri = str(rows[0].court)  # type: ignore[attr-defined]
-        prov_uri = str(rows[0].prov)  # type: ignore[attr-defined]
-        assert court_uri.endswith("CourtDecision_1")
-        assert prov_uri.endswith("Provision_1")
+        # The fixture seeds CourtDecision_1 → Provision_1; C3 added
+        # CourtDecision_2 / CourtDecision_3 with explicit interpretsLaw
+        # edges so the Kohtupraktika workflow has multi-court coverage.
+        # Assert canonical-edge presence rather than pinning a row count.
+        assert len(rows) >= 1
+        pairs = {(str(r.court), str(r.prov)) for r in rows}  # type: ignore[attr-defined]
+        assert any(
+            court.endswith("CourtDecision_1") and prov.endswith("Provision_1")
+            for court, prov in pairs
+        )
 
     def test_interpreted_by_inverse_query(self, fixture_graph: Graph):
         rows = list(
