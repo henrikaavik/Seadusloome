@@ -241,7 +241,6 @@ CAPABILITIES: list[Capability] = [
         target_url="/analyysikeskus/sarnasus",
         example_input="AvTS § 35",
         use_case_from_section_2=3,
-        status="planned",
     ),
     Capability(
         slug="el-tahtajad",

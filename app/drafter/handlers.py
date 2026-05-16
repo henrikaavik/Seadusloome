@@ -262,7 +262,13 @@ def _run_research_queries(
 
 
 def _find_similar_laws(research: dict[str, Any], client: SparqlClient) -> list[dict[str, str]]:
-    """Find structurally similar laws based on topic cluster overlap."""
+    """Find structurally similar laws based on topic cluster overlap.
+
+    Legacy fallback retained for back-compat with tests that still patch
+    this name. New code paths should use
+    :func:`_find_similar_provisions` (A5b) which uses the full hybrid
+    similarity engine instead of an act-label dedup.
+    """
     # Use the first few provisions' act labels as candidates
     provisions = research.get("provisions", [])
     act_labels: list[str] = []
@@ -273,6 +279,117 @@ def _find_similar_laws(research: dict[str, Any], client: SparqlClient) -> list[d
             seen.add(label)
             act_labels.append(label)
     return [{"label": label} for label in act_labels[:3]]
+
+
+# A5b — Koostaja Step 3 + 4 integration.
+#
+# How many seed provisions we draw from the research bucket. Each seed
+# triggers two SPARQL hits + one embedding lookup (cheap when there are
+# no chunks), so we keep the seed count modest.
+_SIMILAR_PROVISIONS_SEED_COUNT = 3
+# How many merged candidates we surface in research_data["similar_provisions"].
+_SIMILAR_PROVISIONS_LIMIT = 10
+# How many of those are injected into the Step 4 draft prompts as
+# verbatim provision text (the plan: "actual TEXT of the closest
+# provision matches, not just act names").
+_SIMILAR_PROVISIONS_TEXT_INJECT = 3
+
+
+def _find_similar_provisions(
+    research: dict[str, Any],
+    *,
+    sparql_client: SparqlClient | None = None,
+) -> list[dict[str, Any]]:
+    """A5b: find similar provisions across the three hybrid tracks.
+
+    Seeded on the top N provisions discovered during Step 3 ontology
+    research. Returns merged + de-duplicated rows in a flat dict shape
+    (no :class:`SimilarityRow` leakage into the encrypted research
+    payload — JSON-friendly).
+
+    Privacy: this runs on **server-side ontology research**, not on
+    the user's free-text intent. The embedding call (if it fires) is
+    seeded on the *labels* of already-resolved provisions; the same
+    labels are public ontology data already in pgvector. No new user
+    text crosses any SaaS boundary here.
+    """
+    seed_provisions = list(research.get("provisions") or [])[:_SIMILAR_PROVISIONS_SEED_COUNT]
+    if not seed_provisions:
+        return []
+
+    # Lazy-import so the legacy code paths don't pay the cost.
+    from app.analyysikeskus.similarity import find_similar
+
+    out_by_uri: dict[str, dict[str, Any]] = {}
+    for seed in seed_provisions:
+        seed_uri = str(seed.get("uri") or "").strip()
+        seed_label = str(seed.get("label") or "").strip()
+        if not seed_uri:
+            continue
+        try:
+            rows = find_similar(
+                seed_uri=seed_uri,
+                query_text=seed_label or None,
+                limit=_SIMILAR_PROVISIONS_LIMIT,
+                sparql_client=sparql_client,
+            )
+        except Exception:
+            logger.warning(
+                "drafter: similar-provision lookup failed for seed=%r",
+                seed_uri,
+                exc_info=True,
+            )
+            continue
+        for r in rows:
+            if not r.entity_uri or r.entity_uri == seed_uri:
+                continue
+            existing = out_by_uri.get(r.entity_uri)
+            if existing is None or r.score > existing["score"]:
+                out_by_uri[r.entity_uri] = {
+                    "uri": r.entity_uri,
+                    "label": r.label or r.entity_uri.rsplit("#", 1)[-1] or "",
+                    "score": float(r.score),
+                    "reasons": list(r.reasons),
+                    "snippet": r.snippet,
+                    "seed_uri": seed_uri,
+                }
+
+    # Sort by score desc, stable on URI for determinism.
+    out = sorted(
+        out_by_uri.values(),
+        key=lambda d: (-float(d["score"]), str(d["uri"])),
+    )
+    return out[:_SIMILAR_PROVISIONS_LIMIT]
+
+
+def _similar_provisions_text_for_prompt(research: dict[str, Any]) -> str:
+    """Return the Step 4 prompt's ``{similar_laws}`` block from research data.
+
+    Per the A5b plan: inject the **actual text** of the closest provision
+    matches (not just act names) so drafted clauses can mirror
+    established wording. We use the snippet from the embedding track
+    when available; otherwise we degrade to the label + URI tail.
+
+    Returns the literal "(no similar provisions found)" sentinel when
+    nothing is available, matching the existing prompt's "no similar
+    laws found" idiom so the prompt template never has a blank line.
+    """
+    similar = list(research.get("similar_provisions") or [])
+    if not similar:
+        # Back-compat: if A5b research hasn't populated similar_provisions
+        # yet (older sessions), fall back to the act-label list.
+        return ""
+    parts: list[str] = []
+    for row in similar[:_SIMILAR_PROVISIONS_TEXT_INJECT]:
+        label = str(row.get("label") or "").strip()
+        snippet = str(row.get("snippet") or "").strip()
+        uri = str(row.get("uri") or "").strip()
+        header = label or uri.rsplit("#", 1)[-1] or "Sarnane säte"
+        if snippet:
+            parts.append(f'- {header}\n  Sõnastus: "{snippet}"')
+        else:
+            parts.append(f"- {header}")
+    return "\n".join(parts) if parts else ""
 
 
 def _format_clarifications_for_prompt(clarifications: list[dict[str, Any]]) -> str:
@@ -288,14 +405,26 @@ def _format_clarifications_for_prompt(clarifications: list[dict[str, Any]]) -> s
 def _filter_research_for_section(research: dict[str, Any], section: dict[str, Any]) -> str:
     """Select research findings relevant to a specific section.
 
-    For now, return the first few provisions and EU directives as
-    context. Phase 3B can add semantic relevance ranking.
+    For now, return the first few provisions, EU directives, and (per
+    A5b) the closest similar-provision *snippets* as context. Phase 3B
+    can add semantic relevance ranking.
     """
     parts: list[str] = []
     for p in research.get("provisions", [])[:5]:
         parts.append(f"- {p.get('label', '')} ({p.get('act_label', '')})")
     for eu in research.get("eu_directives", [])[:3]:
         parts.append(f"- EU: {eu.get('label', '')}")
+    # A5b: include the verbatim text of similar provisions so the LLM
+    # can mirror established phrasing. The snippet is the highest-
+    # matching chunk from the embedding track; act / label only when
+    # no snippet is available (fallback).
+    for sim in research.get("similar_provisions", [])[:_SIMILAR_PROVISIONS_TEXT_INJECT]:
+        label = str(sim.get("label") or "").strip()
+        snippet = str(sim.get("snippet") or "").strip()
+        if snippet:
+            parts.append(f'- Sarnane säte: {label} — "{snippet}"')
+        elif label:
+            parts.append(f"- Sarnane säte: {label}")
     return "\n".join(parts) if parts else "(no research findings)"
 
 
@@ -425,6 +554,21 @@ def drafter_research(
                 conn.commit()
         raise RuntimeError(f"Research queries failed: {exc}") from exc
 
+    # A5b: enrich the research bucket with hybrid similarity over the top
+    # researched provisions. Wrapped in a try/except — a similarity
+    # lookup failure must not block the session from advancing to
+    # Step 3 (the legacy act-label fallback in
+    # :func:`_similar_provisions_text_for_prompt` keeps Step 4 working).
+    try:
+        research["similar_provisions"] = _find_similar_provisions(research, sparql_client=client)
+    except Exception:
+        logger.warning(
+            "drafter_research: similar-provision enrichment failed for session %s",
+            session_id,
+            exc_info=True,
+        )
+        research["similar_provisions"] = []
+
     encrypted = encrypt_text(json.dumps(research, ensure_ascii=False))
 
     with get_connection() as conn:
@@ -499,10 +643,19 @@ def drafter_structure(
             logger.warning("Could not decrypt research data for session %s", session_id)
 
     client = SparqlClient()
-    similar_laws = _find_similar_laws(research_data, client)
-    similar_laws_text = (
-        "\n".join(f"- {law['label']}" for law in similar_laws) or "(no similar laws found)"
-    )
+    # A5b: prefer the hybrid-similarity output if the research bucket has
+    # it (populated by Step 3 — :func:`drafter_research`). The injected
+    # text carries the *actual wording* of the closest provision matches
+    # (via the snippet from the embedding track), so drafted clauses can
+    # mirror established phrasing — not just act names. Falls back to the
+    # legacy act-label list for older sessions whose research_data was
+    # serialised before A5b landed.
+    similar_laws_text = _similar_provisions_text_for_prompt(research_data)
+    if not similar_laws_text:
+        similar_laws = _find_similar_laws(research_data, client)
+        similar_laws_text = (
+            "\n".join(f"- {law['label']}" for law in similar_laws) or "(no similar laws found)"
+        )
 
     clarifications_text = _format_clarifications_for_prompt(session.clarifications or [])
 

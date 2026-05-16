@@ -48,6 +48,7 @@ from app.drafter._step_renderers import (  # noqa: E402, F401
     _find_latest_job,
     _render_clause_card,
     _research_category_card,
+    _similar_provisions_card,
     _step_1_content,
     _step_1_page,
     _step_2_page,

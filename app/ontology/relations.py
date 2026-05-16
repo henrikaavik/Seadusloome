@@ -99,6 +99,12 @@ class PREDICATES:
 
     # --- Similarity ---
     SEMANTICALLY_SIMILAR_TO: Final[str] = _uri("semanticallySimilarTo")
+    # Inline similarity score on the (subject) side of a
+    # ``semanticallySimilarTo`` edge — populated corpus-wide by the
+    # ontology's keyword_jaccard v2 pipeline. Used by A5 (similarity
+    # workflow) to rank ontology-declared similarity candidates; a
+    # missing score is treated as null in the merge layer rather than 0.
+    SIMILARITY_SCORE: Final[str] = _uri("similarityScore")
 
     # --- Concepts / terms ---
     DEFINES_CONCEPT: Final[str] = _uri("definesConcept")

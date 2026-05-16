@@ -386,6 +386,7 @@ def _step_3_page(session: DraftingSession, auth: UserDict):
     eu_directives = research.get("eu_directives", [])
     court_decisions = research.get("court_decisions", [])
     topic_clusters = research.get("topic_clusters", [])
+    similar_provisions = research.get("similar_provisions", [])
 
     cards: list[Any] = []
 
@@ -395,6 +396,11 @@ def _step_3_page(session: DraftingSession, auth: UserDict):
     cards.append(_category_card("EL-i õigusaktid", eu_directives, "eu"))
     cards.append(_category_card("Kohtulahendid", court_decisions, "court"))
     cards.append(_category_card("Teemaklastrid", topic_clusters, "cluster"))
+    # A5b — "Sarnased sätted" card driven by the hybrid similarity engine.
+    # Renders alongside the standard research categories so the drafter
+    # sees at a glance which existing provisions are most worth mirroring
+    # in the new draft's wording.
+    cards.append(_similar_provisions_card(similar_provisions))
 
     # Advance button
     advance_form = AppForm(
@@ -470,6 +476,84 @@ def _research_category_card(title: str, items: list[dict[str, str]], category: s
     return Div(  # noqa: F405
         H4(f"{title}: {count}", cls="research-category-title"),  # noqa: F405
         Ul(*item_list, cls="research-item-list"),  # noqa: F405
+        cls="research-category",
+    )
+
+
+def _similar_provisions_card(items: list[dict[str, Any]]) -> Any:
+    """A5b: Render the "Sarnased sätted" card on Step 3.
+
+    Each row shows the matched provision's label, the "miks see sobib"
+    reason badges (Estonian — "ontoloogias deklareeritud" / "sama
+    temaatika" / "sarnane sõnastus"), an "Ava õiguskaardil" deep link,
+    and (when present from the embedding track) a muted snippet showing
+    the highest-matching chunk's text. This is the surface that lets a
+    drafter actually decide which existing wording to mirror.
+
+    Empty list → a one-line muted "Sarnaseid sätteid ei leitud."; the
+    card still renders so the absence is visible (rather than the
+    category quietly disappearing).
+    """
+    from app.analyysikeskus.similarity import REASON_LABELS_ET
+
+    count = len(items or [])
+    if count == 0:
+        return Div(  # noqa: F405
+            H4("Sarnased sätted: 0", cls="research-category-title"),  # noqa: F405
+            P(  # noqa: F405
+                "Sarnaseid sätteid ei leitud — koostage uus sõnastus iseseisvalt.",
+                cls="muted-text",
+            ),
+            cls="research-category",
+        )
+
+    item_nodes: list[Any] = []
+    for item in items[:10]:
+        uri = str(item.get("uri") or "").strip()
+        label = str(item.get("label") or "").strip() or uri.rsplit("#", 1)[-1] or "—"
+        reasons = list(item.get("reasons") or [])
+        snippet = str(item.get("snippet") or "").strip()
+        reason_text = ", ".join(
+            REASON_LABELS_ET[str(r)] for r in reasons if str(r) in REASON_LABELS_ET
+        )
+
+        row_children: list[Any] = [
+            Span(label, cls="research-item-label"),  # noqa: F405
+        ]
+        if reason_text:
+            row_children.append(  # type: ignore[arg-type]
+                Span(  # noqa: F405
+                    f" — {reason_text}",
+                    cls="muted-text",
+                )
+            )
+        if uri:
+            row_children.append(" ")  # type: ignore[arg-type]
+            row_children.append(  # type: ignore[arg-type]
+                A(  # noqa: F405
+                    "Ava õiguskaardil →",
+                    href=explorer_focus_url(uri),
+                    cls="data-table-link research-item-link",
+                )
+            )
+        if snippet:
+            row_children.append(  # type: ignore[arg-type]
+                P(  # noqa: F405
+                    snippet,
+                    cls="muted-text research-item-snippet",
+                )
+            )
+        item_nodes.append(Li(*row_children, cls="research-item"))  # noqa: F405
+
+    return Div(  # noqa: F405
+        H4(f"Sarnased sätted: {count}", cls="research-category-title"),  # noqa: F405
+        P(  # noqa: F405
+            "Need sätted sarnanevad teie sisendiga ontoloogia, temaatika "
+            "või sõnastuse poolest. Kasutage neid eeskujuks oma eelnõu "
+            "koostamisel.",
+            cls="muted-text",
+        ),
+        Ul(*item_nodes, cls="research-item-list"),  # noqa: F405
         cls="research-category",
     )
 
