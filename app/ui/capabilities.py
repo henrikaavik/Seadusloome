@@ -203,7 +203,6 @@ CAPABILITIES: list[Capability] = [
         target_url="/analyysikeskus/halduskoormus",
         example_input=None,
         use_case_from_section_2=3,
-        status="planned",
     ),
     Capability(
         slug="padevused",
