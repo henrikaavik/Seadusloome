@@ -47,6 +47,7 @@ from app.db import get_connection as _connect
 from app.docs.report_routes import explorer_focus_url
 from app.drafter.session_model import DraftingSession
 from app.drafter.state_machine import STEP_LABELS_ET, Step
+from app.ontology.relations import legal_phrase
 from app.ui.forms.app_form import AppForm
 from app.ui.layout import PageShell
 from app.ui.primitives.annotation_button import AnnotationButton
@@ -430,7 +431,21 @@ def _step_3_page(session: DraftingSession, auth: UserDict):
 
 
 def _research_category_card(title: str, items: list[dict[str, str]], category: str):
-    """Render a summary card for a research category.
+    """Render a summary card for a research category, grouped by relation.
+
+    C2 (2026-05-15): Step 3 cards no longer show a flat count + list.
+    Each result row carries a ``relation`` field — a canonical
+    ``estleg:*`` predicate URI projected by the SPARQL handler — which we
+    fold into Estonian legal-language phrases (``muudab``,
+    ``tõlgendab``, ``võtab üle direktiivi``, ``defineerib mõistet``,
+    …) via :func:`app.ontology.relations.legal_phrase`. The card then
+    renders one sub-group per relation phrase with its own count and
+    top-10 list, while preserving an overall "N seotud kirjet" header
+    so the drafter still gets the total at a glance.
+
+    Backwards-compatible: items missing a ``relation`` key fall back to
+    a single "viitab" group, matching the pre-C2 behaviour and keeping
+    legacy cached research payloads renderable.
 
     #759: every researched entity that carries an ontology URI gets an
     "Ava õiguskaardil →" deep link (URL-encoded by
@@ -439,37 +454,65 @@ def _research_category_card(title: str, items: list[dict[str, str]], category: s
     legal map centred on it. Items without a URI (e.g. topic clusters)
     render as plain text, matching how Analüüsikeskus handles the same case.
     """
-    count = len(items)
-    if count == 0:
+    # Total count of items (across all relation groups). A single
+    # entity can appear under multiple relations — that's the point —
+    # so the overall count reflects (entity, relation) pairs.
+    total = len(items)
+    if total == 0:
         return Div(  # noqa: F405
             H4(f"{title}: 0", cls="research-category-title"),  # noqa: F405
             P("Tulemusi ei leitud.", cls="muted-text"),  # noqa: F405
             cls="research-category",
         )
 
-    item_list: list[Any] = []
-    for item in items[:10]:
-        uri = str(item.get("uri") or "").strip()
-        label = item.get("label") or item.get("act_label") or uri or "—"
-        if uri:
-            item_list.append(
-                Li(  # noqa: F405
-                    Span(label, cls="research-item-label"),  # noqa: F405
-                    " ",
-                    A(  # noqa: F405
-                        "Ava õiguskaardil →",
-                        href=explorer_focus_url(uri),
-                        cls="data-table-link research-item-link",
-                    ),
-                    cls="research-item",
+    # Group items by Estonian legal phrase. Preserve insertion order
+    # so the SPARQL row order (most relevant first) is reflected in
+    # the UI grouping order — Python dicts are insertion-ordered since
+    # 3.7, which is fine for our case.
+    grouped: dict[str, list[dict[str, str]]] = {}
+    for item in items:
+        relation_uri = str(item.get("relation") or "").strip()
+        phrase = legal_phrase(relation_uri) if relation_uri else "viitab"
+        if not phrase:
+            phrase = "viitab"
+        grouped.setdefault(phrase, []).append(item)
+
+    group_blocks: list[Any] = []
+    for phrase, group_items in grouped.items():
+        item_list: list[Any] = []
+        for item in group_items[:10]:
+            uri = str(item.get("uri") or "").strip()
+            label = item.get("label") or item.get("act_label") or uri or "—"
+            if uri:
+                item_list.append(
+                    Li(  # noqa: F405
+                        Span(label, cls="research-item-label"),  # noqa: F405
+                        " ",
+                        A(  # noqa: F405
+                            "Ava õiguskaardil →",
+                            href=explorer_focus_url(uri),
+                            cls="data-table-link research-item-link",
+                        ),
+                        cls="research-item",
+                    )
                 )
+            else:
+                item_list.append(Li(label, cls="research-item"))  # noqa: F405
+
+        group_blocks.append(
+            Div(  # noqa: F405
+                H5(  # noqa: F405
+                    f"{phrase}: {len(group_items)}",
+                    cls="research-relation-title",
+                ),
+                Ul(*item_list, cls="research-item-list"),  # noqa: F405
+                cls="research-relation-group",
             )
-        else:
-            item_list.append(Li(label, cls="research-item"))  # noqa: F405
+        )
 
     return Div(  # noqa: F405
-        H4(f"{title}: {count}", cls="research-category-title"),  # noqa: F405
-        Ul(*item_list, cls="research-item-list"),  # noqa: F405
+        H4(f"{title}: {total}", cls="research-category-title"),  # noqa: F405
+        *group_blocks,
         cls="research-category",
     )
 
