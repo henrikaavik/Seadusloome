@@ -156,3 +156,35 @@ estleg:Provision_1 estleg:definesTerm    estleg:Term_1 .
 
 # Competence.
 estleg:Provision_1 estleg:competentAuthority estleg:Institution_1 .
+
+# ---------------------------------------------------------------------------
+# A2 — Halduskoormus: NormativeType class + individuals + edges
+# ---------------------------------------------------------------------------
+#
+# Four canonical individuals of estleg:NormativeType (one per deontic
+# category) plus normativeType + dutyHolder edges on each existing
+# provision so the A2 burden helpers can be tested end-to-end against
+# this fixture.
+
+estleg:NormativeType a rdfs:Class ;
+    rdfs:label "Normatiivne liik" .
+
+estleg:NormType_Obligation  a estleg:NormativeType ; rdfs:label "Kohustus" .
+estleg:NormType_Right       a estleg:NormativeType ; rdfs:label "Õigus" .
+estleg:NormType_Permission  a estleg:NormativeType ; rdfs:label "Luba" .
+estleg:NormType_Prohibition a estleg:NormativeType ; rdfs:label "Keeld" .
+
+# Provision_1 — Obligation, dutyHolder = "Tööandja"
+estleg:Provision_1
+    estleg:normativeType estleg:NormType_Obligation ;
+    estleg:dutyHolder    "Tööandja" .
+
+# Provision_2 — Right, dutyHolder = "Töötaja"
+estleg:Provision_2
+    estleg:normativeType estleg:NormType_Right ;
+    estleg:dutyHolder    "Töötaja" .
+
+# Provision_3 — Prohibition, dutyHolder = "Tööandja"
+estleg:Provision_3
+    estleg:normativeType estleg:NormType_Prohibition ;
+    estleg:dutyHolder    "Tööandja" .

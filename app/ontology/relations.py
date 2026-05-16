@@ -107,6 +107,115 @@ class PREDICATES:
     # --- Competence ---
     COMPETENT_AUTHORITY: Final[str] = _uri("competentAuthority")
 
+    # --- Deontic classification (A2 — Halduskoormus) ---
+    #
+    # Added for A2 (administrative-burden / deontic view): the
+    # ontology audit (plan section 2.5 row A2, 2026-05-15) confirmed
+    # ``estleg:normativeType`` + four ``NormType_*`` individuals are
+    # populated corpus-wide, and ``estleg:dutyHolder`` is a populated
+    # free-text literal. They were missing from this module because
+    # they're property/literal predicates rather than entity-to-entity
+    # relations; the A2 workflow needs canonical URIs so its SPARQL
+    # never hardcodes ``estleg:*``.
+    NORMATIVE_TYPE: Final[str] = _uri("normativeType")
+    DUTY_HOLDER: Final[str] = _uri("dutyHolder")
+
+
+# ---------------------------------------------------------------------------
+# NormativeType class + individuals (A2 — Halduskoormus / deontic view)
+# ---------------------------------------------------------------------------
+#
+# The ``estleg:NormativeType`` class has four canonical individuals in the
+# source ontology — one per deontic category. They are referenced from
+# provisions via :attr:`PREDICATES.NORMATIVE_TYPE`. Importing them as
+# named constants here lets the A2 ``burden.py`` helper bucket rows
+# without hardcoding ``estleg:NormType_*`` URIs at the route layer.
+#
+# The mapping is **bidirectional** — :func:`norm_type_key` accepts a URI
+# / prefixed name / literal value (the corpus occasionally carries a
+# free-text echo like ``"obligation"`` / ``"Kohustus"`` on older rows
+# instead of the canonical individual) and folds it to a stable
+# lower-case bucket key (``"obligation"`` / ``"prohibition"`` /
+# ``"permission"`` / ``"right"``).
+
+NORMATIVE_TYPE_CLASS: Final[str] = _uri("NormativeType")
+
+NORM_TYPE_OBLIGATION: Final[str] = _uri("NormType_Obligation")
+NORM_TYPE_RIGHT: Final[str] = _uri("NormType_Right")
+NORM_TYPE_PERMISSION: Final[str] = _uri("NormType_Permission")
+NORM_TYPE_PROHIBITION: Final[str] = _uri("NormType_Prohibition")
+
+
+# Canonical bucket-key → individual-URI lookup. Bucket keys are stable
+# lower-case English identifiers (so they can serve as both the
+# ``Literal[...]`` type in :mod:`app.analyysikeskus.burden` and as
+# stable JSON dict keys). The UI translates them to Estonian labels at
+# the render site.
+NORM_TYPE_INDIVIDUALS: dict[str, str] = {
+    "obligation": NORM_TYPE_OBLIGATION,
+    "right": NORM_TYPE_RIGHT,
+    "permission": NORM_TYPE_PERMISSION,
+    "prohibition": NORM_TYPE_PROHIBITION,
+}
+
+#: The closed set of canonical bucket keys (handy for ``in`` checks).
+NORM_TYPE_KEYS: frozenset[str] = frozenset(NORM_TYPE_INDIVIDUALS.keys())
+
+
+# Literal-string aliases the corpus has historically used in place of
+# the canonical individuals — folded to the same bucket key by
+# :func:`norm_type_key`. Lower-case lookup. Estonian labels are included
+# because the older corpus rows carry the Estonian word as a literal
+# (e.g. ``"Kohustus"`` on a ``normativeType`` literal).
+_NORM_TYPE_LITERAL_ALIASES: dict[str, str] = {
+    "obligation": "obligation",
+    "kohustus": "obligation",
+    "kohustused": "obligation",
+    "right": "right",
+    "oigus": "right",
+    "õigus": "right",
+    "õigused": "right",
+    "oigused": "right",
+    "permission": "permission",
+    "luba": "permission",
+    "load": "permission",
+    "prohibition": "prohibition",
+    "keeld": "prohibition",
+    "keelud": "prohibition",
+}
+
+
+def norm_type_key(name_or_uri: str) -> str:
+    """Fold a ``normativeType`` value to its canonical bucket key.
+
+    Accepts a full URI (``…#NormType_Obligation``), a prefixed name
+    (``estleg:NormType_Obligation``), a bare local name
+    (``NormType_Obligation``), or a literal alias (``"obligation"`` /
+    ``"Kohustus"`` / …). Returns one of the four
+    :data:`NORM_TYPE_KEYS` strings on a match, else ``"unknown"`` —
+    never raises.
+    """
+    if not name_or_uri:
+        return "unknown"
+    raw = str(name_or_uri).strip()
+    if not raw:
+        return "unknown"
+    # Try the canonical-individual path first (URI / prefixed / local
+    # name forms).
+    local = _local_name(raw)
+    if local:
+        # Direct match on the local name part of NormType_Obligation etc.
+        for key, uri in NORM_TYPE_INDIVIDUALS.items():
+            if _local_name(uri).lower() == local.lower():
+                return key
+    # Literal-alias path — strip any namespace tail (some serialisers
+    # emit ``"Kohustus"`` already; others emit ``"Kohustus"@et`` — strip
+    # the language tag).
+    literal = raw.split("@", 1)[0].strip().lower()
+    if literal in _NORM_TYPE_LITERAL_ALIASES:
+        return _NORM_TYPE_LITERAL_ALIASES[literal]
+    return "unknown"
+
 
 # ---------------------------------------------------------------------------
 # INVERSES — forward predicate URI → inverse predicate URI
@@ -434,6 +543,14 @@ __all__ = [
     "INVERSES",
     "LEGAL_PHRASES",
     "RELATION_GROUPS",
+    "NORMATIVE_TYPE_CLASS",
+    "NORM_TYPE_OBLIGATION",
+    "NORM_TYPE_RIGHT",
+    "NORM_TYPE_PERMISSION",
+    "NORM_TYPE_PROHIBITION",
+    "NORM_TYPE_INDIVIDUALS",
+    "NORM_TYPE_KEYS",
+    "norm_type_key",
     "legal_phrase",
     "inverse_of",
     "group_of",
