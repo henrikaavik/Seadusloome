@@ -50,14 +50,24 @@ logger = logging.getLogger(__name__)
 # SPARQL helpers
 # ---------------------------------------------------------------------------
 #
-# C0 audit (2026-05-15): the four research queries below were
-# cross-checked against the canonical ontology vocabulary
-# (``app.ontology.relations``). They use only ``estleg:sourceAct``,
-# ``estleg:paragrahv``, ``estleg:EULegislation``, ``estleg:CourtDecision``,
-# ``estleg:TopicCluster``, and ``rdfs:label`` — all canonical. No rename
-# needed. If C2 later extends these queries to project relation types,
-# import predicate constants from ``app.ontology.relations`` rather than
-# hard-coding new ``estleg:foo`` strings.
+# C2 (2026-05-15): the four research queries below now project a
+# ``?relation`` variable on every row, classifying each found entity by
+# the predicate that connects it to a keyword-matched provision (or by
+# its inherent role for entity types that don't participate in inbound
+# legal relations). The Step 3 page groups results by Estonian legal
+# phrase (see ``app.ontology.relations.legal_phrase``) so the drafter
+# sees not just "5 provisions found" but "3 muudab, 2 tõlgendab".
+#
+# Design notes:
+#   * Predicate URIs are interpolated from ``app.ontology.relations``
+#     (PREDICATES.*) rather than hard-coded — a rename in the
+#     relations module propagates here automatically.
+#   * Each query keeps a small bare-keyword UNION arm (BIND a generic
+#     ``estleg:references`` relation) so entities that match by label
+#     but participate in no canonical relation still show up under
+#     the "viitab" group — preserving the old behaviour.
+#   * Per-entity row counts can be > 1 when an entity participates in
+#     multiple relations; downstream renderers honour the grouping.
 
 _RELATED_LAWS_QUERY = """\
 PREFIX estleg: <https://data.riik.ee/ontology/estleg#>
@@ -71,54 +81,128 @@ SELECT DISTINCT ?law ?label WHERE {{
 LIMIT 5
 """
 
+# Provisions: keyword-match on the provision label, then classify by
+# any canonical relation the provision participates in. The
+# ``BIND(estleg:references AS ?relation)`` fallback arm guarantees a
+# row for every keyword match even when no other relation is recorded.
 _PROVISIONS_BY_KEYWORD_QUERY = """\
 PREFIX estleg: <https://data.riik.ee/ontology/estleg#>
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 
-SELECT DISTINCT ?provision ?label ?actLabel WHERE {{
+SELECT DISTINCT ?provision ?label ?actLabel ?relation WHERE {{
   ?provision estleg:paragrahv ?paragrahv .
   ?provision rdfs:label ?label .
   ?provision estleg:sourceAct ?act .
   ?act rdfs:label ?actLabel .
   FILTER(CONTAINS(LCASE(?label), LCASE("{keyword}")))
+  {{
+    # Fallback: every keyword match shows up at least once under
+    # "viitab" so the card never silently drops entities.
+    BIND(estleg:references AS ?relation)
+  }} UNION {{
+    ?_amendmentEvent estleg:amends ?provision .
+    BIND(estleg:amends AS ?relation)
+  }} UNION {{
+    ?provision estleg:amendedBy ?_amender .
+    BIND(estleg:amendedBy AS ?relation)
+  }} UNION {{
+    ?_court estleg:interpretsLaw ?provision .
+    BIND(estleg:interpretsLaw AS ?relation)
+  }} UNION {{
+    ?provision estleg:interpretedBy ?_court .
+    BIND(estleg:interpretedBy AS ?relation)
+  }} UNION {{
+    ?provision estleg:transposesDirective ?_euAct .
+    BIND(estleg:transposesDirective AS ?relation)
+  }} UNION {{
+    ?provision estleg:harmonisedWith ?_euAct .
+    BIND(estleg:harmonisedWith AS ?relation)
+  }} UNION {{
+    ?provision estleg:definesConcept ?_concept .
+    BIND(estleg:definesConcept AS ?relation)
+  }} UNION {{
+    ?provision estleg:definesTerm ?_term .
+    BIND(estleg:definesTerm AS ?relation)
+  }} UNION {{
+    ?provision estleg:requestedCluster ?_cluster .
+    BIND(estleg:requestedCluster AS ?relation)
+  }}
 }}
-LIMIT 20
+LIMIT 100
 """
 
+# EU directives: keyword-match the directive label, then classify by
+# the inbound predicate from any Estonian provision/act. Fallback:
+# ``references`` so every keyword-matched directive appears.
 _EU_DIRECTIVES_QUERY = """\
 PREFIX estleg: <https://data.riik.ee/ontology/estleg#>
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 
-SELECT DISTINCT ?directive ?label WHERE {{
+SELECT DISTINCT ?directive ?label ?relation WHERE {{
   ?directive a estleg:EULegislation .
   ?directive rdfs:label ?label .
   FILTER(CONTAINS(LCASE(?label), LCASE("{keyword}")))
+  {{
+    BIND(estleg:references AS ?relation)
+  }} UNION {{
+    ?_act estleg:transposesDirective ?directive .
+    BIND(estleg:transposesDirective AS ?relation)
+  }} UNION {{
+    ?directive estleg:transposedBy ?_act .
+    BIND(estleg:transposedBy AS ?relation)
+  }} UNION {{
+    ?_provision estleg:harmonisedWith ?directive .
+    BIND(estleg:harmonisedWith AS ?relation)
+  }}
 }}
-LIMIT 10
+LIMIT 50
 """
 
+# Court decisions: keyword-match, classify by how the decision relates
+# to Estonian provisions.
 _COURT_DECISIONS_QUERY = """\
 PREFIX estleg: <https://data.riik.ee/ontology/estleg#>
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 
-SELECT DISTINCT ?decision ?label WHERE {{
+SELECT DISTINCT ?decision ?label ?relation WHERE {{
   ?decision a estleg:CourtDecision .
   ?decision rdfs:label ?label .
   FILTER(CONTAINS(LCASE(?label), LCASE("{keyword}")))
+  {{
+    BIND(estleg:references AS ?relation)
+  }} UNION {{
+    ?decision estleg:interpretsLaw ?_provision .
+    BIND(estleg:interpretsLaw AS ?relation)
+  }} UNION {{
+    ?_provision estleg:interpretedBy ?decision .
+    BIND(estleg:interpretedBy AS ?relation)
+  }}
 }}
-LIMIT 10
+LIMIT 50
 """
 
+# Topic clusters: keyword-match. Clusters always participate via the
+# ``requestedCluster`` / ``topicCluster`` predicates, so we project
+# those directly.
 _TOPIC_CLUSTERS_QUERY = """\
 PREFIX estleg: <https://data.riik.ee/ontology/estleg#>
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 
-SELECT DISTINCT ?cluster ?label WHERE {{
+SELECT DISTINCT ?cluster ?label ?relation WHERE {{
   ?cluster a estleg:TopicCluster .
   ?cluster rdfs:label ?label .
   FILTER(CONTAINS(LCASE(?label), LCASE("{keyword}")))
+  {{
+    ?_p estleg:requestedCluster ?cluster .
+    BIND(estleg:requestedCluster AS ?relation)
+  }} UNION {{
+    ?_p estleg:topicCluster ?cluster .
+    BIND(estleg:topicCluster AS ?relation)
+  }} UNION {{
+    BIND(estleg:references AS ?relation)
+  }}
 }}
-LIMIT 10
+LIMIT 50
 """
 
 
@@ -170,7 +254,18 @@ def _find_related_laws(intent: str, client: SparqlClient) -> list[dict[str, str]
 def _run_research_queries(
     intent: str, clarifications: list[dict[str, Any]], client: SparqlClient
 ) -> dict[str, Any]:
-    """Execute SPARQL queries for ontology research (Step 3)."""
+    """Execute SPARQL queries for ontology research (Step 3).
+
+    Each item dict carries a ``relation`` key (canonical estleg
+    predicate URI) classifying how the entity participates in the legal
+    framework. The same URI can appear under multiple ``relation``
+    values when the entity engages in several relations (e.g. a
+    provision that both ``amends`` and ``transposesDirective``);
+    dedup is per ``(uri, relation)`` pair so the Step 3 renderer can
+    group by Estonian legal phrase. The ``references`` predicate is
+    used as a neutral fallback for entities that match the keyword
+    filter but participate in no other canonical relation.
+    """
     # Combine keywords from intent and clarification answers
     combined_text = intent
     for c in clarifications:
@@ -184,7 +279,9 @@ def _run_research_queries(
     court_decisions: list[dict[str, str]] = []
     topic_clusters: list[dict[str, str]] = []
 
-    seen_uris: set[str] = set()
+    # Dedup per (uri, relation) so we can show the same entity under
+    # multiple relation groups when applicable.
+    seen_pairs: set[tuple[str, str]] = set()
 
     for kw in keywords[:5]:
         escaped_kw = _safe_keyword(kw)
@@ -193,13 +290,16 @@ def _run_research_queries(
             rows = client.query(_PROVISIONS_BY_KEYWORD_QUERY.format(keyword=escaped_kw))
             for row in rows:
                 uri = row.get("provision", "")
-                if uri and uri not in seen_uris:
-                    seen_uris.add(uri)
+                relation = row.get("relation", "")
+                key = (uri, relation)
+                if uri and key not in seen_pairs:
+                    seen_pairs.add(key)
                     provisions.append(
                         {
                             "uri": uri,
                             "label": row.get("label", ""),
                             "act_label": row.get("actLabel", ""),
+                            "relation": relation,
                         }
                     )
         except Exception:
@@ -210,12 +310,15 @@ def _run_research_queries(
             rows = client.query(_EU_DIRECTIVES_QUERY.format(keyword=escaped_kw))
             for row in rows:
                 uri = row.get("directive", "")
-                if uri and uri not in seen_uris:
-                    seen_uris.add(uri)
+                relation = row.get("relation", "")
+                key = (uri, relation)
+                if uri and key not in seen_pairs:
+                    seen_pairs.add(key)
                     eu_directives.append(
                         {
                             "uri": uri,
                             "label": row.get("label", ""),
+                            "relation": relation,
                         }
                     )
         except Exception:
@@ -226,12 +329,15 @@ def _run_research_queries(
             rows = client.query(_COURT_DECISIONS_QUERY.format(keyword=escaped_kw))
             for row in rows:
                 uri = row.get("decision", "")
-                if uri and uri not in seen_uris:
-                    seen_uris.add(uri)
+                relation = row.get("relation", "")
+                key = (uri, relation)
+                if uri and key not in seen_pairs:
+                    seen_pairs.add(key)
                     court_decisions.append(
                         {
                             "uri": uri,
                             "label": row.get("label", ""),
+                            "relation": relation,
                         }
                     )
         except Exception:
@@ -242,12 +348,15 @@ def _run_research_queries(
             rows = client.query(_TOPIC_CLUSTERS_QUERY.format(keyword=escaped_kw))
             for row in rows:
                 uri = row.get("cluster", "")
-                if uri and uri not in seen_uris:
-                    seen_uris.add(uri)
+                relation = row.get("relation", "")
+                key = (uri, relation)
+                if uri and key not in seen_pairs:
+                    seen_pairs.add(key)
                     topic_clusters.append(
                         {
                             "uri": uri,
                             "label": row.get("label", ""),
+                            "relation": relation,
                         }
                     )
         except Exception:
