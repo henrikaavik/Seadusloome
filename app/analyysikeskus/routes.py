@@ -69,6 +69,7 @@ from app.docs.labels import TYPE_LABELS_ET as _TYPE_LABELS_ET
 from app.docs.reference_resolver import ReferenceResolver
 from app.docs.report_routes import explorer_focus_url
 from app.drafter.state_machine import STEP_LABELS_ET, Step
+from app.ui.capabilities import CAPABILITIES, Capability
 from app.ui.data.data_table import Column, DataTable
 from app.ui.layout import PageShell
 from app.ui.primitives.badge import Badge, BadgeVariant  # noqa: E402  (re-import after wildcard)
@@ -315,8 +316,96 @@ def _recent_analyses_card(items: list[dict[str, Any]]) -> Any:
     )
 
 
+# ---------------------------------------------------------------------------
+# Directory page — workflow card builders driven by the B3 capability dict
+# ---------------------------------------------------------------------------
+#
+# The directory shows every capability whose ``target_url`` lives under
+# ``/analyysikeskus`` (these are the legal-analysis workflows). Live ones
+# render as full ``_workflow_card`` rows with their input form; planned
+# ones render as a smaller ``_planned_workflow_card`` with a "Tulekul"
+# badge and no input — clicking is disabled but the card still describes
+# what's coming so the directory stays an honest map of what the system
+# *will* do.
+#
+# A small overlay dict keeps per-workflow input metadata (placeholder /
+# aria label / example queries) that doesn't belong on every Capability
+# (most consumers don't need it). When a planned workflow ships, its entry
+# is added here at the same time its ``status`` flips to ``"live"``.
+_ANALYYSIKESKUS_INPUTS: dict[str, dict[str, str]] = {
+    "normi-mojuahel": {
+        "placeholder": (
+            "Nt: AvTS § 35 · CELEX-number · eelnõu pealkiri · või kirjeldage muudatust"
+        ),
+        "aria_label": "Õiguslik viide või kirjeldus",
+        "examples": "Näited: «Muudame AvTS § 35.» · «Kontrolli karistusseadustiku § 133 mõju.»",
+    },
+    "el-ulevott": {
+        "placeholder": "Nt: CELEX-number · EL akti pealkiri · poliitikavaldkond",
+        "aria_label": "CELEX-number, EL akti pealkiri või valdkond",
+        "examples": "Näited: «Kontrolli AI määruse ülevõttu.» · «32016R0679»",
+    },
+}
+
+
+def _planned_workflow_card(cap: Capability) -> Any:
+    """A directory entry for a not-yet-wired Analüüsikeskus workflow.
+
+    Renders with a ``Tulekul`` badge in the header and no input form — the
+    point is to advertise the workflow's existence (so it appears in the
+    sidebar of the directory and is discoverable), not to expose a dead form.
+    """
+    return Card(
+        CardHeader(
+            H3(  # noqa: F405
+                cap.canonical_name_et,
+                " ",
+                Badge("Tulekul", variant="warning"),
+                cls="card-title",
+            )
+        ),
+        CardBody(
+            P(cap.one_line_description_et),  # noqa: F405
+            Small(  # noqa: F405
+                "See töövoog avaneb peagi.",
+                cls="muted-text",
+            ),
+        ),
+        cls="analyysikeskus-card analyysikeskus-card--planned",
+    )
+
+
+def _capability_card(cap: Capability) -> Any:
+    """Render a Capability as a directory entry — full card or "Tulekul" card."""
+    if cap.status != "live":
+        return _planned_workflow_card(cap)
+    inputs = _ANALYYSIKESKUS_INPUTS.get(cap.slug)
+    if inputs is None:
+        # A live capability that's wired but has no input-form metadata — fall
+        # back to the planned-card layout so the user can still see it (and the
+        # developer notices the missing entry).
+        return _planned_workflow_card(cap)
+    return _workflow_card(
+        title=cap.canonical_name_et,
+        purpose=cap.one_line_description_et,
+        action=cap.target_url,
+        input_name="sisend",
+        input_placeholder=inputs["placeholder"],
+        input_aria_label=inputs["aria_label"],
+        examples=inputs["examples"],
+    )
+
+
 def analyysikeskus_page(req: Request):
-    """GET /analyysikeskus — the legal-analysis workflow directory."""
+    """GET /analyysikeskus — the legal-analysis workflow directory.
+
+    The card list is generated from :data:`app.ui.capabilities.CAPABILITIES`,
+    filtered to entries whose ``target_url`` lives under ``/analyysikeskus``.
+    Live capabilities (``Normi mõjuahel``, ``EL ülevõtt``) render with their
+    input form; planned ones (``Kohtupraktika``, ``Sanktsioonid``, ...) render
+    as a compact "Tulekul" card. The order matches the dict's order — see
+    ``app/ui/capabilities.py`` for the canonical ordering rules.
+    """
     auth = req.scope.get("auth") or None
     theme = get_theme_from_request(req)
     user_id = auth.get("id") if auth else None
@@ -334,39 +423,15 @@ def analyysikeskus_page(req: Request):
         ),
     )
 
-    normi_card = _workflow_card(
-        title="Normi mõjuahel",
-        purpose=(
-            "Vaata, mida muudatus mõjutab — millised sätted viitavad muudetavale "
-            "paragrahvile, millised eelnõud puudutavad sama teemat ja milline "
-            "Riigikohtu praktika on seotud."
-        ),
-        action="/analyysikeskus/normi-mojuahel",
-        input_name="sisend",
-        input_placeholder=(
-            "Nt: AvTS § 35 · CELEX-number · eelnõu pealkiri · või kirjeldage muudatust"
-        ),
-        input_aria_label="Õiguslik viide või kirjeldus",
-        examples=("Näited: «Muudame AvTS § 35.» · «Kontrolli karistusseadustiku § 133 mõju.»"),
-    )
-
-    el_card = _workflow_card(
-        title="EL ülevõtt ja harmoneerimine",
-        purpose=(
-            "Kontrolli, kas Eesti õigus katab EL kohustuse — millised Eesti sätted "
-            "on EL aktiga seotud ja kus on katmata kohad."
-        ),
-        action="/analyysikeskus/el-ulevott",
-        input_name="sisend",
-        input_placeholder="Nt: CELEX-number · EL akti pealkiri · poliitikavaldkond",
-        input_aria_label="CELEX-number, EL akti pealkiri või valdkond",
-        examples="Näited: «Kontrolli AI määruse ülevõttu.» · «32016R0679»",
-    )
+    # Pull every capability whose target lives under /analyysikeskus —
+    # preserves the canonical order from the dict (live first within each
+    # use case).
+    workflow_caps = [c for c in CAPABILITIES if c.target_url.startswith("/analyysikeskus")]
+    workflow_cards = [_capability_card(c) for c in workflow_caps]
 
     return PageShell(
         *header,
-        normi_card,
-        el_card,
+        *workflow_cards,
         _recent_analyses_card(recent),
         title="Analüüsikeskus",
         user=auth,

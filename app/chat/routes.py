@@ -53,6 +53,7 @@ from app.chat.pending_seed import (
 from app.chat.sanitize import render_markdown_safe, render_plaintext_safe
 from app.db import get_connection as _connect
 from app.docs.report_routes import explorer_focus_url
+from app.ui.capabilities import live_capabilities
 from app.ui.data.data_table import Column, DataTable
 from app.ui.data.pagination import Pagination
 from app.ui.layout import PageShell
@@ -588,34 +589,54 @@ def chat_list_page(req: Request):
     )
 
     header_children: list = [H1("Nõustaja", cls="page-title")]  # noqa: F405
+    # InfoBox body: framing prose + a generated list of "what else you can
+    # do" pulled from :mod:`app.ui.capabilities` (B3). Use cases 1-5 cover
+    # the conversational + analytical surface area; the chat itself (use
+    # case 1, slug ``noustaja``) is omitted because the user is already
+    # here. Falling out of the list automatically means a new live workflow
+    # (e.g. A1 Sanctions when it ships) appears in the InfoBox with zero
+    # touch-up here.
+    capability_items = [
+        Li(  # noqa: F405
+            A(  # noqa: F405
+                cap.canonical_name_et,
+                href=cap.target_url,
+                cls="info-box-link",
+            ),
+            " — ",
+            cap.one_line_description_et,
+        )
+        for cap in live_capabilities()
+        if cap.use_case_from_section_2 in {1, 2, 3, 4, 5} and cap.slug != "noustaja"
+    ]
     header_children.append(
         InfoBox(
             P(
-                "AI \u00f5igusn\u00f5ustaja Claude vastab teie k\u00fcsimustele "
-                "Eesti \u00f5iguse kohta. Vastused tuginevad ontoloogiale "
-                "(50\u202f000+ kehtivat s\u00e4tet, 615 seadust, "
-                "22\u202f832 eeln\u00f5ud, 12\u202f137 Riigikohtu lahendit, "
-                "33\u202f242 EL \u00f5igusakti, 22\u202f290 EL kohtulahendit) "
-                "ning RAG-s\u00fcsteemile, mis leiab semantiliselt sarnaseid "
-                "\u00f5igusakti l\u00f5ike."
+                "AI õigusnõustaja Claude vastab teie küsimustele "
+                "Eesti õiguse kohta. Vastused tuginevad ontoloogiale "
+                "(50 000+ kehtivat sätet, 615 seadust, "
+                "22 832 eelnõud, 12 137 Riigikohtu lahendit, "
+                "33 242 EL õigusakti, 22 290 EL kohtulahendit) "
+                "ning RAG-süsteemile, mis leiab semantiliselt sarnaseid "
+                "õigusakti lõike."
             ),
             P(
-                "Saate k\u00fcsida konkreetsete s\u00e4tete t\u00e4henduse "
-                "kohta, v\u00f5rrelda eeln\u00f5ud kehtiva regulatsiooniga, "
-                "otsida pretsedente, paluda EL direktiivide "
-                "transponeerimisanal\u00fc\u00fcsi v\u00f5i arutada "
-                "eeln\u00f5u m\u00f5ju. AI kasutab vajadusel t\u00f6\u00f6riistu "
-                "(ontoloogiap\u00e4ringud, s\u00e4tete otsing, m\u00f5juanal\u00fc\u00fcs, "
-                "s\u00e4tte detailid) ja viitab vastustes alusallikatele, et "
-                "saaksite v\u00e4ited kontrollida."
+                "Küsige konkreetsete sätete tähenduse kohta, võrrelge "
+                "eelnõud kehtiva regulatsiooniga, otsige pretsedente "
+                "või arutage eelnõu mõju. AI kasutab vajadusel "
+                "tööriistu (ontoloogiapäringud, sätete otsing, "
+                "mõjuanalüüs, sätte detailid) ja viitab vastustes "
+                "alusallikatele, et saaksite väited kontrollida."
             ),
+            P("Lisaks Nõustajale saate Seadusloomes:"),
+            Ul(*capability_items, cls="info-box-capabilities"),  # noqa: F405
             P(
                 "Vestlused on privaatsed ja seotud teie organisatsiooniga. "
-                "Saate vestluse siduda konkreetse eeln\u00f5uga "
+                "Saate vestluse siduda konkreetse eelnõuga "
                 "(kontekst paneb AI vastused selle dokumendi suhtes), "
-                "kinnitada olulised vestlused t\u00e4hekesega, otsida "
-                "vanadest vestlustest ja vajadusel arhiveerida l\u00f5petatud "
-                "vestlused. Vajutage \u201eUus vestlus\u201c, et alustada."
+                "kinnitada olulised vestlused tähekesega, otsida "
+                "vanadest vestlustest ja vajadusel arhiveerida lõpetatud "
+                "vestlused. Vajutage „Uus vestlus“, et alustada."
             ),
             variant="info",
             dismissible=True,
