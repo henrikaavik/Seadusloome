@@ -1941,6 +1941,41 @@
   align-self: flex-start;
 }
 
+/* C6 (#791) — sanctions + burden delta collapsible sections. The
+   <details> element is used as a native disclosure widget; we just
+   visually align its summary line with the other report section
+   headers and add a muted summary-line beside the section title. */
+.report-collapsible {
+  margin-bottom: var(--space-3);
+  border: 1px solid var(--color-border, #ddd);
+  border-radius: 6px;
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-surface, #fff);
+}
+
+.report-collapsible > summary {
+  cursor: pointer;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+  list-style: revert;
+  font-weight: 600;
+}
+
+.report-collapsible-title {
+  font-size: var(--text-lg, 1.1rem);
+  font-weight: 600;
+}
+
+.report-collapsible-summary {
+  font-weight: normal;
+}
+
+.report-collapsible-body {
+  margin-top: var(--space-2);
+}
+
 .export-form {
   margin-bottom: var(--space-3);
 }
