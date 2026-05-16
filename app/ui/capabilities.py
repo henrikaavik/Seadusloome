@@ -208,13 +208,12 @@ CAPABILITIES: list[Capability] = [
         canonical_name_et="Kaardista pädevusi",
         one_line_description_et=(
             "Vaata, millised volitused on antud millisele asutusele — "
-            "kattuvused ja lüngad pädevusalades."
+            "kattuvused teiste asutustega akti kaupa."
         ),
         icon="users",
         target_url="/analyysikeskus/padevused",
         example_input="Andmekaitse Inspektsioon",
         use_case_from_section_2=6,
-        status="planned",
     ),
     Capability(
         slug="ajalugu",
