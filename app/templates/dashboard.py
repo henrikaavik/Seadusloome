@@ -21,12 +21,20 @@ or schema change — everything is derivable from existing tables.
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any
+from urllib.parse import urlencode
 
 from fasthtml.common import *
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse
 
+from app.analyysikeskus.eu_transposition import (
+    DEFAULT_TRANSPOSITION_HORIZON_DAYS,
+    TranspositionDeadlineRow,
+    list_overdue_or_upcoming_transpositions,
+)
 from app.auth.audit import log_action
 from app.db import get_connection as _connect
 from app.docs.impact.scoring import IMPACT_BAND_LABELS_ET, ImpactBand, impact_band
@@ -56,6 +64,16 @@ _MAX_STALE = 8
 _MAX_SYNCS = 5
 _MAX_EXPORTS = 5
 _MAX_UNRESOLVED = 8
+
+# A6 (EU transposition deadlines widget): how many deadline rows the
+# Töölaud renders inline; the rest go behind "Näita kõiki" → /analyysikeskus/el-ulevott.
+_MAX_EU_DEADLINES = 5
+
+# Soft timeout for the SPARQL deadline query — if Jena is slow the
+# dashboard does not block. Empty list → widget hides; the page renders
+# without delay (per A6 spec, the SPARQL call is gated behind a ~1s
+# graceful-degradation timeout).
+_EU_DEADLINES_SPARQL_TIMEOUT_S = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -401,6 +419,71 @@ def _get_unresolved_annotation_drafts(  # type: ignore[type-arg]
 
 
 # ---------------------------------------------------------------------------
+# SPARQL helper — A6 EU transposition deadlines widget
+# ---------------------------------------------------------------------------
+
+
+def _get_eu_transposition_deadlines(
+    org_id: str | None,
+    *,
+    horizon_days: int = DEFAULT_TRANSPOSITION_HORIZON_DAYS,
+    timeout_s: float = _EU_DEADLINES_SPARQL_TIMEOUT_S,
+) -> list[TranspositionDeadlineRow]:
+    """Return EU directives whose transposition deadline is approaching or passed.
+
+    Wraps :func:`app.analyysikeskus.eu_transposition.list_overdue_or_upcoming_transpositions`
+    in a soft *wall-clock* timeout so a slow / stuck Jena cannot delay the
+    dashboard render. On timeout (or any exception) returns ``[]`` — the
+    widget then hides per the A6 empty-state rule.
+
+    ``org_id`` is forwarded for forward-compatibility (the underlying helper
+    accepts it today but does not yet scope by responsible ministry — the
+    ontology doesn't expose that predicate yet).
+
+    Implementation note (F1 + F8 fix, 2026-05-15 review): we deliberately
+    do **not** use ``with ThreadPoolExecutor(...)``. Python's executor
+    ``__exit__`` calls ``shutdown(wait=True)`` which blocks until
+    in-flight tasks complete — that defeats the soft timeout because a
+    stuck Jena query would still hold the dashboard render. Instead we
+    manage the lifecycle manually and shut down with ``wait=False,
+    cancel_futures=True`` in ``finally`` so the dashboard renders within
+    ``timeout_s`` regardless of Jena state.
+
+    Important resource caveat: ``concurrent.futures.ThreadPoolExecutor``
+    worker threads are **not** daemonised by Python's default factory,
+    and ``future.cancel()`` does not interrupt a thread that is already
+    executing (it only stops a not-yet-started future). To prevent a
+    stuck Jena from accumulating zombie worker threads across many
+    dashboard renders, ``timeout_s`` is also pushed down into the SPARQL
+    client via ``SparqlClient(timeout=timeout_s)`` inside
+    :func:`list_overdue_or_upcoming_transpositions` — httpx then raises
+    ``ReadTimeout`` at the network layer, the worker exits cleanly, and
+    there is no orphaned thread.
+    """
+    pool = ThreadPoolExecutor(max_workers=1)
+    try:
+        future = pool.submit(
+            list_overdue_or_upcoming_transpositions,
+            horizon_days=horizon_days,
+            org_id=org_id,
+            timeout_s=timeout_s,
+        )
+        try:
+            return future.result(timeout=timeout_s)
+        except FuturesTimeoutError:
+            logger.warning(
+                "EU transposition deadlines query exceeded %.1fs — hiding widget", timeout_s
+            )
+            future.cancel()
+            return []
+    except Exception:
+        logger.exception("Failed to fetch EU transposition deadlines")
+        return []
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+# ---------------------------------------------------------------------------
 # DB helpers — kept verbatim from the welcome-page era
 # ---------------------------------------------------------------------------
 
@@ -680,6 +763,166 @@ def _high_risk_card(reports: list[dict]):  # type: ignore[type-arg, no-untyped-d
 
 
 # ---------------------------------------------------------------------------
+# Section 2b: EL ülevõtu tähtajad (A6)
+# ---------------------------------------------------------------------------
+#
+# Proactive surveillance widget — surfaces EU directives whose
+# transposition deadline is within the next 90 days **and** Estonia's
+# transposition status is not yet ``"kaetud"``. The widget is operational,
+# not decorative: every row click-throughs to the existing EL ülevõtt
+# workflow pre-filled with the directive's CELEX.
+#
+# Empty-state policy: hide the entire card when there are no rows. The
+# dashboard already runs long, and an empty "no upcoming transpositions"
+# message would be noise. Caller (``dashboard_page``) only includes the
+# card in the page tree when :func:`_eu_deadlines_card` returns a node.
+
+
+# Map a row's days_remaining + status onto the Estonian status text +
+# badge variant the table renders. Severity order (badge colour):
+#
+#   Tähtaeg möödunud  → danger  (red)
+#   Tähtaeg läheneb   → warning (amber) — within 30 days
+#   Ülevõtt puudub    → danger  (red)   — no transposing act at all
+#   Ülevõtt osaline   → warning (amber)
+#   Ebaselge          → default (neutral)
+#
+# Time-based status wins over status-bucket: an overdue row is always
+# rendered as "Tähtaeg möödunud" even if its transposition status is
+# only "osaline" — the message is "act now", not "this is partial".
+
+
+def _deadline_badge_variant(days_remaining: int) -> BadgeVariant:
+    """Pick the deadline-cell badge colour from days_remaining."""
+    if days_remaining < 0:
+        return "danger"
+    if days_remaining < 30:
+        return "warning"
+    return "default"
+
+
+def _deadline_badge_label(days_remaining: int) -> str:
+    """Pick the deadline-cell Estonian label from days_remaining."""
+    if days_remaining < 0:
+        # ``abs()`` keeps the surface non-negative; the colour already
+        # signals "overdue".
+        return f"Tähtaeg möödunud ({abs(days_remaining)} p)"
+    if days_remaining == 0:
+        return "Tähtaeg täna"
+    if days_remaining < 30:
+        return f"Tähtaeg {days_remaining} päeva"
+    return f"{days_remaining} päeva"
+
+
+_STATUS_LABELS_ET: dict[str, str] = {
+    "puudub": "Ülevõtt puudub",
+    "osaline": "Ülevõtt osaline",
+    "ebaselge": "Ebaselge",
+    "kaetud": "Üle võetud",  # never rendered (filtered out) but kept for completeness
+}
+
+_STATUS_VARIANTS: dict[str, BadgeVariant] = {
+    "puudub": "danger",
+    "osaline": "warning",
+    "ebaselge": "default",
+    "kaetud": "success",
+}
+
+
+def _format_deadline_date(d: Any) -> str:
+    """Format a deadline ``date`` as ``DD.MM.YYYY`` (matches ``format_tallinn``)."""
+    try:
+        return d.strftime("%d.%m.%Y")
+    except Exception:
+        return str(d)
+
+
+def _el_ulevott_link(celex: str) -> str:
+    """Build a ``/analyysikeskus/el-ulevott?sisend=<celex>`` URL."""
+    return "/analyysikeskus/el-ulevott?" + urlencode({"sisend": celex})
+
+
+def _eu_deadlines_card(rows: list[TranspositionDeadlineRow]):  # type: ignore[no-untyped-def]
+    """Render the "EL ülevõtu tähtajad" Töölaud widget.
+
+    Returns ``None`` when there are no rows so the caller can omit the
+    section entirely (per the A6 empty-state rule). Renders the top
+    :data:`_MAX_EU_DEADLINES` rows; when more exist, a "Näita kõiki (X)"
+    link at the bottom points at the EL ülevõtt workflow.
+    """
+    if not rows:
+        return None
+
+    total = len(rows)
+    top_rows = rows[:_MAX_EU_DEADLINES]
+
+    columns = [
+        Column(
+            key="deadline",
+            label="Tähtaeg",
+            sortable=False,
+            render=lambda r: Badge(
+                r["deadline_label"],
+                variant=r["deadline_variant"],
+            ),
+        ),
+        Column(key="celex", label="CELEX", sortable=False),
+        Column(key="directive_label", label="Direktiiv", sortable=False),
+        Column(
+            key="status",
+            label="Staatus",
+            sortable=False,
+            render=lambda r: Badge(r["status_label"], variant=r["status_variant"]),
+        ),
+        Column(
+            key="actions",
+            label="",
+            sortable=False,
+            render=lambda r: A(
+                "Vaata ülevõttu →",
+                href=r["href"],
+                cls="table-link el-deadlines-action",
+                # Operational widget — keep the touch-target obvious.
+                aria_label=f"Vaata EL ülevõttu — {r['celex']}",
+            ),
+        ),
+    ]
+    table_rows = [
+        {
+            "celex": row.celex,
+            "directive_label": row.directive_label_et,
+            "deadline_label": (
+                f"{_format_deadline_date(row.deadline)} · "
+                f"{_deadline_badge_label(row.days_remaining)}"
+            ),
+            "deadline_variant": _deadline_badge_variant(row.days_remaining),
+            "status_label": _STATUS_LABELS_ET.get(row.status, row.status),
+            "status_variant": _STATUS_VARIANTS.get(row.status, "default"),
+            "href": _el_ulevott_link(row.celex),
+        }
+        for row in top_rows
+    ]
+
+    body_children: list[Any] = [DataTable(columns=columns, rows=table_rows)]
+    if total > _MAX_EU_DEADLINES:
+        body_children.append(
+            P(
+                A(
+                    f"Näita kõiki ({total}) →",
+                    href="/analyysikeskus/el-ulevott?vaade=tahtajad",
+                    cls="el-deadlines-show-all",
+                ),
+                cls="el-deadlines-show-all-row",
+            )
+        )
+
+    return Card(
+        CardHeader(H3("EL ülevõtu tähtajad", cls="card-title")),
+        CardBody(*body_children),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Section 3: Aegunud analüüsid
 # ---------------------------------------------------------------------------
 
@@ -883,9 +1126,11 @@ def dashboard_page(req: Request):
         unresolved = _get_unresolved_annotation_drafts(org_id)
         bookmarks = _get_bookmarks(user_id)
         org_info = _get_user_org_info(user_id)
+        eu_deadlines = _get_eu_transposition_deadlines(org_id)
     else:
         sessions = high_risk = unviewed = stale = syncs = exports = unresolved = bookmarks = []
         org_info = None
+        eu_deadlines = []
 
     next_actions = _build_next_actions(sessions, high_risk, stale, unviewed)
 
@@ -896,17 +1141,28 @@ def dashboard_page(req: Request):
     else:
         subtitle = Small("Te ei kuulu ühtegi organisatsiooni.", cls="page-subtitle")
 
-    content = (
+    # A6: the EU deadlines widget hides entirely when there are no rows
+    # (no decorative empty box), so it's spliced in only when present.
+    eu_deadlines_card = _eu_deadlines_card(eu_deadlines)
+
+    content_parts: list[Any] = [
         H1(f"Tere, {first_name}", cls="page-title"),
         subtitle,
         _next_actions_card(next_actions),
         _high_risk_card(high_risk),
-        _stale_card(stale),
-        _syncs_card(syncs),
-        _exports_card(exports),
-        _unresolved_card(unresolved),
-        _bookmarks_card(bookmarks),
+    ]
+    if eu_deadlines_card is not None:
+        content_parts.append(eu_deadlines_card)
+    content_parts.extend(
+        [
+            _stale_card(stale),
+            _syncs_card(syncs),
+            _exports_card(exports),
+            _unresolved_card(unresolved),
+            _bookmarks_card(bookmarks),
+        ]
     )
+    content = tuple(content_parts)
 
     return PageShell(
         *content,
