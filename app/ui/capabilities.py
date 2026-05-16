@@ -192,7 +192,6 @@ CAPABILITIES: list[Capability] = [
         target_url="/analyysikeskus/sanktsioonid",
         example_input="KarS § 211",
         use_case_from_section_2=5,
-        status="planned",
     ),
     Capability(
         slug="halduskoormus",
