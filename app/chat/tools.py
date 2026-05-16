@@ -18,6 +18,7 @@ from typing import Any
 from uuid import UUID
 
 from app.db import get_connection
+from app.ontology.relations import PREDICATES
 from app.ontology.sparql_client import SparqlClient, _sanitize_sparql_value
 
 # Strict validation patterns for provision URIs (prevents SPARQL injection).
@@ -100,6 +101,116 @@ CHAT_TOOLS: list[dict[str, Any]] = [
                 "provision_uri": {
                     "type": "string",
                     "description": ("Ontology URI of the provision (e.g., estleg:KarS_Norm_001)"),
+                },
+            },
+            "required": ["provision_uri"],
+        },
+    },
+    # ---- C4 specialised helpers (2026-05-16) -------------------------------
+    # These four tools cover the most frequent lawyer questions ("what court
+    # decisions interpret this section?", "is this an EU transposition?",
+    # "how has this been amended?", "what concepts does it define?"). The
+    # LLM is steered toward them by the system prompt so it doesn't fall back
+    # to hand-rolling SPARQL via ``query_ontology`` (which has a real
+    # hallucination failure mode — wrong predicates, malformed FILTERs,
+    # runaway joins). Every predicate is imported from
+    # :mod:`app.ontology.relations`; nothing is hardcoded as ``estleg:*``
+    # string in the templates.
+    {
+        "name": "get_court_decisions_for_provision",
+        "description": (
+            "List Supreme Court decisions (Riigikohus) that interpret or apply "
+            "the given legal provision. Prefer this over query_ontology for "
+            "court-practice questions. Returns ordered decisions with case "
+            "metadata so they can be cited cleanly."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "provision_uri": {
+                    "type": "string",
+                    "description": ("Ontology URI of the provision (e.g., estleg:KarS_Norm_001)"),
+                },
+                "limit": {
+                    "type": "integer",
+                    "default": 25,
+                    "description": "Max decisions to return (1-100, default 25).",
+                },
+            },
+            "required": ["provision_uri"],
+        },
+    },
+    {
+        "name": "get_eu_transposition_for_provision",
+        "description": (
+            "Show the EU transposition / harmonisation links for the given "
+            "Estonian legal provision (or its parent act). Prefer this over "
+            "query_ontology for EU-compliance questions. Returns the EU acts "
+            "with the relation type (transposesDirective / transposedBy / "
+            "harmonisedWith) and the raw transpositionStatus literal where "
+            "present so the caller can cite the official status."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "provision_uri": {
+                    "type": "string",
+                    "description": "Ontology URI of the provision.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "default": 25,
+                    "description": "Max EU acts to return (1-100, default 25).",
+                },
+            },
+            "required": ["provision_uri"],
+        },
+    },
+    {
+        "name": "get_provision_amendments",
+        "description": (
+            "Return the ordered amendment history for the given provision. "
+            "Prefer this over query_ontology for amendment / version-history "
+            "questions. Includes both AmendmentEvent -> Provision (``amends``) "
+            "and Provision -> Act/Draft (``amendedBy``) edges, ordered by "
+            "validFrom date when available."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "provision_uri": {
+                    "type": "string",
+                    "description": "Ontology URI of the provision.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "default": 50,
+                    "description": "Max amendment rows (1-100, default 50).",
+                },
+            },
+            "required": ["provision_uri"],
+        },
+    },
+    {
+        "name": "get_related_concepts",
+        "description": (
+            "List the legal concepts the provision defines plus the topic "
+            "clusters it belongs to. Prefer this over query_ontology for "
+            "conceptual / thematic questions. The query UNIONs the canonical "
+            "``requestedCluster`` predicate with its SHACL alias "
+            "``topicCluster`` for forward compatibility."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "provision_uri": {
+                    "type": "string",
+                    "description": "Ontology URI of the provision.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "default": 25,
+                    "description": "Max related rows (1-100, default 25).",
                 },
             },
             "required": ["provision_uri"],
@@ -386,6 +497,327 @@ async def _exec_get_provision_details(
 
 
 # ---------------------------------------------------------------------------
+# C4 specialised helpers — shared infrastructure
+# ---------------------------------------------------------------------------
+#
+# Each of the four helpers below performs the same opening dance:
+#
+#   1. Validate the ``provision_uri`` parameter against
+#      ``_SAFE_PREFIXED_RE`` / ``_SAFE_FULL_URI_RE`` (same allowlist as
+#      :func:`_exec_get_provision_details` — prevents SPARQL injection).
+#   2. Clamp the optional ``limit`` to ``1..100``.
+#   3. Build a ``BIND(...)`` clause that materialises the validated URI
+#      as ``?uri`` so the rest of the template can use it without further
+#      escaping.
+#
+# Sharing :func:`_resolve_provision_binding` lets the executors stay focused
+# on their query shape and keeps the security-critical validation in one
+# auditable function. Every executor projects ``?source`` (the URI of the
+# row that *originated* the relation) so the LLM can cite back to the
+# specific provision / amendment event / EU act, never just a label.
+
+
+_DEFAULT_PROVISION_LIMIT = 25
+_MAX_PROVISION_LIMIT = 100
+
+
+def _resolve_provision_binding(
+    tool_input: dict[str, Any],
+    *,
+    default_limit: int = _DEFAULT_PROVISION_LIMIT,
+) -> tuple[str, int] | dict[str, Any]:
+    """Validate ``provision_uri`` + ``limit`` from a tool input.
+
+    Returns either a ``(bind_clause, limit)`` tuple ready to drop into a
+    SPARQL template, or an ``{"error": ...}`` dict that the caller should
+    return verbatim. Mirroring the pattern of
+    :func:`_exec_get_provision_details` lets us reject the same shapes of
+    bad input across every C4 helper.
+    """
+    provision_uri = tool_input.get("provision_uri", "")
+    if not isinstance(provision_uri, str) or not provision_uri.strip():
+        return {"error": "Empty provision_uri"}
+
+    if provision_uri.startswith("estleg:"):
+        if not _SAFE_PREFIXED_RE.fullmatch(provision_uri):
+            return {
+                "error": (
+                    "Invalid prefixed URI. Only alphanumeric characters, "
+                    "underscores, and hyphens are allowed after 'estleg:'."
+                )
+            }
+        bind_clause = f"BIND({provision_uri} AS ?uri)"
+    elif _SAFE_FULL_URI_RE.fullmatch(provision_uri):
+        bind_clause = f"BIND(<{provision_uri}> AS ?uri)"
+    else:
+        return {
+            "error": (
+                "Invalid provision URI. Must be a prefixed name "
+                "(estleg:...) or a valid http(s) URI."
+            )
+        }
+
+    raw_limit = tool_input.get("limit", default_limit)
+    if not isinstance(raw_limit, int) or raw_limit <= 0:
+        limit = default_limit
+    else:
+        limit = min(raw_limit, _MAX_PROVISION_LIMIT)
+
+    return bind_clause, limit
+
+
+# ---------------------------------------------------------------------------
+# C4 #1 — court decisions interpreting a provision
+# ---------------------------------------------------------------------------
+
+
+async def _exec_get_court_decisions_for_provision(
+    tool_input: dict[str, Any],
+    sparql: SparqlClient,
+) -> dict[str, Any]:
+    """Return court decisions interpreting *provision_uri*.
+
+    Walks both ``CourtDecision interpretsLaw Provision`` (forward) and
+    ``Provision interpretedBy CourtDecision`` (inverse) so the result is
+    insensitive to which direction the data was loaded in. The optional
+    ``validFrom`` / ``caseNumber`` projections give the LLM something to
+    cite even when ``rdfs:label`` is missing.
+    """
+    resolved = _resolve_provision_binding(tool_input)
+    if isinstance(resolved, dict):
+        return resolved
+    bind_clause, limit = resolved
+
+    query = f"""
+        PREFIX estleg: <https://data.riik.ee/ontology/estleg#>
+        PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+
+        SELECT DISTINCT ?decision ?label ?caseNumber ?date ?relation ?source WHERE {{
+            {bind_clause}
+            {{
+                ?decision <{PREDICATES.INTERPRETS_LAW}> ?uri .
+                BIND(<{PREDICATES.INTERPRETS_LAW}> AS ?relation)
+            }} UNION {{
+                ?uri <{PREDICATES.INTERPRETED_BY}> ?decision .
+                BIND(<{PREDICATES.INTERPRETED_BY}> AS ?relation)
+            }}
+            OPTIONAL {{ ?decision rdfs:label ?label }}
+            OPTIONAL {{ ?decision estleg:caseNumber ?caseNumber }}
+            OPTIONAL {{ ?decision estleg:validFrom ?date }}
+            BIND(?uri AS ?source)
+        }}
+        ORDER BY DESC(?date) ?decision
+        LIMIT {limit}
+    """
+    results = sparql.query(query)
+    decisions = [
+        {
+            "uri": row.get("decision", ""),
+            "label": row.get("label", ""),
+            "case_number": row.get("caseNumber", ""),
+            "date": row.get("date", ""),
+            "relation": row.get("relation", ""),
+            "source": row.get("source", ""),
+        }
+        for row in results
+    ]
+    return {"decisions": decisions, "count": len(decisions)}
+
+
+# ---------------------------------------------------------------------------
+# C4 #2 — EU transposition links for a provision
+# ---------------------------------------------------------------------------
+
+
+async def _exec_get_eu_transposition_for_provision(
+    tool_input: dict[str, Any],
+    sparql: SparqlClient,
+) -> dict[str, Any]:
+    """Return EU acts linked to *provision_uri* via transposition / harmonisation.
+
+    Three UNION arms cover the canonical edges:
+
+    1. Provision-level ``transposesDirective`` (SHACL allows it).
+    2. Provision-level ``harmonisedWith``.
+    3. Inverse ``transposedBy`` from the EU side.
+
+    The query also projects the raw ``estleg:transpositionStatus`` literal
+    where it exists so the caller can render the official status word
+    ("ülevõetud", "osaliselt", …) without re-querying.
+    """
+    resolved = _resolve_provision_binding(tool_input)
+    if isinstance(resolved, dict):
+        return resolved
+    bind_clause, limit = resolved
+
+    query = f"""
+        PREFIX estleg: <https://data.riik.ee/ontology/estleg#>
+        PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+
+        SELECT DISTINCT ?euAct ?label ?celex ?status ?relation ?source WHERE {{
+            {bind_clause}
+            {{
+                ?uri <{PREDICATES.TRANSPOSES_DIRECTIVE}> ?euAct .
+                BIND(<{PREDICATES.TRANSPOSES_DIRECTIVE}> AS ?relation)
+                BIND(?uri AS ?source)
+            }} UNION {{
+                ?uri <{PREDICATES.HARMONISED_WITH}> ?euAct .
+                BIND(<{PREDICATES.HARMONISED_WITH}> AS ?relation)
+                BIND(?uri AS ?source)
+            }} UNION {{
+                ?euAct <{PREDICATES.TRANSPOSED_BY}> ?uri .
+                BIND(<{PREDICATES.TRANSPOSED_BY}> AS ?relation)
+                BIND(?uri AS ?source)
+            }}
+            OPTIONAL {{ ?euAct rdfs:label ?label }}
+            OPTIONAL {{ ?euAct estleg:celexNumber ?celex }}
+            OPTIONAL {{ ?source estleg:transpositionStatus ?status }}
+        }}
+        ORDER BY ?euAct
+        LIMIT {limit}
+    """
+    results = sparql.query(query)
+    eu_acts = [
+        {
+            "uri": row.get("euAct", ""),
+            "label": row.get("label", ""),
+            "celex": row.get("celex", ""),
+            "status": row.get("status", ""),
+            "relation": row.get("relation", ""),
+            "source": row.get("source", ""),
+        }
+        for row in results
+    ]
+    return {"eu_acts": eu_acts, "count": len(eu_acts)}
+
+
+# ---------------------------------------------------------------------------
+# C4 #3 — amendment history for a provision
+# ---------------------------------------------------------------------------
+
+
+async def _exec_get_provision_amendments(
+    tool_input: dict[str, Any],
+    sparql: SparqlClient,
+) -> dict[str, Any]:
+    """Return the ordered amendment history for *provision_uri*.
+
+    Two relation shapes are unioned:
+
+    * ``AmendmentEvent estleg:amends Provision`` (forward — the canonical
+      direction; the AmendmentEvent's ``validFrom`` is the date the
+      amendment took effect).
+    * ``Provision estleg:amendedBy Act/Draft`` (inverse — older data and
+      some draft chains record it this way).
+
+    Rows are ordered by ``validFrom DESC`` (most recent first); rows with
+    no date sort last so a partial dataset still produces a stable order.
+    """
+    resolved = _resolve_provision_binding(tool_input, default_limit=50)
+    if isinstance(resolved, dict):
+        return resolved
+    bind_clause, limit = resolved
+
+    query = f"""
+        PREFIX estleg: <https://data.riik.ee/ontology/estleg#>
+        PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+
+        SELECT DISTINCT ?amendment ?label ?date ?relation ?source WHERE {{
+            {bind_clause}
+            {{
+                ?amendment <{PREDICATES.AMENDS}> ?uri .
+                BIND(<{PREDICATES.AMENDS}> AS ?relation)
+            }} UNION {{
+                ?uri <{PREDICATES.AMENDED_BY}> ?amendment .
+                BIND(<{PREDICATES.AMENDED_BY}> AS ?relation)
+            }}
+            OPTIONAL {{ ?amendment rdfs:label ?label }}
+            OPTIONAL {{ ?amendment estleg:validFrom ?date }}
+            BIND(?uri AS ?source)
+        }}
+        ORDER BY DESC(?date) ?amendment
+        LIMIT {limit}
+    """
+    results = sparql.query(query)
+    amendments = [
+        {
+            "uri": row.get("amendment", ""),
+            "label": row.get("label", ""),
+            "date": row.get("date", ""),
+            "relation": row.get("relation", ""),
+            "source": row.get("source", ""),
+        }
+        for row in results
+    ]
+    return {"amendments": amendments, "count": len(amendments)}
+
+
+# ---------------------------------------------------------------------------
+# C4 #4 — related concepts and topic clusters
+# ---------------------------------------------------------------------------
+
+
+async def _exec_get_related_concepts(
+    tool_input: dict[str, Any],
+    sparql: SparqlClient,
+) -> dict[str, Any]:
+    """Return defined concepts + topic clusters for *provision_uri*.
+
+    Three UNION arms:
+
+    1. ``definesConcept`` — the canonical LegalProvision -> LegalConcept link.
+    2. ``requestedCluster`` — the populated provision -> topic cluster link.
+    3. ``topicCluster`` — the SHACL alias; mostly empty today but queried
+       so callers don't need to repeat the rollout once the data migrates.
+
+    Each row exposes ``?kind`` (``"concept"`` or ``"cluster"``) so a
+    renderer can group without re-parsing the relation URI.
+    """
+    resolved = _resolve_provision_binding(tool_input)
+    if isinstance(resolved, dict):
+        return resolved
+    bind_clause, limit = resolved
+
+    query = f"""
+        PREFIX estleg: <https://data.riik.ee/ontology/estleg#>
+        PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+
+        SELECT DISTINCT ?related ?label ?relation ?kind ?source WHERE {{
+            {bind_clause}
+            {{
+                ?uri <{PREDICATES.DEFINES_CONCEPT}> ?related .
+                BIND(<{PREDICATES.DEFINES_CONCEPT}> AS ?relation)
+                BIND("concept" AS ?kind)
+            }} UNION {{
+                ?uri <{PREDICATES.REQUESTED_CLUSTER}> ?related .
+                BIND(<{PREDICATES.REQUESTED_CLUSTER}> AS ?relation)
+                BIND("cluster" AS ?kind)
+            }} UNION {{
+                ?uri <{PREDICATES.TOPIC_CLUSTER}> ?related .
+                BIND(<{PREDICATES.TOPIC_CLUSTER}> AS ?relation)
+                BIND("cluster" AS ?kind)
+            }}
+            OPTIONAL {{ ?related rdfs:label ?label }}
+            BIND(?uri AS ?source)
+        }}
+        ORDER BY ?kind ?related
+        LIMIT {limit}
+    """
+    results = sparql.query(query)
+    related = [
+        {
+            "uri": row.get("related", ""),
+            "label": row.get("label", ""),
+            "relation": row.get("relation", ""),
+            "kind": row.get("kind", ""),
+            "source": row.get("source", ""),
+        }
+        for row in results
+    ]
+    return {"related": related, "count": len(related)}
+
+
+# ---------------------------------------------------------------------------
 # Executor dispatcher
 # ---------------------------------------------------------------------------
 
@@ -394,6 +826,11 @@ _EXECUTORS: dict[str, Any] = {
     "search_provisions": _exec_search_provisions,
     "get_draft_impact": _exec_get_draft_impact,
     "get_provision_details": _exec_get_provision_details,
+    # C4 specialised helpers (2026-05-16).
+    "get_court_decisions_for_provision": _exec_get_court_decisions_for_provision,
+    "get_eu_transposition_for_provision": _exec_get_eu_transposition_for_provision,
+    "get_provision_amendments": _exec_get_provision_amendments,
+    "get_related_concepts": _exec_get_related_concepts,
 }
 
 

@@ -35,7 +35,9 @@ def _make_sparql() -> SparqlClient:
 class TestToolSchemas:
     def test_all_tools_have_required_keys(self):
         """Every tool schema has name, description, and input_schema."""
-        assert len(CHAT_TOOLS) == 4
+        # C4 (2026-05-16): four specialised helpers added — court decisions,
+        # EU transposition, amendments, related concepts.
+        assert len(CHAT_TOOLS) == 8
         for tool in CHAT_TOOLS:
             assert "name" in tool
             assert "description" in tool
@@ -49,6 +51,11 @@ class TestToolSchemas:
             "search_provisions",
             "get_draft_impact",
             "get_provision_details",
+            # C4 specialised helpers.
+            "get_court_decisions_for_provision",
+            "get_eu_transposition_for_provision",
+            "get_provision_amendments",
+            "get_related_concepts",
         }
 
 
