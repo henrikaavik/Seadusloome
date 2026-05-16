@@ -184,8 +184,20 @@ estleg:Provision_1 estleg:harmonisedWith      estleg:EU_Dir_1 .
 estleg:Act_1       estleg:transposesDirective estleg:EU_Dir_2 .
 
 # References / similarity.
-estleg:Provision_1 estleg:references            estleg:Provision_3 .
-estleg:Provision_1 estleg:semanticallySimilarTo estleg:Provision_2 .
+#
+# A5 (similarity workflow): the ``semanticallySimilarTo`` predicate has
+# an inline ``similarityScore`` literal on the *subject* in the populated
+# corpus (per the keyword_jaccard v2 pipeline). The A5 SPARQL helper
+# projects both the related provision URI and the optional score; rows
+# without a score still surface (treated as no-score in the merge layer).
+#
+# Two edges from Provision_1 — one scored (Provision_2) and one to
+# Provision_3 carried via a second subject (Provision_2 → Provision_3,
+# unscored) so the helper has both a scored and an unscored row in scope
+# when seeded from Provision_2.
+estleg:Provision_1 estleg:references             estleg:Provision_3 .
+estleg:Provision_1 estleg:semanticallySimilarTo  estleg:Provision_2 ;
+                   estleg:similarityScore        "0.82"^^xsd:decimal .
 
 # Concepts / terms.
 estleg:Provision_1 estleg:definesConcept estleg:Concept_1 .
