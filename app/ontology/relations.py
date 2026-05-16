@@ -107,6 +107,28 @@ class PREDICATES:
     # --- Competence ---
     COMPETENT_AUTHORITY: Final[str] = _uri("competentAuthority")
 
+    # --- Temporal validity (A4 — Ajalooline kehtivus) ---
+    #
+    # Added for A4 v1 (ajalugu workflow): the ontology audit confirms
+    # ``entryIntoForce``, ``repealDate``, ``lastAmendmentDate``,
+    # ``temporalStatus`` are populated corpus-wide on Acts; the
+    # AmendmentEvent class carries ``eventDate``, ``entryIntoForceDate``,
+    # ``rtReference``. The four ``version*`` predicates exist in SHACL
+    # but the populated data is sample-only — used by V2 (deferred,
+    # ontology issue #208).
+    ENTRY_INTO_FORCE: Final[str] = _uri("entryIntoForce")
+    REPEAL_DATE: Final[str] = _uri("repealDate")
+    LAST_AMENDMENT_DATE: Final[str] = _uri("lastAmendmentDate")
+    TEMPORAL_STATUS: Final[str] = _uri("temporalStatus")
+    EVENT_DATE: Final[str] = _uri("eventDate")
+    ENTRY_INTO_FORCE_DATE: Final[str] = _uri("entryIntoForceDate")
+    RT_REFERENCE: Final[str] = _uri("rtReference")
+    # ProvisionVersion chain — V2 (deferred):
+    VERSION_VALID_FROM: Final[str] = _uri("versionValidFrom")
+    VERSION_VALID_TO: Final[str] = _uri("versionValidTo")
+    SUPERSEDED_BY_VERSION: Final[str] = _uri("supersededByVersion")
+    VERSION_TEXT: Final[str] = _uri("versionText")
+
 
 # ---------------------------------------------------------------------------
 # INVERSES — forward predicate URI → inverse predicate URI
