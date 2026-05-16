@@ -54,6 +54,7 @@ from app.db import get_connection as _connect
 from app.docs.draft_model import Draft, fetch_draft, touch_draft_access_conn
 from app.docs.labels import TYPE_LABELS_ET as _TYPE_LABELS_ET
 from app.jobs.queue import JobQueue
+from app.ontology.relations import legal_phrase
 from app.ui.data.data_table import Column, DataTable
 from app.ui.forms.app_form import AppForm
 from app.ui.layout import PageShell
@@ -539,6 +540,23 @@ def _annotation_column(
     )
 
 
+def _relation_cell_text(row: dict[str, Any]) -> str:
+    """Render the "Seose liik" cell text from a row's ``relation`` field.
+
+    Uses :func:`app.ontology.relations.legal_phrase` to map the predicate
+    URI (or prefixed / bare local name) to the Estonian legal-language
+    phrase. Falls back to ``"—"`` when the row carries no relation —
+    historic impact reports persisted before C5 (#790) did not project
+    ``?relation``, and gap rows aggregate multiple relations under one
+    cluster so they never have a single predicate to label.
+    """
+    relation = str(row.get("relation") or "").strip()
+    if not relation:
+        return "—"
+    phrase = legal_phrase(relation)
+    return phrase or "—"
+
+
 def _affected_columns(
     draft_version_id: str = "",
     counts: dict[tuple[str, str], int] | None = None,
@@ -560,6 +578,12 @@ def _affected_columns(
         )
 
     cols: list[Column] = [
+        Column(
+            key="relation",
+            label="Seose liik",
+            sortable=False,
+            render=lambda row: _relation_cell_text(row),
+        ),
         Column(key="type", label="Tüüp", sortable=False, render=_type_cell),
         Column(key="label", label="Nimetus", sortable=False, render=_label_cell),
         Column(key="uri", label="URI", sortable=False, render=_uri_cell),
@@ -593,6 +617,12 @@ def _conflicts_columns(
         return str(row.get("reason") or "—")
 
     cols: list[Column] = [
+        Column(
+            key="relation",
+            label="Seose liik",
+            sortable=False,
+            render=lambda row: _relation_cell_text(row),
+        ),
         Column(key="draft_ref", label="Eelnõu viide", sortable=False, render=_draft_ref),
         Column(
             key="conflicting_entity",
@@ -631,6 +661,12 @@ def _eu_columns(
         return str(row.get("transposition_status") or "—")
 
     cols: list[Column] = [
+        Column(
+            key="relation",
+            label="Seose liik",
+            sortable=False,
+            render=lambda row: _relation_cell_text(row),
+        ),
         Column(key="eu_act", label="EL õigusakt", sortable=False, render=_eu_act),
         Column(key="provision", label="Eesti säte", sortable=False, render=_ee_provision),
         Column(key="status", label="Staatus", sortable=False, render=_status),
@@ -654,6 +690,16 @@ def _gaps_columns(
         return str(row.get("description") or "—")
 
     cols: list[Column] = [
+        # Gap rows aggregate provisions across a topic cluster, so no
+        # single ``?relation`` is meaningful — render "—" via the shared
+        # helper. The column is kept for visual parity with the other
+        # three impact sections (#790).
+        Column(
+            key="relation",
+            label="Seose liik",
+            sortable=False,
+            render=lambda row: _relation_cell_text(row),
+        ),
         Column(key="cluster", label="Teemaklaster", sortable=False, render=_cluster),
         Column(key="coverage", label="Sätete kaetus", sortable=False, render=_coverage),
         Column(key="description", label="Kirjeldus", sortable=False, render=_description),

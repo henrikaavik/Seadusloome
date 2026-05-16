@@ -49,6 +49,7 @@ from docx.shared import Pt
 
 from app.docs.draft_model import Draft
 from app.docs.labels import TYPE_LABELS_ET as _TYPE_LABELS_ET
+from app.ontology.relations import legal_phrase
 from app.ui.time import format_tallinn
 
 logger = logging.getLogger(__name__)
@@ -179,6 +180,24 @@ def _short_type(uri: str) -> str:
     return _TYPE_LABELS_ET.get(short, short)
 
 
+def _relation_cell(row: dict[str, Any]) -> str:
+    """Render the "Seose liik" cell from a row's ``relation`` field (#790).
+
+    Mirrors :func:`app.docs.report_routes._relation_cell_text` so the
+    .docx export and the HTML view show the exact same Estonian
+    legal-language phrase ("muudab", "tõlgendab", "viitab",
+    "võtab üle direktiivi", "defineerib mõistet", "on harmoneeritud
+    aktiga"). Falls back to ``"—"`` for old impact reports persisted
+    before C5 (no ``?relation`` projection) and for gap rows (no single
+    predicate per cluster).
+    """
+    relation = str(row.get("relation") or "").strip()
+    if not relation:
+        return "—"
+    phrase = legal_phrase(relation)
+    return phrase or "—"
+
+
 # ---------------------------------------------------------------------------
 # Section renderers
 # ---------------------------------------------------------------------------
@@ -246,17 +265,22 @@ def _add_affected_entities(
         doc.add_paragraph("Mõjutatud üksuseid ei tuvastatud.")
         return 1
 
-    table = doc.add_table(rows=1, cols=3)
+    table = doc.add_table(rows=1, cols=4)
     table.style = "Light Grid Accent 1"
     header = table.rows[0].cells
-    header[0].text = "Tüüp"
-    header[1].text = "Nimetus"
-    header[2].text = "URI"
+    # #790 (C5): "Seose liik" leads each row so the lawyer reading the
+    # printed report sees the relation type ("muudab", "tõlgendab", …)
+    # before the entity. Keeps parity with the HTML view.
+    header[0].text = "Seose liik"
+    header[1].text = "Tüüp"
+    header[2].text = "Nimetus"
+    header[3].text = "URI"
     for index, row in enumerate(rows):
         cells = table.add_row().cells
-        cells[0].text = _short_type(str(row.get("type", "")))
-        cells[1].text = str(row.get("label", "") or "—")
-        cells[2].text = str(row.get("uri", "") or "—")
+        cells[0].text = _relation_cell(row)
+        cells[1].text = _short_type(str(row.get("type", "")))
+        cells[2].text = str(row.get("label", "") or "—")
+        cells[3].text = str(row.get("uri", "") or "—")
         # Mid-table checkpoint: every Nth row OR the last row. Avoids
         # firing for tiny tables where the section-level publish above
         # already covers the work.
@@ -286,19 +310,21 @@ def _add_conflicts(
         doc.add_paragraph("Konflikte ei tuvastatud.")
         return 1
 
-    table = doc.add_table(rows=1, cols=3)
+    table = doc.add_table(rows=1, cols=4)
     table.style = "Light Grid Accent 1"
     header = table.rows[0].cells
-    header[0].text = "Eelnõu viide"
-    header[1].text = "Konflikti üksus"
-    header[2].text = "Põhjus"
+    header[0].text = "Seose liik"
+    header[1].text = "Eelnõu viide"
+    header[2].text = "Konflikti üksus"
+    header[3].text = "Põhjus"
     for index, row in enumerate(rows):
         cells = table.add_row().cells
-        cells[0].text = str(row.get("draft_ref", "") or "—")
-        cells[1].text = str(
+        cells[0].text = _relation_cell(row)
+        cells[1].text = str(row.get("draft_ref", "") or "—")
+        cells[2].text = str(
             row.get("conflicting_label") or row.get("conflicting_entity", "") or "—"
         )
-        cells[2].text = str(row.get("reason", "") or "—")
+        cells[3].text = str(row.get("reason", "") or "—")
         if (index + 1) % _PROGRESS_BATCH == 0:
             _safe_publish(
                 progress_callback,
@@ -328,17 +354,19 @@ def _add_eu_compliance(
         doc.add_paragraph("EL-i õigusaktide seoseid ei tuvastatud.")
         return 1
 
-    table = doc.add_table(rows=1, cols=3)
+    table = doc.add_table(rows=1, cols=4)
     table.style = "Light Grid Accent 1"
     header = table.rows[0].cells
-    header[0].text = "EL õigusakt"
-    header[1].text = "Eesti säte"
-    header[2].text = "Staatus"
+    header[0].text = "Seose liik"
+    header[1].text = "EL õigusakt"
+    header[2].text = "Eesti säte"
+    header[3].text = "Staatus"
     for index, row in enumerate(rows):
         cells = table.add_row().cells
-        cells[0].text = str(row.get("eu_label") or row.get("eu_act", "") or "—")
-        cells[1].text = str(row.get("provision_label") or row.get("estonian_provision", "") or "—")
-        cells[2].text = str(row.get("transposition_status", "") or "—")
+        cells[0].text = _relation_cell(row)
+        cells[1].text = str(row.get("eu_label") or row.get("eu_act", "") or "—")
+        cells[2].text = str(row.get("provision_label") or row.get("estonian_provision", "") or "—")
+        cells[3].text = str(row.get("transposition_status", "") or "—")
         if (index + 1) % _PROGRESS_BATCH == 0:
             _safe_publish(
                 progress_callback,
@@ -365,19 +393,25 @@ def _add_gaps(
         doc.add_paragraph("Lünki ei tuvastatud.")
         return 1
 
-    table = doc.add_table(rows=1, cols=3)
+    # Gap rows aggregate provisions per topic cluster, so no single
+    # relation predicate is meaningful — the column always renders "—".
+    # The column is kept for visual parity with the other three impact
+    # sections (#790).
+    table = doc.add_table(rows=1, cols=4)
     table.style = "Light Grid Accent 1"
     header = table.rows[0].cells
-    header[0].text = "Teemaklaster"
-    header[1].text = "Sätete kaetus"
-    header[2].text = "Kirjeldus"
+    header[0].text = "Seose liik"
+    header[1].text = "Teemaklaster"
+    header[2].text = "Sätete kaetus"
+    header[3].text = "Kirjeldus"
     for index, row in enumerate(rows):
         cells = table.add_row().cells
-        cells[0].text = str(row.get("topic_cluster_label") or row.get("topic_cluster", "") or "—")
+        cells[0].text = _relation_cell(row)
+        cells[1].text = str(row.get("topic_cluster_label") or row.get("topic_cluster", "") or "—")
         cells[
-            1
+            2
         ].text = f"{row.get('referenced_provisions', '0')} / {row.get('total_provisions', '0')}"
-        cells[2].text = str(row.get("description", "") or "—")
+        cells[3].text = str(row.get("description", "") or "—")
         if (index + 1) % _PROGRESS_BATCH == 0:
             _safe_publish(
                 progress_callback,
