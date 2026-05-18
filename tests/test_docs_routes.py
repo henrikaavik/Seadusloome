@@ -3172,6 +3172,165 @@ class TestVersionTimelineOnDetailPage:
         assert body.count(">Ava<") >= 2
 
 
+class TestVersionTimelineDocTypeAwareStageLabel:
+    """#810: the "Lugemine" column resolves the label using both the row's
+    ``reading_stage`` AND the parent draft's ``doc_type`` so an Eelnõu
+    whose v1 row carries the placeholder ``reading_stage='vtk'`` does
+    NOT render as "VTK"."""
+
+    def test_format_helper_eelnou_with_vtk_stage_returns_esitatud(self):
+        """Unit-level: the helper maps the (vtk, eelnou) pair to
+        "Esitatud" — never "VTK". This is the root-cause fix branch."""
+        from app.docs.routes._detail_versions import _format_reading_stage_for_draft
+
+        assert _format_reading_stage_for_draft("vtk", "eelnou") == "Esitatud"
+
+    def test_format_helper_vtk_with_vtk_stage_returns_vtk(self):
+        """Regression: a doc_type='vtk' draft's v1 row still renders as
+        the literal "VTK" — only the eelnou case is rewritten."""
+        from app.docs.routes._detail_versions import _format_reading_stage_for_draft
+
+        assert _format_reading_stage_for_draft("vtk", "vtk") == "VTK"
+
+    def test_format_helper_later_readings_unaffected_by_doc_type(self):
+        """The reading_1/2/3 + enacted stages don't carry the
+        ambiguous-placeholder problem — both doc_types should resolve
+        to the same human label."""
+        from app.docs.routes._detail_versions import _format_reading_stage_for_draft
+
+        for stage, label in (
+            ("reading_1", "1. lugemine"),
+            ("reading_2", "2. lugemine"),
+            ("reading_3", "3. lugemine"),
+            ("enacted", "Vastu võetud"),
+        ):
+            assert _format_reading_stage_for_draft(stage, "eelnou") == label
+            assert _format_reading_stage_for_draft(stage, "vtk") == label
+
+    def test_format_helper_unknown_stage_falls_through(self):
+        """An unrecognised stage value passes through as-is (matching
+        the existing :func:`_format_reading_stage` fallback contract)."""
+        from app.docs.routes._detail_versions import _format_reading_stage_for_draft
+
+        assert _format_reading_stage_for_draft("bogus", "eelnou") == "bogus"
+        assert _format_reading_stage_for_draft("bogus", "vtk") == "bogus"
+
+    @patch("app.docs.routes._detail._version_timeline_rows")
+    @patch("app.docs.routes._detail._connect")
+    @patch("app.docs.routes._detail.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_eelnou_v1_renders_as_esitatud_not_vtk(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_connect: MagicMock,
+        mock_timeline: MagicMock,
+    ):
+        """Render-level regression for #810: an Eelnõu's v1 row carries
+        the placeholder ``reading_stage='vtk'`` (because the CHECK
+        constraint has no "submitted" slot) but the timeline must NOT
+        surface that as "VTK" — it should read "Esitatud" instead."""
+        mock_get_provider.return_value = _stub_provider()
+        draft = _make_draft(status="ready", doc_type="eelnou")
+        mock_fetch.return_value = draft
+        _stub_connect(mock_connect)
+        mock_timeline.return_value = [
+            {
+                "version": _make_version(version_number=1, reading_stage="vtk"),
+                "uploader_label": "Mari Maasikas",
+                "is_first": True,
+            },
+        ]
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{draft.id}")
+
+        assert resp.status_code == 200
+        body = resp.text
+        # The timeline must render the neutral "Esitatud" label.
+        assert "Esitatud" in body, body
+        # And critically: the *Badge content* must NOT be "VTK". We
+        # search for the bracketed badge body the markup uses (Badge
+        # renders >Esitatud< / >VTK< between span tags) so we don't
+        # match the VTK module's unrelated copy ("Seotud VTK", "VTKga")
+        # elsewhere on the same page.
+        assert ">VTK<" not in body, (
+            "Eelnõu v1 must not surface the placeholder 'vtk' stage as 'VTK' (#810)"
+        )
+
+    @patch("app.docs.routes._detail._version_timeline_rows")
+    @patch("app.docs.routes._detail._connect")
+    @patch("app.docs.routes._detail.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_vtk_v1_still_renders_as_vtk(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_connect: MagicMock,
+        mock_timeline: MagicMock,
+    ):
+        """Regression: a doc_type='vtk' draft's v1 row must keep the
+        literal "VTK" label — the fix only changes the eelnou case."""
+        mock_get_provider.return_value = _stub_provider()
+        draft = _make_draft(status="ready", doc_type="vtk")
+        mock_fetch.return_value = draft
+        _stub_connect(mock_connect)
+        mock_timeline.return_value = [
+            {
+                "version": _make_version(version_number=1, reading_stage="vtk"),
+                "uploader_label": "Mari Maasikas",
+                "is_first": True,
+            },
+        ]
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{draft.id}")
+
+        assert resp.status_code == 200
+        body = resp.text
+        # The badge body for a VTK v1 must literally read "VTK".
+        assert ">VTK<" in body, "doc_type='vtk' v1 must still render as 'VTK' (#810)"
+
+    @patch("app.docs.routes._detail._version_timeline_rows")
+    @patch("app.docs.routes._detail._connect")
+    @patch("app.docs.routes._detail.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_eelnou_later_reading_unchanged(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_connect: MagicMock,
+        mock_timeline: MagicMock,
+    ):
+        """An Eelnõu whose timeline includes a reading_1 row must still
+        render that row's "1. lugemine" label — the doc_type-aware fix
+        only kicks in for the (vtk-stage, eelnou) placeholder pair."""
+        mock_get_provider.return_value = _stub_provider()
+        draft = _make_draft(status="ready", doc_type="eelnou")
+        mock_fetch.return_value = draft
+        _stub_connect(mock_connect)
+        mock_timeline.return_value = [
+            {
+                "version": _make_version(version_number=1, reading_stage="vtk"),
+                "uploader_label": "Mari",
+                "is_first": True,
+            },
+            {
+                "version": _make_version(version_number=2, reading_stage="reading_1"),
+                "uploader_label": "Mari",
+                "is_first": False,
+            },
+        ]
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{draft.id}")
+
+        assert resp.status_code == 200
+        body = resp.text
+        assert "Esitatud" in body
+        assert "1. lugemine" in body
+
+
 class TestDraftDiffPage:
     """GET /drafts/{draft_id}/diff?from=<v1>&to=<v2> — side-by-side diff page."""
 

@@ -91,9 +91,38 @@ _READING_STAGE_LABELS_ET: dict[str, str] = {
 }
 
 
+# #810: an Eelnõu uploaded directly (no VTK parent) is persisted with the
+# placeholder ``reading_stage='vtk'`` because the legislative pipeline
+# starts there and the CHECK constraint has no "submitted" slot. Showing
+# "VTK" for those rows is misleading — Eelnõud are not VTKd. The
+# ``_format_reading_stage_for_draft`` helper resolves the label using
+# both the row's ``reading_stage`` AND the parent draft's ``doc_type``
+# so the UI shows a neutral "Esitatud" for the eelnou case while VTKd
+# keep the literal "VTK" label.
+_EELNOU_INITIAL_LABEL_ET = "Esitatud"
+
+
 def _format_reading_stage(stage: str) -> str:
     """Return the Estonian label for a ``reading_stage`` value (#618 PR-C)."""
     return _READING_STAGE_LABELS_ET.get(stage, stage)
+
+
+def _format_reading_stage_for_draft(stage: str, doc_type: str) -> str:
+    """Return the Estonian timeline label for ``(reading_stage, doc_type)`` (#810).
+
+    The placeholder ``reading_stage='vtk'`` is written for the v1 row of
+    BOTH ``doc_type='vtk'`` and ``doc_type='eelnou'`` drafts because the
+    CHECK constraint has no "submitted" slot and the pipeline steps
+    forward from ``vtk`` on each subsequent upload. When the draft is an
+    Eelnõu, surfacing that placeholder as "VTK" tells the user the wrong
+    story about lineage — issue #810. We treat the eelnou + vtk-stage
+    combination as "Esitatud" instead; every other (stage, doc_type)
+    pair falls through to the standard :func:`_format_reading_stage`
+    label table.
+    """
+    if doc_type == "eelnou" and stage == "vtk":
+        return _EELNOU_INITIAL_LABEL_ET
+    return _format_reading_stage(stage)
 
 
 # ---------------------------------------------------------------------------
@@ -204,8 +233,12 @@ def _version_timeline_section(
 
     def _stage_cell(row: dict[str, Any]) -> Any:
         version: DraftVersion = row["version"]
+        # #810: resolve the label via doc_type so an Eelnõu's v1
+        # placeholder ('vtk') renders as "Esitatud" rather than "VTK".
+        # The CSS class still mirrors the raw stage so existing
+        # diagnostic styling keeps working.
         return Badge(
-            _format_reading_stage(version.reading_stage),
+            _format_reading_stage_for_draft(version.reading_stage, draft.doc_type),
             variant="primary",
             cls=f"reading-stage reading-stage-{version.reading_stage}",
         )
@@ -400,6 +433,13 @@ def draft_diff_page(req: Request, draft_id: str):
 
     title = f"{draft.title} — versioonide erinevus v{from_num} → v{to_num}"
 
+    # #810: resolve the per-version stage label up here so the H3 below
+    # stays readable inside the PageShell. Both sides go through the
+    # doc_type-aware helper so an Eelnõu's v1 placeholder ('vtk') reads
+    # "Esitatud" — never "VTK".
+    _left_label = _format_reading_stage_for_draft(left_version.reading_stage, draft.doc_type)
+    _right_label = _format_reading_stage_for_draft(right_version.reading_stage, draft.doc_type)
+
     return PageShell(
         H1(  # noqa: F405
             f"Versioonide erinevus v{from_num} → v{to_num}",
@@ -416,9 +456,9 @@ def draft_diff_page(req: Request, draft_id: str):
             CardHeader(
                 H3(  # noqa: F405
                     (
-                        f"v{from_num} ({_format_reading_stage(left_version.reading_stage)}) "
-                        f"võrreldes v{to_num} "
-                        f"({_format_reading_stage(right_version.reading_stage)})"
+                        # #810: doc_type-aware labels — an Eelnõu's v1
+                        # placeholder shows "Esitatud" rather than "VTK".
+                        f"v{from_num} ({_left_label}) võrreldes v{to_num} ({_right_label})"
                     ),
                     cls="card-title",
                 ),

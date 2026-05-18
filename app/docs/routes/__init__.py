@@ -94,9 +94,11 @@ from app.docs.routes._detail_modals import (
     _link_vtk_modal,
 )
 from app.docs.routes._detail_versions import (
+    _EELNOU_INITIAL_LABEL_ET,
     _READING_STAGE_LABELS_ET,
     _diff_not_found_response,
     _format_reading_stage,
+    _format_reading_stage_for_draft,
     _version_timeline_rows,
     _version_timeline_section,
     draft_diff_page,
@@ -231,9 +233,11 @@ __all__ = [
     "draft_status_fragment",
     "link_vtk_handler",
     # _detail_versions.py (#704 PR-E)
+    "_EELNOU_INITIAL_LABEL_ET",
     "_READING_STAGE_LABELS_ET",
     "_diff_not_found_response",
     "_format_reading_stage",
+    "_format_reading_stage_for_draft",
     "_version_timeline_rows",
     "_version_timeline_section",
     "draft_diff_page",
