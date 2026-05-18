@@ -73,10 +73,18 @@ class ActTimeline:
     consolidated act may carry no ``lastAmendmentDate`` literal.
 
     Attributes:
-        act_uri: The Act URI the timeline describes. Empty for
+        act_uri: The Act *identifier* — either a URI (legacy/fixture
+            path where ``estleg:sourceAct`` points at an act node) or
+            a literal title string (prod path, where ``sourceAct`` is
+            an ``xsd:string`` literal). The field name is kept for
+            backward-compat; the route layer treats it as an opaque
+            identifier and only the URI form is fed to
+            :func:`app.explorer.urls.explorer_focus_url`. Empty for
             provision-only inputs whose parent act is not in the
             ontology (defensive).
-        act_label: ``rdfs:label`` on the act, fallback to URI tail.
+        act_label: ``rdfs:label`` on the act, fallback to URI tail
+            or — when ``act_uri`` is itself a literal title — the
+            same string.
         entry_into_force: ``estleg:entryIntoForce`` parsed as ``date``.
         repeal_date: ``estleg:repealDate`` parsed as ``date``.
         last_amendment_date: ``estleg:lastAmendmentDate`` parsed as
@@ -271,20 +279,41 @@ LIMIT 1
 """
 )
 
-# Provision → owning act discovery. The ontology uses ``estleg:partOf``
-# as the primary edge (Sanctions workflow relies on the same) plus
-# ``estleg:sourceAct`` (newer fixture data); we UNION both so the
-# discovery works regardless of which shape the corpus uses.
+# Provision → owning act discovery. In prod ``estleg:sourceAct`` is a
+# *literal* title (24,221 triples, all ``xsd:string``) and
+# ``estleg:partOf`` carries zero rows — verified by the 2026-05-18
+# ontology probe (see ``docs/2026-05-18-bugfix-plan.md`` Wave 2
+# Step 1). The query therefore projects the literal title of the act;
+# the legacy ``partOf`` arm was dropped because it was dead weight.
+#
+# The result column is named ``?actLabel`` even though in prod it
+# equals the ``estleg:sourceAct`` literal directly — the route
+# downstream consumes a "title string", regardless of whether that
+# string came from ``rdfs:label`` of an act URI (fixture path) or
+# ``estleg:sourceAct`` (prod path).
 _PROVISION_OWNING_ACT_QUERY = (
     PREFIXES
     + """
-SELECT DISTINCT ?act
+SELECT DISTINCT ?actLabel
 WHERE {
-  {
-    ?provision estleg:partOf ?act .
-  } UNION {
-    ?provision estleg:sourceAct ?act .
-  }
+  ?provision estleg:sourceAct ?actLabel .
+}
+LIMIT 1
+"""
+)
+
+
+# When the owning-act resolution falls back to a URI (e.g. fixture
+# data where ``sourceAct`` points at an act node rather than a literal),
+# we peek the act's ``rdfs:label`` so downstream sections can still
+# join by a literal title. This is a backwards-compat shim — prod data
+# never reaches it because prod's ``sourceAct`` is already a literal.
+_ACT_LABEL_FOR_URI_QUERY = (
+    PREFIXES
+    + """
+SELECT ?label
+WHERE {
+  ?act rdfs:label ?label .
 }
 LIMIT 1
 """
@@ -292,37 +321,39 @@ LIMIT 1
 
 # AmendmentEvent rows — one row per (event, affected_provision) pair.
 # The route layer aggregates by event URI. We surface every event whose
-# ``amends`` target is the input URI OR a sibling provision of the
-# input's owning act. The UNION arm with ``partOf`` widens the match
-# for the act-level case.
+# ``amends`` target is either (a) the resolved input URI directly, or
+# (b) a sibling provision that shares the input's owning-act *title
+# literal* via ``estleg:sourceAct``.
 #
-# ``?inputUri`` is the entity the user resolved. ``?actUri`` is the
-# owning act (resolved separately for provisions, equal to ``?inputUri``
-# for act-level inputs).
+# Prod data shape (2026-05-18 ontology probe): ``estleg:sourceAct`` is
+# a literal title; ``estleg:partOf`` / ``estleg:partOfAct`` carry zero
+# rows. The legacy UNION arms that joined through ``partOf`` or matched
+# ``amends ?actUri`` against an act URI were dead in prod and have
+# been removed. See ``docs/2026-05-18-bugfix-plan.md`` Wave 2 Step 5.
+#
+# Bindings:
+# * ``?inputUri`` — the resolved entity URI (always set).
+# * ``?actLit``   — the owning-act title literal (empty string when no
+#                   owning-act could be resolved; the sibling-via-act
+#                   arm then matches zero rows naturally).
 _AMENDMENT_EVENTS_QUERY = (
     PREFIXES
     + """
 SELECT DISTINCT ?event ?eventLabel ?eventDate ?entryIntoForceDate ?rtReference
                 ?affectedProvision ?affectedLabel
 WHERE {
+  ?event a estleg:AmendmentEvent .
+  ?event estleg:amends ?affectedProvision .
   {
-    ?event a estleg:AmendmentEvent .
-    ?event estleg:amends ?affectedProvision .
-    {
-      ?event estleg:amends ?inputUri .
-    } UNION {
-      ?event estleg:amends ?actUri .
-    } UNION {
-      ?affectedProvision estleg:partOf ?actUri .
-    } UNION {
-      ?affectedProvision estleg:sourceAct ?actUri .
-    }
-    OPTIONAL { ?event rdfs:label ?eventLabel }
-    OPTIONAL { ?event estleg:eventDate ?eventDate }
-    OPTIONAL { ?event estleg:entryIntoForceDate ?entryIntoForceDate }
-    OPTIONAL { ?event estleg:rtReference ?rtReference }
-    OPTIONAL { ?affectedProvision rdfs:label ?affectedLabel }
+    ?event estleg:amends ?inputUri .
+  } UNION {
+    ?affectedProvision estleg:sourceAct ?actLit .
   }
+  OPTIONAL { ?event rdfs:label ?eventLabel }
+  OPTIONAL { ?event estleg:eventDate ?eventDate }
+  OPTIONAL { ?event estleg:entryIntoForceDate ?entryIntoForceDate }
+  OPTIONAL { ?event estleg:rtReference ?rtReference }
+  OPTIONAL { ?affectedProvision rdfs:label ?affectedLabel }
 }
 ORDER BY DESC(?eventDate)
 LIMIT """
@@ -334,6 +365,12 @@ LIMIT """
 # provision of the input act. ``EUCourtDecision`` extends
 # ``CourtDecision`` in SHACL; querying the bare ``interpretsLaw``
 # predicate catches both.
+#
+# Same prod-shape rewrite as the amendment-events query above: the
+# legacy arms that interpreted act URIs (``?decision interpretsLaw
+# ?actUri`` and ``?interpretsUri partOf ?actUri``) were dead in prod
+# and have been replaced with the literal-title join via
+# ``estleg:sourceAct``.
 _COURT_DECISIONS_QUERY = (
     PREFIXES
     + """
@@ -344,11 +381,7 @@ WHERE {
   {
     ?decision estleg:interpretsLaw ?inputUri .
   } UNION {
-    ?decision estleg:interpretsLaw ?actUri .
-  } UNION {
-    ?interpretsUri estleg:partOf ?actUri .
-  } UNION {
-    ?interpretsUri estleg:sourceAct ?actUri .
+    ?interpretsUri estleg:sourceAct ?actLit .
   }
   OPTIONAL { ?decision rdfs:label ?decisionLabel }
   OPTIONAL { ?decision estleg:decisionDate ?decisionDate }
@@ -361,9 +394,14 @@ LIMIT """
 )
 
 # Pending drafts — DraftLegislation OR DraftingIntent that ``amends``
-# the input directly OR the owning act. ``submittedDate`` is OPTIONAL
-# (older fixtures don't carry it); the Python sort treats ``None`` as
-# oldest.
+# the input directly OR a sibling provision sharing the input's
+# owning-act title literal. ``submittedDate`` is OPTIONAL (older
+# fixtures don't carry it); the Python sort treats ``None`` as oldest.
+#
+# Prod-shape rewrite (2026-05-18 plan, Wave 2 Step 5): the legacy
+# ``?draft estleg:amends ?actUri`` arm was joined against act URIs
+# that don't exist atomically in prod; replaced with the sibling
+# lookup ``?affected estleg:sourceAct ?actLit``.
 _PENDING_DRAFTS_QUERY = (
     PREFIXES
     + """
@@ -379,7 +417,8 @@ WHERE {
   {
     ?draft estleg:amends ?inputUri .
   } UNION {
-    ?draft estleg:amends ?actUri .
+    ?draft estleg:amends ?affected .
+    ?affected estleg:sourceAct ?actLit .
   }
   OPTIONAL { ?draft rdfs:label ?draftLabel }
   OPTIONAL { ?draft estleg:submittedDate ?submittedDate }
@@ -442,11 +481,21 @@ def resolve_owning_act(
     *,
     sparql_client: SparqlClient | None = None,
 ) -> str:
-    """Return the Act URI that owns ``provision_uri``, or ``""`` if none.
+    """Return the owning act identifier for ``provision_uri``, or ``""``.
 
-    Walks ``estleg:partOf`` / ``estleg:sourceAct``. Empty input or a
-    provision with no owning-act edge yields ``""`` — the caller treats
-    that as "no act-level timeline available".
+    Walks ``estleg:sourceAct``. In prod the value of ``sourceAct`` is a
+    *literal title* (e.g. ``"Avaliku teabe seadus"``); the function
+    therefore returns a string that may be either a literal title
+    (prod path) or, when an older fixture serialises ``sourceAct`` as
+    a URI pointing at an act node, an act URI (legacy path —
+    downstream helpers reverse-lookup the URI's ``rdfs:label`` to
+    bring it back to the literal form).
+
+    Empty input or a provision with no owning-act edge yields ``""``
+    — the caller treats that as "no act-level timeline available".
+
+    The legacy ``estleg:partOf`` UNION arm was dropped: the 2026-05-18
+    prod-Jena probe found zero ``partOf`` / ``partOfAct`` triples.
     """
     uri = (provision_uri or "").strip()
     if not uri:
@@ -463,9 +512,39 @@ def resolve_owning_act(
         return ""
 
     for row in rows or []:
-        act_uri = _as_str(row.get("act"))
-        if act_uri:
-            return act_uri
+        # The new query projects ``?actLabel`` (the literal title in
+        # prod, or the URI of a fixture act node). Older test stubs
+        # still set ``?act``; check both for back-compat.
+        candidate = _as_str(row.get("actLabel")) or _as_str(row.get("act"))
+        if candidate:
+            return candidate
+    return ""
+
+
+def _act_literal_for(identifier: str, *, client: SparqlClient) -> str:
+    """Coerce *identifier* to a literal act-title string.
+
+    Pass-through when *identifier* is not a URI. When it's a URI
+    (legacy fixture path), reverse-lookup ``rdfs:label`` and return
+    that. Returns ``""`` for empty input or a URI without a label.
+    """
+    text = (identifier or "").strip()
+    if not text:
+        return ""
+    if not (text.startswith("http://") or text.startswith("https://")):
+        return text
+    try:
+        rows = client.query(
+            _ACT_LABEL_FOR_URI_QUERY,
+            uri_bindings={"act": text},
+        )
+    except Exception:
+        logger.warning("_act_literal_for: rdfs:label lookup failed for %r", text, exc_info=True)
+        return ""
+    for row in rows or []:
+        label = _as_str(row.get("label"))
+        if label:
+            return label
     return ""
 
 
@@ -479,28 +558,48 @@ def get_act_timeline(
     Empty input yields an empty :class:`ActTimeline`. SPARQL errors
     degrade to an empty timeline so the route renders a muted "andmed
     puuduvad" row rather than a 500.
+
+    The ``act_uri`` parameter keeps its historical name but accepts
+    either a URI (fixture / legacy path — joined via ``?act ?p ?o``)
+    or an act title literal (prod path — used only as the
+    ``act_label`` on the returned envelope, since prod has no atomic
+    Act URI nodes carrying ``entryIntoForce`` / ``repealDate`` /
+    etc.). The graceful-degradation contract: in prod the envelope
+    returns with just the title populated and the date fields
+    ``None``; the route renders that as a muted timeline section
+    rather than a 500.
     """
-    uri = (act_uri or "").strip()
-    if not uri:
+    identifier = (act_uri or "").strip()
+    if not identifier:
         return ActTimeline()
+
+    is_uri = identifier.startswith("http://") or identifier.startswith("https://")
+
+    # Literal-title path (prod): we have nothing to SELECT against in
+    # the deployed corpus, so return an envelope with the title only.
+    # Date predicates aren't carried by any atomic Act URI in prod
+    # (the only ``estleg:Law`` instances are topic-map clusters per
+    # the 2026-05-18 probe).
+    if not is_uri:
+        return ActTimeline(act_uri=identifier, act_label=identifier)
 
     client = sparql_client if sparql_client is not None else SparqlClient()
     try:
         rows = client.query(
             _ACT_TIMELINE_QUERY,
-            uri_bindings={"act": uri},
+            uri_bindings={"act": identifier},
         )
     except Exception:
-        logger.warning("get_act_timeline: SPARQL query failed for %r", uri, exc_info=True)
-        return ActTimeline(act_uri=uri)
+        logger.warning("get_act_timeline: SPARQL query failed for %r", identifier, exc_info=True)
+        return ActTimeline(act_uri=identifier)
 
     if not rows:
-        return ActTimeline(act_uri=uri)
+        return ActTimeline(act_uri=identifier)
 
     row = rows[0]
-    label = _as_str(row.get("actLabel")) or _uri_tail(uri)
+    label = _as_str(row.get("actLabel")) or _uri_tail(identifier)
     return ActTimeline(
-        act_uri=uri,
+        act_uri=identifier,
         act_label=label,
         entry_into_force=_parse_date(row.get("entryIntoForce")),
         repeal_date=_parse_date(row.get("repealDate")),
@@ -518,24 +617,29 @@ def list_amendment_events(
     """Return every AmendmentEvent touching the input or its owning act.
 
     Aggregates raw (event, affected_provision) rows into one row per
-    AmendmentEvent. ``act_uri`` may be empty when no owning act was
-    resolved (the input is the act itself, or no ``partOf`` edge); we
-    still query and pass through whatever the SPARQL FILTER lets
-    through. Empty inputs short-circuit.
+    AmendmentEvent. The ``act_uri`` parameter keeps its historical
+    name but now holds the **owning-act title literal** in prod
+    (legacy URI form is auto-resolved to the literal via
+    :func:`_act_literal_for`). Empty inputs short-circuit.
+
+    Binding contract: ``?inputUri`` is the provision/act entity URI,
+    and ``?actLit`` is the title literal — the prod data joins through
+    ``estleg:sourceAct`` literals, not ``estleg:partOf`` URIs (zero
+    rows of that predicate in prod, see ``docs/2026-05-18-bugfix-plan.md``
+    Wave 2 Step 1).
     """
     input_clean = (input_uri or "").strip()
     if not input_clean:
         return []
 
     client = sparql_client if sparql_client is not None else SparqlClient()
-    # ``actUri`` defaults to the input URI when no owning act exists —
-    # the SPARQL UNION arms then collapse to "match the input itself".
-    effective_act = (act_uri or "").strip() or input_clean
+    act_literal = _act_literal_for(act_uri, client=client)
 
     try:
         rows = client.query(
             _AMENDMENT_EVENTS_QUERY,
-            uri_bindings={"inputUri": input_clean, "actUri": effective_act},
+            uri_bindings={"inputUri": input_clean},
+            bindings={"actLit": act_literal},
         )
     except Exception:
         logger.warning(
@@ -557,7 +661,13 @@ def list_court_decisions(
 ) -> list[HistoryCourtDecisionRow]:
     """Return court decisions interpreting the input or any sibling provision.
 
-    Same UNION-of-sources pattern as :func:`list_amendment_events`.
+    Same prod-shape binding contract as :func:`list_amendment_events`:
+    ``?inputUri`` is the entity URI and ``?actLit`` is the
+    owning-act title literal (legacy URI form is auto-coerced via
+    :func:`_act_literal_for`). The literal-title join through
+    ``estleg:sourceAct`` is the only sibling-discovery path that
+    carries rows in prod.
+
     Sorted newest-first via the SPARQL ``ORDER BY DESC(?decisionDate)``;
     rows with no date sink to the end after the Python tie-break sort.
     """
@@ -566,12 +676,13 @@ def list_court_decisions(
         return []
 
     client = sparql_client if sparql_client is not None else SparqlClient()
-    effective_act = (act_uri or "").strip() or input_clean
+    act_literal = _act_literal_for(act_uri, client=client)
 
     try:
         rows = client.query(
             _COURT_DECISIONS_QUERY,
-            uri_bindings={"inputUri": input_clean, "actUri": effective_act},
+            uri_bindings={"inputUri": input_clean},
+            bindings={"actLit": act_literal},
         )
     except Exception:
         logger.warning(
@@ -613,19 +724,23 @@ def list_pending_drafts(
 ) -> list[PendingDraftRow]:
     """Return pending DraftLegislation / DraftingIntent rows targeting the input.
 
-    Forward-look section. Same UNION pattern. Empty input ⇒ ``[]``.
+    Forward-look section. Same prod-shape binding contract as
+    :func:`list_amendment_events` — ``?inputUri`` is the entity URI
+    and ``?actLit`` is the owning-act title literal. Empty input ⇒
+    ``[]``.
     """
     input_clean = (input_uri or "").strip()
     if not input_clean:
         return []
 
     client = sparql_client if sparql_client is not None else SparqlClient()
-    effective_act = (act_uri or "").strip() or input_clean
+    act_literal = _act_literal_for(act_uri, client=client)
 
     try:
         rows = client.query(
             _PENDING_DRAFTS_QUERY,
-            uri_bindings={"inputUri": input_clean, "actUri": effective_act},
+            uri_bindings={"inputUri": input_clean},
+            bindings={"actLit": act_literal},
         )
     except Exception:
         logger.warning(
@@ -756,10 +871,13 @@ def get_history_bundle(
         input_uri: The resolved entity URI.
         input_type: ``"provision"`` / ``"act"`` / ``"court_decision"``
             — drives owning-act resolution. A provision walks
-            ``partOf`` / ``sourceAct`` to find the act; an act-typed
-            input uses itself; a court decision uses itself (we still
-            run the queries — they'll surface decisions citing this
-            decision via no edge, so the section is typically empty).
+            ``estleg:sourceAct`` to find the act title literal (the
+            legacy ``estleg:partOf`` arm was dropped because that
+            predicate carries zero rows in prod, per the 2026-05-18
+            ontology probe); an act-typed input uses itself; a
+            court decision uses itself (we still run the queries —
+            they'll surface decisions citing this decision via no
+            edge, so the section is typically empty).
         sparql_client: Optional override for the SPARQL helpers.
         db_connection: Optional override for the impact-reports query.
 
@@ -771,19 +889,43 @@ def get_history_bundle(
         return HistoryBundle(input_type=input_type or "")
 
     if input_type == "provision":
-        act_uri = resolve_owning_act(uri, sparql_client=sparql_client)
+        act_identifier = resolve_owning_act(uri, sparql_client=sparql_client)
     else:
         # Act / court_decision / anything else: treat the input as
         # the act itself for the timeline + sibling queries.
-        act_uri = uri
+        act_identifier = uri
 
+    # Build the act-level timeline first. For URI-shaped identifiers
+    # ``get_act_timeline`` resolves the URI's ``rdfs:label`` once and
+    # we can reuse the resulting literal across the three downstream
+    # section helpers without each re-issuing the same lookup.
     act_timeline = (
-        get_act_timeline(act_uri, sparql_client=sparql_client) if act_uri else ActTimeline()
+        get_act_timeline(act_identifier, sparql_client=sparql_client)
+        if act_identifier
+        else ActTimeline()
     )
-    amendments = list_amendment_events(uri, act_uri, sparql_client=sparql_client)
-    court_decisions = list_court_decisions(uri, act_uri, sparql_client=sparql_client)
+    # Resolve the act-for-sections string ONCE so the per-section
+    # helpers don't re-fire ``rdfs:label`` lookups:
+    # * Timeline returned a literal label → use it directly.
+    # * Timeline returned nothing AND the identifier is a literal
+    #   (prod path) → use the literal identifier directly.
+    # * Timeline returned nothing AND the identifier is a URI without
+    #   a label → fall through with the empty string so the
+    #   sibling-via-``sourceAct`` UNION arm naturally matches zero
+    #   rows in each helper.
+    if act_timeline.act_label:
+        act_for_sections = act_timeline.act_label
+    elif act_identifier and not (
+        act_identifier.startswith("http://") or act_identifier.startswith("https://")
+    ):
+        act_for_sections = act_identifier
+    else:
+        act_for_sections = ""
+
+    amendments = list_amendment_events(uri, act_for_sections, sparql_client=sparql_client)
+    court_decisions = list_court_decisions(uri, act_for_sections, sparql_client=sparql_client)
     impact_reports = list_impact_reports(uri, db_connection=db_connection)
-    pending_drafts = list_pending_drafts(uri, act_uri, sparql_client=sparql_client)
+    pending_drafts = list_pending_drafts(uri, act_for_sections, sparql_client=sparql_client)
 
     return HistoryBundle(
         input_uri=uri,

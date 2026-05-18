@@ -82,12 +82,26 @@ class TestTemporalStatusLabel:
 
 
 class TestResolveOwningAct:
-    def test_returns_act_uri(self):
+    def test_returns_act_uri_legacy_key(self):
+        """Legacy ``?act`` projection (older test stubs) still works."""
         from app.analyysikeskus.history import resolve_owning_act
 
         stub = MagicMock()
         stub.query.return_value = [{"act": _ACT_URI}]
         assert resolve_owning_act(_PROVISION_URI, sparql_client=stub) == _ACT_URI
+
+    def test_returns_literal_title_from_prod_key(self):
+        """Prod contract: ``?actLabel`` projects the ``estleg:sourceAct`` literal.
+
+        Per the 2026-05-18 ontology probe, ``estleg:sourceAct`` is a
+        literal title (e.g. ``"Avaliku teabe seadus"``) — never an
+        act URI. The resolver returns the literal directly.
+        """
+        from app.analyysikeskus.history import resolve_owning_act
+
+        stub = MagicMock()
+        stub.query.return_value = [{"actLabel": "Avaliku teabe seadus"}]
+        assert resolve_owning_act(_PROVISION_URI, sparql_client=stub) == "Avaliku teabe seadus"
 
     def test_blank_uri_skips_jena(self):
         from app.analyysikeskus.history import resolve_owning_act
@@ -102,6 +116,18 @@ class TestResolveOwningAct:
         stub = MagicMock()
         stub.query.side_effect = RuntimeError("jena down")
         assert resolve_owning_act(_PROVISION_URI, sparql_client=stub) == ""
+
+    def test_owning_act_query_drops_partof(self):
+        """The owning-act query no longer references ``estleg:partOf``.
+
+        Acceptance criterion 1 of Wave 2 Step 5: no active SPARQL
+        string references ``estleg:partOf`` / ``estleg:partOfAct``.
+        """
+        from app.analyysikeskus.history import _PROVISION_OWNING_ACT_QUERY
+
+        assert "estleg:partOf" not in _PROVISION_OWNING_ACT_QUERY
+        assert "estleg:partOfAct" not in _PROVISION_OWNING_ACT_QUERY
+        assert "estleg:sourceAct" in _PROVISION_OWNING_ACT_QUERY
 
 
 class TestGetActTimeline:
@@ -150,6 +176,80 @@ class TestGetActTimeline:
         timeline = get_act_timeline(_ACT_URI, sparql_client=stub)
         assert timeline.act_uri == _ACT_URI
         assert timeline.entry_into_force is None
+
+
+class TestActLiteralFor:
+    """Internal helper that coerces URI input to a literal act title."""
+
+    def test_literal_input_short_circuits(self):
+        from app.analyysikeskus.history import _act_literal_for
+
+        stub = MagicMock()
+        assert _act_literal_for("Avaliku teabe seadus", client=stub) == "Avaliku teabe seadus"
+        # No SPARQL call needed for an already-literal title.
+        stub.query.assert_not_called()
+
+    def test_uri_input_reverse_looks_up_label(self):
+        from app.analyysikeskus.history import _act_literal_for
+
+        stub = MagicMock()
+        stub.query.return_value = [{"label": "Avaliku teabe seadus"}]
+        assert _act_literal_for(_ACT_URI, client=stub) == "Avaliku teabe seadus"
+        stub.query.assert_called_once()
+
+    def test_uri_with_no_label_returns_empty(self):
+        from app.analyysikeskus.history import _act_literal_for
+
+        stub = MagicMock()
+        stub.query.return_value = []
+        assert _act_literal_for(_ACT_URI, client=stub) == ""
+
+    def test_blank_input_returns_empty(self):
+        from app.analyysikeskus.history import _act_literal_for
+
+        stub = MagicMock()
+        assert _act_literal_for("", client=stub) == ""
+        assert _act_literal_for("   ", client=stub) == ""
+        stub.query.assert_not_called()
+
+
+class TestAmendmentEventsLiteralContract:
+    """The prod-shape join contract: bind ``?actLit`` as a string literal."""
+
+    def test_literal_act_title_uses_string_binding(self):
+        """A literal-title input flows straight to ``bindings={'actLit': ...}``."""
+        from app.analyysikeskus.history import list_amendment_events
+
+        stub = MagicMock()
+        stub.query.return_value = [
+            {
+                "event": _EVENT_URI,
+                "eventLabel": "Amendment Event 1",
+                "eventDate": "2023-03-15",
+                "rtReference": "RT I, 04.01.2023, 12",
+                "affectedProvision": _PROVISION_URI,
+                "affectedLabel": "Provision 1",
+            }
+        ]
+
+        rows = list_amendment_events(_PROVISION_URI, "Avaliku teabe seadus", sparql_client=stub)
+        assert len(rows) == 1
+        assert rows[0].event_uri == _EVENT_URI
+        # Exactly one SPARQL call (no rdfs:label reverse-lookup pre-step).
+        assert stub.query.call_count == 1
+        kwargs = stub.query.call_args.kwargs
+        # ``?inputUri`` is bound as a URI; ``?actLit`` as a string literal.
+        assert kwargs.get("uri_bindings") == {"inputUri": _PROVISION_URI}
+        assert kwargs.get("bindings") == {"actLit": "Avaliku teabe seadus"}
+
+    def test_amendment_query_drops_partof(self):
+        from app.analyysikeskus.history import _AMENDMENT_EVENTS_QUERY
+
+        assert "estleg:partOf" not in _AMENDMENT_EVENTS_QUERY
+        assert "estleg:partOfAct" not in _AMENDMENT_EVENTS_QUERY
+        # And the new sibling-via-sourceAct arm is present.
+        assert "?actLit" in _AMENDMENT_EVENTS_QUERY
+        assert "estleg:sourceAct ?actLit" in _AMENDMENT_EVENTS_QUERY
 
 
 class TestListAmendmentEvents:
@@ -204,6 +304,139 @@ class TestListAmendmentEvents:
         stub = MagicMock()
         stub.query.side_effect = RuntimeError("dead")
         assert list_amendment_events(_PROVISION_URI, _ACT_URI, sparql_client=stub) == []
+
+
+class TestCourtDecisionsLiteralContract:
+    """The prod-shape join contract for the court-decisions query."""
+
+    def test_literal_act_title_uses_string_binding(self):
+        from app.analyysikeskus.history import list_court_decisions
+
+        stub = MagicMock()
+        stub.query.return_value = [
+            {
+                "decision": _COURT_URI,
+                "decisionLabel": "Court Decision 1",
+                "decisionDate": "2022-06-10",
+                "interpretsUri": _PROVISION_URI,
+                "interpretsLabel": "Provision 1",
+            }
+        ]
+
+        rows = list_court_decisions(_PROVISION_URI, "Avaliku teabe seadus", sparql_client=stub)
+        assert len(rows) == 1
+        assert stub.query.call_count == 1
+        kwargs = stub.query.call_args.kwargs
+        assert kwargs.get("uri_bindings") == {"inputUri": _PROVISION_URI}
+        assert kwargs.get("bindings") == {"actLit": "Avaliku teabe seadus"}
+
+    def test_court_query_drops_partof(self):
+        from app.analyysikeskus.history import _COURT_DECISIONS_QUERY
+
+        assert "estleg:partOf" not in _COURT_DECISIONS_QUERY
+        assert "estleg:partOfAct" not in _COURT_DECISIONS_QUERY
+        assert "?actLit" in _COURT_DECISIONS_QUERY
+        assert "estleg:sourceAct ?actLit" in _COURT_DECISIONS_QUERY
+
+
+class TestPendingDraftsLiteralContract:
+    """The prod-shape join contract for the pending-drafts query."""
+
+    def test_literal_act_title_uses_string_binding(self):
+        from app.analyysikeskus.history import list_pending_drafts
+
+        stub = MagicMock()
+        stub.query.return_value = [
+            {
+                "draft": _DRAFT_URI,
+                "draftLabel": "Eelnõu 1",
+                "draftType": "DraftLegislation",
+                "submittedDate": "2024-02-20",
+            }
+        ]
+
+        rows = list_pending_drafts(_PROVISION_URI, "Avaliku teabe seadus", sparql_client=stub)
+        assert len(rows) == 1
+        assert rows[0].draft_uri == _DRAFT_URI
+        assert stub.query.call_count == 1
+        kwargs = stub.query.call_args.kwargs
+        assert kwargs.get("uri_bindings") == {"inputUri": _PROVISION_URI}
+        assert kwargs.get("bindings") == {"actLit": "Avaliku teabe seadus"}
+
+    def test_drafts_query_drops_partof_and_act_uri_arm(self):
+        from app.analyysikeskus.history import _PENDING_DRAFTS_QUERY
+
+        assert "estleg:partOf" not in _PENDING_DRAFTS_QUERY
+        assert "estleg:partOfAct" not in _PENDING_DRAFTS_QUERY
+        # The legacy ``?draft estleg:amends ?actUri`` arm is gone.
+        assert "?actUri" not in _PENDING_DRAFTS_QUERY
+        assert "?actLit" in _PENDING_DRAFTS_QUERY
+
+
+class TestHistoryBundleProdShape:
+    """End-to-end regression: the bundle flow against prod-shaped data.
+
+    Walks a Provision URI through ``get_history_bundle`` using
+    prod-shape SPARQL responses (``sourceAct`` returns a literal title;
+    no ``partOf`` rows; no atomic act URI for the timeline). The
+    amendment chain must still surface through the new literal-join.
+    """
+
+    def test_provision_amendment_chain_resolves_through_literal(self):
+        from app.analyysikeskus.history import get_history_bundle
+
+        stub_sparql = MagicMock()
+        # Prod-shape SPARQL responses:
+        # 1. resolve_owning_act → returns the literal title via ?actLabel.
+        # 2. get_act_timeline → sees a literal, short-circuits without
+        #    a SPARQL call (no atomic act URI exists in prod).
+        # 3. amendments query → returns a sibling-affected event row.
+        # 4. court query → empty.
+        # 5. pending-drafts query → empty.
+        stub_sparql.query.side_effect = [
+            [{"actLabel": "Avaliku teabe seadus"}],
+            [
+                {
+                    "event": _EVENT_URI,
+                    "eventLabel": "AvTS muudatus 2024",
+                    "eventDate": "2024-02-15",
+                    "rtReference": "RT I, 15.02.2024, 4",
+                    "affectedProvision": _PROVISION_URI,
+                    "affectedLabel": "AvTS § 35",
+                }
+            ],
+            [],  # court
+            [],  # pending
+        ]
+        stub_conn = MagicMock()
+        stub_cur = MagicMock()
+        stub_conn.cursor.return_value.__enter__.return_value = stub_cur
+        stub_conn.cursor.return_value.__exit__.return_value = None
+        stub_cur.fetchall.return_value = []
+
+        bundle = get_history_bundle(
+            _PROVISION_URI,
+            input_type="provision",
+            sparql_client=stub_sparql,
+            db_connection=stub_conn,
+        )
+
+        # The act-level envelope holds the literal title (no atomic
+        # Act URI exists in prod, so the timeline call short-circuits
+        # without a SPARQL hit).
+        assert bundle.act_timeline.act_label == "Avaliku teabe seadus"
+        assert bundle.act_timeline.entry_into_force is None
+        # The amendment chain resolved through the literal-join shape.
+        assert len(bundle.amendments) == 1
+        assert bundle.amendments[0].rt_reference == "RT I, 15.02.2024, 4"
+        # Exactly 4 SPARQL calls (owning-act + 3 section queries; the
+        # timeline call is skipped for the literal-title branch).
+        assert stub_sparql.query.call_count == 4
+        # All section queries received the literal title via
+        # string-binding, not URI-binding.
+        for call in stub_sparql.query.call_args_list[1:]:
+            kwargs = call.kwargs
+            assert kwargs.get("bindings") == {"actLit": "Avaliku teabe seadus"}
 
 
 class TestListCourtDecisions:

@@ -264,17 +264,70 @@ class TestListDecisionsForProvision:
 
 
 class TestListDecisionsForAct:
-    def test_aggregates_act_member_decisions(self):
+    def test_literal_title_uses_string_binding_directly(self):
+        """The prod contract: caller passes a literal act title string.
+
+        No reverse-lookup needed — the literal goes straight into
+        ``?actLit`` via ``bindings={"actLit": ...}`` and the SPARQL
+        joins ``?provision estleg:sourceAct ?actLit``.
+        """
         from app.analyysikeskus.court_practice import list_decisions_for_act
 
         stub_client = MagicMock()
         stub_client.query.return_value = [_dec_riigikohus_row()]
 
+        rows = list_decisions_for_act("Avaliku teabe seadus", sparql_client=stub_client)
+        assert len(rows) == 1
+        assert rows[0].decision_uri == _DEC_1_URI
+        # Exactly one SPARQL call (no reverse-lookup pre-step for literals).
+        assert stub_client.query.call_count == 1
+        # And the literal travelled via the string-binding API, not the
+        # URI-binding API.
+        kwargs = stub_client.query.call_args.kwargs
+        assert kwargs.get("bindings") == {"actLit": "Avaliku teabe seadus"}
+        assert "uri_bindings" not in kwargs or not kwargs.get("uri_bindings")
+
+    def test_uri_input_reverse_looks_up_label(self):
+        """Legacy/fixture contract: URI input ⇒ reverse-lookup ``rdfs:label``.
+
+        The first SPARQL call peeks the URI's label; the second
+        decisions query runs with the resolved literal as ``?actLit``.
+        """
+        from app.analyysikeskus.court_practice import list_decisions_for_act
+
+        stub_client = MagicMock()
+        # First call → label lookup; second call → decisions.
+        stub_client.query.side_effect = [
+            [{"label": "Avaliku teabe seadus"}],
+            [_dec_riigikohus_row()],
+        ]
+
         rows = list_decisions_for_act(_AVTS_URI, sparql_client=stub_client)
         assert len(rows) == 1
         assert rows[0].decision_uri == _DEC_1_URI
+        assert stub_client.query.call_count == 2
+        # Second call uses the resolved literal.
+        second_kwargs = stub_client.query.call_args_list[1].kwargs
+        assert second_kwargs.get("bindings") == {"actLit": "Avaliku teabe seadus"}
 
-    def test_blank_uri_returns_empty(self):
+    def test_uri_with_no_label_returns_empty_without_main_query(self):
+        """A URI input that has no ``rdfs:label`` ⇒ skip the main query and return ``[]``.
+
+        Prevents a spurious empty-literal join (``?actLit = ""``) that
+        could match nothing anyway but should never be sent.
+        """
+        from app.analyysikeskus.court_practice import list_decisions_for_act
+
+        stub_client = MagicMock()
+        # Label lookup returns no rows → resolver returns "".
+        stub_client.query.return_value = []
+
+        rows = list_decisions_for_act(_AVTS_URI, sparql_client=stub_client)
+        assert rows == []
+        # Only the label-lookup query ran — no decisions query.
+        assert stub_client.query.call_count == 1
+
+    def test_blank_input_returns_empty(self):
         from app.analyysikeskus.court_practice import list_decisions_for_act
 
         stub_client = MagicMock()
@@ -287,7 +340,7 @@ class TestListDecisionsForAct:
 
         stub_client = MagicMock()
         stub_client.query.side_effect = RuntimeError("jena down")
-        rows = list_decisions_for_act(_AVTS_URI, sparql_client=stub_client)
+        rows = list_decisions_for_act("Avaliku teabe seadus", sparql_client=stub_client)
         assert rows == []
 
     def test_query_uses_canonical_predicate_uris(self):
@@ -296,6 +349,21 @@ class TestListDecisionsForAct:
 
         assert PREDICATES.INTERPRETS_LAW in _ACT_DECISIONS_QUERY
         assert PREDICATES.INTERPRETED_BY in _ACT_DECISIONS_QUERY
+
+    def test_query_drops_partof_arm(self):
+        """The prod-shape rewrite drops the legacy ``estleg:partOf`` UNION arm.
+
+        Acceptance criterion 1 of the bugfix plan, Step 5: no active
+        SPARQL string references ``estleg:partOf`` /
+        ``estleg:partOfAct``.
+        """
+        from app.analyysikeskus.court_practice import _ACT_DECISIONS_QUERY
+
+        assert "estleg:partOf" not in _ACT_DECISIONS_QUERY
+        assert "estleg:partOfAct" not in _ACT_DECISIONS_QUERY
+        # And the new query uses ``?actLit`` as the literal binding.
+        assert "?actLit" in _ACT_DECISIONS_QUERY
+        assert "estleg:sourceAct ?actLit" in _ACT_DECISIONS_QUERY
 
 
 # ---------------------------------------------------------------------------

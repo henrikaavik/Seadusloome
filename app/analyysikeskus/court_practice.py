@@ -17,7 +17,10 @@ Public functions:
 * :func:`list_decisions_for_provision` — every decision interpreting a single
   provision.
 * :func:`list_decisions_for_act` — every decision interpreting *any* provision
-  of an act (joined via ``estleg:partOf`` or ``estleg:sourceAct``).
+  of an act. Joined via the literal ``estleg:sourceAct`` title in prod —
+  ``estleg:partOf`` carries zero rows in the deployed corpus (verified by
+  the 2026-05-18 ontology probe), so the historical UNION arm was dropped.
+  See ``docs/2026-05-18-bugfix-plan.md`` Wave 2 Step 5.
 * :func:`group_by_court` — pure helper: groups a list of
   :class:`CourtDecisionRow` rows by an Estonian court bucket
   (Riigikohus / Euroopa Kohus / ringkonnakohus / muu), counts citations, and
@@ -311,9 +314,15 @@ LIMIT {_MAX_DECISIONS_PER_QUERY}
 """
 )
 
-# The act-level query joins the provision via the two membership
-# predicates the corpus uses (``estleg:partOf`` and the older
-# ``estleg:sourceAct``) so neither serialisation is dropped.
+# The act-level query joins provisions to the act via the literal
+# ``estleg:sourceAct`` title (the only join path that carries rows in
+# prod — see the 2026-05-18 ontology probe in
+# ``docs/2026-05-18-bugfix-plan.md``: 24,221 ``sourceAct`` triples, all
+# ``xsd:string``; zero ``partOf`` / ``partOfAct`` triples).
+#
+# The act-binding is therefore a string-literal — ``?actLit`` — not a
+# URI, and the caller injects it via :meth:`SparqlClient._inject_bindings`
+# (the string-literal variant of ``_inject_uri_bindings``).
 _ACT_DECISIONS_QUERY = (
     PREFIXES
     + f"""
@@ -321,11 +330,7 @@ SELECT DISTINCT ?decision ?decisionLabel ?caseNumber ?decisionDate
                 ?court ?courtLabel ?type
                 ?provision ?provisionLabel
 WHERE {{
-  {{
-    ?provision estleg:partOf ?act .
-  }} UNION {{
-    ?provision estleg:sourceAct ?act .
-  }}
+  ?provision estleg:sourceAct ?actLit .
   {{
     ?decision <{PREDICATES.INTERPRETS_LAW}> ?provision .
   }} UNION {{
@@ -342,6 +347,25 @@ WHERE {{
 }}
 ORDER BY DESC(?decisionDate)
 LIMIT {_MAX_DECISIONS_PER_QUERY}
+"""
+)
+
+
+# Lightweight URI → literal-title reverse lookup. The corpus has no
+# atomic Act URIs but a caller may still pass a URI during the
+# resolver-rewrite transition (Wave 2 Step 2). When we get a URI, peek
+# its ``rdfs:label``; if a label exists, use that as ``?actLit``. If no
+# label is found (the common prod case for any caller still on the URI
+# shape) the caller sees an empty result rather than a silent SPARQL
+# error.
+_ACT_LABEL_FOR_URI_QUERY = (
+    PREFIXES
+    + """
+SELECT ?label
+WHERE {
+  ?act rdfs:label ?label .
+}
+LIMIT 1
 """
 )
 
@@ -394,43 +418,92 @@ def list_decisions_for_provision(
 
 
 def list_decisions_for_act(
-    act_uri: str,
+    act_identifier: str,
     *,
     sparql_client: SparqlClient | None = None,
 ) -> list[CourtDecisionRow]:
-    """Return every CourtDecision interpreting any provision of *act_uri*.
+    """Return every CourtDecision interpreting any provision of an act.
 
-    Walks the graph ``?provision estleg:partOf / estleg:sourceAct <act>``
-    then ``?decision interpretsLaw ?provision`` (or the inverse) and
-    aggregates.
+    Walks the graph ``?provision estleg:sourceAct ?actLit`` then
+    ``?decision interpretsLaw ?provision`` (or the inverse) and
+    aggregates. ``?actLit`` is bound as a *string literal* — the
+    deployed corpus stores ``estleg:sourceAct`` as a literal title
+    (24,221 triples, all ``xsd:string``; zero ``partOf`` triples), per
+    the 2026-05-18 ontology probe.
 
     Args:
-        act_uri: The Act URI. Empty / whitespace input yields ``[]``.
+        act_identifier: The act title literal (e.g.
+            ``"Avaliku teabe seadus"``). Accepts a URI during the
+            resolver-rewrite transition (Wave 2 Step 2): when the
+            input starts with ``http://`` / ``https://`` the helper
+            does a one-shot ``rdfs:label`` reverse-lookup and uses
+            that label as the literal. Empty / whitespace yields
+            ``[]``.
         sparql_client: Optional :class:`SparqlClient` override.
 
     Returns:
         A list of :class:`CourtDecisionRow` — deduped by
-        ``decision_uri``. ``[]`` on no matches / SPARQL error.
+        ``decision_uri``. ``[]`` on no matches / SPARQL error /
+        URI-with-no-label.
     """
-    uri = (act_uri or "").strip()
-    if not uri:
+    identifier = (act_identifier or "").strip()
+    if not identifier:
         return []
 
     client = sparql_client if sparql_client is not None else SparqlClient()
+    act_literal = _resolve_act_literal(identifier, client=client)
+    if not act_literal:
+        return []
+
     try:
         rows = client.query(
             _ACT_DECISIONS_QUERY,
-            uri_bindings={"act": uri},
+            bindings={"actLit": act_literal},
         )
     except Exception:
         logger.warning(
             "list_decisions_for_act: SPARQL query failed for %r",
-            uri,
+            identifier,
             exc_info=True,
         )
         return []
 
     return _rows_to_decisions(rows)
+
+
+def _resolve_act_literal(identifier: str, *, client: SparqlClient) -> str:
+    """Return the act title literal for *identifier*.
+
+    Pass-through when *identifier* is already a literal title (does not
+    start with ``http://`` / ``https://``). When it's a URI, look up
+    ``?act rdfs:label`` and return the first label; on miss or error,
+    returns ``""`` so the caller sees an empty result rather than a
+    spurious match.
+    """
+    text = identifier.strip()
+    if not text:
+        return ""
+    if not (text.startswith("http://") or text.startswith("https://")):
+        # Already a literal title.
+        return text
+    # URI path — peek the label.
+    try:
+        rows = client.query(
+            _ACT_LABEL_FOR_URI_QUERY,
+            uri_bindings={"act": text},
+        )
+    except Exception:
+        logger.warning(
+            "_resolve_act_literal: rdfs:label lookup failed for %r",
+            text,
+            exc_info=True,
+        )
+        return ""
+    for row in rows or []:
+        label = (row.get("label") or "").strip()
+        if label:
+            return label
+    return ""
 
 
 def group_by_court(
