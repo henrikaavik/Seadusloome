@@ -133,6 +133,15 @@ class TranspositionDeadlineRow:
 # module that already owns the vocabulary).
 
 
+#: Server-side floor for deadline literals. The ontology carries ~50 sentinel
+#: rows with implausibly old dates (e.g. ``"1001-01-01"``) that swallow the
+#: query LIMIT before any real overdue row surfaces. ``1980-01-01`` is a
+#: pragmatic floor — pre-dates the EEA agreement (1994) and the entire
+#: corpus of meaningful Estonian transposition data, while admitting every
+#: real directive in the current ingest. See bug #800.
+_DEADLINE_FLOOR_LITERAL = "1980-01-01"
+
+
 def _build_deadlines_query(cutoff: date) -> str:
     """Return the directives-with-deadline SPARQL query.
 
@@ -148,12 +157,19 @@ def _build_deadlines_query(cutoff: date) -> str:
     directions (``UNION`` of ``transposesDirective`` / ``transposedBy``).
     ``transpositionStatus`` is ``OPTIONAL`` and projected raw — the caller
     normalises and filters.
+
+    The WHERE clause also (a) floors the deadline at
+    :data:`_DEADLINE_FLOOR_LITERAL` to drop the ~50 sentinel pre-1980 rows
+    in the corpus that would otherwise eat the ``LIMIT`` (bug #800), and
+    (b) scopes to ``estleg:inForce true`` directives so repealed acts
+    don't surface as live transposition debt.
     """
     cutoff_literal = cutoff.isoformat()
     body = f"""
 SELECT DISTINCT ?euAct ?euLabel ?celex ?deadline ?eeAct ?status
 WHERE {{
   ?euAct a estleg:EULegislation .
+  ?euAct estleg:inForce true .
   ?euAct estleg:transpositionDeadline ?deadline .
   OPTIONAL {{ ?euAct rdfs:label ?euLabel }}
   OPTIONAL {{ ?euAct estleg:celexNumber ?celex }}
@@ -165,6 +181,7 @@ WHERE {{
     }}
     OPTIONAL {{ ?eeAct estleg:transpositionStatus ?status }}
   }}
+  FILTER(?deadline >= "{_DEADLINE_FLOOR_LITERAL}"^^xsd:date)
   FILTER(?deadline < "{cutoff_literal}"^^xsd:date)
 }}
 ORDER BY ASC(?deadline)
@@ -178,14 +195,28 @@ LIMIT {_DEADLINES_QUERY_LIMIT}
 # ---------------------------------------------------------------------------
 
 
+#: Python-side year floor — defence-in-depth against any sentinel literal
+#: that slips past the server-side
+#: ``FILTER(?deadline >= "1980-01-01"^^xsd:date)``. Kept in sync with
+#: :data:`_DEADLINE_FLOOR_LITERAL` deliberately. See bug #800.
+_DEADLINE_FLOOR_YEAR = 1980
+
+
 def _parse_deadline(raw: str | None) -> date | None:
     """Parse an ``xsd:date`` literal into a Python ``date``.
 
-    Returns ``None`` when the input is missing or malformed. ``xsd:date``
-    literals come back from Jena as either ``"YYYY-MM-DD"`` or, less
-    commonly, ``"YYYY-MM-DDZ"`` / with a timezone suffix — we strip the
-    timezone tail before parsing. A row with an unparseable deadline is
-    skipped by the caller (logged at debug — not a 500-worthy event).
+    Returns ``None`` when the input is missing, malformed, or carries an
+    implausibly old year (anything before :data:`_DEADLINE_FLOOR_YEAR` is
+    treated as a sentinel and rejected — see bug #800: the ontology has
+    ~50 directives whose deadline literal is ``"1001-01-01"`` and that
+    sentinel produced widget rows like ``"01.01.1001 · 374511 p möödunud"``
+    when accepted at face value).
+
+    ``xsd:date`` literals come back from Jena as either ``"YYYY-MM-DD"``
+    or, less commonly, ``"YYYY-MM-DDZ"`` / with a timezone suffix — we
+    strip the timezone tail before parsing. A row with an unparseable or
+    sentinel deadline is skipped by the caller (logged at debug — not a
+    500-worthy event).
     """
     if not raw:
         return None
@@ -197,10 +228,22 @@ def _parse_deadline(raw: str | None) -> date | None:
     if len(text) > 10 and text[10] in {"Z", "+", "-", "T"}:
         text = text[:10]
     try:
-        return datetime.strptime(text, "%Y-%m-%d").date()
+        parsed = datetime.strptime(text, "%Y-%m-%d").date()
     except ValueError:
         logger.debug("Could not parse transposition deadline literal %r", raw)
         return None
+    if parsed.year < _DEADLINE_FLOOR_YEAR:
+        # Sentinel pre-1980 date — the SPARQL server-side filter should
+        # already have dropped it, but treat as unparseable here so the
+        # widget never renders a year-1001-style row even if the data
+        # shifts in the future.
+        logger.debug(
+            "Rejecting pre-%d sentinel transposition deadline literal %r",
+            _DEADLINE_FLOOR_YEAR,
+            raw,
+        )
+        return None
+    return parsed
 
 
 def _celex_fallback(uri: str, raw_celex: str | None) -> str:

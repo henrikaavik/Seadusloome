@@ -30,6 +30,7 @@ from app.analyysikeskus.eu_transposition import (
     DEFAULT_TRANSPOSITION_HORIZON_DAYS,
     TranspositionDeadlineRow,
     _build_deadlines_query,
+    _parse_deadline,
     list_overdue_or_upcoming_transpositions,
 )
 
@@ -91,6 +92,54 @@ class TestBuildDeadlinesQuery:
         q = _build_deadlines_query(date(2026, 8, 13))
         assert "ORDER BY ASC(?deadline)" in q
         assert "LIMIT " in q
+
+    def test_query_floors_deadlines_to_drop_pre_1980_sentinels(self):
+        """Bug #800: the ontology carries ~50 sentinel rows with
+        ``"1001-01-01"`` deadlines that previously exhausted the
+        ``LIMIT 50`` before any real overdue row surfaced. The WHERE
+        clause now floors the deadline server-side."""
+        q = _build_deadlines_query(date(2026, 8, 13))
+        assert 'FILTER(?deadline >= "1980-01-01"^^xsd:date)' in q
+
+    def test_query_scopes_to_in_force_directives(self):
+        """Bug #800: repealed EU acts should not surface as live
+        transposition debt. ``estleg:inForce true`` is the predicate
+        present in prod Jena (26,313 boolean triples)."""
+        q = _build_deadlines_query(date(2026, 8, 13))
+        assert "estleg:inForce true" in q
+
+
+# ---------------------------------------------------------------------------
+# _parse_deadline — sentinel-year floor (bug #800)
+# ---------------------------------------------------------------------------
+
+
+class TestParseDeadlineSentinelFloor:
+    """Defence-in-depth Python-side floor for pre-1980 sentinel dates.
+
+    The server-side SPARQL filter already drops these, but the parser
+    enforces the same rule so the widget never re-renders a year-1001
+    row even if the ontology drifts.
+    """
+
+    def test_pre_1980_sentinel_year_1001_returns_none(self):
+        # The literal that produced "01.01.1001 · 374511 p möödunud" rows
+        # on /dashboard before the fix.
+        assert _parse_deadline("1001-01-01") is None
+
+    def test_year_just_below_floor_returns_none(self):
+        # Boundary: 1979-12-31 is the last day below the 1980 floor.
+        assert _parse_deadline("1979-12-31") is None
+
+    def test_year_at_floor_parses(self):
+        # Boundary: 1980-01-01 is the first day at the floor and parses
+        # normally.
+        assert _parse_deadline("1980-01-01") == date(1980, 1, 1)
+
+    def test_modern_year_parses(self):
+        # Sanity check: a normal post-2000 directive deadline parses
+        # cleanly.
+        assert _parse_deadline("2025-06-15") == date(2025, 6, 15)
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +358,39 @@ class TestListOverdueOrUpcomingTranspositions:
             today=date(2026, 5, 15),
         )
         # The malformed row drops; the valid one survives.
+        assert len(rows) == 1
+        assert rows[0].celex == "32023L0002"
+
+    def test_pre_1980_sentinel_deadline_dropped_at_aggregation(self):
+        """Bug #800: even if a sentinel ``"1001-01-01"`` literal somehow
+        slips past the server-side floor (e.g. a future schema drift),
+        the Python-side parser rejects it and ``_aggregate_rows`` drops
+        the row — the widget never re-renders ``"01.01.1001 · 374511 p
+        möödunud"``."""
+        rows_in = [
+            {
+                "euAct": _DIR_OVERDUE,
+                "euLabel": "Direktiiv (sentinel)",
+                "celex": "31970L0001",
+                "deadline": "1001-01-01",  # sentinel
+                "eeAct": _ACT_PARTIAL,
+                "status": "partial",
+            },
+            {
+                "euAct": _DIR_UPCOMING,
+                "euLabel": "Direktiiv B",
+                "celex": "32023L0002",
+                "deadline": "2026-06-15",
+                "eeAct": _ACT_PARTIAL,
+                "status": "partial",
+            },
+        ]
+        rows = list_overdue_or_upcoming_transpositions(
+            horizon_days=90,
+            sparql_client=_client_returning(rows_in),
+            today=date(2026, 5, 15),
+        )
+        # Sentinel row drops; the modern row survives.
         assert len(rows) == 1
         assert rows[0].celex == "32023L0002"
 
