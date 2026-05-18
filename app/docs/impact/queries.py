@@ -285,6 +285,30 @@ LIMIT 100
 # query now uses ``transposesDirective`` (forward), ``transposedBy``
 # (inverse, in case data only carries one direction), and
 # ``harmonisedWith`` (provision-level harmonisation).
+#
+# 2026-05-18 (Wave 2 Step 5 of docs/2026-05-18-bugfix-plan.md): the
+# act-level UNION arms that chained through ``estleg:sourceAct`` /
+# ``estleg:partOf`` were SILENTLY DEAD in prod:
+#
+#   * ``estleg:sourceAct`` is a string LITERAL in this corpus (24,221
+#     triples, all ``xsd:string`` — see Step 1 spike). Binding
+#     ``?_parentAct`` to a literal then joining ``?_parentAct
+#     estleg:transposesDirective ?euAct`` cannot match — literals
+#     cannot be subjects of those triples → zero rows.
+#   * ``estleg:partOf`` and ``estleg:partOfAct`` have ZERO triples in
+#     prod — both UNION arms returned zero rows for every draft.
+#
+# The reverse-lookup option (``?actUri rdfs:label ?actLit`` then chain
+# via the URI) was considered but rejected: a SPARQL probe against
+# prod showed the title ``"Atmosfääriõhu kaitse seadus"`` resolves
+# to a Draft URI (``Draft_KLIM14_1034``), not an atomic act URI with
+# transposition edges. Joining on labels would surface draft +
+# topic-map false positives.
+#
+# Fix: drop the act-level chain entirely. The corpus has no reliable
+# act URIs to traverse; provision-level transposition + harmonisation
+# (SHACL lines 158-163 and 226-230) are the only honest paths. When
+# act-level data later lands cleanly, a new UNION arm can be added.
 
 EU_COMPLIANCE = (
     PREFIXES
@@ -295,27 +319,6 @@ SELECT DISTINCT ?euAct ?euLabel ?estonianProvision ?provisionLabel ?relation WHE
     # Provision-level transposition (SHACL lines 158-163 allow this).
     ?estonianProvision estleg:transposesDirective ?euAct .
     BIND(estleg:transposesDirective AS ?relation)
-  }} UNION {{
-    # Act-level transposition (canonical per SHACL lines 62-66): chain via
-    # the provision's parent act (``sourceAct`` is the populated edge;
-    # ``partOf`` is the SHACL alias — UNION both for forward compatibility).
-    {{
-      ?estonianProvision estleg:sourceAct ?_parentAct .
-    }} UNION {{
-      ?estonianProvision estleg:partOf ?_parentAct .
-    }}
-    ?_parentAct estleg:transposesDirective ?euAct .
-    BIND(estleg:transposesDirective AS ?relation)
-  }} UNION {{
-    # Inverse — ``transposedBy`` is on EULegislation → Act (SHACL 687-692),
-    # so chain from provision → parent act first.
-    {{
-      ?estonianProvision estleg:sourceAct ?_parentAct .
-    }} UNION {{
-      ?estonianProvision estleg:partOf ?_parentAct .
-    }}
-    ?euAct estleg:transposedBy ?_parentAct .
-    BIND(estleg:transposedBy AS ?relation)
   }} UNION {{
     # Provision-level harmonisation (SHACL 226-230).
     ?estonianProvision estleg:harmonisedWith ?euAct .

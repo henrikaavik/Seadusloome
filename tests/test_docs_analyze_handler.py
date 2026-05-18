@@ -131,9 +131,13 @@ def _make_sync_conn(row: tuple | None) -> MagicMock:
 class TestAnalyzeImpactHappyPath:
     def test_writes_impact_report_and_flips_status(self):
         draft = _make_draft()
+        # Row shape post-Wave-2-Step-5: (ref_text, entity_uri,
+        # confidence, ref_type, location, partial_match). Both rows
+        # below are fully-resolved provision matches → partial_match
+        # is NULL.
         entity_rows = [
-            ("KarS § 133", "urn:kars-133", 0.9, "provision", json.dumps({})),
-            ("TsÜS § 12", "urn:tsus-12", 0.85, "provision", json.dumps({})),
+            ("KarS § 133", "urn:kars-133", 0.9, "provision", json.dumps({}), None),
+            ("TsÜS § 12", "urn:tsus-12", 0.85, "provision", json.dumps({}), None),
         ]
 
         load_conn = _make_load_conn(entity_rows=entity_rows)
@@ -454,6 +458,161 @@ class TestAnalyzeImpactFailurePaths:
         # The failure-path connection must have seen a status='failed' update.
         fail_sql = [c.args[0].lower() for c in fail_conn.execute.call_args_list]
         assert any("update drafts" in s for s in fail_sql)
+
+
+class TestAnalyzeImpactPartialMatch:
+    """Wave 2 Step 5 of docs/2026-05-18-bugfix-plan.md.
+
+    The entity-load SELECT widened to include rows where
+    ``partial_match`` is non-null even though ``entity_uri`` is null.
+    These rows must flow through ``_row_to_resolved_ref`` carrying the
+    JSON-decoded partial_match dict so the graph builder can emit an
+    act-level annotation triple instead of a fake provision URI.
+    """
+
+    def test_partial_match_row_threads_through_to_resolved_ref(self):
+        """A draft_entities row with partial_match set must surface as
+        a ResolvedRef with the dict populated and entity_uri=None.
+        """
+        draft = _make_draft()
+        # Row shape: (ref_text, entity_uri, confidence, ref_type, location, partial_match).
+        # partial_match is the jsonb column from migration 034.
+        entity_rows = [
+            (
+                "riigieelarve seaduse § 20 lõike 5",
+                None,
+                0.85,
+                "provision",
+                json.dumps({}),
+                json.dumps(
+                    {
+                        "act_token": "REELS",
+                        "act_title": "Riigieelarve seadus",
+                        "section": "20",
+                    }
+                ),
+            ),
+        ]
+        load_conn = _make_load_conn(entity_rows=entity_rows)
+        insert_conn = _make_insert_conn()
+        sync_conn = _make_sync_conn((datetime(2026, 4, 9, 12, 0, tzinfo=UTC), 1))
+
+        mock_analyzer = MagicMock()
+        mock_analyzer.analyze.return_value = _findings(affected=0)
+
+        captured_refs: list[Any] = []
+
+        def _capture_refs(_draft: Any, refs: Any) -> str:
+            captured_refs.extend(refs)
+            return "# turtle"
+
+        with (
+            patch("app.docs.analyze_handler.get_connection") as mock_get_conn,
+            patch("app.docs.analyze_handler.get_draft", return_value=draft),
+            patch("app.docs.analyze_handler.get_latest_version", return_value=_make_version()),
+            patch(
+                "app.docs.analyze_handler.build_draft_graph",
+                side_effect=_capture_refs,
+            ),
+            patch("app.docs.analyze_handler.put_named_graph", return_value=True),
+            patch("app.docs.analyze_handler.write_doc_lineage", return_value=None),
+            patch("app.docs.analyze_handler.fetch_draft", return_value=None),
+            patch(
+                "app.docs.analyze_handler.ImpactAnalyzer",
+                return_value=mock_analyzer,
+            ),
+            patch(
+                "app.docs.analyze_handler.calculate_impact_score",
+                return_value=0,
+            ),
+        ):
+            mock_get_conn.side_effect = [
+                _ConnectCM(load_conn),
+                _ConnectCM(sync_conn),
+                _ConnectCM(insert_conn),
+            ]
+            analyze_impact({"draft_id": str(_DRAFT_ID)})
+
+        # The build_draft_graph mock saw exactly one ResolvedRef with
+        # partial_match populated (and entity_uri=None).
+        assert len(captured_refs) == 1
+        ref = captured_refs[0]
+        assert ref.entity_uri is None
+        assert ref.partial_match is not None
+        assert ref.partial_match["act_title"] == "Riigieelarve seadus"
+        assert ref.partial_match["section"] == "20"
+        assert ref.partial_match["act_token"] == "REELS"
+        # match_score is the resolver's partial-match marker (0.5).
+        assert ref.match_score == 0.5
+
+    def test_select_includes_partial_match_column_and_widened_where(self):
+        """The SELECT must read partial_match AND the WHERE clause must
+        no longer require entity_uri to be non-null. Together these
+        ensure act-level partial matches surface in the impact pipeline.
+        """
+        draft = _make_draft()
+        load_conn = _make_load_conn(entity_rows=[])
+        insert_conn = _make_insert_conn()
+        sync_conn = _make_sync_conn(None)
+
+        mock_analyzer = MagicMock()
+        mock_analyzer.analyze.return_value = _findings(affected=0)
+
+        with (
+            patch("app.docs.analyze_handler.get_connection") as mock_get_conn,
+            patch("app.docs.analyze_handler.get_draft", return_value=draft),
+            patch("app.docs.analyze_handler.get_latest_version", return_value=_make_version()),
+            patch("app.docs.analyze_handler.build_draft_graph", return_value="# t"),
+            patch("app.docs.analyze_handler.put_named_graph", return_value=True),
+            patch("app.docs.analyze_handler.write_doc_lineage", return_value=None),
+            patch("app.docs.analyze_handler.fetch_draft", return_value=None),
+            patch(
+                "app.docs.analyze_handler.ImpactAnalyzer",
+                return_value=mock_analyzer,
+            ),
+            patch(
+                "app.docs.analyze_handler.calculate_impact_score",
+                return_value=0,
+            ),
+        ):
+            mock_get_conn.side_effect = [
+                _ConnectCM(load_conn),
+                _ConnectCM(sync_conn),
+                _ConnectCM(insert_conn),
+            ]
+            analyze_impact({"draft_id": str(_DRAFT_ID)})
+
+        # The load-connection's SELECT must contain ``partial_match``
+        # (widened column projection) and must NOT have the old
+        # ``entity_uri is not null`` filter that hid act-level rows.
+        select_calls = [
+            c.args[0]
+            for c in load_conn.execute.call_args_list
+            if "from draft_entities" in c.args[0].lower()
+        ]
+        assert len(select_calls) == 1
+        select_sql = select_calls[0].lower()
+        assert "partial_match" in select_sql, (
+            "The entity-load SELECT must project partial_match — "
+            "see Wave 2 Step 5 of docs/2026-05-18-bugfix-plan.md"
+        )
+        # Allow either ``or partial_match is not null`` or
+        # any equivalent broadening — we just want to be sure the
+        # bare ``entity_uri is not null`` filter is gone in isolation.
+        # Specifically: the WHERE must NOT be exactly
+        # ``and entity_uri is not null`` followed by a newline.
+        import re
+
+        old_filter = re.search(
+            r"and\s+entity_uri\s+is\s+not\s+null\s*[\n)]",
+            select_sql,
+        )
+        if old_filter:
+            assert "or partial_match is not null" in select_sql, (
+                "If entity_uri is not null is still in the WHERE, "
+                "it must be paired with OR partial_match is not null "
+                "so act-level rows still flow through"
+            )
 
 
 class TestRegistration:

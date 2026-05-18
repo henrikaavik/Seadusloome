@@ -262,8 +262,13 @@ class TestGapsQuery:
 
 
 class TestEuComplianceQuery:
-    """The EU compliance query should find transposesDirective + harmonisedWith
-    at both provision-level (EU_Dir_1) and act-level (EU_Dir_2, via sourceAct chain)."""
+    """The EU compliance query is provision-level only after the Wave 2
+    Step 5 fix (docs/2026-05-18-bugfix-plan.md). The act-level UNION arms
+    that chained through ``estleg:sourceAct`` / ``estleg:partOf`` were
+    silently dead in prod (``sourceAct`` binds a literal that can't be a
+    subject of ``transposesDirective``; ``partOf`` has zero triples in
+    prod). The query now surfaces only provision-level transposition +
+    harmonisation."""
 
     def test_provision_level_transposes_directive(self, seeded_dataset: Dataset):
         # Direct ``Provision_1 transposesDirective EU_Dir_1``.
@@ -276,10 +281,16 @@ class TestEuComplianceQuery:
         ]
         assert len(td) == 1
 
-    def test_act_level_transposes_directive_via_source_act(self, seeded_dataset: Dataset):
-        # ``Act_1 transposesDirective EU_Dir_2`` reached via
-        # ``Provision_1 sourceAct Act_1``. This is the canonical
-        # direction per SHACL lines 62-66 and was the F3 bug from review.
+    def test_act_level_branches_removed(self, seeded_dataset: Dataset):
+        """The act-level chain via ``estleg:sourceAct`` is gone.
+
+        EU_Dir_2 in the fixture is only reachable via
+        ``Provision_1 sourceAct Act_1 . Act_1 transposesDirective EU_Dir_2``.
+        Wave 2 Step 5 drops that chain because in prod ``sourceAct`` is a
+        string literal (not a URI), so the join was silently producing
+        zero rows. Verify the chain is no longer reachable here so we
+        can't accidentally re-introduce it.
+        """
         query = build_eu_compliance_query(DRAFT_GRAPH_URI)
         rows = _rows(seeded_dataset, query)
         td = [
@@ -287,23 +298,24 @@ class TestEuComplianceQuery:
             for r in rows
             if r["euAct"].endswith("EU_Dir_2") and r["relation"].endswith("transposesDirective")
         ]
-        assert len(td) == 1, (
-            "Act-level transposesDirective (EU_Dir_2) should be reachable via the "
-            "sourceAct/partOf chain — see F3 in the 2026-05-15 review."
+        assert len(td) == 0, (
+            "Act-level transposesDirective via sourceAct was removed in "
+            "Wave 2 Step 5 — see docs/2026-05-18-bugfix-plan.md. The "
+            "prod corpus stores sourceAct as a string literal, so "
+            "joining ?_parentAct transposesDirective ?euAct is dead."
         )
 
-    def test_act_level_transposed_by_via_source_act(self, seeded_dataset: Dataset):
-        # Inverse: ``EU_Dir_1 transposedBy Act_1`` reached via
-        # ``Provision_1 sourceAct Act_1``. transposedBy is on EU → Act
-        # (SHACL 687-692), not EU → Provision — must chain.
+    def test_transposed_by_branch_removed(self, seeded_dataset: Dataset):
+        """The inverse ``transposedBy`` branch is gone for the same reason.
+
+        ``estleg:transposedBy`` is on EULegislation → Act (SHACL 687-692),
+        not EU → Provision, so it needed an act-level chain that the
+        Wave 2 Step 5 fix removed.
+        """
         query = build_eu_compliance_query(DRAFT_GRAPH_URI)
         rows = _rows(seeded_dataset, query)
-        tb = [
-            r
-            for r in rows
-            if r["euAct"].endswith("EU_Dir_1") and r["relation"].endswith("transposedBy")
-        ]
-        assert len(tb) == 1
+        tb = [r for r in rows if r["relation"].endswith("transposedBy")]
+        assert len(tb) == 0
 
     def test_harmonised_with_branch(self, seeded_dataset: Dataset):
         query = build_eu_compliance_query(DRAFT_GRAPH_URI)
@@ -317,11 +329,30 @@ class TestEuComplianceQuery:
 
     def test_eu_act_labelled(self, seeded_dataset: Dataset):
         # EU label projection should resolve via OPTIONAL rdfs:label.
+        # Only EU_Dir_1 is reachable provision-level; EU_Dir_2 is now
+        # unreachable (see test_act_level_branches_removed).
         query = build_eu_compliance_query(DRAFT_GRAPH_URI)
         rows = _rows(seeded_dataset, query)
         labelled = [r for r in rows if r.get("euLabel")]
         assert any("EU Directive 1" in r["euLabel"] for r in labelled)
-        assert any("EU Directive 2" in r["euLabel"] for r in labelled)
+
+    def test_no_dead_partof_arm_in_query_text(self):
+        """The query text must NOT include any ``partOf`` / ``sourceAct``
+        traversal — see docs/2026-05-18-bugfix-plan.md Wave 2 Step 5.
+        Those predicates are dead in prod and reintroducing them silently
+        produces zero rows (the original failure mode the fix targets)."""
+        text = build_eu_compliance_query(DRAFT_GRAPH_URI)
+        assert "estleg:partOf" not in text, (
+            "estleg:partOf must not appear — zero triples in prod, "
+            "see Wave 2 Step 5 of docs/2026-05-18-bugfix-plan.md"
+        )
+        assert "estleg:sourceAct" not in text, (
+            "estleg:sourceAct must not appear — it's a literal, not a "
+            "URI, and binding ?_parentAct to it kills the join"
+        )
+        assert "?_parentAct" not in text, (
+            "The dead act-level chain variable must not appear — see Wave 2 Step 5"
+        )
 
 
 # ---------------------------------------------------------------------------

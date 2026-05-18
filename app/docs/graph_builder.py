@@ -117,50 +117,107 @@ def build_draft_graph(draft: Draft, refs: list[ResolvedRef]) -> str:
     )
 
     # References — one edge per resolved ref.
+    #
+    # Three states are handled here (Wave 2 Step 5 of
+    # docs/2026-05-18-bugfix-plan.md):
+    #
+    #   * Fully resolved: ``ref.entity_uri`` is a URI → emit the
+    #     standard ``estleg:references <uri>`` edge so the impact
+    #     engine's 2-hop BFS can pivot from it.
+    #   * Partial match (act-level only): ``ref.entity_uri`` is None
+    #     but ``ref.partial_match`` carries ``{"act_title": …,
+    #     "section": …}`` → emit an ``estleg:referencesAct`` literal
+    #     triple instead of a ``references`` URI edge. The act-level
+    #     triple is intentionally a DEAD END for the impact engine —
+    #     it surfaces in the report (so the drafter sees "I knew
+    #     which Act this was but not which §") but the BFS won't fan
+    #     out from a string literal, preventing the prior failure
+    #     mode where act-level data masqueraded as a provision URI.
+    #   * Fully unresolved: both fields None → skip silently (the row
+    #     still lives in ``draft_entities`` for the UI; there's
+    #     nothing useful to put in the graph).
     written = 0
+    partial_written = 0
     for ref in refs:
         entity_uri = ref.entity_uri
-        if not entity_uri:
-            continue
-        try:
-            entity_iri = URIRef(entity_uri)
-        except Exception:  # noqa: BLE001 — malformed URIs should never kill the graph build
-            logger.warning(
-                "build_draft_graph: skipping ref with malformed URI: %r",
-                entity_uri,
-            )
-            continue
-        g.add((draft_iri, ESTLEG.references, entity_iri))
-
-        # Confidence annotation as a blank node. Keeping it as a BNode
-        # means the analyzer can OPTIONAL-match it without bloating the
-        # primary ``estleg:references`` edges and without needing a new
-        # class in the ontology.
-        confidence = getattr(ref.extracted, "confidence", None)
-        if confidence is not None:
+        if entity_uri:
             try:
-                conf_val = float(confidence)
-            except (TypeError, ValueError):
-                conf_val = None
-            if conf_val is not None:
-                from rdflib import BNode
-
-                bnode = BNode()
-                g.add((draft_iri, ESTLEG.refConfidence, bnode))
-                g.add((bnode, ESTLEG.aboutEntity, entity_iri))
-                g.add(
-                    (
-                        bnode,
-                        ESTLEG.confidenceScore,
-                        Literal(conf_val, datatype=XSD.decimal),
-                    )
+                entity_iri = URIRef(entity_uri)
+            except Exception:  # noqa: BLE001 — malformed URIs should never kill the graph build
+                logger.warning(
+                    "build_draft_graph: skipping ref with malformed URI: %r",
+                    entity_uri,
                 )
-        written += 1
+                continue
+            g.add((draft_iri, ESTLEG.references, entity_iri))
+
+            # Confidence annotation as a blank node. Keeping it as a BNode
+            # means the analyzer can OPTIONAL-match it without bloating the
+            # primary ``estleg:references`` edges and without needing a new
+            # class in the ontology.
+            confidence = getattr(ref.extracted, "confidence", None)
+            if confidence is not None:
+                try:
+                    conf_val = float(confidence)
+                except (TypeError, ValueError):
+                    conf_val = None
+                if conf_val is not None:
+                    from rdflib import BNode
+
+                    bnode = BNode()
+                    g.add((draft_iri, ESTLEG.refConfidence, bnode))
+                    g.add((bnode, ESTLEG.aboutEntity, entity_iri))
+                    g.add(
+                        (
+                            bnode,
+                            ESTLEG.confidenceScore,
+                            Literal(conf_val, datatype=XSD.decimal),
+                        )
+                    )
+            written += 1
+            continue
+
+        # Partial match — act-level annotation only. No URI to point
+        # at, so we emit a literal-keyed edge that the impact engine
+        # surfaces in its report but does NOT traverse like a
+        # provision URI. The dict shape mirrors what the resolver
+        # writes (``{"act_token": str|None, "act_title": str,
+        # "section": str}``); we project ``act_title`` to the graph
+        # since that's the only field downstream consumers (the
+        # renderer + docx_export) need.
+        partial = ref.partial_match
+        if partial:
+            act_title = str(partial.get("act_title") or "").strip()
+            section = str(partial.get("section") or "").strip()
+            if act_title:
+                # Use a dedicated predicate so the impact engine and
+                # the renderer can distinguish "we resolved this to a
+                # specific provision URI" from "we know the act but
+                # not the §".  The literal is the act title; the
+                # section number rides along on a blank-node
+                # annotation so renderers can show "AvTS § 35
+                # (§-tasandil ei leitud)" without re-parsing the
+                # original ref text.
+                g.add((draft_iri, ESTLEG.referencesAct, Literal(act_title)))
+                if section:
+                    from rdflib import BNode
+
+                    bnode = BNode()
+                    g.add((draft_iri, ESTLEG.partialMatch, bnode))
+                    g.add((bnode, ESTLEG.actTitle, Literal(act_title)))
+                    g.add((bnode, ESTLEG.section, Literal(section)))
+                    token = partial.get("act_token")
+                    if token:
+                        g.add((bnode, ESTLEG.actToken, Literal(str(token))))
+                partial_written += 1
 
     logger.info(
-        "build_draft_graph: serialised draft %s with %d references (%d total refs)",
+        "build_draft_graph: serialised draft %s with %d refs "
+        "(%d full URI, %d act-level partial; %d total in)",
         draft.id,
+        written + partial_written,
         written,
+        partial_written,
         len(refs),
     )
 

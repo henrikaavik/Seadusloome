@@ -95,24 +95,38 @@ def analyze_impact(
     # ------------------------------------------------------------------
     # 1. Load draft + resolved references
     # ------------------------------------------------------------------
+    #
+    # Step 5 of docs/2026-05-18-bugfix-plan.md: widen the SELECT to
+    # include ``partial_match`` (jsonb column from migration 034).
+    # Previously the WHERE clause filtered ``entity_uri is not null``
+    # which silently dropped every act-level partial match the resolver
+    # wrote. Those rows now surface so the graph builder can emit an
+    # act-level annotation triple and the impact engine can include the
+    # partial-match reference in the report (as an act-level finding,
+    # not as a synthetic provision URI).
     with get_connection() as conn:
         draft = get_draft(conn, draft_id)
         if draft is None:
             raise ValueError(f"Draft {draft_id} not found")
         entity_rows = conn.execute(
             """
-            select ref_text, entity_uri, confidence, ref_type, location
+            select ref_text, entity_uri, confidence, ref_type, location,
+                   partial_match
             from draft_entities
-            where draft_id = %s and entity_uri is not null
+            where draft_id = %s
+              and (entity_uri is not null or partial_match is not null)
             """,
             (str(draft_id),),
         ).fetchall()
 
     resolved_refs = [_row_to_resolved_ref(row) for row in entity_rows]
     logger.info(
-        "analyze_impact: draft %s has %d resolved references",
+        "analyze_impact: draft %s has %d resolved references "
+        "(%d full URI, %d act-level partial match)",
         draft_id,
         len(resolved_refs),
+        sum(1 for r in resolved_refs if r.entity_uri),
+        sum(1 for r in resolved_refs if r.partial_match is not None),
     )
 
     # ------------------------------------------------------------------
@@ -376,11 +390,20 @@ def _row_to_resolved_ref(row: tuple[Any, ...]) -> ResolvedRef:
 
     We cannot round-trip the full ``ExtractedRef`` (the resolver did
     not persist ``location``/``confidence`` losslessly) but the
-    analyzer only reads ``entity_uri`` and ``confidence``, so a thin
-    reconstruction is sufficient. ``location`` is stored as a JSONB
-    column so we need to JSON-parse it if Postgres handed us a string.
+    analyzer only reads ``entity_uri``, ``confidence``, and
+    ``partial_match``, so a thin reconstruction is sufficient.
+    ``location`` and ``partial_match`` are stored as JSONB columns;
+    psycopg returns either a parsed dict or the raw JSON string
+    depending on type-adaptation config, so both shapes are tolerated.
+
+    The row shape is ``(ref_text, entity_uri, confidence, ref_type,
+    location, partial_match)`` — see the SELECT in
+    :func:`analyze_impact`. The partial-match column was added by
+    migration 034 (Wave 2 Step 2) and is threaded through here so the
+    graph builder can emit a distinct act-level annotation triple for
+    those rows (Step 5).
     """
-    ref_text, entity_uri, confidence, ref_type, location = row
+    ref_text, entity_uri, confidence, ref_type, location, partial_match = row
     try:
         conf = float(confidence) if confidence is not None else 0.0
     except (TypeError, ValueError):
@@ -394,6 +417,19 @@ def _row_to_resolved_ref(row: tuple[Any, ...]) -> ResolvedRef:
         location_dict = location
     else:
         location_dict = {}
+    # ``partial_match`` is jsonb (migration 034). Tolerate both string
+    # and dict shapes so the handler is independent of psycopg's
+    # JSONB-loader configuration.
+    partial_match_dict: dict[str, Any] | None
+    if isinstance(partial_match, str):
+        try:
+            partial_match_dict = json.loads(partial_match)
+        except (TypeError, ValueError):
+            partial_match_dict = None
+    elif isinstance(partial_match, dict):
+        partial_match_dict = partial_match
+    else:
+        partial_match_dict = None
     extracted = ExtractedRef(
         ref_text=str(ref_text),
         ref_type=str(ref_type or "provision"),
@@ -404,7 +440,8 @@ def _row_to_resolved_ref(row: tuple[Any, ...]) -> ResolvedRef:
         extracted=extracted,
         entity_uri=str(entity_uri) if entity_uri else None,
         matched_label=None,
-        match_score=1.0 if entity_uri else 0.0,
+        match_score=1.0 if entity_uri else (0.5 if partial_match_dict else 0.0),
+        partial_match=partial_match_dict,
     )
 
 

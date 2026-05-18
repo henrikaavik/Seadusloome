@@ -327,6 +327,14 @@ def _make_conn_factory(state: _State):
 
         if "from draft_entities" in sql_lower and "where draft_id" in sql_lower:
             # analyze_handler reads back resolved refs.
+            # Wave 2 Step 5 widened the SELECT to include partial_match
+            # (jsonb, migration 034) AND broadened the WHERE clause to
+            # include rows where partial_match is non-null even if
+            # entity_uri is null. The mock mirrors both shifts:
+            #   - row index 6 is the partial_match jsonb blob (None for
+            #     fully-resolved or fully-unresolved rows).
+            #   - the WHERE filter accepts EITHER entity_uri or
+            #     partial_match being non-null.
             rows = [
                 (
                     e[1],  # ref_text
@@ -334,9 +342,10 @@ def _make_conn_factory(state: _State):
                     e[3],  # confidence
                     e[4],  # ref_type
                     e[5],  # location
+                    e[6] if len(e) > 6 else None,  # partial_match (migration 034)
                 )
                 for e in state.entities
-                if e[2] is not None  # entity_uri not null
+                if e[2] is not None or (len(e) > 6 and e[6] is not None)
             ]
             cursor.fetchall.return_value = rows
             return cursor

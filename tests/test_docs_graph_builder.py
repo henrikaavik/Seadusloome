@@ -75,6 +75,38 @@ def _ref(
     )
 
 
+def _partial_ref(
+    *,
+    text: str = "riigieelarve seaduse § 20 lõike 5",
+    act_title: str = "Riigieelarve seadus",
+    section: str = "20",
+    act_token: str | None = "REELS",
+    confidence: float = 0.8,
+) -> ResolvedRef:
+    """Build a partial-match :class:`ResolvedRef` — act resolved, § unknown.
+
+    Mirrors the shape the resolver writes (see
+    ``app.docs.reference_resolver._resolve_provision``) for cases where
+    the act half resolves but the section literal isn't in the corpus.
+    Used by the Wave 2 Step 5 graph-builder tests."""
+    return ResolvedRef(
+        extracted=ExtractedRef(
+            ref_text=text,
+            ref_type="provision",
+            confidence=confidence,
+            location={"chunk": 0, "offset": 0},
+        ),
+        entity_uri=None,
+        matched_label=f"{act_title} (sätet § {section} ei leitud)",
+        match_score=0.5,
+        partial_match={
+            "act_token": act_token,
+            "act_title": act_title,
+            "section": section,
+        },
+    )
+
+
 def _parse(turtle: str) -> Graph:
     g = Graph()
     g.parse(data=turtle, format="turtle")
@@ -176,6 +208,113 @@ class TestBuildDraftGraphEdgeCases:
         draft = _make_draft()
         turtle = build_draft_graph(draft, [])
         assert isinstance(turtle, str)
+
+
+class TestBuildDraftGraphPartialMatch:
+    """Wave 2 Step 5 (docs/2026-05-18-bugfix-plan.md): partial matches —
+    act resolved but § unknown — must emit a DISTINCT triple shape so the
+    impact engine surfaces the act-level reference without treating it as
+    a provision URI (the original failure mode that fanned 500 unrelated
+    topic-map clusters into the affected-entities report).
+    """
+
+    def test_partial_match_emits_act_level_annotation(self):
+        draft = _make_draft()
+        refs = [_partial_ref()]
+        turtle = build_draft_graph(draft, refs)
+
+        g = _parse(turtle)
+        draft_iri = URIRef(f"{draft.graph_uri}#self")
+        # The standard ``references`` URI edge must NOT be emitted —
+        # there is no URI to point at.
+        assert list(g.objects(draft_iri, ESTLEG.references)) == [], (
+            "Partial matches must not emit a references URI edge — they "
+            "have no provision URI to point at"
+        )
+        # The act-level literal annotation must be present.
+        act_titles = list(g.objects(draft_iri, ESTLEG.referencesAct))
+        assert len(act_titles) == 1
+        assert str(act_titles[0]) == "Riigieelarve seadus"
+
+    def test_partial_match_emits_blank_node_with_section_metadata(self):
+        draft = _make_draft()
+        refs = [_partial_ref(section="20", act_token="REELS")]
+        turtle = build_draft_graph(draft, refs)
+
+        g = _parse(turtle)
+        draft_iri = URIRef(f"{draft.graph_uri}#self")
+        # The partialMatch blank node carries actTitle + section + token.
+        partial_bnodes = list(g.objects(draft_iri, ESTLEG.partialMatch))
+        assert len(partial_bnodes) == 1
+        bnode = partial_bnodes[0]
+        assert (bnode, ESTLEG.actTitle, Literal("Riigieelarve seadus")) in g
+        assert (bnode, ESTLEG.section, Literal("20")) in g
+        assert (bnode, ESTLEG.actToken, Literal("REELS")) in g
+
+    def test_partial_match_without_token_omits_token_triple(self):
+        draft = _make_draft()
+        refs = [_partial_ref(act_token=None)]
+        turtle = build_draft_graph(draft, refs)
+
+        g = _parse(turtle)
+        draft_iri = URIRef(f"{draft.graph_uri}#self")
+        partial_bnodes = list(g.objects(draft_iri, ESTLEG.partialMatch))
+        assert len(partial_bnodes) == 1
+        bnode = partial_bnodes[0]
+        # actTitle + section land; token does NOT.
+        assert (bnode, ESTLEG.actTitle, Literal("Riigieelarve seadus")) in g
+        assert (bnode, ESTLEG.section, Literal("20")) in g
+        assert list(g.objects(bnode, ESTLEG.actToken)) == []
+
+    def test_mixed_full_and_partial_refs_emit_both_triple_shapes(self):
+        draft = _make_draft()
+        refs = [
+            _ref(),  # full URI match
+            _partial_ref(),  # act-level only
+        ]
+        turtle = build_draft_graph(draft, refs)
+
+        g = _parse(turtle)
+        draft_iri = URIRef(f"{draft.graph_uri}#self")
+        # The full match produces a references URI edge.
+        ref_uris = list(g.objects(draft_iri, ESTLEG.references))
+        assert len(ref_uris) == 1
+        assert str(ref_uris[0]) == "https://data.riik.ee/ontology/estleg#KarS_Par_133"
+        # The partial match produces an act-level literal edge.
+        act_titles = list(g.objects(draft_iri, ESTLEG.referencesAct))
+        assert len(act_titles) == 1
+        assert str(act_titles[0]) == "Riigieelarve seadus"
+
+    def test_partial_match_without_act_title_is_skipped(self):
+        """Defence-in-depth: a partial_match dict missing act_title must
+        not produce a referencesAct edge (the resolver shouldn't emit this
+        shape, but the builder must not crash either)."""
+        draft = _make_draft()
+        # Hand-craft a degraded ResolvedRef — partial_match without an
+        # act_title (the resolver's invariant guarantees act_title is set
+        # whenever partial_match is non-null, but the builder must not
+        # crash on a malformed row).
+        bad_ref = ResolvedRef(
+            extracted=ExtractedRef(
+                ref_text="some ref",
+                ref_type="provision",
+                confidence=0.5,
+                location={},
+            ),
+            entity_uri=None,
+            matched_label=None,
+            match_score=0.5,
+            partial_match={"section": "20", "act_token": "X"},
+        )
+        turtle = build_draft_graph(draft, [bad_ref])
+
+        g = _parse(turtle)
+        draft_iri = URIRef(f"{draft.graph_uri}#self")
+        # No references, no referencesAct, no partialMatch — silently
+        # dropped because act_title is the load-bearing field.
+        assert list(g.objects(draft_iri, ESTLEG.references)) == []
+        assert list(g.objects(draft_iri, ESTLEG.referencesAct)) == []
+        assert list(g.objects(draft_iri, ESTLEG.partialMatch)) == []
 
 
 class TestBuildDraftGraphDocType:
