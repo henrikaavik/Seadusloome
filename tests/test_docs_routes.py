@@ -552,6 +552,82 @@ class TestNewDraftPage:
         assert 'type="file"' in resp.text
         assert ".docx" in resp.text
 
+    # #808: VTK picker empty-state UX. When the caller's org has zero
+    # VTKs the picker renders a disabled select with an explanatory
+    # help message; when there is at least one VTK the picker is
+    # enabled and lists the available rows.
+    @patch("app.docs.routes._upload.list_vtks_for_org")
+    @patch("app.auth.middleware._get_provider")
+    def test_new_draft_vtk_picker_empty_state_is_disabled_with_help_text(
+        self,
+        mock_get_provider: MagicMock,
+        mock_list_vtks: MagicMock,
+    ):
+        """#808: zero VTKs → disabled select + Estonian empty-state help."""
+        mock_get_provider.return_value = _stub_provider()
+        mock_list_vtks.return_value = []
+
+        client = _authed_client()
+        resp = client.get("/drafts/new")
+
+        assert resp.status_code == 200
+        # The VTK picker must still render so the form layout is stable.
+        assert 'id="field-parent-vtk"' in resp.text
+        # Slice out the <select ...> opening tag for the parent-vtk
+        # picker and assert it carries the `disabled` attribute.
+        # FastHTML serialises boolean attributes as the bare attribute
+        # name, and the attribute order in the tag is not guaranteed,
+        # so we scan from the nearest preceding `<select` to the next
+        # `>` rather than anchoring on `id="..."`.
+        id_idx = resp.text.find('id="field-parent-vtk"')
+        select_open = resp.text.rfind("<select", 0, id_idx)
+        select_end = resp.text.find(">", id_idx)
+        assert id_idx != -1
+        assert select_open != -1
+        assert select_end != -1
+        select_tag = resp.text[select_open : select_end + 1]
+        assert " disabled" in select_tag or 'disabled="' in select_tag
+        # The empty-state help text appears below the select.
+        assert "Organisatsioonis pole veel VTKsid" in resp.text
+
+    @patch("app.docs.routes._upload.list_vtks_for_org")
+    @patch("app.auth.middleware._get_provider")
+    def test_new_draft_vtk_picker_with_rows_is_enabled(
+        self,
+        mock_get_provider: MagicMock,
+        mock_list_vtks: MagicMock,
+    ):
+        """Regression: ≥1 VTK → picker is NOT disabled and lists labels."""
+        mock_get_provider.return_value = _stub_provider()
+        mock_list_vtks.return_value = [
+            _make_draft(
+                draft_id=uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+                doc_type="vtk",
+                status="ready",
+                title="Maantee VTK",
+            ),
+        ]
+
+        client = _authed_client()
+        resp = client.get("/drafts/new")
+
+        assert resp.status_code == 200
+        assert 'id="field-parent-vtk"' in resp.text
+        # The select tag must NOT be disabled in the non-empty branch.
+        id_idx = resp.text.find('id="field-parent-vtk"')
+        select_open = resp.text.rfind("<select", 0, id_idx)
+        select_end = resp.text.find(">", id_idx)
+        assert id_idx != -1
+        assert select_open != -1
+        assert select_end != -1
+        select_tag = resp.text[select_open : select_end + 1]
+        assert " disabled" not in select_tag and 'disabled="' not in select_tag
+        # The VTK label must appear as an <option>.
+        assert "<option" in resp.text
+        assert "Maantee VTK" in resp.text
+        # And the empty-state help text must NOT leak into this branch.
+        assert "Organisatsioonis pole veel VTKsid" not in resp.text
+
 
 # ---------------------------------------------------------------------------
 # POST /drafts — upload

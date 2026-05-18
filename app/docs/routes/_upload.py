@@ -217,8 +217,32 @@ def _vtk_picker(
     leak possible). First option is an empty "— vali —" sentinel so
     "no link" round-trips through the form.  Renders as a ``<select>``
     element so the control works without JS.
+
+    #808: when the caller's org has zero VTKs, render the select as
+    disabled with just the empty sentinel option and an inline help
+    message explaining that the user can upload without linking a VTK.
+    The field is optional server-side either way.
     """
     selected_str = str(selected) if selected else ""
+
+    # #808: empty-state branch — disabled select + explanatory help text.
+    if not vtks:
+        return Div(  # noqa: F405
+            Label(label, fr=field_id, cls="form-field-label"),  # noqa: F405
+            Select(  # noqa: F405
+                Option("— vali —", value="", selected=True),  # noqa: F405
+                name=name,
+                id=field_id,
+                cls="input input-select",
+                disabled=True,
+            ),
+            Small(  # noqa: F405
+                "Organisatsioonis pole veel VTKsid — saate eelnõu üles laadida ilma VTK-ta.",
+                cls="form-field-help",
+            ),
+            cls="form-field",
+        )
+
     options: list = [Option("— vali —", value="", selected=(selected_str == ""))]  # noqa: F405
     for vtk in vtks:
         vtk_id = str(vtk.id)
