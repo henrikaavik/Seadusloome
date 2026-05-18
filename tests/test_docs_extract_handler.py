@@ -266,8 +266,11 @@ class TestHappyPath:
         ]
         assert len(insert_calls) == 1
         params = insert_calls[0].args[1]
-        # Location is the last positional param.
-        assert params[-1] == json.dumps(location)
+        # Columns are (draft_id, ref_text, entity_uri, confidence,
+        # ref_type, location, partial_match) — see migration 034.
+        # ``partial_match`` is None for fully-resolved refs.
+        assert params[-2] == json.dumps(location)
+        assert params[-1] is None
 
     def test_retry_cleanup_clears_prior_partial_rows(self):
         """#469 + #626: on retry, the handler must DELETE pre-existing rows.

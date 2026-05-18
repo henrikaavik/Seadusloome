@@ -4,39 +4,64 @@ Entity extraction (``entity_extractor.py``) gives us a list of raw
 references Claude spotted in the draft. This module takes each one
 and asks Jena whether the ontology knows about it.
 
-Strategy per ref_type (spec §6.1):
+Strategy per ref_type (revised 2026-05-18 per spike findings in
+``docs/2026-05-18-bugfix-plan.md`` — supersedes the original §6.1 spec):
 
-    law            exact short-name match from a cached SPARQL
-                   dictionary (``"KarS"`` -> ``estleg:karistusseadustik``);
-                   fall back to ``difflib.SequenceMatcher`` fuzzy match
-                   against every law's ``rdfs:label`` + ``estleg:shortName``.
-    provision      exact string match on ``estleg:paragrahv`` literal;
-                   whitespace-normalise and retry if the first pass misses.
-    eu_act         CELEX regex match then SPARQL lookup on
+    law            normalise (strip explicit legal-reference suffixes
+                   like ``seadus``/``seadustik``); look up against an
+                   ontology-derived abbreviation map built from
+                   ``LegalProvision_<TOKEN>`` rdf:type subclasses
+                   paired with the most-frequent ``estleg:sourceAct``
+                   literal among each subclass's members. Fall back to
+                   fuzzy match (``difflib.SequenceMatcher`` ≥ 0.7).
+                   **The act identifier returned is the literal title
+                   string** — the corpus has no act URIs.
+
+    provision      decompose ``<act-name-or-abbrev> § <num>[ lg <m>][ p <k>]``
+                   into act + section; resolve act via the abbreviation
+                   map; try a cheap URI-guess fast path
+                   (``ASK { <estleg:TOKEN_Par_N> ?p ?o }``); fall back
+                   to a single-arm structural SPARQL keyed on
+                   ``estleg:sourceAct`` (literal) and ``estleg:paragrahv``
+                   matching BOTH ``"§ N."`` and ``"§ N"`` forms.
+
+                   IMPORTANT: when the act resolves but the section
+                   does not, return a distinct ``partial_match`` state
+                   instead of silently collapsing to the act.
+
+    eu_act         uppercase + strip whitespace; CELEX regex
+                   (``re.IGNORECASE``); SPARQL lookup on
                    ``estleg:celexNumber``.
-    court_decision exact match on ``estleg:caseNumber``.
-    concept        exact ``rdfs:label`` match on ``estleg:LegalConcept``.
+
+    court_decision exact match on ``estleg:caseNumber``, case-sensitive.
+    concept        case-folded ``rdfs:label`` match on ``estleg:LegalConcept``.
 
 A dead Jena must NOT crash the extraction pipeline: every SPARQL call
 is guarded, and on failure the ref returns with ``entity_uri=None``
-and a warning is logged.
+and a structured log line is emitted.
 
-Phase 3 may want to tighten the fuzzy threshold, add EstBERT
-embeddings for concept matching, and cache the law short-name dict in
-Redis. Today we keep the dict in a module-level global loaded lazily
-on first use; the worker thread lives long enough for that to pay off.
+Privacy: ref texts come from pre-publication drafts. Miss-logs never
+contain raw ``ref_text`` — only an HMAC-truncated identifier derived
+via ``RESOLVER_REF_HASH_SECRET``. See the plan's "Add diagnostic
+logging" subsection.
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
+import os
 import re
 import threading
-from dataclasses import dataclass
+from collections import Counter, defaultdict
+from dataclasses import dataclass, field
 from difflib import SequenceMatcher
+from typing import Any
 
+from app.config import is_stub_allowed
 from app.docs.entity_extractor import ExtractedRef
-from app.ontology.queries import PREFIXES
+from app.ontology.queries import ESTLEG_NS, PREFIXES
 from app.ontology.sparql_client import SparqlClient
 
 logger = logging.getLogger(__name__)
@@ -49,8 +74,65 @@ _FUZZY_THRESHOLD = 0.7
 
 # CELEX numbers look like ``32016R0679`` or ``32019L0790``:
 # 1-digit sector + 4-digit year + single letter (R/L/D/A etc.) + 1-4
-# digits. See https://eur-lex.europa.eu/content/help/faq/celex-number.html
-_CELEX_RE = re.compile(r"\b(\d{5}[A-Z]\d{1,4})\b")
+# digits. ``re.IGNORECASE`` so a user pasting ``32016r0679`` still
+# matches at the regex step; we uppercase the captured group before
+# binding into SPARQL (belt-and-braces with the input-string uppercase
+# at the call site).
+_CELEX_RE = re.compile(r"\b(\d{5}[A-Z]\d{1,4})\b", re.IGNORECASE)
+
+
+# Explicit legal-reference suffixes the resolver may strip from a law
+# name token. **Do not** widen this to generic Estonian case suffixes
+# (-e/-i/-st/-ks/-s/-le) — that creates false positives like
+# ``karistusseaduselt`` collapsing to ``karistusseadus``. Order longest
+# first so re.sub matches greedy.
+_LAW_SUFFIX_RE = re.compile(
+    r"(seadustikus|seadustiku|seadustik"
+    r"|seaduseni|seadusest|seaduses|seaduse|seadus)\b",
+    re.IGNORECASE,
+)
+
+
+# Decomposition of provision references. Captures:
+#   1. act half (everything before the §/paragrahv marker)
+#   2. section number (digits only)
+#   3. optional lõige number
+#   4. optional punkt number
+#
+# The Estonian inflection space is wide: ``lõige`` (nom.), ``lõike``
+# (gen./part.), ``lõikest`` (elative), ``lõikele`` (allative), the
+# bare abbrev ``lg``. Likewise for ``punkt`` → ``punkti``,
+# ``punktist``, ``p``. We use loose stems (``l(õi|oi|õ|o)[gk]`` for
+# lõige; ``p(unkt[…])?``) and then allow any letters before the
+# digit.
+_PROVISION_RE = re.compile(
+    r"""
+    ^\s*
+    (?P<act>.+?)                                     # act half (lazy)
+    \s+
+    (?:§(?:-s|-st|-le|-ni)?|paragrahv[ia]?|paragrahvist|paragrahvile)
+    \s*
+    (?P<num>\d+)                                     # section number
+    (?:
+        \s*
+        (?:lg|l(?:õi|oi|õ|o)[gk][a-zõöäü]*)         # lg / lõige / lõike / lõikest …
+        \s*
+        (?P<lg>\d+)
+    )?
+    (?:
+        \s*
+        (?:p|punkt[a-zõöäü]*)                       # p / punkt / punkti / punktist …
+        \s*
+        (?P<p>\d+)
+    )?
+    \s*$
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+# Env var that holds the HMAC secret for miss-log identifiers.
+_REF_HASH_SECRET_ENV = "RESOLVER_REF_HASH_SECRET"
 
 
 @dataclass(frozen=True)
@@ -67,13 +149,20 @@ class ResolvedRef:
         matched_label: The ``rdfs:label`` we matched against, or
             ``None`` when the lookup was literal (provision, CELEX).
         match_score: ``1.0`` for exact matches, ``0.0..<1.0`` for
-            fuzzy matches, ``0.0`` for unresolved refs.
+            fuzzy matches, ``0.0`` for unresolved refs, ``0.5`` for
+            partial (act-only) provision matches.
+        partial_match: Set when the act half of a provision reference
+            resolves but the section does not. Carries
+            ``{"act_token": str | None, "act_title": str, "section": str}``.
+            Downstream impact code MUST check this explicitly before
+            treating ``entity_uri is None`` as "fully unresolved".
     """
 
     extracted: ExtractedRef
     entity_uri: str | None
     matched_label: str | None
     match_score: float
+    partial_match: dict[str, Any] | None = field(default=None)
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +174,7 @@ class ReferenceResolver:
     """SPARQL-backed matcher for extracted legal references.
 
     Instances hold a :class:`SparqlClient` and lazily build a cache of
-    all law short names on first resolve call. The cache lives for the
+    the abbreviation map on first resolve call. The cache lives for the
     lifetime of the instance — the worker thread keeps a single
     resolver per draft, so one SPARQL roundtrip per draft is an
     acceptable warm-up cost.
@@ -93,10 +182,20 @@ class ReferenceResolver:
 
     def __init__(self, sparql_client: SparqlClient | None = None) -> None:
         self._sparql = sparql_client if sparql_client is not None else SparqlClient()
-        # ``_law_dict`` maps normalised short name -> (uri, label).
-        # ``None`` means "not loaded yet"; empty dict means "loaded,
-        # but Jena returned nothing" so we don't re-query every call.
-        self._law_dict: dict[str, tuple[str, str]] | None = None
+        # Abbreviation map: TOKEN (e.g. "KRIMIN", "ATMOSF", "AVTS")
+        # → canonical title literal (e.g. "Karistusseadustik").
+        # ``None`` means "not loaded yet"; empty dict means "loaded
+        # successfully but Jena returned nothing" — populated dicts
+        # are not re-queried.
+        self._token_to_title: dict[str, str] | None = None
+        # Reverse lookup: normalised title → TOKEN. Built alongside
+        # ``_token_to_title``.
+        self._title_to_token: dict[str, str] = {}
+        # Cache of all distinct sourceAct title literals seen in the
+        # corpus, normalised. Used for fuzzy matching when neither
+        # token nor exact title hits. Set alongside the maps.
+        self._normalised_titles: dict[str, str] = {}
+        self._map_lock = threading.Lock()
 
     # -- public API ---------------------------------------------------------
 
@@ -120,9 +219,9 @@ class ReferenceResolver:
                 return self._resolve_concept(ref)
         except Exception as exc:  # noqa: BLE001 — never crash on one bad ref
             logger.warning(
-                "resolve: ref_type=%s ref_text=%r raised %s; returning unresolved",
+                "resolve: ref_type=%s ref_id=%s raised %s; returning unresolved",
                 ref.ref_type,
-                ref.ref_text,
+                _ref_id(ref.ref_text),
                 exc,
             )
             return _unresolved(ref)
@@ -133,148 +232,318 @@ class ReferenceResolver:
     # -- law ----------------------------------------------------------------
 
     def _resolve_law(self, ref: ExtractedRef) -> ResolvedRef:
-        law_dict = self._get_law_dict()
-        if not law_dict:
+        """Resolve a law reference to its canonical title literal.
+
+        Returns ``ResolvedRef.entity_uri`` as the literal title string
+        (NOT a URI — the corpus has no act URIs). When the act half is
+        a known TOKEN abbreviation, ``matched_label`` carries the title
+        and the resolver behaves the same as for full titles.
+        """
+        token_map, title_map, _ = self._get_abbrev_maps()
+        if not token_map and not title_map:
+            self._log_miss(ref, tried_keys=[], candidates=0)
             return _unresolved(ref)
 
-        key = _normalise_law_name(ref.ref_text)
+        normalised = _normalise_law_name(ref.ref_text)
+        # Token lookup is case-insensitive over the upper-cased form
+        # (TOKENs are conventionally uppercase like ``AVTS``, ``KRIMIN``).
+        token_key = normalised.upper().replace(" ", "")
 
-        # 1) Exact short-name match.
-        exact = law_dict.get(key)
-        if exact is not None:
-            uri, label = exact
+        # 1) Exact token match.
+        if token_key in token_map:
+            title = token_map[token_key]
             return ResolvedRef(
                 extracted=ref,
-                entity_uri=uri,
-                matched_label=label,
+                entity_uri=title,
+                matched_label=title,
                 match_score=1.0,
             )
 
-        # 2) Fuzzy fallback via difflib against every known name.
-        best_uri: str | None = None
-        best_label: str | None = None
-        best_score = 0.0
-        for candidate_key, (uri, label) in law_dict.items():
-            score = SequenceMatcher(None, key, candidate_key).ratio()
-            if score > best_score:
-                best_score = score
-                best_uri = uri
-                best_label = label
-
-        if best_uri is not None and best_score >= _FUZZY_THRESHOLD:
+        # 2) Exact title match (normalised).
+        if normalised in title_map:
+            title = title_map[normalised]
             return ResolvedRef(
                 extracted=ref,
-                entity_uri=best_uri,
-                matched_label=best_label,
+                entity_uri=title,
+                matched_label=title,
+                match_score=1.0,
+            )
+
+        # 3) Fuzzy fallback on normalised titles.
+        best_title: str | None = None
+        best_score = 0.0
+        for candidate_key, title in title_map.items():
+            score = SequenceMatcher(None, normalised, candidate_key).ratio()
+            if score > best_score:
+                best_score = score
+                best_title = title
+
+        if best_title is not None and best_score >= _FUZZY_THRESHOLD:
+            return ResolvedRef(
+                extracted=ref,
+                entity_uri=best_title,
+                matched_label=best_title,
                 match_score=round(best_score, 3),
             )
+
+        self._log_miss(
+            ref,
+            tried_keys=[token_key, normalised],
+            candidates=len(title_map),
+        )
         return _unresolved(ref)
 
-    def _get_law_dict(self) -> dict[str, tuple[str, str]]:
-        """Return the cached ``{normalised_name: (uri, label)}`` dict.
+    def _resolve_law_half(self, act_text: str) -> tuple[str | None, str | None, float]:
+        """Resolve the act half of a provision reference.
 
-        Lazily loads on first call. On Jena failure returns an empty
-        dict and logs a warning — subsequent calls will re-attempt the
-        load (unlike a populated cache, an empty cache is treated as
-        "not yet loaded" on purpose so transient outages can recover).
+        Returns ``(token, title, score)``:
+            - ``token`` is the abbreviation TOKEN (e.g. ``"AVTS"``) or
+              ``None`` when only a fuzzy title match landed.
+            - ``title`` is the canonical literal title or ``None`` when
+              nothing matched.
+            - ``score`` is ``1.0`` for exact, ``<1.0`` for fuzzy,
+              ``0.0`` for miss.
         """
-        if self._law_dict:
-            return self._law_dict
+        token_map, title_map, _ = self._get_abbrev_maps()
+        if not token_map and not title_map:
+            return None, None, 0.0
 
-        sparql = (
-            PREFIXES
-            + """
-            SELECT DISTINCT ?uri ?shortName ?fullName WHERE {
-              ?provision estleg:sourceAct ?uri .
-              OPTIONAL { ?uri estleg:shortName ?shortName }
-              OPTIONAL { ?uri rdfs:label ?fullName }
-            }
-            """
-        )
-        try:
-            rows = self._sparql.query(sparql)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("resolve: law dict SPARQL load failed: %s", exc)
-            return {}
+        normalised = _normalise_law_name(act_text)
+        token_key = normalised.upper().replace(" ", "")
 
-        out: dict[str, tuple[str, str]] = {}
-        for row in rows:
-            uri = row.get("uri", "")
-            if not uri:
-                continue
-            full_name = row.get("fullName", "")
-            short_name = row.get("shortName", "")
-            # Index by BOTH short and full name, normalised.
-            if short_name:
-                out[_normalise_law_name(short_name)] = (uri, full_name or short_name)
-            if full_name:
-                out[_normalise_law_name(full_name)] = (uri, full_name)
+        # Token match wins.
+        if token_key in token_map:
+            return token_key, token_map[token_key], 1.0
 
-        self._law_dict = out
-        logger.info("resolve: loaded %d law short-name entries from Jena", len(out))
-        return out
+        # Exact title match (no TOKEN known).
+        if normalised in title_map:
+            title = title_map[normalised]
+            # Reverse-lookup the token if we have one for this title.
+            token = self._title_to_token.get(normalised)
+            return token, title, 1.0
+
+        # Fuzzy on titles.
+        best_title: str | None = None
+        best_key: str | None = None
+        best_score = 0.0
+        for candidate_key, title in title_map.items():
+            score = SequenceMatcher(None, normalised, candidate_key).ratio()
+            if score > best_score:
+                best_score = score
+                best_title = title
+                best_key = candidate_key
+
+        if best_title is not None and best_score >= _FUZZY_THRESHOLD:
+            token = self._title_to_token.get(best_key or "")
+            return token, best_title, round(best_score, 3)
+
+        return None, None, 0.0
+
+    def _get_abbrev_maps(self) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+        """Return the lazily-loaded abbreviation maps.
+
+        Returns ``(token_to_title, title_to_token_normalised_keys, normalised_titles)``.
+        Loaded once per resolver instance with thread-safe
+        double-checked locking. On Jena failure returns empty dicts and
+        logs a warning — subsequent calls will re-attempt the load
+        (unlike a populated cache, an empty cache is treated as "not
+        yet loaded" on purpose so transient outages can recover).
+
+        Build strategy (per spike findings):
+            1. Walk every ``?prov a ?cls ; estleg:sourceAct ?actLit``
+               row where ``?cls`` is in the
+               ``estleg:LegalProvision_<TOKEN>`` family.
+            2. Derive TOKEN from the cls URI local-name suffix.
+            3. For each TOKEN, pick the most-frequent ``?actLit`` as
+               the canonical title.
+            4. Build the reverse normalised-title → TOKEN map.
+        """
+        if self._token_to_title is not None:
+            return self._token_to_title, self._normalised_titles, self._title_to_token
+
+        with self._map_lock:
+            if self._token_to_title is not None:
+                return self._token_to_title, self._normalised_titles, self._title_to_token
+
+            sparql = (
+                PREFIXES
+                + """
+                SELECT ?prov ?cls ?actLit WHERE {
+                  ?prov a ?cls ;
+                        estleg:sourceAct ?actLit .
+                  FILTER(STRSTARTS(STR(?cls),
+                         \""""
+                + ESTLEG_NS
+                + """LegalProvision_\"))
+                }
+                """
+            )
+            try:
+                rows = self._sparql.query(sparql)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("resolve: abbreviation map SPARQL load failed: %s", exc)
+                return {}, {}, {}
+
+            # token → Counter[title_literal]
+            token_titles: dict[str, Counter[str]] = defaultdict(Counter)
+            # Track every distinct title literal seen, regardless of TOKEN.
+            distinct_titles: set[str] = set()
+
+            cls_prefix = ESTLEG_NS + "LegalProvision_"
+            for row in rows:
+                cls_uri = row.get("cls", "")
+                title = row.get("actLit", "")
+                if not cls_uri or not title:
+                    continue
+                if not cls_uri.startswith(cls_prefix):
+                    continue
+                token = cls_uri[len(cls_prefix) :]
+                if not token:
+                    continue
+                token_titles[token][title] += 1
+                distinct_titles.add(title)
+
+            token_to_title: dict[str, str] = {}
+            for token, counter in token_titles.items():
+                # most_common returns [(title, count)] tuples; pick the
+                # most-frequent literal as the canonical title.
+                top = counter.most_common(1)
+                if top:
+                    token_to_title[token.upper()] = top[0][0]
+
+            # Reverse: normalised title → TOKEN (for the act half
+            # lookup when the input was a full title, not an abbrev).
+            title_to_token: dict[str, str] = {}
+            for token, title in token_to_title.items():
+                title_to_token[_normalise_law_name(title)] = token
+
+            # All known normalised titles (so fuzzy matching can pick
+            # up titles that aren't part of any TOKEN cluster).
+            normalised_titles: dict[str, str] = {}
+            for title in distinct_titles:
+                normalised_titles[_normalise_law_name(title)] = title
+
+            self._token_to_title = token_to_title
+            self._title_to_token = title_to_token
+            self._normalised_titles = normalised_titles
+            logger.info(
+                "resolve: loaded %d abbreviation tokens and %d distinct titles",
+                len(token_to_title),
+                len(normalised_titles),
+            )
+            return token_to_title, normalised_titles, title_to_token
 
     # -- provision ----------------------------------------------------------
 
     def _resolve_provision(self, ref: ExtractedRef) -> ResolvedRef:
-        # Attempt 1: exact match on the raw text as it came from the LLM.
-        hit = self._query_provision(ref.ref_text)
-        if hit is not None:
-            uri, label = hit
-            return ResolvedRef(
-                extracted=ref,
-                entity_uri=uri,
-                matched_label=label,
-                match_score=1.0,
-            )
+        """Decompose ``<act> § <num>[ lg <m>][ p <k>]`` and resolve both halves."""
+        text = _normalise_whitespace(ref.ref_text)
+        match = _PROVISION_RE.match(text)
+        if match is None:
+            self._log_miss(ref, tried_keys=["regex_no_match"], candidates=0)
+            return _unresolved(ref)
 
-        # Attempt 2: normalise whitespace (collapse runs of spaces,
-        # trim) and retry. This catches the common case where the LLM
-        # inserts a non-breaking space or a stray newline.
-        normalised = _normalise_whitespace(ref.ref_text)
-        if normalised != ref.ref_text:
-            hit = self._query_provision(normalised)
-            if hit is not None:
-                uri, label = hit
+        act_text = match.group("act").strip()
+        num = match.group("num")
+
+        # Hard injection guard: only accept digits in the section number.
+        if not num or not num.isdigit():
+            self._log_miss(ref, tried_keys=["non_digit_section"], candidates=0)
+            return _unresolved(ref)
+
+        token, title, _ = self._resolve_law_half(act_text)
+        if title is None:
+            self._log_miss(ref, tried_keys=[act_text, num], candidates=0)
+            return _unresolved(ref)
+
+        # URI-guess fast path. Only attempt when TOKEN is known and num
+        # is purely digits (validated above).
+        if token:
+            guess_uri = f"{ESTLEG_NS}{token}_Par_{num}"
+            ask_sparql = PREFIXES + f"\nASK {{ <{guess_uri}> ?p ?o }}\n"
+            try:
+                hit = self._sparql.ask(ask_sparql)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "resolve: URI-guess ASK failed token=%s num=%s: %s",
+                    token,
+                    num,
+                    exc,
+                )
+                hit = False
+            if hit:
                 return ResolvedRef(
                     extracted=ref,
-                    entity_uri=uri,
-                    matched_label=label,
+                    entity_uri=guess_uri,
+                    matched_label=f"{title} § {num}",
                     match_score=1.0,
                 )
 
-        return _unresolved(ref)
-
-    def _query_provision(self, paragrahv_literal: str) -> tuple[str, str] | None:
-        sparql = (
+        # Structural fallback: single-arm sourceAct + paragrahv match.
+        # Both literal forms (``"§ N."`` and ``"§ N"``) per spike.
+        # ``num`` is digits-only, validated above — safe to interpolate.
+        # ``actLit`` is bound via the SparqlClient escape helper.
+        struct_sparql = (
             PREFIXES
-            + """
-            SELECT ?uri ?paragrahv WHERE {
-              ?uri estleg:paragrahv ?paragrahv .
-            }
+            + f"""
+            SELECT ?p WHERE {{
+              ?p estleg:paragrahv ?par ;
+                 estleg:sourceAct  ?actLit .
+              VALUES ?par {{ "§ {num}." "§ {num}" }}
+            }}
             LIMIT 1
             """
         )
         try:
-            rows = self._sparql.query(sparql, bindings={"paragrahv": paragrahv_literal})
+            rows = self._sparql.query(struct_sparql, bindings={"actLit": title})
         except Exception as exc:  # noqa: BLE001
             logger.warning("resolve: provision SPARQL failed: %s", exc)
-            return None
-        if not rows:
-            return None
-        row = rows[0]
-        uri = row.get("uri")
-        if not uri:
-            return None
-        return (uri, row.get("paragrahv", paragrahv_literal))
+            rows = []
+
+        if rows:
+            row = rows[0]
+            uri = row.get("p")
+            if uri:
+                return ResolvedRef(
+                    extracted=ref,
+                    entity_uri=uri,
+                    matched_label=f"{title} § {num}",
+                    match_score=1.0,
+                )
+
+        # Partial match: act resolved, section did not. Surface as a
+        # distinct state so downstream impact code can flag "act-level
+        # only" instead of treating it like a clean miss.
+        self._log_miss(
+            ref,
+            tried_keys=[token or "", title, num],
+            candidates=0,
+        )
+        return ResolvedRef(
+            extracted=ref,
+            entity_uri=None,
+            matched_label=f"{title} (sätet § {num} ei leitud)",
+            match_score=0.5,
+            partial_match={
+                "act_token": token,
+                "act_title": title,
+                "section": num,
+            },
+        )
 
     # -- EU act -------------------------------------------------------------
 
     def _resolve_eu_act(self, ref: ExtractedRef) -> ResolvedRef:
-        match = _CELEX_RE.search(ref.ref_text)
+        # Belt-and-braces: uppercase + strip whitespace *and* compile
+        # the regex with IGNORECASE. Either alone would suffice but
+        # both together makes the case-handling invariant impossible
+        # to miss in code review.
+        text = (ref.ref_text or "").strip().upper()
+        match = _CELEX_RE.search(text)
         if match is None:
+            self._log_miss(ref, tried_keys=["no_celex"], candidates=0)
             return _unresolved(ref)
-        celex = match.group(1)
+        celex = match.group(1).upper()
 
         sparql = (
             PREFIXES
@@ -293,10 +562,12 @@ class ReferenceResolver:
             logger.warning("resolve: eu_act SPARQL failed: %s", exc)
             return _unresolved(ref)
         if not rows:
+            self._log_miss(ref, tried_keys=[celex], candidates=0)
             return _unresolved(ref)
         row = rows[0]
         uri = row.get("uri")
         if not uri:
+            self._log_miss(ref, tried_keys=[celex], candidates=0)
             return _unresolved(ref)
         return ResolvedRef(
             extracted=ref,
@@ -309,9 +580,13 @@ class ReferenceResolver:
 
     def _resolve_court_decision(self, ref: ExtractedRef) -> ResolvedRef:
         # Case numbers follow patterns like ``3-1-1-63-15`` (Riigikohus)
-        # or CJEU ``C-123/20``; we just hand the raw text to SPARQL and
-        # let the literal match succeed-or-fail.
-        case_number = ref.ref_text.strip()
+        # or CJEU ``C-123/20``; they are case-sensitive (CJEU prefixes
+        # like ``C-`` matter), so strip whitespace but DO NOT casefold.
+        case_number = (ref.ref_text or "").strip()
+        if not case_number:
+            self._log_miss(ref, tried_keys=["empty"], candidates=0)
+            return _unresolved(ref)
+
         sparql = (
             PREFIXES
             + """
@@ -328,10 +603,12 @@ class ReferenceResolver:
             logger.warning("resolve: court_decision SPARQL failed: %s", exc)
             return _unresolved(ref)
         if not rows:
+            self._log_miss(ref, tried_keys=[case_number], candidates=0)
             return _unresolved(ref)
         row = rows[0]
         uri = row.get("uri")
         if not uri:
+            self._log_miss(ref, tried_keys=[case_number], candidates=0)
             return _unresolved(ref)
         return ResolvedRef(
             extracted=ref,
@@ -343,32 +620,68 @@ class ReferenceResolver:
     # -- concept ------------------------------------------------------------
 
     def _resolve_concept(self, ref: ExtractedRef) -> ResolvedRef:
+        # Concept labels are matched case-insensitively. ``casefold()``
+        # is the Unicode-aware lowercaser — matters for Estonian
+        # diacritics in concept labels (``Õ`` vs ``õ`` etc.).
+        label = (ref.ref_text or "").strip()
+        if not label:
+            self._log_miss(ref, tried_keys=["empty"], candidates=0)
+            return _unresolved(ref)
+        normalised = label.casefold()
+
         sparql = (
             PREFIXES
             + """
             SELECT ?uri ?label WHERE {
               ?uri a estleg:LegalConcept ;
                    rdfs:label ?label .
+              FILTER(LCASE(STR(?label)) = LCASE(?probe))
             }
             LIMIT 1
             """
         )
         try:
-            rows = self._sparql.query(sparql, bindings={"label": ref.ref_text.strip()})
+            rows = self._sparql.query(sparql, bindings={"probe": normalised})
         except Exception as exc:  # noqa: BLE001
             logger.warning("resolve: concept SPARQL failed: %s", exc)
             return _unresolved(ref)
         if not rows:
+            self._log_miss(ref, tried_keys=[normalised], candidates=0)
             return _unresolved(ref)
         row = rows[0]
         uri = row.get("uri")
         if not uri:
+            self._log_miss(ref, tried_keys=[normalised], candidates=0)
             return _unresolved(ref)
         return ResolvedRef(
             extracted=ref,
             entity_uri=uri,
-            matched_label=row.get("label") or ref.ref_text,
+            matched_label=row.get("label") or label,
             match_score=1.0,
+        )
+
+    # -- miss logging -------------------------------------------------------
+
+    def _log_miss(
+        self,
+        ref: ExtractedRef,
+        *,
+        tried_keys: list[str],
+        candidates: int,
+    ) -> None:
+        """Emit a structured miss log line.
+
+        ``ref.ref_text`` is sensitive (pre-publication draft content)
+        and never leaves this module; the log carries an HMAC'd
+        identifier instead. Tests assert on the format string and the
+        ``ref_id`` token.
+        """
+        logger.info(
+            "resolver: %s unresolved ref_id=%s tried_keys=%d candidates=%d",
+            ref.ref_type,
+            _ref_id(ref.ref_text),
+            len(tried_keys),
+            candidates,
         )
 
 
@@ -383,19 +696,94 @@ def _unresolved(ref: ExtractedRef) -> ResolvedRef:
         entity_uri=None,
         matched_label=None,
         match_score=0.0,
+        partial_match=None,
     )
 
 
 def _normalise_law_name(name: str) -> str:
-    """Collapse whitespace and lowercase for case-insensitive matching."""
-    return re.sub(r"\s+", " ", name).strip().lower()
+    """Normalise a law name token for case-insensitive matching.
+
+    Steps:
+        1. Replace NBSP and tabs/newlines with plain spaces.
+        2. Strip explicit Estonian legal-reference suffixes
+           (``seadus``, ``seaduse``, ``seaduses``, …, ``seadustik``,
+           ``seadustiku``, ``seadustikus``). Other tokens are NOT
+           touched — generic case-suffix stripping (-e/-i/-st/…)
+           creates false positives like ``karistusseaduselt`` →
+           ``karistus``.
+        3. Strip leading/trailing dashes (handles ``AvTS-i`` →
+           ``AvTS``).
+        4. Lowercase + collapse whitespace.
+
+    The output is the canonical normalisation key used by both the
+    abbreviation map's title index and the law-name fuzzy matcher.
+    """
+    cleaned = (name or "").replace(" ", " ")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    # Strip explicit legal-reference suffixes from EACH whitespace
+    # token. ``karistusseadustiku §`` → ``karistus``; ``karistusseaduselt``
+    # is unaffected because ``seaduselt`` is not in the suffix list.
+    tokens = []
+    for tok in cleaned.split(" "):
+        # Trim trailing punctuation/dashes commonly attached to act
+        # abbreviations (``AvTS-i`` → ``AvTS``).
+        stripped = tok.rstrip(",.;:")
+        stripped = re.sub(r"[-‒–—]+(?:[a-zõöäü]+)?$", "", stripped, flags=re.IGNORECASE)
+        stripped = _LAW_SUFFIX_RE.sub("", stripped)
+        if stripped:
+            tokens.append(stripped)
+    out = " ".join(tokens).strip().lower()
+    return re.sub(r"\s+", " ", out)
 
 
 def _normalise_whitespace(text: str) -> str:
     """Replace NBSP, tabs and newlines with plain spaces and collapse runs."""
-    cleaned = text.replace("\u00a0", " ")  # non-breaking space
+    cleaned = (text or "").replace(" ", " ")  # non-breaking space
     cleaned = re.sub(r"\s+", " ", cleaned)
     return cleaned.strip()
+
+
+def _get_ref_hash_secret() -> bytes:
+    """Resolve the HMAC secret for the miss-log ``ref_id``.
+
+    Module-import-time reads break local dev, CI, and unit tests, any
+    of which can ``import app.docs.reference_resolver`` without the env
+    var set. Instead:
+
+      - In production (``APP_ENV=production``, i.e.
+        ``not is_stub_allowed()``): require the var; raise a clear
+        ``RuntimeError`` if missing so the app refuses to start with
+        unredacted logging.
+      - Outside production: fall back to a dev sentinel so imports and
+        tests work; the resulting ``ref_id`` is still stable
+        per-process and never leaves the dev machine.
+
+    Tests monkeypatch this helper directly to keep assertions on the
+    hashed identifier stable.
+    """
+    secret = os.environ.get(_REF_HASH_SECRET_ENV)
+    if secret:
+        return secret.encode("utf-8")
+    if not is_stub_allowed():  # production
+        raise RuntimeError(
+            f"{_REF_HASH_SECRET_ENV} must be set in production "
+            "(see docs/2026-05-18-bugfix-plan.md and .env.example)."
+        )
+    return b"dev-only-resolver-ref-id-secret"
+
+
+def _ref_id(ref_text: str) -> str:
+    """HMAC-truncated ref identifier — stable across runs, not enumerable.
+
+    Plain SHA-256 over a short legal reference (e.g. ``"KarS § 211"``)
+    is low-entropy enough to dictionary-attack offline. HMAC with an
+    app secret blocks that without changing the call-site shape.
+    """
+    return hmac.new(
+        _get_ref_hash_secret(),
+        (ref_text or "").encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()[:12]
 
 
 # ---------------------------------------------------------------------------
@@ -411,7 +799,7 @@ _default_resolver_lock = threading.Lock()
 def get_default_resolver() -> ReferenceResolver:
     """Return the process-wide default :class:`ReferenceResolver`.
 
-    The singleton lets the law short-name dict survive across
+    The singleton lets the abbreviation map survive across
     ``extract_entities`` jobs in a single worker process, saving one
     SPARQL roundtrip per draft after the first warm-up.
 

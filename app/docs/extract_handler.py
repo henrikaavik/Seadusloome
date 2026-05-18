@@ -139,8 +139,9 @@ def extract_entities(
                 conn.execute(
                     """
                     insert into draft_entities
-                        (draft_id, ref_text, entity_uri, confidence, ref_type, location)
-                    values (%s, %s, %s, %s, %s, %s)
+                        (draft_id, ref_text, entity_uri, confidence,
+                         ref_type, location, partial_match)
+                    values (%s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         str(draft_id),
@@ -149,6 +150,11 @@ def extract_entities(
                         r.extracted.confidence,
                         r.extracted.ref_type,
                         json.dumps(r.extracted.location),
+                        # #801/#803: persist the partial_match state so the
+                        # analyzer can flag "act resolved, § not found"
+                        # without re-running SPARQL. NULL for the common
+                        # path (resolved OR cleanly unresolved).
+                        (json.dumps(r.partial_match) if r.partial_match is not None else None),
                     ),
                 )
             # #625 §4.2: route through the SSOT helper so the status

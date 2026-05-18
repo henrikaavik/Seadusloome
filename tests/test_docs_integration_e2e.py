@@ -459,6 +459,12 @@ class TestDocsPipelineE2E:
         fake_resolved.entity_uri = "https://data.riik.ee/ontology/estleg#KarS_Par_133"
         fake_resolved.matched_label = "KarS § 133"
         fake_resolved.match_score = 1.0
+        # #801/#803: extract_handler now reads ``partial_match`` and json-dumps
+        # it when present. MagicMock auto-creates attributes on access, so
+        # leaving this unset would give us a MagicMock instance that isn't
+        # ``None`` and isn't JSON-serialisable. Pin it explicitly to None
+        # for the resolved-with-URI happy path.
+        fake_resolved.partial_match = None
         fake_resolved.extracted = MagicMock(
             ref_text="KarS § 133",
             ref_type="provision",

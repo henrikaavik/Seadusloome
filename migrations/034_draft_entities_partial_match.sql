@@ -1,0 +1,42 @@
+-- =============================================================================
+-- Migration 034: draft_entities.partial_match — act-only provision resolutions
+-- =============================================================================
+--
+-- Wave 2 Step 2 of docs/2026-05-18-bugfix-plan.md (#801 + #803).
+--
+-- The reference resolver used to either return a URI or NULL — a binary
+-- "matched or unmatched" outcome. The spike findings (Step 1 of the same
+-- plan) showed that for some acts (e.g. AvTS in the current corpus) the
+-- act-level node exists but the §-level node does not. Silently collapsing
+-- those to "unresolved" loses information: the downstream impact engine
+-- and the UI both want to surface "we know which Act this is referring to,
+-- we just don't have a row for that §".
+--
+-- The resolver now emits a third state: ``partial_match`` — entity_uri is
+-- NULL, match_score is 0.5, and ``partial_match`` carries a JSON blob with
+-- ``{"act_token": str|null, "act_title": str, "section": str}``. This
+-- column persists that blob so reverse-fill scripts, the analyzer, and the
+-- UI can read it back without re-running SPARQL.
+--
+-- Schema:
+--   - ``partial_match`` is JSONB so we can filter on its keys with the
+--     existing GIN index pattern if it becomes a hot query path.
+--   - NULL is the default (the common case: either entity_uri is set OR
+--     the ref is fully unresolved).
+--   - No CHECK constraint pairing entity_uri with partial_match — the
+--     resolver invariant is "at most one of (entity_uri, partial_match)
+--     is non-null" but adding it as a DB constraint would block a future
+--     "act resolved, § also resolved via fallback path" without value.
+--
+-- Idempotency:
+--   - ``ADD COLUMN IF NOT EXISTS`` keeps re-runs safe.
+--
+-- ROLLBACK procedure (manual; requires app on pre-034 code):
+--   ALTER TABLE draft_entities DROP COLUMN IF EXISTS partial_match;
+--   DELETE FROM schema_migrations WHERE version = '034_draft_entities_partial_match';
+--   Then redeploy the previous app image. No data loss for any existing
+--   draft_entities row — the column is additive and nullable.
+-- =============================================================================
+
+ALTER TABLE draft_entities
+    ADD COLUMN IF NOT EXISTS partial_match jsonb NULL;
