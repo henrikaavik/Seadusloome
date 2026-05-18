@@ -563,7 +563,20 @@ class TestNewDraftPage:
         mock_get_provider: MagicMock,
         mock_list_vtks: MagicMock,
     ):
-        """#808: zero VTKs → disabled select + Estonian empty-state help."""
+        """#808: zero VTKs → disabled select + Estonian empty-state help.
+
+        Verifies the HTTP response (not just ``to_xml()``) because
+        FastHTML 0.13.3's HTTP renderer normalises bool-true attributes
+        differently than ``to_xml()``: ``disabled=True`` was silently
+        dropped on the wire even though ``to_xml()`` rendered it
+        correctly. The fix renders ``disabled="disabled"`` which
+        round-trips through every serializer.
+
+        Also pins the ``data-empty="true"`` escape hatch read by
+        ``_DOC_TYPE_TOGGLE_SCRIPT`` — without it the toggle re-enables
+        the picker on initial sync because the default radio is
+        ``eelnou``.
+        """
         mock_get_provider.return_value = _stub_provider()
         mock_list_vtks.return_value = []
 
@@ -574,11 +587,11 @@ class TestNewDraftPage:
         # The VTK picker must still render so the form layout is stable.
         assert 'id="field-parent-vtk"' in resp.text
         # Slice out the <select ...> opening tag for the parent-vtk
-        # picker and assert it carries the `disabled` attribute.
-        # FastHTML serialises boolean attributes as the bare attribute
-        # name, and the attribute order in the tag is not guaranteed,
-        # so we scan from the nearest preceding `<select` to the next
-        # `>` rather than anchoring on `id="..."`.
+        # picker and assert it carries the `disabled` attribute on the
+        # HTTP-rendered response (this is the layer where FastHTML
+        # 0.13.3 dropped bool-true attributes silently — pinning it
+        # against the live response rather than ``to_xml()`` is the
+        # whole point of this test).
         id_idx = resp.text.find('id="field-parent-vtk"')
         select_open = resp.text.rfind("<select", 0, id_idx)
         select_end = resp.text.find(">", id_idx)
@@ -586,9 +599,73 @@ class TestNewDraftPage:
         assert select_open != -1
         assert select_end != -1
         select_tag = resp.text[select_open : select_end + 1]
-        assert " disabled" in select_tag or 'disabled="' in select_tag
+        # The disabled attribute MUST be present on the wire. We accept
+        # either the bare bool form or the HTML4-compatible name=value
+        # form (the fix uses the latter).
+        assert " disabled" in select_tag or 'disabled="' in select_tag, (
+            f"<select> rendered without a disabled attribute: {select_tag!r}. "
+            "FastHTML 0.13.3 drops bool-true attributes from the HTTP "
+            'response; the empty-state branch must use disabled="disabled".'
+        )
+        # The data-empty hint is the toggle-script escape hatch — pin
+        # it so a future refactor cannot accidentally drop it (which
+        # would cause _DOC_TYPE_TOGGLE_SCRIPT to re-enable the picker
+        # on initial load when doc_type=eelnou is selected).
+        assert 'data-empty="true"' in select_tag, (
+            f"<select> missing data-empty hint: {select_tag!r}. The "
+            "toggle script reads picker.dataset.empty to preserve the "
+            "disabled flag — dropping this attribute regresses #808."
+        )
         # The empty-state help text appears below the select.
         assert "Organisatsioonis pole veel VTKsid" in resp.text
+
+    @patch("app.docs.routes._upload.list_vtks_for_org")
+    @patch("app.auth.middleware._get_provider")
+    def test_new_draft_vtk_picker_empty_state_toggle_script_preserves_disabled(
+        self,
+        mock_get_provider: MagicMock,
+        mock_list_vtks: MagicMock,
+    ):
+        """#808 follow-up: the doc_type toggle script must respect the
+        ``data-empty`` flag so it never re-enables an empty-state picker.
+
+        Without a JSDOM fixture available in the test harness we instead
+        read the script source out of the HTTP response and assert it
+        references ``dataset.empty`` (or the equivalent attribute) so a
+        regression to the pre-fix behaviour — where ``picker.disabled =
+        !!isVtk`` unconditionally re-enabled the picker on initial sync
+        for the default ``eelnou`` radio — is caught at the source.
+        """
+        mock_get_provider.return_value = _stub_provider()
+        mock_list_vtks.return_value = []
+
+        client = _authed_client()
+        resp = client.get("/drafts/new")
+
+        assert resp.status_code == 200
+        # The toggle script must reference the data-empty hint. We
+        # accept either ``dataset.empty`` (the canonical DOM accessor
+        # for the kebab-cased ``data-empty`` attribute) or the literal
+        # attribute name as a string, so a future rewrite to
+        # ``getAttribute('data-empty')`` still passes.
+        assert "dataset.empty" in resp.text or "data-empty" in resp.text, (
+            "The doc_type toggle script must reference the data-empty "
+            "escape hatch so an empty-state picker stays disabled when "
+            "the default ``eelnou`` radio is selected. Without this "
+            "check the toggle re-enables the picker on initial sync."
+        )
+        # Strong pin: assert the toggle script's disabled-assignment is
+        # NOT a plain ``picker.disabled = !!isVtk`` — that was the
+        # pre-fix shape and is the exact line that caused the regression.
+        # We accept any expression that ORs the isVtk flag with the
+        # empty-state flag.
+        assert "picker.disabled = !!isVtk;" not in resp.text, (
+            "Pre-fix toggle-script shape detected: "
+            "``picker.disabled = !!isVtk;`` unconditionally re-enables "
+            "the picker on the default ``eelnou`` radio, overriding "
+            "the server-rendered ``disabled`` flag in the empty-state "
+            "branch. The fix must OR in the data-empty flag."
+        )
 
     @patch("app.docs.routes._upload.list_vtks_for_org")
     @patch("app.auth.middleware._get_provider")
@@ -622,6 +699,9 @@ class TestNewDraftPage:
         assert select_end != -1
         select_tag = resp.text[select_open : select_end + 1]
         assert " disabled" not in select_tag and 'disabled="' not in select_tag
+        # And the data-empty escape hatch must NOT leak into the
+        # non-empty branch — it's only set when the org has zero VTKs.
+        assert "data-empty=" not in select_tag
         # The VTK label must appear as an <option>.
         assert "<option" in resp.text
         assert "Maantee VTK" in resp.text

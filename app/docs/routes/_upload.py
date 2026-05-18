@@ -136,6 +136,16 @@ def _file_picker_script() -> str:
 # the DB CHECK constraint in migration 019) so the control is purely
 # UX polish; server-side validation in ``create_draft_handler`` is the
 # authoritative guard.
+#
+# #808 follow-up: the empty-state branch in ``_vtk_picker`` renders the
+# select as disabled when the caller's org has zero VTKs. The toggle
+# below MUST preserve that disabled flag — without the ``data-empty``
+# escape hatch, ``sync()`` would re-enable the picker on initial load
+# (default ``doc_type`` is ``eelnou``, so ``isVtk === false``), undoing
+# the server-rendered ``disabled`` attribute. The ``data-empty="true"``
+# data attribute is set server-side in the empty-state branch only;
+# when present, the toggle keeps the picker disabled regardless of
+# radio state.
 _DOC_TYPE_TOGGLE_SCRIPT = (
     "(function () {\n"
     "  var picker = document.getElementById('field-parent-vtk');\n"
@@ -144,7 +154,8 @@ _DOC_TYPE_TOGGLE_SCRIPT = (
     "  function sync() {\n"
     "    var chosen = document.querySelector('input[name=\"doc_type\"]:checked');\n"
     "    var isVtk = chosen && chosen.value === 'vtk';\n"
-    "    picker.disabled = !!isVtk;\n"
+    "    var isEmpty = picker.dataset.empty === 'true';\n"
+    "    picker.disabled = !!isVtk || isEmpty;\n"
     "    if (isVtk) picker.value = '';\n"
     "  }\n"
     "  radios.forEach(function (r) { r.addEventListener('change', sync); });\n"
@@ -222,6 +233,24 @@ def _vtk_picker(
     disabled with just the empty sentinel option and an inline help
     message explaining that the user can upload without linking a VTK.
     The field is optional server-side either way.
+
+    Two FastHTML 0.13.3 quirks worth knowing:
+
+    1. The HTTP response renderer drops bool-true attributes (e.g.
+       ``disabled=True`` → no attribute in the wire output) even though
+       ``to_xml()`` serialises them correctly. The HTML4-compatible
+       ``disabled="disabled"`` round-trips through every serializer, so
+       we use it here.
+    2. The same renderer also normalises ``selected=True`` → ``selected=""``
+       (empty string), which is still a valid bool attribute per the
+       HTML5 spec, so the option-default behaviour is unaffected. If you
+       ever hit it, the fix is the same: ``selected="selected"``.
+
+    The ``data-empty="true"`` data attribute is the escape hatch read by
+    ``_DOC_TYPE_TOGGLE_SCRIPT`` so the toggle preserves the disabled flag
+    on initial sync (default ``doc_type`` is ``eelnou`` → otherwise the
+    toggle would set ``picker.disabled = false`` and re-enable an
+    empty-state picker the server just rendered as disabled).
     """
     selected_str = str(selected) if selected else ""
 
@@ -234,7 +263,8 @@ def _vtk_picker(
                 name=name,
                 id=field_id,
                 cls="input input-select",
-                disabled=True,
+                disabled="disabled",
+                data_empty="true",
             ),
             Small(  # noqa: F405
                 "Organisatsioonis pole veel VTKsid — saate eelnõu üles laadida ilma VTK-ta.",
