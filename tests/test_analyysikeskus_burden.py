@@ -207,14 +207,67 @@ class TestListBurdenForAct:
         # dutyHolder should be carried forward from whichever row had one.
         assert summary.rows[0].duty_holder == "Riik"
 
-    def test_passes_act_as_uri_binding(self):
+    def test_passes_uri_input_as_uri_binding(self):
+        """A URI-shaped input binds ``?actLit`` via ``uri_bindings`` so the
+        SPARQL ``VALUES`` clause emits ``<URI>`` form — the canonical
+        TTL fixture shape where ``estleg:sourceAct`` carries a URI object.
+        """
         from app.analyysikeskus.burden import list_burden_for_act
 
         stub_client = MagicMock()
         stub_client.query.return_value = []
         list_burden_for_act(_TLS_URI, sparql_client=stub_client)
         kwargs = stub_client.query.call_args.kwargs
-        assert kwargs["uri_bindings"] == {"act": _TLS_URI}
+        assert kwargs.get("uri_bindings") == {"actLit": _TLS_URI}
+        assert kwargs.get("bindings") is None
+
+    def test_passes_literal_title_as_string_binding(self):
+        """A literal-title input binds ``?actLit`` via ``bindings`` so the
+        SPARQL ``VALUES`` clause emits ``"Title"`` (string) form — the
+        prod shape where ``estleg:sourceAct`` is always a string literal
+        (Wave 2 spike, 2026-05-18).
+        """
+        from app.analyysikeskus.burden import list_burden_for_act
+
+        stub_client = MagicMock()
+        stub_client.query.return_value = []
+        list_burden_for_act("Töölepingu seadus", sparql_client=stub_client)
+        kwargs = stub_client.query.call_args.kwargs
+        assert kwargs.get("bindings") == {"actLit": "Töölepingu seadus"}
+        assert kwargs.get("uri_bindings") is None
+
+    def test_literal_title_rows_flow_through_workflow(self):
+        """A mock prod-shaped row (``?act`` empty, ``?actLabel`` literal)
+        flows correctly through the burden workflow — the Python that
+        previously expected ``?act`` as a URI no longer crashes.
+
+        In prod the ``sourceAct`` object is a string literal, so the
+        SPARQL ``BIND`` clauses set ``?act = ""`` and ``?actLabel =
+        <literal title>``. The :class:`BurdenRow` should carry the
+        empty URI + the literal title without raising.
+        """
+        from app.analyysikeskus.burden import list_burden_for_act
+
+        stub_client = MagicMock()
+        # Prod-shaped row: no act URI, actLabel is the literal title.
+        stub_client.query.return_value = [
+            {
+                "provision": f"{_NS}P1",
+                "provisionLabel": "TLS § 12",
+                "act": "",  # literal sourceAct in prod ⇒ empty URI
+                "actLabel": "Töölepingu seadus",
+                "normType": _OBLIGATION_URI,
+                "dutyHolder": "Tööandja",
+            }
+        ]
+        summary = list_burden_for_act("Töölepingu seadus", sparql_client=stub_client)
+        assert summary.total == 1
+        row = summary.rows[0]
+        assert row.provision_uri == f"{_NS}P1"
+        assert row.act_uri == ""  # literal mode ⇒ empty URI
+        assert row.act_label == "Töölepingu seadus"
+        assert row.burden_key == "obligation"
+        assert summary.counts["obligation"] == 1
 
 
 class TestListBurdenForProvision:
@@ -607,16 +660,19 @@ class TestActQueryAgainstFixture:
         from app.analyysikeskus.burden import _build_act_burden_query
 
         g = self._load_graph()
-        # Inject ``?act`` VALUES binding (matches SparqlClient._inject_uri_bindings).
+        # Inject the ``?actLit`` VALUES binding in URI form — the fixture
+        # carries ``estleg:Provision_1 estleg:sourceAct estleg:Act_1``
+        # (URI object), so the act-level burden query binds the act URI.
+        # In prod the same query is run with a literal title binding;
+        # see ``TestListBurdenForAct.test_passes_literal_title_as_string_binding``.
         query = _build_act_burden_query()
         last_brace = query.rfind("}")
-        values_block = f"VALUES ?act {{ <{_NS}Act_1> }}\n"
+        values_block = f"VALUES ?actLit {{ <{_NS}Act_1> }}\n"
         query = query[:last_brace] + "\n" + values_block + "\n" + query[last_brace:]
 
         raw_rows: Any = list(g.query(query))
-        # The fixture has Provision_1 (sourceAct Act_1) and Provision_3
-        # (sourceAct Act_1) — both should surface via the sourceAct UNION
-        # arm. Provision_2 is part of Act_2 and must not be returned.
+        # The fixture has Provision_1 and Provision_3 with
+        # ``estleg:sourceAct estleg:Act_1``; Provision_2 is on Act_2.
         provisions = {str(r[0]) for r in raw_rows}
         assert f"{_NS}Provision_1" in provisions
         assert f"{_NS}Provision_3" in provisions
@@ -630,7 +686,7 @@ class TestActQueryAgainstFixture:
         g = self._load_graph()
         query = _build_act_burden_query()
         last_brace = query.rfind("}")
-        values_block = f"VALUES ?act {{ <{_NS}Act_1> }}\n"
+        values_block = f"VALUES ?actLit {{ <{_NS}Act_1> }}\n"
         query = query[:last_brace] + "\n" + values_block + "\n" + query[last_brace:]
 
         raw_rows: Any = list(g.query(query))
@@ -641,3 +697,28 @@ class TestActQueryAgainstFixture:
             by_provision[provision] = norm_type_key(norm_type)
         assert by_provision[f"{_NS}Provision_1"] == "obligation"
         assert by_provision[f"{_NS}Provision_3"] == "prohibition"
+
+    def test_fixture_act_label_is_projected_from_rdfs_label(self):
+        """When ``estleg:sourceAct`` carries a URI (fixture shape), the
+        SPARQL ``BIND`` clauses should resolve ``?actLabel`` via the
+        URI's ``rdfs:label`` rather than the URI's local-name.
+
+        This is the canonical TTL fixture path. In prod ``sourceAct``
+        is a literal, so ``?actLabel`` is the literal itself — covered
+        by :class:`TestListBurdenForAct.test_literal_title_rows_flow_through_workflow`.
+        """
+        from app.analyysikeskus.burden import _build_act_burden_query
+
+        g = self._load_graph()
+        query = _build_act_burden_query()
+        last_brace = query.rfind("}")
+        values_block = f"VALUES ?actLit {{ <{_NS}Act_1> }}\n"
+        query = query[:last_brace] + "\n" + values_block + "\n" + query[last_brace:]
+
+        raw_rows: Any = list(g.query(query))
+        # Every row should carry the fixture act label "Act 1 — fixture host"
+        # and the URI string of Act_1 in the ?act binding.
+        labels = {str(r[3]) for r in raw_rows if r[3] is not None}
+        uris = {str(r[2]) for r in raw_rows if r[2] is not None}
+        assert "Act 1 — fixture host" in labels
+        assert f"{_NS}Act_1" in uris

@@ -132,10 +132,16 @@ class BurdenRow:
         provision_label: ``rdfs:label`` on the provision. Falls back
             to the URI tail when absent so the UI cell never renders
             blank.
-        act_uri: The Act URI (best-effort; may be empty for orphan
-            sandbox provisions). Pulled via ``estleg:partOf`` /
-            ``estleg:sourceAct``.
-        act_label: ``rdfs:label`` on the act.
+        act_uri: The Act URI (best-effort). In the prod corpus
+            ``estleg:sourceAct`` is a string literal (the act title),
+            not a URI, so this is typically empty for prod rows; the
+            URI form is still projected when the SPARQL data carries a
+            URI object (e.g. the canonical TTL fixture). See the Wave 2
+            spike in ``docs/2026-05-18-bugfix-plan.md`` — ``estleg:partOf``
+            / ``estleg:partOfAct`` carry zero triples in prod.
+        act_label: The act title. Either ``rdfs:label`` on the URI
+            (fixture shape) or the literal value of ``sourceAct``
+            itself (prod shape — the literal IS the title).
         norm_type_uri: The ``estleg:NormativeType`` individual URI (or
             ``""`` when the ontology row carries a literal /
             non-canonical value). Useful for tests that want to assert
@@ -260,31 +266,65 @@ def burden_key_order() -> tuple[BurdenKey, ...]:
 # provisions (a draft does not carry its own normativeType edges in v1
 # data, see BurdenDelta docstring).
 #
-# We OPTIONAL every field except ``provision`` because the corpus'
-# completeness varies — many provisions have a normativeType but no
-# dutyHolder, and a small minority have neither (kept in the
-# "Liigitamata" bucket so the count grid is honest).
+# Act ↔ Provision membership shape (post Wave 2 spike, 2026-05-18):
+#
+# The Wave 2 diagnostic spike (`docs/2026-05-18-bugfix-plan.md`,
+# Step 1) confirmed for the production corpus:
+#
+#   * ``estleg:sourceAct`` is the only provision-to-act edge present
+#     (24,221 triples, all ``xsd:string`` literals — sample
+#     ``"Avaliku teabe seadus"``). There are zero URI objects.
+#   * ``estleg:partOf`` and ``estleg:partOfAct`` both carry zero
+#     triples corpus-wide. The previous UNION arms were silently
+#     producing zero rows.
+#
+# These templates therefore use **only** ``estleg:sourceAct``. The
+# binding variable ``?actLit`` is deliberately neutral: it accepts
+# either a string literal (prod shape) or a URI (canonical TTL
+# fixture shape — ``estleg:Provision_1 estleg:sourceAct estleg:Act_1``).
+# The Python caller decides whether to pass the act identifier through
+# ``bindings`` (literal VALUES) or ``uri_bindings`` (URI VALUES).
+#
+# When the bound ``?actLit`` is a URI we project ``?act`` (the URI)
+# and try to resolve ``?actLabel`` via ``rdfs:label`` — the fixture
+# shape. When the bound ``?actLit`` is a literal we project an empty
+# ``?act`` and pass the literal through as ``?actLabel`` because the
+# literal IS the act title (no extra label lookup needed).
+#
+# We OPTIONAL every field except ``provision`` (and the sourceAct
+# join, which anchors the membership) because the corpus' completeness
+# varies — many provisions have a normativeType but no dutyHolder,
+# and a small minority have neither (kept in the "Liigitamata" bucket
+# so the count grid is honest).
 
 
 def _build_act_burden_query() -> str:
     """Return the act-level burden SPARQL.
 
-    Joins via ``estleg:partOf`` *or* ``estleg:sourceAct`` (the corpus
-    uses both for the act↔provision membership relation) so we don't
-    silently miss provisions in one shape or the other.
+    Joins via ``estleg:sourceAct`` only — the Wave 2 spike confirmed
+    ``estleg:partOf`` / ``estleg:partOfAct`` carry zero triples in
+    prod, so the historical UNION arms were dead code. ``?actLit``
+    is bound by the caller as either a string literal (prod shape)
+    or a URI (canonical TTL fixture shape); the ``BIND`` clauses
+    derive ``?act`` (URI form when applicable) and ``?actLabel``
+    (label-or-literal) from whichever object the data carries.
     """
     return (
         PREFIXES
         + f"""
 SELECT ?provision ?provisionLabel ?act ?actLabel ?normType ?dutyHolder
 WHERE {{
-  {{ ?provision estleg:partOf ?act . }}
-  UNION
-  {{ ?provision estleg:sourceAct ?act . }}
+  ?provision estleg:sourceAct ?actLit .
   OPTIONAL {{ ?provision rdfs:label ?provisionLabel }}
-  OPTIONAL {{ ?act rdfs:label ?actLabel }}
+  OPTIONAL {{ ?actLit rdfs:label ?actLabelFromUri }}
   OPTIONAL {{ ?provision <{PREDICATES.NORMATIVE_TYPE}> ?normType }}
   OPTIONAL {{ ?provision <{PREDICATES.DUTY_HOLDER}> ?dutyHolder }}
+  BIND(IF(isURI(?actLit), STR(?actLit), "") AS ?act)
+  BIND(
+    IF(BOUND(?actLabelFromUri), STR(?actLabelFromUri),
+       IF(isLiteral(?actLit), STR(?actLit), ""))
+    AS ?actLabel
+  )
 }}
 ORDER BY ?provision
 LIMIT {_MAX_BURDEN_ROWS_PER_ACT}
@@ -293,7 +333,13 @@ LIMIT {_MAX_BURDEN_ROWS_PER_ACT}
 
 
 def _build_provision_burden_query() -> str:
-    """Return the provision-level burden SPARQL (single-row OPTIONAL fan-out)."""
+    """Return the provision-level burden SPARQL (single-row OPTIONAL fan-out).
+
+    Joins via ``estleg:sourceAct`` only — see :func:`_build_act_burden_query`
+    for the rationale (Wave 2 spike, 2026-05-18). The whole
+    ``sourceAct`` chain is wrapped in an OPTIONAL because a provision
+    URI looked up in isolation may not carry the membership edge yet.
+    """
     return (
         PREFIXES
         + f"""
@@ -301,10 +347,14 @@ SELECT ?provision ?provisionLabel ?act ?actLabel ?normType ?dutyHolder
 WHERE {{
   OPTIONAL {{ ?provision rdfs:label ?provisionLabel }}
   OPTIONAL {{
-    {{ ?provision estleg:partOf ?act . }}
-    UNION
-    {{ ?provision estleg:sourceAct ?act . }}
-    OPTIONAL {{ ?act rdfs:label ?actLabel }}
+    ?provision estleg:sourceAct ?actLit .
+    OPTIONAL {{ ?actLit rdfs:label ?actLabelFromUri }}
+    BIND(IF(isURI(?actLit), STR(?actLit), "") AS ?act)
+    BIND(
+      IF(BOUND(?actLabelFromUri), STR(?actLabelFromUri),
+         IF(isLiteral(?actLit), STR(?actLit), ""))
+      AS ?actLabel
+    )
   }}
   OPTIONAL {{ ?provision <{PREDICATES.NORMATIVE_TYPE}> ?normType }}
   OPTIONAL {{ ?provision <{PREDICATES.DUTY_HOLDER}> ?dutyHolder }}
@@ -347,19 +397,40 @@ LIMIT {_MAX_BURDEN_ROWS_PER_ACT}
 # ---------------------------------------------------------------------------
 
 
+def _looks_like_uri(value: str) -> bool:
+    """Return True when *value* is shaped like a SPARQL-bindable URI.
+
+    The Wave 2 spike confirmed prod's ``estleg:sourceAct`` is always a
+    literal title; the canonical TTL fixture uses a URI. The act-level
+    burden query supports both — this helper decides which VALUES
+    binding to emit for the caller's input.
+    """
+    v = (value or "").strip()
+    return v.startswith("http://") or v.startswith("https://")
+
+
 def list_burden_for_act(
-    act_uri: str,
+    act: str,
     *,
     sparql_client: SparqlClient | None = None,
 ) -> BurdenSummary:
-    """Return the deontic-classified rows + counts for every provision of *act_uri*.
+    """Return the deontic-classified rows + counts for every provision of *act*.
 
-    Walks ``?provision estleg:partOf <act_uri>`` (or ``sourceAct``) and
-    projects ``rdfs:label``, ``estleg:normativeType``, ``estleg:dutyHolder``
-    for each member provision.
+    Walks ``?provision estleg:sourceAct ?actLit`` and projects
+    ``rdfs:label``, ``estleg:normativeType``, ``estleg:dutyHolder``
+    for each member provision. The Wave 2 spike (2026-05-18)
+    confirmed ``estleg:partOf`` / ``estleg:partOfAct`` carry zero
+    triples in prod, so the only honest provision-to-act join in this
+    corpus is the literal ``sourceAct`` title; the historical UNION
+    arms were silently producing zero rows.
 
     Args:
-        act_uri: The Act URI. Empty / whitespace input yields an empty
+        act: The act identifier. Accepts either a string literal title
+            (the prod resolver shape, post Wave 2 Step 2 — e.g.
+            ``"Töölepingu seadus"``) or a URI (the canonical TTL
+            fixture shape, e.g. ``"https://…#Act_1"``). The function
+            detects the shape and emits the appropriate VALUES
+            binding. Empty / whitespace input yields an empty
             :class:`BurdenSummary` (no SPARQL hit).
         sparql_client: Optional :class:`SparqlClient` override (tests
             inject a mocked one).
@@ -370,18 +441,19 @@ def list_burden_for_act(
         A dead Jena / any SPARQL error degrades to an empty summary
         rather than a 500.
     """
-    uri = (act_uri or "").strip()
-    if not uri:
+    ident = (act or "").strip()
+    if not ident:
         return _empty_summary()
 
     client = sparql_client if sparql_client is not None else SparqlClient()
+    query = _build_act_burden_query()
     try:
-        rows = client.query(
-            _build_act_burden_query(),
-            uri_bindings={"act": uri},
-        )
+        if _looks_like_uri(ident):
+            rows = client.query(query, uri_bindings={"actLit": ident})
+        else:
+            rows = client.query(query, bindings={"actLit": ident})
     except Exception:
-        logger.warning("list_burden_for_act: SPARQL query failed for %r", uri, exc_info=True)
+        logger.warning("list_burden_for_act: SPARQL query failed for %r", ident, exc_info=True)
         return _empty_summary()
 
     return _summary_from_rows(rows)
