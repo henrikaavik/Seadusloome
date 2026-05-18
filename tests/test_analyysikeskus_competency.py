@@ -196,6 +196,12 @@ class TestListCompetencesForInstitution:
         stub.query.assert_not_called()
 
     def test_returns_parsed_rows(self):
+        """Mirrors the prod SPARQL shape: a single ``actLit`` column.
+
+        Wave 2 Step 5: the prod corpus has no act URIs on provisions —
+        the row-builder fills ``act_label`` from ``actLit`` and leaves
+        ``act_uri`` empty.
+        """
         from app.analyysikeskus.competency import (
             CompetenceRow,
             list_competences_for_institution,
@@ -206,8 +212,7 @@ class TestListCompetencesForInstitution:
             {
                 "provision": _PROV_4_URI,
                 "provisionLabel": "Provision 4",
-                "act": _ACT_1_URI,
-                "actLabel": "Act 1",
+                "actLit": "Act 1",
             },
         ]
         rows = list_competences_for_institution(_INST_2_URI, sparql_client=stub)
@@ -215,7 +220,9 @@ class TestListCompetencesForInstitution:
         assert isinstance(rows[0], CompetenceRow)
         assert rows[0].provision_uri == _PROV_4_URI
         assert rows[0].provision_label == "Provision 4"
-        assert rows[0].act_uri == _ACT_1_URI
+        # ``act_uri`` is empty in prod (no provision → act URI edge);
+        # ``act_label`` carries the literal ``estleg:sourceAct`` title.
+        assert rows[0].act_uri == ""
         assert rows[0].act_label == "Act 1"
 
     def test_drops_rows_without_provision_uri(self):
@@ -227,8 +234,7 @@ class TestListCompetencesForInstitution:
             {
                 "provision": _PROV_4_URI,
                 "provisionLabel": "Provision 4",
-                "act": "",
-                "actLabel": "",
+                "actLit": "",
             },
         ]
         rows = list_competences_for_institution(_INST_2_URI, sparql_client=stub)
@@ -277,6 +283,11 @@ class TestListCompetenceOverlaps:
         stub.query.assert_not_called()
 
     def test_returns_parsed_rows(self):
+        """Mirrors the prod SPARQL shape: ``actLit`` literal, not act URI.
+
+        Wave 2 Step 5: the row-builder fills ``act_label`` from
+        ``actLit`` and leaves ``act_uri`` empty.
+        """
         from app.analyysikeskus.competency import (
             OverlapRow,
             list_competence_overlaps,
@@ -287,8 +298,7 @@ class TestListCompetenceOverlaps:
             {
                 "provision": _PROV_5_URI,
                 "provisionLabel": "Provision 5",
-                "act": _ACT_2_URI,
-                "actLabel": "Act 2",
+                "actLit": "Act 2",
                 "other": _INST_3_URI,
                 "otherLabel": "Institution 3",
             },
@@ -298,6 +308,8 @@ class TestListCompetenceOverlaps:
         assert isinstance(rows[0], OverlapRow)
         assert rows[0].provision_uri == _PROV_5_URI
         assert rows[0].other_institution_uri == _INST_3_URI
+        assert rows[0].act_uri == ""
+        assert rows[0].act_label == "Act 2"
 
     def test_defence_in_depth_drops_self_pair(self):
         """Even if SPARQL leaks a self-pair, the Python filter drops it."""
@@ -378,6 +390,14 @@ class TestGatherInstitutionCompetences:
         mock_list: MagicMock,
         mock_overlaps: MagicMock,
     ):
+        """Wave 2 Step 5: bucket key is the literal ``estleg:sourceAct`` title.
+
+        The prod corpus carries no provision → act URI edge, so the
+        aggregator groups rows on ``row.act_label`` (the literal
+        title) rather than ``row.act_uri`` (which is always empty in
+        prod). Two rows with the same title bucket together; two rows
+        with distinct titles produce two buckets.
+        """
         from app.analyysikeskus.competency import (
             CompetenceRow,
             OverlapRow,
@@ -389,13 +409,13 @@ class TestGatherInstitutionCompetences:
             CompetenceRow(
                 provision_uri=_PROV_4_URI,
                 provision_label="P4",
-                act_uri=_ACT_1_URI,
+                act_uri="",
                 act_label="A1",
             ),
             CompetenceRow(
                 provision_uri=_PROV_5_URI,
                 provision_label="P5",
-                act_uri=_ACT_2_URI,
+                act_uri="",
                 act_label="A2",
             ),
         ]
@@ -403,7 +423,7 @@ class TestGatherInstitutionCompetences:
             OverlapRow(
                 provision_uri=_PROV_5_URI,
                 provision_label="P5",
-                act_uri=_ACT_2_URI,
+                act_uri="",
                 act_label="A2",
                 other_institution_uri=_INST_3_URI,
                 other_institution_label="I3",
@@ -414,10 +434,56 @@ class TestGatherInstitutionCompetences:
         assert view.institution_uri == _INST_2_URI
         assert view.institution_label == "Andmekaitse Inspektsioon"
         assert view.total_count == 2
-        assert set(view.by_act.keys()) == {_ACT_1_URI, _ACT_2_URI}
-        assert view.by_act[_ACT_1_URI][0].provision_uri == _PROV_4_URI
+        # Buckets are keyed by the literal ``estleg:sourceAct`` title,
+        # not by act URI.
+        assert set(view.by_act.keys()) == {"A1", "A2"}
+        assert view.by_act["A1"][0].provision_uri == _PROV_4_URI
+        assert view.by_act["A2"][0].provision_uri == _PROV_5_URI
         assert len(view.overlaps) == 1
         assert view.truncated is False
+
+    @patch("app.analyysikeskus.competency.list_competence_overlaps", return_value=[])
+    @patch("app.analyysikeskus.competency.list_competences_for_institution")
+    @patch("app.analyysikeskus.competency.get_institution_label", return_value="Inst")
+    def test_aggregates_same_title_into_single_bucket(
+        self,
+        _mock_label: MagicMock,
+        mock_list: MagicMock,
+        _mock_overlaps: MagicMock,
+    ):
+        """Two rows with the same literal title share a single bucket.
+
+        Wave 2 Step 5 acceptance: ``gather_institution_competences``
+        groups powers by the literal title (the prod corpus carries
+        no act URIs), so two rows that share an ``act_label`` MUST
+        cluster into one bucket rather than two empty-key buckets.
+        """
+        from app.analyysikeskus.competency import (
+            CompetenceRow,
+            gather_institution_competences,
+        )
+
+        mock_list.return_value = [
+            CompetenceRow(
+                provision_uri=_PROV_4_URI,
+                provision_label="P4",
+                act_uri="",
+                act_label="Karistusseadustik",
+            ),
+            CompetenceRow(
+                provision_uri=_PROV_5_URI,
+                provision_label="P5",
+                act_uri="",
+                act_label="Karistusseadustik",
+            ),
+        ]
+
+        view = gather_institution_competences(_INST_2_URI)
+        assert view.total_count == 2
+        # Single bucket keyed by the shared literal title.
+        assert list(view.by_act.keys()) == ["Karistusseadustik"]
+        bucket = view.by_act["Karistusseadustik"]
+        assert {r.provision_uri for r in bucket} == {_PROV_4_URI, _PROV_5_URI}
 
     @patch("app.analyysikeskus.competency.list_competence_overlaps", return_value=[])
     @patch("app.analyysikeskus.competency.list_competences_for_institution")
@@ -500,6 +566,12 @@ def _authed_client(*, raise_server_exceptions: bool = True):
 
 
 def _canned_view():
+    """Build a canned :class:`InstitutionCompetences` in the prod shape.
+
+    Wave 2 Step 5: ``by_act`` is keyed by the literal
+    ``estleg:sourceAct`` title (the prod corpus has no act URIs on
+    provisions), and the row's ``act_uri`` is always empty.
+    """
     from app.analyysikeskus.competency import (
         CompetenceRow,
         InstitutionCompetences,
@@ -510,19 +582,19 @@ def _canned_view():
         institution_uri=_INST_2_URI,
         institution_label="Andmekaitse Inspektsioon",
         by_act={
-            _ACT_1_URI: [
+            "Act 1": [
                 CompetenceRow(
                     provision_uri=_PROV_4_URI,
                     provision_label="Provision 4",
-                    act_uri=_ACT_1_URI,
+                    act_uri="",
                     act_label="Act 1",
                 )
             ],
-            _ACT_2_URI: [
+            "Act 2": [
                 CompetenceRow(
                     provision_uri=_PROV_5_URI,
                     provision_label="Provision 5",
-                    act_uri=_ACT_2_URI,
+                    act_uri="",
                     act_label="Act 2",
                 )
             ],
@@ -531,7 +603,7 @@ def _canned_view():
             OverlapRow(
                 provision_uri=_PROV_5_URI,
                 provision_label="Provision 5",
-                act_uri=_ACT_2_URI,
+                act_uri="",
                 act_label="Act 2",
                 other_institution_uri=_INST_3_URI,
                 other_institution_label="Tarbijakaitse ja Tehnilise Järelevalve Amet",

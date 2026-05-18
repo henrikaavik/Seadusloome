@@ -123,10 +123,17 @@ estleg:Institution_3 a estleg:Institution ;
     rdfs:label "Tarbijakaitse ja Tehnilise Järelevalve Amet" .
 
 # A second provision attached to Act_1 so the A3 by-act bucketing has
-# more than one row per act on at least one bucket.
+# more than one row per act on at least one bucket. ``sourceAct`` is
+# carried as a **literal title** to mirror the prod shape (the
+# 2026-05-18 Wave 2 spike confirmed ``sourceAct`` is always a string
+# literal in the deployed corpus, never a URI). The legacy ``partOf``
+# URI edge is kept so older tests that may still reference it via
+# direct rdflib queries don't break, but the A1/A3 SPARQL templates
+# join on the literal.
 estleg:Provision_4 a estleg:LegalProvision ;
     rdfs:label "Provision 4 — Institution_2 competence" ;
     estleg:partOf estleg:Act_1 ;
+    estleg:sourceAct "Act 1 — fixture host" ;
     estleg:paragrahv "4" .
 
 # Two more provisions for A3 — one with a single competent authority
@@ -135,6 +142,7 @@ estleg:Provision_4 a estleg:LegalProvision ;
 estleg:Provision_5 a estleg:LegalProvision ;
     rdfs:label "Provision 5 — overlap on Institution_2" ;
     estleg:partOf estleg:Act_2 ;
+    estleg:sourceAct "Act 2 — amender" ;
     estleg:paragrahv "5" .
 
 # Reified Competence node — present so future v2 queries that need

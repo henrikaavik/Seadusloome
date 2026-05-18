@@ -38,13 +38,19 @@ _KMS_P30_SANCTION_URI = "https://data.riik.ee/ontology/estleg#KMS-p30-Sanction"
 
 
 def _kars_p211_row() -> dict[str, str]:
-    """SPARQL JSON-extractor row for a sample KarS §211 imprisonment sanction."""
+    """SPARQL JSON-extractor row for a sample KarS §211 imprisonment sanction.
+
+    Mirrors the prod shape (post-2026-05-18 Wave 2 Step 5): the act
+    join is the literal ``estleg:sourceAct`` title in ``actLit`` —
+    there is no act URI / actLabel column. The row-builder fills
+    :class:`SanctionRow.act_label` from this literal and leaves
+    ``act_uri`` empty.
+    """
     return {
         "sanction": _KARS_P211_SANCTION_URI,
         "provision": _KARS_P211_URI,
         "provisionLabel": "KarS § 211",
-        "act": _KARS_URI,
-        "actLabel": "Karistusseadustik",
+        "actLit": "Karistusseadustik",
         "sanctionType": "imprisonment",
         "minAmount": "1",
         "maxAmount": "5",
@@ -63,8 +69,7 @@ def _kms_p30_row() -> dict[str, str]:
         "sanction": _KMS_P30_SANCTION_URI,
         "provision": _KMS_P30_URI,
         "provisionLabel": "KMS § 30",
-        "act": _KMS_URI,
-        "actLabel": "Käibemaksuseadus",
+        "actLit": "Käibemaksuseadus",
         "sanctionType": "fine",
         "minAmount": "100",
         "maxAmount": "5000",
@@ -148,7 +153,10 @@ class TestListSanctionsForProvision:
         assert row.sanction_uri == _KARS_P211_SANCTION_URI
         assert row.provision_uri == _KARS_P211_URI
         assert row.provision_label == "KarS § 211"
-        assert row.act_uri == _KARS_URI
+        # Wave 2 Step 5: ``sourceAct`` is a literal in prod, so
+        # ``act_uri`` is always empty and ``act_label`` carries the
+        # literal title.
+        assert row.act_uri == ""
         assert row.act_label == "Karistusseadustik"
         assert row.sanction_type == "imprisonment"
         assert row.min_amount == 1.0
@@ -196,17 +204,22 @@ class TestListSanctionsForAct:
         stub_client = MagicMock()
         stub_client.query.return_value = [_kars_p211_row()]
 
-        rows = list_sanctions_for_act(_KARS_URI, sparql_client=stub_client)
+        # Wave 2 Step 5: param is the literal ``estleg:sourceAct`` title.
+        rows = list_sanctions_for_act("Karistusseadustik", sparql_client=stub_client)
         assert len(rows) == 1
-        assert rows[0].act_uri == _KARS_URI
+        # ``act_uri`` is always empty in prod (no act URIs on
+        # provisions); ``act_label`` carries the literal title.
+        assert rows[0].act_uri == ""
+        assert rows[0].act_label == "Karistusseadustik"
         assert rows[0].provision_uri == _KARS_P211_URI
 
-    def test_blank_uri_returns_empty(self):
+    def test_blank_title_returns_empty_without_hitting_jena(self):
+        """Whitespace / empty title must short-circuit — no Jena round-trip."""
         from app.analyysikeskus.sanctions import list_sanctions_for_act
 
         stub_client = MagicMock()
-        rows = list_sanctions_for_act("", sparql_client=stub_client)
-        assert rows == []
+        assert list_sanctions_for_act("", sparql_client=stub_client) == []
+        assert list_sanctions_for_act("   ", sparql_client=stub_client) == []
         stub_client.query.assert_not_called()
 
     def test_dead_jena_returns_empty(self):
@@ -214,6 +227,43 @@ class TestListSanctionsForAct:
 
         stub_client = MagicMock()
         stub_client.query.side_effect = RuntimeError("jena down")
+        rows = list_sanctions_for_act("Karistusseadustik", sparql_client=stub_client)
+        assert rows == []
+
+    def test_binds_act_title_as_literal(self):
+        """The title must travel via ``bindings`` (string-literal VALUES), not ``uri_bindings``.
+
+        Pins the parameter contract documented in
+        ``app/analyysikeskus/sanctions.py`` (Wave 2 Step 5): the act
+        join is a literal because the prod ontology has no act URIs on
+        provisions.
+        """
+        from app.analyysikeskus.sanctions import list_sanctions_for_act
+
+        stub_client = MagicMock()
+        stub_client.query.return_value = []
+        list_sanctions_for_act("Karistusseadustik", sparql_client=stub_client)
+        kwargs = stub_client.query.call_args.kwargs
+        assert "bindings" in kwargs
+        assert kwargs["bindings"] == {"actLit": "Karistusseadustik"}
+        # Not via uri_bindings — that's reserved for genuine URI joins.
+        assert "uri_bindings" not in kwargs or not kwargs["uri_bindings"]
+
+    def test_uri_input_returns_empty_gracefully(self):
+        """A caller passing a URI by mistake degrades to "no rows", not a 500.
+
+        The new SPARQL query joins on ``?provision estleg:sourceAct
+        ?actLit`` where ``?actLit`` is bound as a string literal. If
+        a caller passes a URI (e.g. legacy code that wasn't updated),
+        the literal VALUES binding will simply not match any triples
+        in prod (no provision has a URI on the right-hand side of
+        ``sourceAct``). The function returns ``[]`` rather than
+        crashing.
+        """
+        from app.analyysikeskus.sanctions import list_sanctions_for_act
+
+        stub_client = MagicMock()
+        stub_client.query.return_value = []
         rows = list_sanctions_for_act(_KARS_URI, sparql_client=stub_client)
         assert rows == []
 
@@ -229,12 +279,18 @@ class TestFindSimilarSanctions:
         stub_client.query.assert_not_called()
 
     def test_excludes_seed_act_defence_in_depth(self):
-        """Even if SPARQL leaks a row with the seed's act, Python filters it."""
+        """Even if SPARQL leaks a row with the seed's act title, Python filters it.
+
+        Wave 2 Step 5: the "other acts" exclusion now keys on the
+        literal ``estleg:sourceAct`` title carried in
+        :class:`SanctionRow.act_label` because the prod corpus has no
+        act URIs on provisions.
+        """
         from app.analyysikeskus.sanctions import SanctionRow, find_similar_sanctions
 
         seed = SanctionRow(
             sanction_type="fine",
-            act_uri=_KARS_URI,
+            act_label="Karistusseadustik",
             min_amount=100.0,
             max_amount=500.0,
         )
@@ -244,24 +300,25 @@ class TestFindSimilarSanctions:
             {
                 "sanction": "https://data.riik.ee/ontology/estleg#KarS-other-Sanction",
                 "provision": "https://data.riik.ee/ontology/estleg#KarS-other",
-                "act": _KARS_URI,  # same as seed → must drop
+                "actLit": "Karistusseadustik",  # same as seed title → must drop
                 "sanctionType": "fine",
                 "minAmount": "200",
                 "maxAmount": "400",
             },
-            _kms_p30_row(),  # different act → kept
+            _kms_p30_row(),  # different act title → kept
         ]
 
         rows = find_similar_sanctions(seed, limit=10, sparql_client=stub_client)
         assert len(rows) == 1
-        assert rows[0].act_uri == _KMS_URI
+        assert rows[0].act_label == "Käibemaksuseadus"
+        assert rows[0].act_uri == ""
 
     def test_passes_seed_bounds_to_sparql_bindings(self):
         from app.analyysikeskus.sanctions import SanctionRow, find_similar_sanctions
 
         seed = SanctionRow(
             sanction_type="fine",
-            act_uri=_KARS_URI,
+            act_label="Karistusseadustik",
             min_amount=100.0,
             max_amount=500.0,
         )
@@ -276,13 +333,20 @@ class TestFindSimilarSanctions:
         assert float(bindings["seedMax"]) == 500.0
         assert "e" not in bindings["seedMin"].lower()
         assert "e" not in bindings["seedMax"].lower()
-        assert bindings["seedAct"] == _KARS_URI
+        # Wave 2 Step 5: the seed-act binding is the literal title
+        # (``seedActLit``), not the act URI — the prod corpus has no
+        # act URIs to compare against.
+        assert bindings["seedActLit"] == "Karistusseadustik"
+        assert "seedAct" not in bindings
 
     def test_missing_seed_bounds_default_to_open_range(self):
         """A seed with no numeric bounds must not blow up — bounds → 0 / +inf."""
         from app.analyysikeskus.sanctions import SanctionRow, find_similar_sanctions
 
-        seed = SanctionRow(sanction_type="fine", act_uri=_KARS_URI)  # no min/max
+        seed = SanctionRow(
+            sanction_type="fine",
+            act_label="Karistusseadustik",
+        )  # no min/max
         stub_client = MagicMock()
         stub_client.query.return_value = []
         find_similar_sanctions(seed, sparql_client=stub_client)
@@ -319,6 +383,11 @@ class TestFindSimilarSanctions:
         every overlapping row. The F7 fix uses ``_xsd_decimal_literal``
         which emits a plain integer string. This test exercises the same
         path with rdflib (which is also strict about the constructor).
+
+        Updated for Wave 2 Step 5: the SPARQL now joins on the literal
+        ``estleg:sourceAct`` title instead of an ``estleg:partOf`` URI
+        edge (the prod corpus has no act URIs on provisions). The
+        in-test graph + VALUES block reflect that shape.
         """
         from rdflib import Graph
 
@@ -333,9 +402,8 @@ class TestFindSimilarSanctions:
         @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
         @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
 
-        estleg:OtherAct rdfs:label "Different act" .
         estleg:OtherProvision rdfs:label "§1 OtherAct" ;
-            estleg:partOf estleg:OtherAct ;
+            estleg:sourceAct "Different act" ;
             estleg:hasSanction estleg:OtherSanction .
         estleg:OtherSanction estleg:sanctionType "fine" ;
             estleg:minPenaltyAmount "150"^^xsd:decimal ;
@@ -347,7 +415,7 @@ class TestFindSimilarSanctions:
 
         seed = SanctionRow(
             sanction_type="fine",
-            act_uri="https://example.org/seed-act",
+            act_label="Seed act title",
             min_amount=100.0,
             max_amount=None,  # the F7 case — sentinel kicks in
         )
@@ -361,7 +429,7 @@ class TestFindSimilarSanctions:
             'VALUES ?type { "fine" }\n'
             f'VALUES ?seedMin {{ "{seed_min_str}" }}\n'
             f'VALUES ?seedMax {{ "{seed_max_str}" }}\n'
-            'VALUES ?seedAct { "https://example.org/seed-act" }\n'
+            'VALUES ?seedActLit { "Seed act title" }\n'
         )
         last_brace = _SIMILAR_SANCTIONS_QUERY.rfind("}")
         query = (
@@ -380,7 +448,7 @@ class TestFindSimilarSanctions:
     def test_respects_limit(self):
         from app.analyysikeskus.sanctions import SanctionRow, find_similar_sanctions
 
-        seed = SanctionRow(sanction_type="fine", act_uri=_KARS_URI)
+        seed = SanctionRow(sanction_type="fine", act_label="Karistusseadustik")
         stub_client = MagicMock()
         stub_client.query.return_value = [_kms_p30_row()] * 25
         rows = find_similar_sanctions(seed, limit=3, sparql_client=stub_client)
@@ -418,6 +486,9 @@ class TestFindSimilarSanctions:
         overlapping row. Catches the original bug: without the
         ``xsd:decimal`` casts, string-vs-decimal comparison drops the
         row even though [100, 500] genuinely overlaps [150, 300].
+
+        Updated for Wave 2 Step 5: provision → act join is on the
+        literal ``estleg:sourceAct`` title (no act URIs in prod).
         """
         from rdflib import Graph
 
@@ -428,9 +499,8 @@ class TestFindSimilarSanctions:
         @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
         @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
 
-        estleg:OtherAct rdfs:label "Different act" .
         estleg:OtherProvision rdfs:label "§1 OtherAct" ;
-            estleg:partOf estleg:OtherAct ;
+            estleg:sourceAct "Different act" ;
             estleg:hasSanction estleg:OtherSanction .
         estleg:OtherSanction estleg:sanctionType "fine" ;
             estleg:minPenaltyAmount "150"^^xsd:decimal ;
@@ -445,7 +515,7 @@ class TestFindSimilarSanctions:
             'VALUES ?type { "fine" }\n'
             'VALUES ?seedMin { "100.0" }\n'
             'VALUES ?seedMax { "500.0" }\n'
-            'VALUES ?seedAct { "https://example.org/seed-act" }\n'
+            'VALUES ?seedActLit { "Seed act title" }\n'
         )
         last_brace = _SIMILAR_SANCTIONS_QUERY.rfind("}")
         query = (
@@ -566,12 +636,15 @@ def _canned_resolved_law_ref():
 def _canned_sanction_rows():
     from app.analyysikeskus.sanctions import SanctionRow
 
+    # Wave 2 Step 5: ``act_uri`` is always empty in the prod shape
+    # because the corpus carries no provision → act URI edge;
+    # ``act_label`` holds the literal ``estleg:sourceAct`` title.
     return [
         SanctionRow(
             sanction_uri=_KARS_P211_SANCTION_URI,
             provision_uri=_KARS_P211_URI,
             provision_label="KarS § 211",
-            act_uri=_KARS_URI,
+            act_uri="",
             act_label="Karistusseadustik",
             sanction_type="imprisonment",
             min_amount=1.0,
@@ -703,7 +776,13 @@ def test_sanctions_resolved_law_uses_act_query(
     mock_resolve: MagicMock,
     mock_list_act: MagicMock,
 ):
-    """A resolved ``law`` ref ⇒ the act-level query branch."""
+    """A resolved ``law`` ref ⇒ the act-level query branch.
+
+    Wave 2 Step 5: the route now passes the resolved title literal (the
+    ``matched_label`` surfaced by the resolver) to
+    :func:`list_sanctions_for_act` rather than the entity URI — the
+    prod corpus has no act URIs on provisions.
+    """
     mock_provider.return_value = _stub_provider()
     mock_resolve.return_value = [_canned_resolved_law_ref()]
     mock_list_act.return_value = _canned_sanction_rows()
@@ -716,7 +795,10 @@ def test_sanctions_resolved_law_uses_act_query(
     # act branch.
     resp = client.get("/analyysikeskus/sanktsioonid?sisend=KarS+%C2%A7+211")
     assert resp.status_code == 200
-    mock_list_act.assert_called_once_with(_KARS_URI)
+    # The route passes the resolved label (literal title) — the
+    # ``_canned_resolved_law_ref()`` helper sets that to
+    # ``"Karistusseadustik"`` via ``matched_label``.
+    mock_list_act.assert_called_once_with("Karistusseadustik")
 
 
 @patch("app.analyysikeskus.routes._rag_candidates", return_value=[])

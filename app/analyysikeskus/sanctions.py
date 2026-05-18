@@ -16,9 +16,12 @@ The three public functions are written so that:
 
 * :func:`list_sanctions_for_provision` projects every Sanction attached
   to a single provision.
-* :func:`list_sanctions_for_act` joins via ``estleg:partOf`` (the act
-  → provision membership relation) and aggregates Sanction rows from
-  every member provision.
+* :func:`list_sanctions_for_act` joins on the literal ``estleg:sourceAct``
+  title (the act → provision membership relation; the Wave 2 diagnostic
+  spike in ``docs/2026-05-18-bugfix-plan.md`` confirmed both
+  ``estleg:partOf`` and ``estleg:partOfAct`` carry zero triples in prod
+  and ``sourceAct`` is always a string literal, never a URI) and
+  aggregates Sanction rows from every member provision.
 * :func:`find_similar_sanctions` returns Sanction rows from *other*
   acts whose sanctionType matches and whose penalty range overlaps the
   given seed row's range, capped at *limit*. The comparison is simple
@@ -78,9 +81,15 @@ class SanctionRow:
             because we walked the graph through ``hasSanction``.
         provision_label: ``rdfs:label`` on the provision; the route
             uses it as the row's primary label.
-        act_uri: The Act URI the provision is ``partOf`` — may be
-            empty for sandbox / unattached provisions.
-        act_label: ``rdfs:label`` on the act.
+        act_uri: Empty string in this corpus — the prod ontology does
+            not carry a provision → act URI edge (see the Wave 2 spike
+            in ``docs/2026-05-18-bugfix-plan.md``). Kept on the
+            dataclass so the route's ``if not sr.act_uri:`` guard
+            keeps surfacing the label-only heading rather than a
+            broken link.
+        act_label: The literal ``estleg:sourceAct`` title (e.g.
+            ``"Karistusseadustik"``). May be empty when the provision
+            has no ``sourceAct`` edge.
         sanction_type: The ontology's coarse type string (e.g.
             ``"imprisonment"``, ``"fine"``). Translated to an Estonian
             display label by the route via :data:`SANCTION_TYPE_LABELS_ET`.
@@ -189,7 +198,7 @@ _PROVISION_SANCTIONS_QUERY = (
     PREFIXES
     + """
 SELECT ?sanction ?provision ?provisionLabel
-       ?act ?actLabel
+       ?actLit
        ?sanctionType
        ?minAmount ?maxAmount
        ?minUnit ?maxUnit
@@ -199,8 +208,7 @@ SELECT ?sanction ?provision ?provisionLabel
 WHERE {
   ?provision estleg:hasSanction ?sanction .
   OPTIONAL { ?provision rdfs:label ?provisionLabel }
-  OPTIONAL { ?provision estleg:partOf ?act .
-             OPTIONAL { ?act rdfs:label ?actLabel } }
+  OPTIONAL { ?provision estleg:sourceAct ?actLit }
   OPTIONAL { ?sanction estleg:sanctionType ?sanctionType }
   OPTIONAL { ?sanction estleg:minPenaltyAmount ?minAmount }
   OPTIONAL { ?sanction estleg:maxPenaltyAmount ?maxAmount }
@@ -221,7 +229,7 @@ _ACT_SANCTIONS_QUERY = (
     PREFIXES
     + """
 SELECT ?sanction ?provision ?provisionLabel
-       ?act ?actLabel
+       ?actLit
        ?sanctionType
        ?minAmount ?maxAmount
        ?minUnit ?maxUnit
@@ -229,10 +237,9 @@ SELECT ?sanction ?provision ?provisionLabel
        ?enforcedAtLevel
        ?isStatutoryDefault
 WHERE {
-  ?provision estleg:partOf ?act .
+  ?provision estleg:sourceAct ?actLit .
   ?provision estleg:hasSanction ?sanction .
   OPTIONAL { ?provision rdfs:label ?provisionLabel }
-  OPTIONAL { ?act rdfs:label ?actLabel }
   OPTIONAL { ?sanction estleg:sanctionType ?sanctionType }
   OPTIONAL { ?sanction estleg:minPenaltyAmount ?minAmount }
   OPTIONAL { ?sanction estleg:maxPenaltyAmount ?maxAmount }
@@ -251,7 +258,7 @@ LIMIT """
 
 # Similar sanctions — same sanctionType, other acts only, with a
 # range-overlap filter on the amount bounds. We bind ``?type`` /
-# ``?seedMin`` / ``?seedMax`` / ``?seedAct`` via
+# ``?seedMin`` / ``?seedMax`` / ``?seedActLit`` via
 # :meth:`SparqlClient._inject_bindings`. The injector emits VALUES
 # with **string literals** (it has to — the same injector is used for
 # URI strings, language tags, etc.), so the numeric comparisons in the
@@ -270,7 +277,7 @@ _SIMILAR_SANCTIONS_QUERY = (
     PREFIXES
     + """
 SELECT ?sanction ?provision ?provisionLabel
-       ?act ?actLabel
+       ?actLit
        ?sanctionType
        ?minAmount ?maxAmount
        ?minUnit ?maxUnit
@@ -281,8 +288,7 @@ WHERE {
   ?provision estleg:hasSanction ?sanction .
   ?sanction estleg:sanctionType ?sanctionType .
   OPTIONAL { ?provision rdfs:label ?provisionLabel }
-  OPTIONAL { ?provision estleg:partOf ?act .
-             OPTIONAL { ?act rdfs:label ?actLabel } }
+  OPTIONAL { ?provision estleg:sourceAct ?actLit }
   OPTIONAL { ?sanction estleg:minPenaltyAmount ?minAmount }
   OPTIONAL { ?sanction estleg:maxPenaltyAmount ?maxAmount }
   OPTIONAL { ?sanction estleg:minPenaltyUnit ?minUnit }
@@ -292,11 +298,11 @@ WHERE {
   OPTIONAL { ?sanction estleg:enforcedAtLevel ?enforcedAtLevel }
   OPTIONAL { ?sanction estleg:isStatutoryDefault ?isStatutoryDefault }
   FILTER(STR(?sanctionType) = ?type)
-  FILTER(!BOUND(?act) || STR(?act) != ?seedAct)
+  FILTER(!BOUND(?actLit) || STR(?actLit) != ?seedActLit)
   FILTER(!BOUND(?maxAmount) || xsd:decimal(?seedMin) <= ?maxAmount)
   FILTER(!BOUND(?minAmount) || ?minAmount <= xsd:decimal(?seedMax))
 }
-ORDER BY ?act ?provision
+ORDER BY ?actLit ?provision
 LIMIT """
     + str(_MAX_SIMILAR_SANCTIONS)
     + "\n"
@@ -350,17 +356,31 @@ def list_sanctions_for_provision(
 
 
 def list_sanctions_for_act(
-    act_uri: str,
+    act_title: str,
     *,
     sparql_client: SparqlClient | None = None,
 ) -> list[SanctionRow]:
-    """Return every Sanction attached to any provision of *act_uri*.
+    """Return every Sanction attached to any provision of *act_title*.
 
-    Walks the graph ``?provision estleg:partOf <act_uri>`` then
+    Walks the graph ``?provision estleg:sourceAct "<act_title>"`` then
     ``?provision estleg:hasSanction ?sanction`` and aggregates.
 
+    The act join is on the **literal title string** (e.g.
+    ``"Karistusseadustik"``) because the prod ontology stores
+    ``estleg:sourceAct`` as a string literal rather than a URI — the
+    Wave 2 spike in ``docs/2026-05-18-bugfix-plan.md`` confirmed that
+    ``estleg:partOf`` / ``estleg:partOfAct`` carry zero triples and
+    ``sourceAct`` is the only working provision → act join in the
+    corpus. The parameter used to be an act URI; callers were updated
+    in the same patch to pass the title string instead.
+
     Args:
-        act_uri: The Act URI. Empty / whitespace input yields ``[]``.
+        act_title: The Act's title as a string literal (matches the
+            ``estleg:sourceAct`` literal value on provisions). Empty /
+            whitespace input yields ``[]`` without hitting Jena. If a
+            caller passes a URI here by mistake the query simply returns
+            no rows (no triples have a URI on the right-hand side of
+            ``sourceAct``) — degrades gracefully rather than 500-ing.
         sparql_client: Optional :class:`SparqlClient` override.
 
     Returns:
@@ -368,20 +388,20 @@ def list_sanctions_for_act(
         a member provision of the act. ``[]`` on no matches / SPARQL
         error.
     """
-    uri = (act_uri or "").strip()
-    if not uri:
+    title = (act_title or "").strip()
+    if not title:
         return []
 
     client = sparql_client if sparql_client is not None else SparqlClient()
     try:
         rows = client.query(
             _ACT_SANCTIONS_QUERY,
-            uri_bindings={"act": uri},
+            bindings={"actLit": title},
         )
     except Exception:
         logger.warning(
             "list_sanctions_for_act: SPARQL query failed for %r",
-            uri,
+            title,
             exc_info=True,
         )
         return []
@@ -406,9 +426,9 @@ def find_similar_sanctions(
 
     Args:
         sanction_row: The seed row. Must have ``sanction_type`` set;
-            empty type yields ``[]``. The seed's ``act_uri`` is
-            excluded from results so the comparison list only shows
-            sanctions in *other* acts.
+            empty type yields ``[]``. The seed's ``act_label`` (the
+            literal ``sourceAct`` title) is excluded from results so
+            the comparison list only shows sanctions in *other* acts.
         limit: Cap the result list (default 10). Hard-capped to
             :data:`_MAX_SIMILAR_SANCTIONS` so the SPARQL query stays
             quick on a 1M-triple corpus.
@@ -416,8 +436,9 @@ def find_similar_sanctions(
 
     Returns:
         A list of :class:`SanctionRow` — comparable sanctions from
-        other acts, sorted by act URI. ``[]`` when no sanction_type
-        is set, when no overlaps exist, or on SPARQL error.
+        other acts, sorted by the literal act title. ``[]`` when no
+        sanction_type is set, when no overlaps exist, or on SPARQL
+        error.
     """
     sanction_type = (sanction_row.sanction_type or "").strip()
     if not sanction_type:
@@ -440,6 +461,14 @@ def find_similar_sanctions(
         sanction_row.max_amount if sanction_row.max_amount is not None else 10**18
     )
 
+    # The "other acts" filter joins on the literal ``estleg:sourceAct``
+    # title (carried on :class:`SanctionRow` in ``act_label`` — the
+    # row-builder always assigns the literal there, see
+    # :func:`_rows_to_sanctions`). The prod ontology has no act URIs on
+    # provisions, so an empty seed title legitimately means "skip the
+    # other-act filter" rather than "no comparable rows".
+    seed_act_lit = sanction_row.act_label or ""
+
     client = sparql_client if sparql_client is not None else SparqlClient()
     try:
         rows = client.query(
@@ -448,7 +477,7 @@ def find_similar_sanctions(
                 "type": sanction_type,
                 "seedMin": _xsd_decimal_literal(seed_min),
                 "seedMax": _xsd_decimal_literal(seed_max),
-                "seedAct": sanction_row.act_uri or "",
+                "seedActLit": seed_act_lit,
             },
         )
     except Exception:
@@ -461,10 +490,11 @@ def find_similar_sanctions(
 
     parsed = _rows_to_sanctions(rows)
     # Defence in depth — also filter on the Python side in case the
-    # SPARQL ``FILTER(STR(?act) != ?seedAct)`` lets a blank-node act
-    # through (BOUND(?act) is false ⇒ the FILTER short-circuits true).
-    if sanction_row.act_uri:
-        parsed = [r for r in parsed if r.act_uri != sanction_row.act_uri]
+    # SPARQL ``FILTER(STR(?actLit) != ?seedActLit)`` lets an unbound
+    # actLit through (BOUND(?actLit) is false ⇒ the FILTER short-circuits
+    # true). The comparison is on the literal title we just bound.
+    if seed_act_lit:
+        parsed = [r for r in parsed if r.act_label != seed_act_lit]
     # Honour the caller's limit on top of the SPARQL LIMIT.
     capped_limit = max(0, min(limit, _MAX_SIMILAR_SANCTIONS))
     return parsed[:capped_limit]
@@ -482,6 +512,13 @@ def _rows_to_sanctions(rows: list[dict[str, str]]) -> list[SanctionRow]:
     malformed literal yields ``None``, not a crash). Boolean fields go
     through :func:`_as_bool`. Empty / blank-node URIs are kept as
     empty strings so the caller's ``if`` checks stay simple.
+
+    The ``act_label`` carries the literal ``estleg:sourceAct`` title and
+    ``act_uri`` is always empty — the Wave 2 prod spike showed
+    ``sourceAct`` is a string literal in this corpus, never a URI.
+    Downstream renderers that gated link-rendering on ``act_uri`` (e.g.
+    :func:`app.analyysikeskus.routes._padevused_act_heading`) degrade
+    gracefully to a label-only heading.
     """
     out: list[SanctionRow] = []
     for row in rows or []:
@@ -490,8 +527,8 @@ def _rows_to_sanctions(rows: list[dict[str, str]]) -> list[SanctionRow]:
                 sanction_uri=(row.get("sanction") or "").strip(),
                 provision_uri=(row.get("provision") or "").strip(),
                 provision_label=(row.get("provisionLabel") or "").strip(),
-                act_uri=(row.get("act") or "").strip(),
-                act_label=(row.get("actLabel") or "").strip(),
+                act_uri="",
+                act_label=(row.get("actLit") or "").strip(),
                 sanction_type=(row.get("sanctionType") or "").strip(),
                 min_amount=_as_float(row.get("minAmount")),
                 max_amount=_as_float(row.get("maxAmount")),

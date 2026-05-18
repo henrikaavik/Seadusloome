@@ -2862,7 +2862,12 @@ def _render_sanctions_result(
     if _is_provision_resolved(resolved):
         rows = list_sanctions_for_provision(entity_uri)
     else:
-        rows = list_sanctions_for_act(entity_uri)
+        # The act join is on the ``estleg:sourceAct`` literal title in
+        # prod (no act URIs exist on provisions — see the Wave 2 spike
+        # in ``docs/2026-05-18-bugfix-plan.md``). The best title we have
+        # for a resolved law ref is the human label the resolver
+        # surfaced; pass that to the SPARQL helper.
+        rows = list_sanctions_for_act(label)
 
     similar_rows: list[Any] | None = None
     if include_comparison and rows:
@@ -4258,11 +4263,21 @@ def _padevused_act_heading(act_uri: str, act_label: str) -> Any:
     """Render the per-act sub-section heading.
 
     Clickable to the Õiguskaart when the act has a URI; orphan rows
-    (empty URI) get the static "Muud sätted" heading.
+    (empty title literal) get the static "Muud sätted" heading. In the
+    prod corpus the provision → act join is the literal
+    ``estleg:sourceAct`` title (no act URIs exist) so the URI argument
+    is always empty and the heading renders as a label only — that's
+    intentional, the explorer can't focus on a string title.
     """
-    if not act_uri:
+    if not act_label:
         return H4(  # noqa: F405
             _PADEVUSED_ORPHAN_BUCKET_LABEL,
+            cls="analyysikeskus-subsection-title",
+        )
+    if not act_uri:
+        # Prod path — title-only heading, no link.
+        return H4(  # noqa: F405
+            act_label,
             cls="analyysikeskus-subsection-title",
         )
     label = act_label or act_uri.rsplit("#", 1)[-1].rsplit("/", 1)[-1] or "Akt"
@@ -4385,8 +4400,15 @@ def _padevused_results_block(view: InstitutionCompetences) -> list[Any]:
     if view.total_count == 0:
         blocks.append(_padevused_overlaps_section(view))
         return blocks
-    for act_uri, rows in view.by_act.items():
-        act_label = rows[0].act_label if rows else ""
+    for bucket_key, rows in view.by_act.items():
+        # In prod the bucket key is the literal ``estleg:sourceAct``
+        # title (no provision → act URI edge exists in the corpus).
+        # We still surface ``rows[0].act_uri`` to ``_padevused_act_heading``
+        # so a future ontology that re-introduces act URIs gets a
+        # clickable link for free; in prod today the URI is always
+        # empty and the heading falls back to a label-only render.
+        act_uri = rows[0].act_uri if rows else ""
+        act_label = (rows[0].act_label if rows else "") or bucket_key
         blocks.append(
             Div(  # noqa: F405
                 _padevused_act_heading(act_uri, act_label),

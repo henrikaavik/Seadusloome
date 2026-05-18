@@ -9,10 +9,13 @@ for a chosen Estonian state institution (e.g. ``Andmekaitse Inspektsioon``):
 1. **Which powers (volitused) does this institution hold today, grouped by
    act?** A power, in ontology terms, is a ``LegalProvision`` whose
    ``estleg:competentAuthority`` points at the institution — every such
-   provision is one power vested in that body. We bucket them by the act
-   the provision is ``estleg:partOf`` so the result reads as a per-act
-   list of competence rows ("In *Karistusseadustik* this institution has
-   the following 12 powers …").
+   provision is one power vested in that body. We bucket them by the
+   literal ``estleg:sourceAct`` title (the Wave 2 spike in
+   ``docs/2026-05-18-bugfix-plan.md`` confirmed both ``estleg:partOf``
+   and ``estleg:partOfAct`` carry zero triples in prod and the only
+   working provision-to-act join is the literal ``sourceAct`` edge) so
+   the result reads as a per-act list of competence rows ("In
+   *Karistusseadustik* this institution has the following 12 powers …").
 2. **Where does this institution's competence overlap with another body?**
    An overlap is a provision that has at least *two distinct* institutions
    on the ``competentAuthority`` predicate — i.e. the same legal power is
@@ -111,18 +114,22 @@ class CompetenceRow:
 
     The provision is the "power" — its ``rdfs:label`` is what a lawyer
     reads as the description of the competence. The act bucket comes
-    from the provision's ``estleg:partOf`` edge so the route can group
-    powers by act without re-querying.
+    from the provision's literal ``estleg:sourceAct`` edge so the route
+    can group powers by act without re-querying.
 
     Attributes:
         provision_uri: The ``LegalProvision`` URI carrying the
             ``competentAuthority`` edge.
         provision_label: ``rdfs:label`` on the provision — the readable
             description of the power.
-        act_uri: The owning Act URI (may be empty for unattached
+        act_uri: Always empty in prod — the corpus carries no act URI
+            edge on provisions (see Wave 2 spike). Kept on the
+            dataclass so the route's "render as a link only when a URI
+            is set" guard short-circuits to a label-only heading.
+        act_label: The literal ``estleg:sourceAct`` title (e.g.
+            ``"Karistusseadustik"``). May be empty for orphan
             provisions; the route then shows the row under a "Muud"
-            bucket).
-        act_label: ``rdfs:label`` on the act.
+            bucket.
     """
 
     provision_uri: str
@@ -173,12 +180,15 @@ class InstitutionCompetences:
         institution_uri: The seed Institution URI (carried through so
             the route can build "Ava õiguskaardil" links).
         institution_label: The seed Institution's label.
-        by_act: ``act_uri → list[CompetenceRow]`` — provisions grouped
-            by act. Acts without a URI (orphan provisions) bucket under
-            the empty string ``""`` and the route labels them "Muud".
+        by_act: ``act_title → list[CompetenceRow]`` — provisions
+            grouped by the literal ``estleg:sourceAct`` title (the
+            prod corpus carries no act URIs on provisions, so we
+            bucket on the literal title string instead). Orphan
+            provisions with no ``sourceAct`` edge bucket under the
+            empty string ``""`` and the route labels them "Muud".
             Iteration order matches insertion order from the SPARQL
-            ``ORDER BY ?act ?provision`` so consecutive rows in the same
-            act stay together.
+            ``ORDER BY ?actLit ?provision`` so consecutive rows in the
+            same act stay together.
         overlaps: List of :class:`OverlapRow` — provisions where the
             seed institution shares competence with another body.
         total_count: Total number of competence provisions (sum of
@@ -223,21 +233,20 @@ LIMIT """
 
 # Competences for one institution — every provision whose
 # ``competentAuthority`` points at the institution, with the owning act
-# joined in optionally. ``partOf`` is the membership edge on
-# ``LegalProvision``; OPTIONAL so an orphan provision still surfaces.
+# title joined in optionally. ``estleg:sourceAct`` is the literal-title
+# membership edge in prod (the Wave 2 spike confirmed both
+# ``estleg:partOf`` and ``estleg:partOfAct`` carry zero triples in this
+# corpus). OPTIONAL so an orphan provision still surfaces.
 _INSTITUTION_COMPETENCES_QUERY = (
     PREFIXES
     + """
-SELECT ?provision ?provisionLabel ?act ?actLabel
+SELECT ?provision ?provisionLabel ?actLit
 WHERE {
   ?provision estleg:competentAuthority ?institution .
   OPTIONAL { ?provision rdfs:label ?provisionLabel }
-  OPTIONAL {
-    ?provision estleg:partOf ?act .
-    OPTIONAL { ?act rdfs:label ?actLabel }
-  }
+  OPTIONAL { ?provision estleg:sourceAct ?actLit }
 }
-ORDER BY ?act ?provision
+ORDER BY ?actLit ?provision
 LIMIT """
     + str(_MAX_COMPETENCES_PER_INSTITUTION + 1)  # +1 sentinel so we can detect truncation
     + "\n"
@@ -254,20 +263,17 @@ LIMIT """
 _INSTITUTION_OVERLAPS_QUERY = (
     PREFIXES
     + """
-SELECT DISTINCT ?provision ?provisionLabel ?act ?actLabel ?other ?otherLabel
+SELECT DISTINCT ?provision ?provisionLabel ?actLit ?other ?otherLabel
 WHERE {
   ?provision estleg:competentAuthority ?institution .
   ?provision estleg:competentAuthority ?other .
   ?other a estleg:Institution .
   OPTIONAL { ?provision rdfs:label ?provisionLabel }
-  OPTIONAL {
-    ?provision estleg:partOf ?act .
-    OPTIONAL { ?act rdfs:label ?actLabel }
-  }
+  OPTIONAL { ?provision estleg:sourceAct ?actLit }
   OPTIONAL { ?other rdfs:label ?otherLabel }
   FILTER(?other != ?institution)
 }
-ORDER BY ?act ?provision ?other
+ORDER BY ?actLit ?provision ?other
 LIMIT """
     + str(_MAX_OVERLAP_ROWS)
     + "\n"
@@ -471,12 +477,15 @@ def list_competence_overlaps(
         # short-circuit.
         if not other_uri or other_uri == uri:
             continue
+        # ``act_label`` carries the literal ``estleg:sourceAct`` title;
+        # ``act_uri`` is always empty in prod (no act URIs on
+        # provisions). See Wave 2 spike.
         out.append(
             OverlapRow(
                 provision_uri=str(r.get("provision") or "").strip(),
                 provision_label=str(r.get("provisionLabel") or "").strip(),
-                act_uri=str(r.get("act") or "").strip(),
-                act_label=str(r.get("actLabel") or "").strip(),
+                act_uri="",
+                act_label=str(r.get("actLit") or "").strip(),
                 other_institution_uri=other_uri,
                 other_institution_label=str(r.get("otherLabel") or "").strip(),
             )
@@ -535,9 +544,12 @@ def gather_institution_competences(
 
     by_act: dict[str, list[CompetenceRow]] = {}
     for row in rows:
-        # The empty-string bucket holds orphan provisions (no partOf
-        # edge); the route labels it "Muud" rather than blank.
-        by_act.setdefault(row.act_uri, []).append(row)
+        # Bucket on the literal ``estleg:sourceAct`` title (carried in
+        # ``row.act_label``) — the prod corpus has no act URIs to key
+        # on, so the title literal IS the bucket identity. The
+        # empty-string bucket holds orphan provisions with no sourceAct
+        # edge; the route labels it "Muud" rather than blank.
+        by_act.setdefault(row.act_label, []).append(row)
 
     overlaps = list_competence_overlaps(uri, sparql_client=sparql_client)
 
@@ -562,6 +574,9 @@ def _rows_to_competences(rows: list[dict[str, Any]]) -> list[CompetenceRow]:
     A row without a ``provision`` URI is dropped (it shouldn't happen —
     the query binds ``?provision`` non-optionally — but defensive
     parsing keeps the route from crashing on a stray bind error).
+
+    The ``act_label`` carries the literal ``estleg:sourceAct`` title and
+    ``act_uri`` is always empty in this corpus (see Wave 2 spike).
     """
     out: list[CompetenceRow] = []
     for row in rows or []:
@@ -572,8 +587,8 @@ def _rows_to_competences(rows: list[dict[str, Any]]) -> list[CompetenceRow]:
             CompetenceRow(
                 provision_uri=provision_uri,
                 provision_label=str(row.get("provisionLabel") or "").strip(),
-                act_uri=str(row.get("act") or "").strip(),
-                act_label=str(row.get("actLabel") or "").strip(),
+                act_uri="",
+                act_label=str(row.get("actLit") or "").strip(),
             )
         )
     return out
