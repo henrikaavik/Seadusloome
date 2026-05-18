@@ -46,6 +46,10 @@ def test_draft_route_surface_is_stable() -> None:
         ("/drafts/{draft_id}/report/section/{section}", ("GET", "HEAD")),
         # C6 (#791): executive summary printout (1-2 page .docx).
         ("/drafts/{draft_id}/report/summary.docx", ("GET", "HEAD")),
+        # #811: synchronous full-report downloads (Safari-friendly).
+        # The user-facing "Laadi alla .docx/.pdf" buttons hit these.
+        ("/drafts/{draft_id}/report/full.docx", ("GET", "HEAD")),
+        ("/drafts/{draft_id}/report/full.pdf", ("GET", "HEAD")),
         ("/drafts/{draft_id}/export", ("POST",)),
         ("/drafts/{draft_id}/export-status/{job_id}", ("GET", "HEAD")),
         ("/drafts/{draft_id}/export/{job_id}/download", ("GET", "HEAD")),

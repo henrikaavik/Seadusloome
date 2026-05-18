@@ -3,13 +3,23 @@
 Route map:
 
     GET  /drafts/{draft_id}/report                       — full impact report page
-    POST /drafts/{draft_id}/export                       — enqueue an export_report job
-    GET  /drafts/{draft_id}/export-status/{job_id}       — HTMX polling fragment
-    GET  /drafts/{draft_id}/export/{job_id}/download     — file download
+    GET  /drafts/{draft_id}/report/full.docx             — synchronous .docx download (#811)
+    GET  /drafts/{draft_id}/report/full.pdf              — synchronous .pdf download (#811)
+    POST /drafts/{draft_id}/export                       — legacy: enqueue an export_report job
+    GET  /drafts/{draft_id}/export-status/{job_id}       — legacy: HTMX polling fragment
+    GET  /drafts/{draft_id}/export/{job_id}/download     — legacy: async-job file download
 
-All four routes require authentication and the org-scoping check from
+All routes require authentication and the org-scoping check from
 :mod:`app.docs.routes`. Cross-org accesses return the 404 page rather
 than 403 so we never leak the existence of another org's drafts.
+
+The full-report download buttons on the report page (#811) use the
+synchronous ``GET /report/full.{docx,pdf}`` routes via plain
+``<a href download>`` anchors so Safari treats them as native
+downloads. The async POST→job→poll→download pipeline below is
+preserved for any callers / tests that still hit it directly, and
+because PDF generation runs through headless LibreOffice (still
+backgrounded for future heavy reports).
 """
 
 from __future__ import annotations
@@ -56,7 +66,6 @@ from app.docs.labels import TYPE_LABELS_ET as _TYPE_LABELS_ET
 from app.jobs.queue import JobQueue
 from app.ontology.relations import legal_phrase
 from app.ui.data.data_table import Column, DataTable
-from app.ui.forms.app_form import AppForm
 from app.ui.layout import PageShell
 from app.ui.primitives.annotation_button import AnnotationButton
 from app.ui.primitives.badge import Badge, BadgeVariant
@@ -1300,45 +1309,45 @@ def _print_summary_button(draft: Draft) -> Any:
     )
 
 
-def _export_form(draft: Draft, *, fmt: str, label: str, variant: ButtonVariant) -> Any:
-    """Render one export-trigger form for a single output format (#613).
+def _export_button(draft: Draft, *, fmt: str, label: str, variant: ButtonVariant) -> Any:
+    """Render one export-trigger anchor for a single output format (#613, #811).
 
-    Both the .docx and .pdf forms POST to the same endpoint; the only
-    difference is the hidden ``format`` field. Both target the shared
-    ``#export-status`` div so the user can switch formats by clicking
-    the other button (the dedupe guard in
-    :func:`_find_active_export_job` keys on draft + report + format so
-    a .pdf request does not collide with an in-flight .docx job)."""
-    return AppForm(
-        Hidden(name="format", value=fmt),  # noqa: F405
-        Button(
-            label,
-            type="submit",
-            variant=variant,
-        ),
-        Span(  # noqa: F405
-            "",
-            cls=f"btn-spinner export-spinner export-spinner-{fmt}",
-            aria_hidden="true",
-        ),
-        method="post",
-        action=f"/drafts/{draft.id}/export",
-        hx_post=f"/drafts/{draft.id}/export",
-        hx_swap="innerHTML",
-        hx_target="#export-status",
-        hx_indicator=f".export-spinner-{fmt}",
-        cls=f"export-form export-form-{fmt}",
+    Both the .docx and .pdf controls are plain ``<a href download>``
+    GETs pointing at the synchronous ``/drafts/<id>/report/full.<fmt>``
+    routes. The browser handles the response's
+    ``Content-Disposition: attachment`` natively, which is what makes
+    the click reliably download in Safari WebKit (the previous HTMX
+    ``hx-post`` + async-job + polling shape was a two-click flow that
+    Safari users could not complete because the JS-driven swap never
+    visually surfaced a download link before they gave up — #811).
+
+    The ``download`` attribute pre-populates Safari's "Save As" dialog
+    with a slugified filename derived from the draft title (mirrors the
+    existing ``Prindi kokkuvõte`` link a few lines above, which works
+    cross-browser for exactly this reason)."""
+    suffix = "pdf" if fmt == "pdf" else "docx"
+    filename = f"impact_report_{_slugify(draft.title)}.{suffix}"
+    return LinkButton(
+        label,
+        href=f"/drafts/{draft.id}/report/full.{suffix}",
+        variant=variant,
+        # ``download`` hints to the browser to treat this as a file
+        # download rather than navigating to the URL. Safari respects
+        # the attribute on same-origin links.
+        download=filename,
+        cls=f"export-link export-link-{fmt}",
     )
 
 
 def _export_section(draft: Draft) -> Any:
-    """Build the export action card with HTMX-driven status placeholder.
+    """Build the export action card (#613, #811).
 
-    Two buttons (#613): .docx (primary, default) and .pdf (secondary).
-    They share the ``#export-status`` div so progress + download UI
-    flips between the two as the user picks one or the other. Dedupe
-    of in-flight jobs is keyed on draft+report+format so the two
-    formats do not collide."""
+    Two anchors: .docx (primary, default) and .pdf (secondary). Both
+    are plain ``<a href download>`` GETs hitting the synchronous
+    ``/report/full.<fmt>`` routes — the response streams the file with
+    ``Content-Disposition: attachment``, which Safari handles natively
+    (the prior HTMX form-post + async-job flow did not produce a
+    Safari download — #811)."""
     return Card(
         CardHeader(H3("Eksport", cls="card-title")),  # noqa: F405
         CardBody(
@@ -1347,11 +1356,10 @@ def _export_section(draft: Draft) -> Any:
                 cls="muted-text",
             ),
             Div(  # noqa: F405
-                _export_form(draft, fmt="docx", label="Laadi alla .docx", variant="primary"),
-                _export_form(draft, fmt="pdf", label="Laadi alla .pdf", variant="secondary"),
+                _export_button(draft, fmt="docx", label="Laadi alla .docx", variant="primary"),
+                _export_button(draft, fmt="pdf", label="Laadi alla .pdf", variant="secondary"),
                 cls="export-actions",
             ),
-            Div(id="export-status", cls="export-status"),
         ),
     )
 
@@ -2229,6 +2237,112 @@ def executive_summary_download_handler(req: Request, draft_id: str):
 
 
 # ---------------------------------------------------------------------------
+# GET /drafts/{draft_id}/report/full.{docx,pdf} — synchronous full report (#811)
+# ---------------------------------------------------------------------------
+
+
+def report_full_download_handler(req: Request, draft_id: str, fmt: str):
+    """GET /drafts/{draft_id}/report/full.{docx,pdf} — synchronous download (#811).
+
+    Renders the full impact-report .docx (and optionally converts to
+    PDF) on the fly and streams the file with ``Content-Disposition:
+    attachment``. This is the shape the user-facing "Laadi alla .docx"
+    / "Laadi alla .pdf" buttons hit: a plain ``<a href download>``
+    GET that Safari treats as a native file download (the prior async
+    HTMX-form pipeline silently failed in Safari — #811).
+
+    Auth + org-scoping mirror :func:`draft_report_page`: a missing /
+    cross-org draft resolves to the 404 page.
+
+    DOCX rendering is well within request-timeout territory (matches the
+    summary path). PDF conversion shells out to headless LibreOffice
+    which typically completes in 2-3 s for a 5-section report
+    (:data:`app.docs.docx_export._SOFFICE_TIMEOUT_SECONDS` caps it at
+    60 s).
+    """
+    auth_or_redirect = _require_auth(req)
+    if isinstance(auth_or_redirect, Response):
+        return auth_or_redirect
+    auth = auth_or_redirect
+
+    fmt_normalised = (fmt or "").lower()
+    if fmt_normalised not in _VALID_EXPORT_FORMATS:
+        return _not_found_page(req)
+
+    parsed = _parse_uuid(draft_id)
+    if parsed is None:
+        return _not_found_page(req)
+
+    draft = fetch_draft(parsed)
+    if draft is None or not can_view_draft(auth, draft):
+        return _not_found_page(req)
+
+    report_row = _fetch_latest_report(parsed)
+    if report_row is None:
+        return _not_found_page(req)
+
+    # Lazy import keeps the top-level module light and avoids a cycle
+    # with the export handler that also imports from docx_export.
+    from app.docs.docx_export import build_impact_report_docx, convert_docx_to_pdf
+
+    try:
+        docx_path = build_impact_report_docx(draft, report_row)
+    except Exception:
+        logger.exception(
+            "report_full_download_handler: docx render failed for draft=%s",
+            parsed,
+        )
+        return _not_found_page(req)
+
+    if fmt_normalised == "pdf":
+        try:
+            artefact_path = convert_docx_to_pdf(docx_path)
+        except Exception:
+            logger.exception(
+                "report_full_download_handler: pdf conversion failed for draft=%s",
+                parsed,
+            )
+            return _not_found_page(req)
+        media_type = _PDF_MIME
+        suffix = "pdf"
+    else:
+        artefact_path = docx_path
+        media_type = _DOCX_MIME
+        suffix = "docx"
+
+    filename = f"impact_report_{_slugify(draft.title)}.{suffix}"
+    log_action(
+        auth.get("id"),
+        "draft.report.export.download",
+        {
+            "draft_id": str(parsed),
+            "report_id": str(report_row[0]),
+            "filename": filename,
+            "format": suffix,
+            "transport": "sync",
+        },
+    )
+    # #572: download counts as access; reset the archive clock.
+    touch_draft_access_conn(parsed)
+
+    return FileResponse(
+        path=str(artefact_path),
+        media_type=media_type,
+        filename=filename,
+    )
+
+
+def report_full_docx_handler(req: Request, draft_id: str):
+    """GET /drafts/{draft_id}/report/full.docx — synchronous DOCX download (#811)."""
+    return report_full_download_handler(req, draft_id, "docx")
+
+
+def report_full_pdf_handler(req: Request, draft_id: str):
+    """GET /drafts/{draft_id}/report/full.pdf — synchronous PDF download (#811)."""
+    return report_full_download_handler(req, draft_id, "pdf")
+
+
+# ---------------------------------------------------------------------------
 # Route registration
 # ---------------------------------------------------------------------------
 
@@ -2245,6 +2359,14 @@ def register_report_routes(rt) -> None:  # type: ignore[no-untyped-def]
     rt("/drafts/{draft_id}/report/summary.docx", methods=["GET"])(
         executive_summary_download_handler
     )
+    # #811: synchronous full-report download — the user-facing
+    # "Laadi alla .docx" / "Laadi alla .pdf" buttons hit these so the
+    # response is a Content-Disposition: attachment that Safari handles
+    # natively (the legacy async POST pipeline below stays mounted).
+    rt("/drafts/{draft_id}/report/full.docx", methods=["GET"])(report_full_docx_handler)
+    rt("/drafts/{draft_id}/report/full.pdf", methods=["GET"])(report_full_pdf_handler)
+    # Legacy async export pipeline — preserved for any in-flight callers
+    # that still POST. The user-facing buttons no longer hit it (#811).
     rt("/drafts/{draft_id}/export", methods=["POST"])(export_draft_report_handler)
     rt("/drafts/{draft_id}/export-status/{job_id}", methods=["GET"])(export_status_fragment)
     rt("/drafts/{draft_id}/export/{job_id}/download", methods=["GET"])(download_export_handler)

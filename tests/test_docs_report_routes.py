@@ -778,6 +778,213 @@ class TestDownloadExportHandler:
 
 
 # ---------------------------------------------------------------------------
+# GET /drafts/{id}/report/full.{docx,pdf} — Safari-friendly synchronous
+# download (#811). The user-facing "Laadi alla .docx/.pdf" buttons hit
+# these routes via plain ``<a href download>`` anchors so the browser
+# treats the response (``Content-Disposition: attachment``) as a native
+# download. The prior HTMX form-POST + async-job pipeline silently
+# failed in Safari WebKit because the JS-driven swap never visibly
+# surfaced a download link before users gave up.
+# ---------------------------------------------------------------------------
+
+
+class TestReportFullDownloadHandler:
+    @patch("app.docs.report_routes._fetch_latest_report")
+    @patch("app.docs.report_routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_report_page_renders_safari_friendly_anchor_for_docx(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_fetch_report: MagicMock,
+    ):
+        """#811: the "Laadi alla .docx" control must be a plain
+        ``<a href="…/report/full.docx" download="…">`` anchor — NOT a
+        form-POST with ``hx-post``. Anchors with ``download`` trigger
+        native downloads in Safari; the previous HTMX-form shape did
+        not."""
+        mock_get_provider.return_value = _stub_provider()
+        mock_fetch.return_value = _make_draft()
+        mock_fetch_report.return_value = _make_report_row()
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{_DRAFT_ID}/report")
+
+        assert resp.status_code == 200
+        body = resp.text
+        # The direct GET anchor for both formats is present...
+        assert f"/drafts/{_DRAFT_ID}/report/full.docx" in body
+        assert f"/drafts/{_DRAFT_ID}/report/full.pdf" in body
+        # ...and they carry the ``download`` attribute so Safari treats
+        # the click as a file download (mirrors the working summary link).
+        assert 'download="impact_report_' in body
+        # The old HTMX-form pipeline must NOT be wired to these buttons:
+        # no ``hx-post`` targeting the legacy /export endpoint inside the
+        # Eksport card. We check for the precise legacy shape (the
+        # async POST handler is still mounted for back-compat but the
+        # user-facing controls no longer use it).
+        assert f'hx-post="/drafts/{_DRAFT_ID}/export"' not in body
+        # Belt-and-braces: no ``method="post" action="…/export"`` form
+        # for the inline export card either.
+        assert f'action="/drafts/{_DRAFT_ID}/export"' not in body
+
+    @patch("app.docs.report_routes._fetch_latest_report")
+    @patch("app.docs.report_routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    @patch("app.docs.report_routes.build_impact_report_docx", create=True)
+    def test_full_docx_streams_with_attachment_disposition(
+        self,
+        mock_build: MagicMock,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_fetch_report: MagicMock,
+        tmp_path: Any,
+    ):
+        """#811: the ``/report/full.docx`` route must respond with a
+        ``Content-Disposition: attachment`` so the browser saves the
+        file rather than rendering it inline."""
+        mock_get_provider.return_value = _stub_provider()
+        mock_fetch.return_value = _make_draft(title="Tööõiguse muudatus")
+        mock_fetch_report.return_value = _make_report_row()
+        # Create a real file so FileResponse can stat + stream it.
+        docx_file = tmp_path / "report.docx"
+        docx_file.write_bytes(b"PK\x03\x04 fake docx content")
+        # The handler does a lazy ``from app.docs.docx_export import
+        # build_impact_report_docx`` so we patch the import target.
+        import app.docs.docx_export as _docx_export
+
+        original = _docx_export.build_impact_report_docx
+        _docx_export.build_impact_report_docx = lambda *a, **kw: docx_file
+        try:
+            client = _authed_client()
+            resp = client.get(f"/drafts/{_DRAFT_ID}/report/full.docx")
+        finally:
+            _docx_export.build_impact_report_docx = original
+
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith(
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
+        cd = resp.headers.get("content-disposition", "")
+        # Must be ``attachment`` (not ``inline``) so Safari downloads it.
+        assert cd.startswith("attachment"), (
+            f"Content-Disposition must be 'attachment' for Safari downloads, got: {cd!r}"
+        )
+        assert "impact_report_" in cd
+        assert ".docx" in cd
+        # Estonian diacritics are stripped via NFKD + ASCII fold.
+        for ch in ("ö", "õ", "ä", "ü"):
+            assert ch not in cd
+
+    @patch("app.docs.report_routes._fetch_latest_report")
+    @patch("app.docs.report_routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_full_docx_cross_org_returns_404(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_fetch_report: MagicMock,
+    ):
+        mock_get_provider.return_value = _stub_provider()
+        mock_fetch.return_value = _make_draft(org_id=_OTHER_ORG_ID)
+        mock_fetch_report.return_value = _make_report_row()
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{_DRAFT_ID}/report/full.docx")
+        assert resp.status_code == 404
+        assert "Eelnõu ei leitud" in resp.text
+
+    @patch("app.docs.report_routes._fetch_latest_report")
+    @patch("app.docs.report_routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_full_docx_missing_report_returns_404(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_fetch_report: MagicMock,
+    ):
+        mock_get_provider.return_value = _stub_provider()
+        mock_fetch.return_value = _make_draft()
+        mock_fetch_report.return_value = None
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{_DRAFT_ID}/report/full.docx")
+        assert resp.status_code == 404
+        assert "Eelnõu ei leitud" in resp.text
+
+    @patch("app.docs.report_routes._fetch_latest_report")
+    @patch("app.docs.report_routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_full_pdf_streams_with_attachment_disposition(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_fetch_report: MagicMock,
+        tmp_path: Any,
+    ):
+        """#811: the ``/report/full.pdf`` route must respond with a
+        ``Content-Disposition: attachment`` so Safari treats it as a
+        download."""
+        mock_get_provider.return_value = _stub_provider()
+        mock_fetch.return_value = _make_draft(title="QA Safari tooö")
+        mock_fetch_report.return_value = _make_report_row()
+        docx_file = tmp_path / "report.docx"
+        docx_file.write_bytes(b"PK\x03\x04 fake docx content")
+        pdf_file = tmp_path / "report.pdf"
+        pdf_file.write_bytes(b"%PDF-1.4 fake pdf content")
+
+        import app.docs.docx_export as _docx_export
+
+        original_build = _docx_export.build_impact_report_docx
+        original_convert = _docx_export.convert_docx_to_pdf
+        _docx_export.build_impact_report_docx = lambda *a, **kw: docx_file
+        _docx_export.convert_docx_to_pdf = lambda *a, **kw: pdf_file
+        try:
+            client = _authed_client()
+            resp = client.get(f"/drafts/{_DRAFT_ID}/report/full.pdf")
+        finally:
+            _docx_export.build_impact_report_docx = original_build
+            _docx_export.convert_docx_to_pdf = original_convert
+
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("application/pdf")
+        cd = resp.headers.get("content-disposition", "")
+        assert cd.startswith("attachment"), (
+            f"Content-Disposition must be 'attachment' for Safari downloads, got: {cd!r}"
+        )
+        assert "impact_report_" in cd
+        assert ".pdf" in cd
+
+    @patch("app.docs.report_routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_full_download_unknown_format_returns_404(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+    ):
+        """A bogus extension must not leak path traversal or land in the
+        DOCX/PDF branches — the handler returns the 404 page."""
+        mock_get_provider.return_value = _stub_provider()
+        mock_fetch.return_value = _make_draft()
+
+        # The route only matches /report/full.docx and /report/full.pdf
+        # at registration time, so a bogus suffix never reaches our
+        # handler — the framework 404s it instead.
+        client = _authed_client()
+        resp = client.get(f"/drafts/{_DRAFT_ID}/report/full.xml")
+        assert resp.status_code == 404
+
+    def test_full_docx_requires_auth(self):
+        """Unauthenticated users get redirected to /auth/login."""
+        from app.main import app
+
+        client = TestClient(app, follow_redirects=False)
+        resp = client.get(f"/drafts/{_DRAFT_ID}/report/full.docx")
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/auth/login"
+
+
+# ---------------------------------------------------------------------------
 # GET /drafts/{id}/report/section/{section} — pagination (#611)
 # ---------------------------------------------------------------------------
 
