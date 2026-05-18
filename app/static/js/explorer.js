@@ -238,6 +238,30 @@ const linkLayer = g.append('g').attr('class', 'links');
 const edgeLabelLayer = g.append('g').attr('class', 'edge-labels');
 const nodeLayer = g.append('g').attr('class', 'nodes');
 
+// --- Mini-map DOM (the <svg id="minimap-svg"> lives in pages.py) ---
+// #804: declared BEFORE `zoomBehavior` because the zoom handler below calls
+// updateMinimapViewport() — and the synchronous `svg.call(zoomBehavior.transform, …)`
+// kick on line 263 fires that handler immediately. If the mini-map consts
+// were still in their temporal dead zone here we'd throw a ReferenceError
+// (the original site of the bug). The rest of the spatial-map polish block
+// (functions further down) is unaffected because functions are hoisted and
+// only access these consts when invoked, by which point they're initialised.
+const minimapEl = document.getElementById('minimap');
+const minimapSvg = document.getElementById('minimap-svg')
+  ? d3.select('#minimap-svg')
+  : null;
+// Layers inside the mini-map: links < nodes < focus-ring < draggable viewport.
+const minimapLinkLayer = minimapSvg ? minimapSvg.append('g').attr('class', 'minimap-links') : null;
+const minimapNodeLayer = minimapSvg ? minimapSvg.append('g').attr('class', 'minimap-nodes') : null;
+const minimapFocusLayer = minimapSvg ? minimapSvg.append('g').attr('class', 'minimap-focus-layer') : null;
+const minimapViewportRect = minimapSvg
+  ? minimapSvg.append('rect').attr('class', 'minimap-viewport').attr('rx', 2)
+  : null;
+
+// The transform mapping graph-space coords → mini-map svg coords. Recomputed
+// every renderMinimap() from the current node bounding box; null until then.
+let _minimapTransform = null;
+
 // Zoom
 const zoomBehavior = d3.zoom()
   .scaleExtent([0.2, 4])
@@ -291,24 +315,12 @@ let nodeSel = nodeLayer.selectAll('g.node');
 // All of the below is additive: mini-map renders into the #minimap-svg the page
 // already ships; region-fit and you-are-here hook the existing zoom / render /
 // focus flow; stable layout seeds node positions + the simulation PRNG.
+//
+// #804: the mini-map DOM const block (minimapEl, minimapSvg, minimapLinkLayer,
+// minimapNodeLayer, minimapFocusLayer, minimapViewportRect, _minimapTransform)
+// used to live here. It was hoisted above zoomBehavior to fix a temporal-dead-
+// zone ReferenceError — see the comment at that hoisted block for details.
 // ---------------------------------------------------------------------------
-
-// --- Mini-map DOM (the <svg id="minimap-svg"> lives in pages.py) ---
-const minimapEl = document.getElementById('minimap');
-const minimapSvg = document.getElementById('minimap-svg')
-  ? d3.select('#minimap-svg')
-  : null;
-// Layers inside the mini-map: links < nodes < focus-ring < draggable viewport.
-const minimapLinkLayer = minimapSvg ? minimapSvg.append('g').attr('class', 'minimap-links') : null;
-const minimapNodeLayer = minimapSvg ? minimapSvg.append('g').attr('class', 'minimap-nodes') : null;
-const minimapFocusLayer = minimapSvg ? minimapSvg.append('g').attr('class', 'minimap-focus-layer') : null;
-const minimapViewportRect = minimapSvg
-  ? minimapSvg.append('rect').attr('class', 'minimap-viewport').attr('rx', 2)
-  : null;
-
-// The transform mapping graph-space coords → mini-map svg coords. Recomputed
-// every renderMinimap() from the current node bounding box; null until then.
-let _minimapTransform = null;
 
 function _minimapSize() {
   if (!minimapEl) return { w: 200, h: 140 };
