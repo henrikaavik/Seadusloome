@@ -206,19 +206,32 @@ def _is_follow_ups_enabled() -> bool:
 
 
 def _load_impact_summary(draft_id: str, org_id: str) -> str | None:
-    """Load the latest impact report summary for *draft_id* from the DB.
+    """Load the latest impact report for *draft_id* and compose an Estonian summary.
+
+    The ``impact_reports.report_data`` JSON is the
+    :class:`app.docs.impact.analyzer.ImpactFindings` dataclass as
+    written by :mod:`app.docs.analyze_handler` — it has NO ``summary``
+    key. The headline metrics live in dedicated columns
+    (``affected_count`` / ``conflict_count`` / ``gap_count`` /
+    ``impact_score``); the entity lists live in the JSON. Issue #809:
+    before this fix the loader looked for a non-existent
+    ``report_data["summary"]`` key, always returned ``None`` even when
+    a report existed, and the system prompt then surfaced the
+    placeholder "Mõjuanalüüsi aruanne pole saadaval." while the LLM
+    answered from unrelated RAG fragments.
 
     The query joins through the ``drafts`` table and filters by
     *org_id* to prevent cross-organisation data access.
 
-    Returns ``None`` if no report exists, the draft belongs to a
-    different organisation, or the query fails.
+    Returns ``None`` only when no report exists for this draft, the
+    draft belongs to a different organisation, or the query fails.
     """
     try:
         with get_connection() as conn:
             row = conn.execute(
                 """
-                SELECT ir.report_data
+                SELECT ir.affected_count, ir.conflict_count, ir.gap_count,
+                       ir.impact_score, ir.report_data
                 FROM impact_reports ir
                 JOIN drafts d ON d.id = ir.draft_id
                 WHERE ir.draft_id = %s AND d.org_id = %s
@@ -234,18 +247,54 @@ def _load_impact_summary(draft_id: str, org_id: str) -> str | None:
     if row is None:
         return None
 
-    report_data = row[0]
+    affected_count = int(row[0] or 0)
+    conflict_count = int(row[1] or 0)
+    gap_count = int(row[2] or 0)
+    impact_score = int(row[3] or 0)
+    report_data: Any = row[4]
     if isinstance(report_data, str):
         try:
             report_data = json.loads(report_data)
         except json.JSONDecodeError:
-            return str(report_data)[:500]
+            report_data = {}
+    if not isinstance(report_data, dict):
+        report_data = {}
 
-    if isinstance(report_data, dict):
-        summary = report_data.get("summary", "")
-        if summary:
-            return str(summary)[:2000]
-    return None
+    lines: list[str] = [
+        f"Mõjuskoor: {impact_score}/100.",
+        (
+            f"Mõjutatud üksused: {affected_count} · "
+            f"Konfliktid: {conflict_count} · Lüngad: {gap_count}."
+        ),
+    ]
+
+    def _entity_label(entry: Any) -> str | None:
+        if not isinstance(entry, dict):
+            return None
+        label = str(entry.get("label") or "").strip()
+        uri = str(entry.get("uri") or "").strip()
+        return label or uri or None
+
+    affected_entities = report_data.get("affected_entities") or []
+    if isinstance(affected_entities, list):
+        labels = [label for label in (_entity_label(e) for e in affected_entities[:5]) if label]
+        if labels:
+            lines.append("Mõjutatud sätted (näited): " + "; ".join(labels) + ".")
+
+    conflicts = report_data.get("conflicts") or []
+    if isinstance(conflicts, list):
+        labels = [label for label in (_entity_label(e) for e in conflicts[:3]) if label]
+        if labels:
+            lines.append("Konfliktid (näited): " + "; ".join(labels) + ".")
+
+    gaps = report_data.get("gaps") or []
+    if isinstance(gaps, list):
+        labels = [label for label in (_entity_label(e) for e in gaps[:3]) if label]
+        if labels:
+            lines.append("Lüngad (näited): " + "; ".join(labels) + ".")
+
+    summary = "\n".join(lines)
+    return summary[:2000]
 
 
 # ---------------------------------------------------------------------------

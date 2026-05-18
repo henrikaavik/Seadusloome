@@ -217,16 +217,116 @@ class TestMessagesToPrompt:
 
 
 class TestLoadImpactSummary:
+    """Issue #809 — the loader must read the headline metric columns plus
+    ``report_data`` JSON (which has NO ``summary`` key — that key never
+    existed; the impact-analyze handler writes
+    :class:`app.docs.impact.analyzer.ImpactFindings` as a flat dict of
+    counts + entity lists). Before the fix the loader looked up
+    ``report_data["summary"]`` and always returned ``None``, leaving the
+    chat system prompt with "Mõjuanalüüsi aruanne pole saadaval." even
+    when a complete report row existed.
+    """
+
     @patch("app.chat.orchestrator.get_connection")
-    def test_returns_summary_from_dict(self, mock_conn):
+    def test_composes_summary_from_columns(self, mock_conn):
+        """The headline metrics (counts + score) drive the first two lines."""
+        conn = MagicMock()
+        mock_conn.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_conn.return_value.__exit__ = MagicMock(return_value=False)
+        # (affected_count, conflict_count, gap_count, impact_score, report_data)
+        conn.execute.return_value.fetchone.return_value = (
+            3,
+            3,
+            1,
+            41,
+            json.dumps({"affected_entities": [], "conflicts": [], "gaps": []}),
+        )
+        result = _load_impact_summary("some-id", _ORG_ID)
+        assert result is not None
+        assert "Mõjuskoor: 41/100" in result
+        assert "Mõjutatud üksused: 3" in result
+        assert "Konfliktid: 3" in result
+        assert "Lüngad: 1" in result
+
+    @patch("app.chat.orchestrator.get_connection")
+    def test_appends_affected_entity_labels(self, mock_conn):
+        """Affected entity labels surface in the summary so Claude sees specifics."""
         conn = MagicMock()
         mock_conn.return_value.__enter__ = MagicMock(return_value=conn)
         mock_conn.return_value.__exit__ = MagicMock(return_value=False)
         conn.execute.return_value.fetchone.return_value = (
-            json.dumps({"summary": "Moju kokkuvote"}),
+            2,
+            0,
+            0,
+            22,
+            json.dumps(
+                {
+                    "affected_entities": [
+                        {"uri": "estleg:X", "label": "§5 Riigieelarve seadus"},
+                        {"uri": "estleg:Y", "label": "§7 Kliima-seadus"},
+                    ],
+                    "conflicts": [],
+                    "gaps": [],
+                }
+            ),
         )
         result = _load_impact_summary("some-id", _ORG_ID)
-        assert result == "Moju kokkuvote"
+        assert result is not None
+        assert "§5 Riigieelarve seadus" in result
+        assert "§7 Kliima-seadus" in result
+
+    @patch("app.chat.orchestrator.get_connection")
+    def test_falls_back_to_uri_when_label_missing(self, mock_conn):
+        """When ``label`` is empty, the URI is surfaced instead."""
+        conn = MagicMock()
+        mock_conn.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_conn.return_value.__exit__ = MagicMock(return_value=False)
+        conn.execute.return_value.fetchone.return_value = (
+            1,
+            0,
+            0,
+            5,
+            json.dumps(
+                {
+                    "affected_entities": [{"uri": "estleg:ONLY_URI", "label": ""}],
+                    "conflicts": [],
+                    "gaps": [],
+                }
+            ),
+        )
+        result = _load_impact_summary("some-id", _ORG_ID)
+        assert result is not None
+        assert "estleg:ONLY_URI" in result
+
+    @patch("app.chat.orchestrator.get_connection")
+    def test_handles_dict_report_data(self, mock_conn):
+        """Postgres may return ``jsonb`` already parsed as ``dict`` (not str)."""
+        conn = MagicMock()
+        mock_conn.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_conn.return_value.__exit__ = MagicMock(return_value=False)
+        conn.execute.return_value.fetchone.return_value = (
+            1,
+            1,
+            0,
+            33,
+            {"affected_entities": [], "conflicts": [], "gaps": []},
+        )
+        result = _load_impact_summary("some-id", _ORG_ID)
+        assert result is not None
+        assert "Mõjuskoor: 33/100" in result
+
+    @patch("app.chat.orchestrator.get_connection")
+    def test_minimal_summary_when_lists_empty(self, mock_conn):
+        """Even with all empty lists the summary is non-None (counts still
+        render). The chat must NOT see "report unavailable" when a row
+        with empty findings exists."""
+        conn = MagicMock()
+        mock_conn.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_conn.return_value.__exit__ = MagicMock(return_value=False)
+        conn.execute.return_value.fetchone.return_value = (0, 0, 0, 0, "{}")
+        result = _load_impact_summary("some-id", _ORG_ID)
+        assert result is not None
+        assert "Mõjuskoor: 0/100" in result
 
     @patch("app.chat.orchestrator.get_connection")
     def test_returns_none_when_no_report(self, mock_conn):
@@ -267,7 +367,13 @@ class TestLoadImpactSummary:
         conn = MagicMock()
         mock_conn.return_value.__enter__ = MagicMock(return_value=conn)
         mock_conn.return_value.__exit__ = MagicMock(return_value=False)
-        conn.execute.return_value.fetchone.return_value = (json.dumps({"summary": "Test"}),)
+        conn.execute.return_value.fetchone.return_value = (
+            0,
+            0,
+            0,
+            0,
+            "{}",
+        )
 
         _load_impact_summary("some-id", _ORG_ID)
 
@@ -275,6 +381,41 @@ class TestLoadImpactSummary:
         query = call_args[0]
         assert "JOIN drafts" in query
         assert "d.org_id" in query
+
+    @patch("app.chat.orchestrator.get_connection")
+    def test_summary_does_not_say_unavailable_when_report_present(self, mock_conn):
+        """Issue #809 regression: when a real report row exists the loader
+        must return a non-empty summary so the system prompt never falls
+        back to the placeholder "Mõjuanalüüsi aruanne pole saadaval."."""
+        conn = MagicMock()
+        mock_conn.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_conn.return_value.__exit__ = MagicMock(return_value=False)
+        # Matches the QA draft 2e88521a-… in prod (#809).
+        conn.execute.return_value.fetchone.return_value = (
+            3,
+            3,
+            1,
+            41,
+            json.dumps(
+                {
+                    "affected_entities": [
+                        {
+                            "uri": "https://data.riik.ee/ontology/estleg#Cluster_ATMOSF_7",
+                            "label": (
+                                "§130–216 Kliimamuutuste leevendamine ja osoonikihi kaitsmine"
+                            ),
+                        }
+                    ],
+                    "conflicts": [],
+                    "gaps": [],
+                }
+            ),
+        )
+
+        result = _load_impact_summary(str(_DRAFT_ID), _ORG_ID)
+        assert result is not None
+        assert "pole saadaval" not in result
+        assert "§130–216" in result
 
 
 # ---------------------------------------------------------------------------
@@ -560,6 +701,66 @@ class TestOrchestratorDraftContext:
         system = captured_kwargs[0].get("system", "")
         assert "EELNOU KONTEKST" in system
         assert str(_DRAFT_ID) in system
+        # Issue #809: the loaded impact summary must actually land in
+        # the system prompt, and the unavailability placeholder must
+        # NOT be present when the loader returned a real summary.
+        assert "Moju: seadus muutub" in system
+        assert "pole saadaval" not in system
+
+    @patch("app.chat.orchestrator._load_impact_summary")
+    @patch("app.chat.orchestrator.get_connection")
+    def test_no_impact_report_does_not_fabricate_unavailable_when_no_draft(
+        self, mock_get_conn, mock_load_impact
+    ):
+        """Issue #809 sibling: when the conversation has NO draft attached,
+        the orchestrator must not invoke the impact-summary loader and the
+        system prompt must NOT carry the "report unavailable" placeholder.
+        """
+        conn = MagicMock()
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
+
+        conv = _make_conversation(context_draft_id=None)
+        call_counter = {"n": 0}
+        base_conv_row = (
+            conv.id,
+            conv.user_id,
+            conv.org_id,
+            conv.title,
+            None,  # context_draft_id is NULL
+            conv.created_at,
+            conv.updated_at,
+        )
+
+        def side_effect_fetchone():
+            call_counter["n"] += 1
+            if call_counter["n"] == 1:
+                return base_conv_row
+            return _make_message_row()
+
+        conn.execute.return_value.fetchone = side_effect_fetchone
+        conn.execute.return_value.fetchall.return_value = []
+
+        captured_kwargs: list[dict[str, Any]] = []
+
+        class CaptureLLM(FakeLLM):
+            async def astream(self, prompt: str, **kwargs: Any):
+                captured_kwargs.append({"prompt": prompt, **kwargs})
+                async for event in super().astream(prompt, **kwargs):
+                    yield event
+
+        collector = _Collector()
+        llm = CaptureLLM()
+        orchestrator = ChatOrchestrator(llm, FakeSparql())
+        asyncio.run(orchestrator.handle_message(_CONV_ID, "Tere", _auth(), collector))
+
+        # Loader must not be touched when there is no draft context.
+        assert mock_load_impact.call_count == 0
+        # System prompt must not carry the EELNOU block at all.
+        assert len(captured_kwargs) >= 1
+        system = captured_kwargs[0].get("system", "")
+        assert "EELNOU KONTEKST" not in system
+        assert "pole saadaval" not in system
 
 
 class TestOrchestratorLLMError:
