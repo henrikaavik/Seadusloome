@@ -2008,6 +2008,73 @@ class TestUploadWithVtkLinking:
         assert resp.status_code == 400
         assert "VTK ei saa olla seotud teise VTKga." in resp.text
 
+    @patch("app.docs.routes._upload.list_vtks_for_org")
+    @patch("app.auth.middleware._get_provider")
+    def test_vtk_picker_non_empty_branch_disabled_attr_renders_with_vtk_doc_type(
+        self,
+        mock_get_provider: MagicMock,
+        mock_list_vtks: MagicMock,
+    ):
+        """When the org has VTK rows AND doc_type=vtk is submitted, the
+        picker is server-disabled. The FastHTML 0.13.3 HTTP renderer drops
+        bool-true attributes (see #802 phase-3 / commit da51a5d), so the
+        string form ``disabled="disabled"`` is required to survive to the
+        wire.
+
+        The validation re-render is triggered the same way as
+        ``test_vtk_upload_with_parent_rejected``: a POST with
+        ``doc_type=vtk`` + a ``parent_vtk_id`` fails server validation
+        and re-renders the form via the 400 path in
+        ``create_draft_handler``. With ``list_vtks_for_org`` mocked to
+        return one VTK we hit the *non-empty* branch of ``_vtk_picker``
+        (the one this test pins), as opposed to the already-tested
+        empty-state branch.
+        """
+        mock_get_provider.return_value = _stub_provider()
+        # One existing VTK -> non-empty branch in _vtk_picker fires.
+        mock_list_vtks.return_value = [_make_vtk()]
+
+        client = _authed_client()
+        resp = client.post(
+            "/drafts",
+            data={
+                "title": "VTK",
+                "doc_type": "vtk",
+                "parent_vtk_id": _VTK_ID,
+            },
+            files={"file": ("vtk.docx", b"x", "application/octet-stream")},
+        )
+
+        assert resp.status_code == 400
+        # Slice out the <select ...> opening tag for the parent-vtk
+        # picker and assert it carries the `disabled` attribute on the
+        # HTTP-rendered response. FastHTML 0.13.3's HTTP renderer drops
+        # bool-true attributes, so we use the HTML4-compatible
+        # name=value form server-side; this test pins that the fix
+        # holds on the validation-re-render path too.
+        assert 'id="field-parent-vtk"' in resp.text
+        id_idx = resp.text.find('id="field-parent-vtk"')
+        select_open = resp.text.rfind("<select", 0, id_idx)
+        select_end = resp.text.find(">", id_idx)
+        assert id_idx != -1
+        assert select_open != -1
+        assert select_end != -1
+        select_tag = resp.text[select_open : select_end + 1]
+        # The disabled attribute MUST be present on the wire. We accept
+        # either the bare bool form or the HTML4-compatible name=value
+        # form (the fix uses the latter).
+        assert " disabled" in select_tag or 'disabled="' in select_tag, (
+            f"<select> rendered without a disabled attribute: {select_tag!r}. "
+            "FastHTML 0.13.3 drops bool-true attributes from the HTTP "
+            "response; the non-empty branch with doc_type=vtk must use "
+            'disabled="disabled". See #802 phase-3 / commit da51a5d.'
+        )
+        # The non-empty branch must NOT leak the data-empty hint — that
+        # is only the empty-state branch's escape hatch.
+        assert "data-empty=" not in select_tag
+        # The single VTK label still renders as an <option>.
+        assert "Maantee VTK" in resp.text
+
 
 class TestLinkVtkHandler:
     @patch("app.docs.routes._detail.write_doc_lineage")

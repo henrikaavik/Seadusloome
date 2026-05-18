@@ -289,7 +289,10 @@ def _vtk_picker(
         "cls": "input input-select",
     }
     if disabled:
-        select_kwargs["disabled"] = True
+        # FastHTML 0.13.3 HTTP renderer drops bool-true; see #802 phase-3 /
+        # commit da51a5d. Mirror the empty-state branch above and use the
+        # HTML4-compatible name=value form so the attribute survives to the wire.
+        select_kwargs["disabled"] = "disabled"
     return Div(  # noqa: F405
         Label(label, fr=field_id, cls="form-field-label"),  # noqa: F405
         Select(*options, **select_kwargs),  # noqa: F405
