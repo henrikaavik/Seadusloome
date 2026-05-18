@@ -155,6 +155,18 @@ SELECT DISTINCT ?entity ?label ?type ?relation WHERE {{
   }}
   OPTIONAL {{ ?entity rdfs:label ?label }}
   OPTIONAL {{ ?entity rdf:type ?type }}
+  # Step 5A live-deploy follow-up: in this corpus ``estleg:Law``
+  # instances are *topic-map clusters* (``ALKS_Map_2026``,
+  # ``RKIOMPU1974_Map_2026``, …) — thematic groupings indexed by
+  # ``estleg:requestedCluster`` from each provision. A single resolved
+  # provision (e.g. ``ATMOSF_Par_143``) traversed via that arm yields
+  # 500+ unrelated topic-map "Laws" (1974 maritime safety convention
+  # etc.). Filter them out: the referenced entity itself never satisfies
+  # ``?entity a estleg:Law`` because it is a Section/LegalProvision_
+  # subclass, so this exclusion only removes the cluster fan-out. If
+  # the upstream ontology ever types real atomic acts as ``estleg:Law``
+  # (today they are not), reconsider this filter.
+  FILTER NOT EXISTS {{ ?entity a estleg:Law }}
 }}
 LIMIT 500
 """

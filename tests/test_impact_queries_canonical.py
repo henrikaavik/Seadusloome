@@ -163,6 +163,26 @@ class TestAffectedEntitiesQuery:
         ]
         assert len(rc_rows) == 1
 
+    def test_excludes_law_typed_topic_map_clusters(self, seeded_dataset: Dataset):
+        """Step 5A live-deploy follow-up: ``estleg:Law``-typed entities
+        reached via ``requestedCluster`` (the topic-map clusters
+        masquerading as acts in prod — e.g. ``RKIOMPU1974_Map_2026``)
+        must NOT appear in the affected list. The fixture seeds
+        ``TopicMapLaw_1`` with ``a estleg:Law`` and a
+        ``requestedCluster`` edge from Provision_1; this regression
+        guard asserts it is filtered out by the
+        ``FILTER NOT EXISTS { ?entity a estleg:Law }`` clause.
+        """
+        query = build_affected_entities_query(DRAFT_GRAPH_URI)
+        rows = _rows(seeded_dataset, query)
+        law_typed_rows = [r for r in rows if r["entity"].endswith("TopicMapLaw_1")]
+        assert law_typed_rows == [], (
+            f"AFFECTED_ENTITIES leaked an estleg:Law-typed topic-map cluster: "
+            f"{law_typed_rows!r}. The Step 5A FILTER NOT EXISTS guard against "
+            f"the prod fan-out (~500 unrelated 'Law'/Map_2026 entities per "
+            f"resolved provision) is missing or broken."
+        )
+
     def test_finds_transposes_directive_edge(self, seeded_dataset: Dataset):
         query = build_affected_entities_query(DRAFT_GRAPH_URI)
         rows = _rows(seeded_dataset, query)

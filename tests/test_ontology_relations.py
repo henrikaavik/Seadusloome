@@ -382,6 +382,13 @@ class TestFixtureGraphSparql:
         assert len(rows) == 1
 
     def test_requested_cluster_query(self, fixture_graph: Graph):
+        # The fixture has two requestedCluster edges from Provision_1:
+        #   Provision_1 → Cluster_1  (a TopicCluster — canonical shape)
+        #   Provision_1 → TopicMapLaw_1  (an estleg:Law-typed topic-map
+        #     cluster, added for the Step 5A live-deploy regression in
+        #     tests/test_impact_queries_canonical.py to reproduce the
+        #     prod fan-out where ~500 Law/Map_2026 entities are reached
+        #     via this edge).
         rows = list(
             fixture_graph.query(
                 """
@@ -392,7 +399,11 @@ class TestFixtureGraphSparql:
                 """
             )
         )
-        assert len(rows) == 1
+        cluster_uris = {str(row[1]).split("#")[-1] for row in rows}
+        assert cluster_uris == {"Cluster_1", "TopicMapLaw_1"}, (
+            f"Expected exactly Cluster_1 + TopicMapLaw_1 as requestedCluster "
+            f"targets in the fixture. Got: {cluster_uris}"
+        )
 
     def test_topic_cluster_alias_present(self, fixture_graph: Graph):
         # SHACL-defined alias — populated only on Provision_2 in this

@@ -175,6 +175,18 @@ estleg:Provision_1      estleg:amendedBy estleg:Act_2 .
 estleg:Provision_1 estleg:requestedCluster estleg:Cluster_1 .
 estleg:Provision_2 estleg:topicCluster     estleg:Cluster_1 .
 
+# Step 5A live-deploy follow-up: prod has hundreds of ``estleg:Law``
+# instances that are actually *topic-map clusters* (``ALKS_Map_2026``,
+# ``RKIOMPU1974_Map_2026``, …) — used as overly-broad ``requestedCluster``
+# targets and fan out the AFFECTED_ENTITIES query to 500+ unrelated rows.
+# We replicate that shape here so the AFFECTED_ENTITIES query's
+# ``FILTER NOT EXISTS { ?entity a estleg:Law }`` is regression-tested
+# against the canonical fixture, not just unit-mocked.
+estleg:TopicMapLaw_1 a estleg:Law ;
+    rdfs:label "Mõni teemakaardistus (1974)" .
+
+estleg:Provision_1 estleg:requestedCluster estleg:TopicMapLaw_1 .
+
 # EU transposition + harmonisation.
 #
 # Per the ontology audit (section 2.5 of the plan), ``transposesDirective`` is
