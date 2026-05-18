@@ -95,7 +95,16 @@ def _start_heartbeat(send: Any) -> asyncio.Task[None]:
     return task
 
 
-async def on_connect(send: Any) -> None:
+# IMPORTANT: do NOT annotate ``send`` on FastHTML connect/disconnect
+# hooks. FastHTML's ``_find_p`` only resolves the special WS names
+# (``send``, ``scope``, ``ws``) inside its ``if anno is empty:`` branch
+# (``fasthtml/core.py:_find_p``). Annotating ``send`` — even with
+# ``Any`` — causes the resolver to fall through to the generic
+# data/path/cookies/headers/query lookup and raise
+# ``ValueError: Missing required field: send`` before the body runs.
+# This was the root cause of #802 (chat hang). See
+# ``docs/2026-05-18-bugfix-plan.md`` Wave 3.
+async def on_connect(send) -> None:
     """Called when a WebSocket client connects to /ws/chat.
 
     The heartbeat is now spawned inside ``_ws_handler`` per message
@@ -106,7 +115,7 @@ async def on_connect(send: Any) -> None:
     await send(json.dumps({"type": "connected"}))
 
 
-async def on_disconnect(send: Any) -> None:
+async def on_disconnect(send) -> None:
     """Called when a WebSocket client disconnects."""
     logger.info("Chat WS client disconnected")
 
@@ -475,7 +484,31 @@ def register_chat_ws_routes(app: Any) -> None:
     # for the lifetime of a single WS connection.
     _per_send_tasks: dict[int, dict[str, asyncio.Task[Any]]] = {}
 
-    async def _ws_handler(msg: str, send: Any, scope: dict[str, Any] | None = None) -> None:
+    # IMPORTANT — FastHTML param resolution (root cause of #802):
+    #   * ``send`` / ``scope`` MUST be unannotated. ``_find_p`` only
+    #     resolves these WS special names inside its ``if anno is empty:``
+    #     branch (``fasthtml/core.py:_find_p``). Annotating them (even
+    #     with ``Any``) makes FastHTML fall through to the generic
+    #     path/cookies/headers/query/data resolver and raise
+    #     ``ValueError: Missing required field: <name>``.
+    #   * ``msg`` MUST be the real ``dict`` type at runtime, not a string.
+    #     ``_find_p``'s ``if anno is dict: return data`` branch checks
+    #     ``isinstance(anno, type)`` AND identity (``anno is dict``). With
+    #     ``from __future__ import annotations`` (PEP 563) at the top of
+    #     this module, every source-level annotation becomes a string at
+    #     runtime — so ``async def _ws_handler(msg: dict, …)`` would give
+    #     us ``__annotations__['msg'] == 'dict'`` (a str), and FastHTML's
+    #     identity check fails, falling back to the empty-anno branch
+    #     which returns ``None`` for non-special names. ``ws_chat`` would
+    #     then crash on ``json.loads(None)``.
+    #     The fix: declare the annotation in source for readability +
+    #     static analysis, THEN override ``__annotations__['msg']`` with
+    #     the real ``dict`` type immediately after definition. We
+    #     re-serialise the dict to a string at the boundary below so
+    #     ``ws_chat``'s existing ``msg: str`` contract — and its unit
+    #     tests — stay unchanged.
+    # See ``docs/2026-05-18-bugfix-plan.md`` Wave 3.
+    async def _ws_handler(msg: dict, send, scope=None) -> None:
         """Extract JWT from WS handshake cookies and pass auth scope to ws_chat.
 
         Mirrors the HTTP middleware's silent-refresh contract (#637): if
@@ -549,8 +582,13 @@ def register_chat_ws_routes(app: Any) -> None:
         # matter while a long server-side operation is in flight.
         heartbeat = _start_heartbeat(send)
         try:
+            # ``msg`` arrives as a dict from FastHTML's resolver (see the
+            # ``__annotations__['msg'] = dict`` override below). Direct-
+            # invocation unit tests pass a JSON string for back-compat.
+            # Accept both shapes; ``ws_chat`` itself expects a string.
+            msg_str = json.dumps(msg) if isinstance(msg, dict) else msg
             await ws_chat(
-                msg,
+                msg_str,
                 send,
                 auth_scope if auth_scope else None,
                 active_tasks=tasks,
@@ -587,7 +625,10 @@ def register_chat_ws_routes(app: Any) -> None:
             if not task.done():
                 task.cancel()
 
-    async def _on_disconnect(send: Any) -> None:
+    # IMPORTANT: do NOT annotate ``send``. See _ws_handler above and
+    # ``docs/2026-05-18-bugfix-plan.md`` Wave 3 for the FastHTML
+    # ``_find_p`` trap that motivates the missing annotation here.
+    async def _on_disconnect(send) -> None:
         """Clear the per-send task registry when the socket closes."""
         try:
             _cancel_all_and_drop(id(send))
@@ -599,5 +640,13 @@ def register_chat_ws_routes(app: Any) -> None:
     # poking at closure internals.
     _ws_handler._per_send_tasks = _per_send_tasks  # type: ignore[attr-defined]
     _ws_handler._on_disconnect = _on_disconnect  # type: ignore[attr-defined]
+
+    # Override the stringified ``msg`` annotation with the real ``dict``
+    # type at runtime. ``from __future__ import annotations`` at the top
+    # of this module makes ``msg: dict`` resolve to the *string* ``'dict'``
+    # in ``__annotations__``, which fails FastHTML's identity check
+    # ``if anno is dict: return data``. Setting it explicitly here makes
+    # the resolver see the real type. See #802 phase-2.
+    _ws_handler.__annotations__["msg"] = dict
 
     app.ws("/ws/chat", conn=on_connect, disconn=_on_disconnect)(_ws_handler)

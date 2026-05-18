@@ -12,19 +12,29 @@ logger = logging.getLogger(__name__)
 _connected_clients: set[Any] = set()
 
 
-async def on_connect(send: Any) -> None:
+# IMPORTANT: do NOT annotate ``send`` or ``scope`` on FastHTML WS
+# handlers (receive, connect, disconnect). FastHTML's ``_find_p`` only
+# resolves the special WS names (``send``, ``scope``, ``ws``) inside its
+# ``if anno is empty:`` branch (``fasthtml/core.py:_find_p``).
+# Annotating these parameters — even with ``Any`` — causes the resolver
+# to fall through to the generic data/path/cookies/headers/query
+# lookup and raise ``ValueError: Missing required field: send`` before
+# the body runs. This was the root cause of #802 (chat hang); the same
+# trap silently broke this push-only socket too. See
+# ``docs/2026-05-18-bugfix-plan.md`` Wave 3.
+async def on_connect(send) -> None:
     """Called when a WebSocket client connects to /ws/explorer."""
     _connected_clients.add(send)
     logger.info("Explorer WS client connected (total: %d)", len(_connected_clients))
 
 
-async def on_disconnect(send: Any) -> None:
+async def on_disconnect(send) -> None:
     """Called when a WebSocket client disconnects."""
     _connected_clients.discard(send)
     logger.info("Explorer WS client disconnected (total: %d)", len(_connected_clients))
 
 
-async def ws_explorer(msg: str, send: Any) -> None:
+async def ws_explorer(msg, send) -> None:
     """Handle incoming messages from the client (currently unused)."""
     # Clients don't send meaningful messages; this is a push-only channel.
     pass

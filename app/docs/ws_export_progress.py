@@ -420,7 +420,22 @@ def register_export_progress_ws_routes(app: Any) -> None:
                 return None
         return _jwt_provider[0]
 
-    async def _ws_handler(msg: str, send: Any, scope: dict[str, Any] | None = None) -> None:
+    # IMPORTANT — FastHTML param resolution (root cause of #802):
+    #   * ``send`` / ``scope`` MUST be unannotated. ``_find_p`` only
+    #     resolves these WS special names inside its ``if anno is empty:``
+    #     branch (``fasthtml/core.py:_find_p``). Annotating them (even
+    #     with ``Any``) makes FastHTML fall through to the generic
+    #     path/cookies/headers/query/data resolver and raise
+    #     ``ValueError: Missing required field: <name>``.
+    #   * ``msg`` MUST be annotated ``dict``. The ``if anno is dict:``
+    #     branch of ``_find_p`` returns the parsed JSON ``data`` payload.
+    #     Without an annotation the empty-anno branch returns ``None``
+    #     (``msg`` is not a FastHTML special name); ``ws_export_progress``
+    #     would then crash on ``json.loads(None)``. We re-serialise the
+    #     dict at the boundary below so the inner handler's existing
+    #     ``msg: str`` contract — and its unit tests — stay unchanged.
+    # See ``docs/2026-05-18-bugfix-plan.md`` Wave 3.
+    async def _ws_handler(msg: dict, send, scope=None) -> None:
         auth_scope: dict[str, Any] = {}
 
         if scope is not None:
@@ -454,12 +469,21 @@ def register_export_progress_ws_routes(app: Any) -> None:
         # Heartbeat scoped to this handler invocation (post-#684 pattern).
         heartbeat = _start_heartbeat(send)
         try:
-            await ws_export_progress(msg, send, auth_scope if auth_scope else None)
+            # See app/chat/websocket.py: accept both dict (FastHTML resolver)
+            # and string (legacy direct-call tests).
+            msg_str = json.dumps(msg) if isinstance(msg, dict) else msg
+            await ws_export_progress(msg_str, send, auth_scope if auth_scope else None)
         finally:
             heartbeat.cancel()
             try:
                 await heartbeat
             except (asyncio.CancelledError, Exception):
                 pass
+
+    # See app/chat/websocket.py for the rationale: PEP-563 stringifies
+    # the ``msg: dict`` annotation, which fails FastHTML's identity
+    # check in ``_find_p``. Override with the real type at runtime so
+    # the resolver injects the parsed WS payload. #802 phase-2.
+    _ws_handler.__annotations__["msg"] = dict
 
     app.ws("/ws/drafts/export-progress")(_ws_handler)
