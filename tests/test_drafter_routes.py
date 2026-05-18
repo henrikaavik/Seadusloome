@@ -193,6 +193,48 @@ class TestNewSessionPage:
         assert 'value="full_law"' in resp.text
         assert 'value="vtk"' in resp.text
 
+    @patch("app.auth.middleware._get_provider")
+    def test_workflow_form_safari_safe_cross_browser_shape(
+        self,
+        mock_get_provider: MagicMock,
+    ):
+        """Issue #812 regression — Safari WebKit could not submit /drafter/new.
+
+        FastHTML 0.13.3's HTTP renderer is fragile around bool-true HTML
+        attributes (cf. commits ``da51a5d`` and ``222dab4``). The
+        cross-browser-safe shape — verified to work in Safari, Chrome,
+        and Firefox — pins three attributes explicitly in the rendered
+        HTML on the *HTTP response* path (not ``to_xml()``):
+
+        1. The default ``workflow_type`` radio has ``checked="checked"``
+           in the HTML4 string form so the attribute survives every
+           serializer path.
+        2. The submit button has ``type="submit"`` explicit (a
+           type-less ``<button>`` inside ``<form>`` has historically
+           tripped WebKit's interactive-activation flow).
+        3. The form has an explicit ``action="/drafter/new"``.
+        """
+        mock_get_provider.return_value = _stub_provider()
+
+        client = _authed_client()
+        resp = client.get("/drafter/new")
+
+        assert resp.status_code == 200
+        # 1. Default radio is pre-selected with the HTML4 string form
+        #    (the bool-true bug landed both as a Safari behaviour diff
+        #    AND as a "drops to nothing" risk on the HTTP renderer path,
+        #    so we pin the string form explicitly).
+        assert 'checked="checked"' in resp.text
+        assert 'value="full_law" checked="checked"' in resp.text
+        # 2. Submit button has type="submit" explicit
+        assert '<button type="submit"' in resp.text
+        assert "Alusta koostamist" in resp.text
+        # 3. The workflow form has an explicit action attribute pointing
+        #    at the POST endpoint — Safari is stricter about implicit
+        #    action="" submitting back to current URL when the page
+        #    might have URL-encoded characters.
+        assert 'action="/drafter/new"' in resp.text
+
 
 # ---------------------------------------------------------------------------
 # POST /drafter/new -- create session

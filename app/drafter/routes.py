@@ -364,6 +364,14 @@ def _workflow_form(*, error: str | None = None):
     """Render the workflow selection form with radio buttons."""
     error_alert = Alert(error, variant="danger") if error else None
 
+    # Issue #812 / cf. commits da51a5d + 222dab4 — FastHTML 0.13.3's HTTP
+    # renderer is fragile around bool-true HTML attributes. Safari's submit
+    # path on /drafter/new failed (click + keyboard) while requestSubmit()
+    # worked; the safest cross-browser shape is the HTML4-compatible string
+    # form (``checked="checked"``) so the attribute survives every
+    # serializer path and every WebKit version. type="submit" on the button
+    # and the form's action="/drafter/new" are also kept explicit for the
+    # same reason.
     return AppForm(
         Div(  # noqa: F405
             Label("Töövoo tüüp", cls="form-field-label"),  # noqa: F405
@@ -373,7 +381,7 @@ def _workflow_form(*, error: str | None = None):
                         type="radio",
                         name="workflow_type",
                         value="full_law",
-                        checked=True,
+                        checked="checked",
                         cls="radio-input",
                     ),
                     Span("Täielik seadus", cls="radio-label"),  # noqa: F405
