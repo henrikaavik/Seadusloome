@@ -557,11 +557,40 @@ def _relation_cell_text(row: dict[str, Any]) -> str:
     return phrase or "—"
 
 
+def _is_partial_match_row(row: dict[str, Any]) -> bool:
+    """Return True for affected-entities rows surfaced via ``referencesAct``.
+
+    Wave 2 Step 5A (docs/2026-05-18-bugfix-plan.md, P2 review
+    follow-up): the AFFECTED_ENTITIES SPARQL now unions a literal-edge
+    branch (``GRAPH <…> { ?draft estleg:referencesAct ?actTitle }``) so
+    act-level partial matches surface in the impact report's "Mõjutatud
+    üksused" panel alongside full URI matches. Those rows carry
+    ``relation == "https://data.riik.ee/ontology/estleg#referencesAct"``
+    and their ``uri`` field is the LITERAL act title — not a URL — so
+    the renderer must not wrap it in an ``<a href=/explorer?focus=…>``
+    link. This predicate is the single source of truth for that branch.
+    """
+    relation = str(row.get("relation") or "").strip()
+    if not relation:
+        return False
+    # Match both ``estleg:referencesAct`` (prefixed) and the full URI
+    # form — rdflib serialisers vary between the two depending on
+    # whether the binding was a literal-projected predicate or a Term
+    # round-trip. The local name is unique either way.
+    return relation.endswith("referencesAct")
+
+
 def _affected_columns(
     draft_version_id: str = "",
     counts: dict[tuple[str, str], int] | None = None,
 ) -> list[Column]:
     def _type_cell(row: dict[str, Any]):
+        # Partial-match rows have no URI and no rdf:type — the entity
+        # is a literal act title. Surface a dedicated Estonian label so
+        # the reader sees "this draft touches the act <X>; we couldn't
+        # narrow it to a specific §" at a glance.
+        if _is_partial_match_row(row):
+            return "Akt (sätet ei leitud)"
         return _short_type(str(row.get("type", "")))
 
     def _label_cell(row: dict[str, Any]):
@@ -571,6 +600,14 @@ def _affected_columns(
         uri = str(row.get("uri") or "")
         if not uri:
             return "—"
+        # Partial-match rows: ``uri`` carries the literal act title,
+        # not a URL — render as plain text. The Explorer has no
+        # entity to focus on (there is no provision URI), so an
+        # anchor would 404. The annotation thread still keys off the
+        # title via ``row_key_for_entity`` so users can leave team
+        # comments on the partial match.
+        if _is_partial_match_row(row):
+            return uri
         return A(  # noqa: F405
             uri,
             href=explorer_focus_url(uri),

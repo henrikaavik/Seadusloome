@@ -290,6 +290,91 @@ class TestDraftReportPage:
         # fetch_draft must NOT be called when UUID parsing fails.
         mock_fetch.assert_not_called()
 
+    @patch("app.docs.report_routes._fetch_latest_report")
+    @patch("app.docs.report_routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_partial_match_row_renders_as_plain_text_with_act_phrase(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_fetch_report: MagicMock,
+    ):
+        """Wave 2 Step 5A (P2 review follow-up,
+        docs/2026-05-18-bugfix-plan.md): an act-level partial match
+        (``estleg:referencesAct "<title>"``) must surface in the
+        "Mõjutatud üksused" table alongside any full URI matches. The
+        partial row must:
+
+          * carry the Estonian "Akt (sätet ei leitud)" phrasing in the
+            Tüüp column,
+          * render the act title in the Nimetus + URI columns as plain
+            text (NOT as an ``<a href=/explorer?focus=…>`` anchor),
+          * show the dedicated ``referencesAct`` Estonian legal phrase
+            in the Seose liik column.
+        """
+        mock_get_provider.return_value = _stub_provider()
+        mock_fetch.return_value = _make_draft()
+        # Two rows: one full URI match (existing path) + one
+        # literal-edge partial match (new path).
+        partial_findings = {
+            "affected_entities": [
+                {
+                    "uri": "https://data.riik.ee/ontology/estleg#KarS_Par_133",
+                    "label": "KarS § 133",
+                    "type": "https://data.riik.ee/ontology/estleg#LegalProvision",
+                    "relation": "https://data.riik.ee/ontology/estleg#references",
+                },
+                {
+                    # Literal-edge partial match. uri carries the act
+                    # title, label echoes it, type is empty.
+                    "uri": "Riigieelarve seadus",
+                    "label": "Riigieelarve seadus",
+                    "type": "",
+                    "relation": "https://data.riik.ee/ontology/estleg#referencesAct",
+                },
+            ],
+            "conflicts": [],
+            "eu_compliance": [],
+            "gaps": [],
+        }
+        mock_fetch_report.return_value = _make_report_row(
+            affected=2, conflicts=0, gaps=0, findings=partial_findings
+        )
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{_DRAFT_ID}/report")
+
+        assert resp.status_code == 200
+        body = resp.text
+        # Both rows present.
+        assert "KarS § 133" in body
+        assert "Riigieelarve seadus" in body
+        # Partial-match-specific UI strings:
+        # - "Akt (sätet ei leitud)" phrase in the Tüüp column.
+        assert "Akt (sätet ei leitud)" in body, (
+            "Partial-match row must show 'Akt (sätet ei leitud)' in "
+            "the Tüüp column — see Wave 2 Step 5A of "
+            "docs/2026-05-18-bugfix-plan.md."
+        )
+        # - "viitab aktile (sätet ei leitud)" phrase from
+        #   :mod:`app.ontology.relations.LEGAL_PHRASES` in Seose liik.
+        assert "viitab aktile (sätet ei leitud)" in body, (
+            "Partial-match row must show the Estonian legal phrase "
+            "for referencesAct — see LEGAL_PHRASES[REFERENCES_ACT]."
+        )
+        # The URI column for the URI-shaped row must still be an
+        # anchor pointing to the explorer.
+        assert "/explorer?focus=" in body
+        # The act title must NOT be wrapped in an /explorer?focus link
+        # — there's no URI to focus on. The cheap proof is "no anchor
+        # whose visible text equals the literal title". We assert this
+        # by looking for ``>Riigieelarve seadus</a>`` and confirming
+        # absence.
+        assert ">Riigieelarve seadus</a>" not in body, (
+            "Partial-match act title must NOT render as an anchor "
+            "(no URI to focus on) — see Wave 2 Step 5A."
+        )
+
 
 # ---------------------------------------------------------------------------
 # POST /drafts/{id}/export

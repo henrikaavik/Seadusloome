@@ -131,6 +131,21 @@ class ImpactAnalyzer:
         URI that linked the entity to the draft reference. C5 uses this
         to render the relation type in legal language; older callers can
         ignore it.
+
+        Wave 2 Step 5A (P2 review follow-up,
+        docs/2026-05-18-bugfix-plan.md): the AFFECTED_ENTITIES query
+        now unions a ``estleg:referencesAct "<title>"`` LITERAL branch
+        on top of the URI-shaped branches. A row coming from that
+        branch carries ``?entity`` as a literal act title (e.g.
+        ``"Riigieelarve seadus"``) with no ``?label`` or ``?type``. The
+        downstream renderer + .docx export expect a homogeneous list
+        shape with ``uri`` / ``label`` populated, so we reshape the
+        partial-match row here: the act title doubles as both ``uri``
+        (the renderer keys off this for the row identity / annotation
+        thread) AND ``label`` (the renderer's "Nimetus" column reads
+        ``label``). The renderer detects partial-match rows by the
+        relation predicate (``referencesAct``) and renders the URI
+        column as plain text instead of an explorer link.
         """
         try:
             query = build_affected_entities_query(graph_uri)
@@ -138,16 +153,36 @@ class ImpactAnalyzer:
         except Exception as exc:  # noqa: BLE001 — pass-level isolation
             logger.warning("ImpactAnalyzer._find_affected failed: %s", exc)
             return []
-        return [
-            {
-                "uri": row.get("entity", ""),
-                "label": row.get("label", ""),
-                "type": row.get("type", ""),
-                "relation": row.get("relation", ""),
-            }
-            for row in rows
-            if row.get("entity")
-        ]
+        out: list[dict[str, str]] = []
+        for row in rows:
+            entity = str(row.get("entity", "") or "").strip()
+            if not entity:
+                continue
+            relation = str(row.get("relation", "") or "")
+            label = str(row.get("label", "") or "")
+            entity_type = str(row.get("type", "") or "")
+            # Partial-match (act-level literal) row: the entity itself
+            # is the act title — populate ``label`` from it so the
+            # "Nimetus" column shows the title verbatim, and leave
+            # ``type`` empty so the type column falls back to the
+            # short "—". The renderer keys on ``relation`` ==
+            # ``…#referencesAct`` to decide whether to render the URI
+            # column as a link or as plain text.
+            if relation.endswith("referencesAct"):
+                if not label:
+                    label = entity
+                # ``type`` is intentionally left empty — there's no
+                # rdf:type for a literal; ``_short_type("")`` returns
+                # "—" in the renderer.
+            out.append(
+                {
+                    "uri": entity,
+                    "label": label,
+                    "type": entity_type,
+                    "relation": relation,
+                }
+            )
+        return out
 
     def _detect_conflicts(self, graph_uri: str) -> list[dict[str, str]]:
         """Run the conflict query and return one dict per hit.

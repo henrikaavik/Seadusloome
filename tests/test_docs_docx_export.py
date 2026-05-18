@@ -13,6 +13,7 @@ import json
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -274,3 +275,143 @@ class TestBuildImpactReportDocx:
             result = build_impact_report_docx(draft, row)
 
         assert result.name == f"{_DRAFT_ID}-{_REPORT_ID}.docx"
+
+    def test_partial_match_row_renders_as_plain_text_cells(self, tmp_export_dir: Path):
+        """Wave 2 Step 5A (P2 review follow-up,
+        docs/2026-05-18-bugfix-plan.md): a ``referencesAct`` partial
+        match must produce a docx row that:
+
+          * shows "Akt (sätet ei leitud)" in the Tüüp column,
+          * renders the act title in the Nimetus + URI columns as a
+            plain text run (not a hyperlink — there's no URL to point
+            at),
+          * shows the Estonian "viitab aktile (sätet ei leitud)"
+            phrase in the Seose liik column.
+        """
+        draft = _make_draft()
+        partial_findings = {
+            "affected_entities": [
+                {
+                    "uri": "https://data.riik.ee/ontology/estleg#KarS_Par_133",
+                    "label": "KarS § 133",
+                    "type": "https://data.riik.ee/ontology/estleg#LegalProvision",
+                    "relation": "https://data.riik.ee/ontology/estleg#references",
+                },
+                {
+                    # Literal-edge partial match. uri carries the act
+                    # title; type is empty.
+                    "uri": "Riigieelarve seadus",
+                    "label": "Riigieelarve seadus",
+                    "type": "",
+                    "relation": "https://data.riik.ee/ontology/estleg#referencesAct",
+                },
+            ],
+            "conflicts": [],
+            "eu_compliance": [],
+            "gaps": [],
+        }
+        row = _build_report_row(affected=2, conflicts=0, gaps=0, findings=partial_findings)
+
+        # Capture every cell-text assignment so we can assert what
+        # the docx renderer wrote per row. The python-docx mock's
+        # ``add_table`` returns a MagicMock; ``add_row().cells[i].text =
+        # "..."`` ends up as a setattr on the cell mock — which
+        # MagicMock records under ``method_calls`` as
+        # ``add_table().add_row().cells.__getitem__(i).text``. The
+        # simpler proof is to inspect the raw run sequence on the
+        # mock's call list.
+        captured_texts: list[str] = []
+
+        def _record_setattr(cells_mock: MagicMock) -> None:
+            # Wire up the cells mock so every ``.text = value``
+            # appends to captured_texts.
+            def _make_cell() -> MagicMock:
+                cell = MagicMock()
+                # Catch any text assignment.
+                cell._raw_text = None
+
+                def _set_text(value: str) -> None:
+                    captured_texts.append(value)
+
+                # MagicMock supports property-like attributes via
+                # __setattr__. Easiest is to use a side_effect on a
+                # property via PropertyMock, but for the simple list
+                # capture we add a __setattr__ override by replacing
+                # the cell with a tiny helper object.
+                cell.text = ""
+                return cell
+
+            cells_mock.__getitem__.side_effect = lambda i: _make_cell()
+
+        with patch("app.docs.docx_export.Document") as mock_doc_cls:
+            mock_doc = MagicMock()
+            mock_doc.sections = []
+            # Build a mock table whose ``add_row().cells[i].text``
+            # assignment is observable. The cleanest path is to make
+            # ``add_table`` return a mock where ``add_row().cells`` is
+            # a list-like that records assignments.
+            tables_added: list[MagicMock] = []
+
+            def _make_table(*_args: Any, **_kwargs: Any) -> MagicMock:
+                table = MagicMock()
+                table_rows: list[MagicMock] = []
+
+                # Header row (rows=1 in add_table). The renderer reads
+                # ``table.rows[0].cells`` first.
+                class _RecordingCell:
+                    def __init__(self) -> None:
+                        self._text: str = ""
+
+                    @property
+                    def text(self) -> str:
+                        return self._text
+
+                    @text.setter
+                    def text(self, value: str) -> None:
+                        self._text = value
+                        captured_texts.append(value)
+
+                class _RecordingRow:
+                    def __init__(self) -> None:
+                        self.cells = [_RecordingCell() for _ in range(4)]
+
+                header_row = _RecordingRow()
+                table_rows.append(header_row)
+                table.rows = table_rows
+
+                def _add_row() -> _RecordingRow:
+                    new = _RecordingRow()
+                    table_rows.append(new)
+                    return new
+
+                table.add_row.side_effect = _add_row
+                tables_added.append(table)
+                return table
+
+            mock_doc.add_table.side_effect = _make_table
+            mock_doc_cls.return_value = mock_doc
+
+            build_impact_report_docx(draft, row)
+
+        # Assert the Estonian phrasing for the partial-match row
+        # appears in the captured cell-text stream.
+        joined = " | ".join(captured_texts)
+        assert "Akt (sätet ei leitud)" in joined, (
+            "DOCX export must label a partial-match row's Tüüp cell "
+            "as 'Akt (sätet ei leitud)' — see Wave 2 Step 5A."
+        )
+        assert "viitab aktile (sätet ei leitud)" in joined, (
+            "DOCX export must show 'viitab aktile (sätet ei leitud)' "
+            "as the Seose liik for a partial-match row."
+        )
+        # The act title appears verbatim (no escaping / wrapping). The
+        # docx renderer assigns it as a plain cell.text — there is no
+        # hyperlink helper in the existing _add_affected_entities path
+        # (the URI column was always plain text), so the regression
+        # guard here is "the title shows up unchanged".
+        assert "Riigieelarve seadus" in joined
+
+        # Sanity: the full-URI row's Tüüp must NOT use the partial
+        # phrasing — verify by counting occurrences of the partial
+        # phrase (should equal 1 for the one partial row only).
+        assert joined.count("Akt (sätet ei leitud)") == 1

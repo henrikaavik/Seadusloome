@@ -96,6 +96,17 @@ class PREDICATES:
     # --- References / citations ---
     REFERENCES: Final[str] = _uri("references")
     CITED_BY: Final[str] = _uri("citedBy")
+    # Act-level partial match — the resolver writes
+    # ``estleg:referencesAct "<title>"`` as a LITERAL edge whenever
+    # the act half of a reference resolved but the § could not be
+    # pinned (e.g. ``riigieelarve seaduse § 20 lõike 5`` →
+    # ``act_title="Riigieelarve seadus", section="20"``). The literal
+    # edge is intentionally non-traversable (no URI to fan out from);
+    # AFFECTED_ENTITIES unions it in via a dedicated SPARQL arm so the
+    # ministry user sees "this draft touches Riigieelarve seadus"
+    # even though we couldn't narrow to a specific section. See Wave
+    # 2 Step 5A of docs/2026-05-18-bugfix-plan.md.
+    REFERENCES_ACT: Final[str] = _uri("referencesAct")
 
     # --- Similarity ---
     SEMANTICALLY_SIMILAR_TO: Final[str] = _uri("semanticallySimilarTo")
@@ -296,6 +307,12 @@ LEGAL_PHRASES: dict[str, str] = {
     # References / citations.
     PREDICATES.REFERENCES: "viitab",
     PREDICATES.CITED_BY: "viidatud õigusaktiga",
+    # Act-level partial match — the lawyer-friendly phrasing keeps
+    # the user's mental model "this draft references some piece of
+    # the legal landscape" intact while signalling that we know only
+    # which act is touched. Matches the "Tüüp" column's "Akt (sätet
+    # ei leitud)" phrasing on the same row.
+    PREDICATES.REFERENCES_ACT: "viitab aktile (sätet ei leitud)",
     # Similarity.
     PREDICATES.SEMANTICALLY_SIMILAR_TO: "sarnane sisuga",
     # Concepts / terms.
@@ -329,6 +346,7 @@ RELATION_GROUPS: dict[str, str] = {
     PREDICATES.HARMONISED_WITH: "transposition",
     PREDICATES.REFERENCES: "reference",
     PREDICATES.CITED_BY: "reference",
+    PREDICATES.REFERENCES_ACT: "reference",
     PREDICATES.SEMANTICALLY_SIMILAR_TO: "similarity",
     PREDICATES.DEFINES_CONCEPT: "concept",
     PREDICATES.DEFINES_TERM: "concept",

@@ -300,3 +300,14 @@ estleg:Draft_1 a estleg:DraftLegislation ;
     rdfs:label "Eelnõu 1 — fixture" ;
     estleg:amends        estleg:Provision_1 ;
     estleg:submittedDate "2024-02-20"^^xsd:date .
+
+# Wave 2 Step 5A (docs/2026-05-18-bugfix-plan.md, P2 review
+# follow-up): a sample ``estleg:referencesAct "<title>"`` literal
+# edge. The resolver writes this whenever the act half of a reference
+# resolves but the § cannot be pinned (the act-level partial-match
+# state). The literal edge is intentionally NON-traversable — the
+# impact engine's AFFECTED_ENTITIES query surfaces it as an
+# affected-list row but no BFS hop fans out from a string literal.
+# The fixture loadability check (test_ontology_relations.py) ensures
+# every predicate in LEGAL_PHRASES has at least one triple here.
+estleg:Draft_1 estleg:referencesAct "Riigieelarve seadus" .

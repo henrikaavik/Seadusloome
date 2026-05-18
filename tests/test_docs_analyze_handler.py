@@ -545,6 +545,109 @@ class TestAnalyzeImpactPartialMatch:
         # match_score is the resolver's partial-match marker (0.5).
         assert ref.match_score == 0.5
 
+    def test_analyzer_affected_entities_with_partial_match_persisted_to_report(self):
+        """Wave 2 Step 5A (P2 review follow-up,
+        docs/2026-05-18-bugfix-plan.md): when the SPARQL UNION arm
+        surfaces a literal-edge partial-match row, the handler must
+        thread it through into ``impact_reports.report_data`` unchanged
+        — the renderer + .docx export key off the row shape to render
+        partial matches as plain text instead of explorer-anchor links.
+        """
+        draft = _make_draft()
+        # Empty PG entity_rows is fine — the partial-match row comes
+        # from the (mocked) analyzer, which is what the SPARQL UNION
+        # arm produces in production.
+        load_conn = _make_load_conn(entity_rows=[])
+        insert_conn = _make_insert_conn()
+        sync_conn = _make_sync_conn((datetime(2026, 5, 18, 12, 0, tzinfo=UTC), 1))
+
+        # The analyzer's affected_entities now includes both a full
+        # URI row and a literal-edge partial-match row. Wave 2 Step 5A.
+        partial_findings = ImpactFindings(
+            affected_entities=[
+                {
+                    "uri": "https://data.riik.ee/ontology/estleg#KarS_Par_133",
+                    "label": "KarS § 133",
+                    "type": "https://data.riik.ee/ontology/estleg#LegalProvision",
+                    "relation": "https://data.riik.ee/ontology/estleg#references",
+                },
+                {
+                    # Polymorphic row — uri is the literal act title,
+                    # label echoes it, type empty, relation marks it
+                    # as a partial match.
+                    "uri": "Riigieelarve seadus",
+                    "label": "Riigieelarve seadus",
+                    "type": "",
+                    "relation": "https://data.riik.ee/ontology/estleg#referencesAct",
+                },
+            ],
+            conflicts=[],
+            gaps=[],
+            eu_compliance=[],
+            affected_count=2,
+            conflict_count=0,
+            gap_count=0,
+        )
+        mock_analyzer = MagicMock()
+        mock_analyzer.analyze.return_value = partial_findings
+
+        with (
+            patch("app.docs.analyze_handler.get_connection") as mock_get_conn,
+            patch("app.docs.analyze_handler.get_draft", return_value=draft),
+            patch("app.docs.analyze_handler.get_latest_version", return_value=_make_version()),
+            patch("app.docs.analyze_handler.build_draft_graph", return_value="# t"),
+            patch("app.docs.analyze_handler.put_named_graph", return_value=True),
+            patch("app.docs.analyze_handler.write_doc_lineage", return_value=None),
+            patch("app.docs.analyze_handler.fetch_draft", return_value=None),
+            patch(
+                "app.docs.analyze_handler.ImpactAnalyzer",
+                return_value=mock_analyzer,
+            ),
+            patch(
+                "app.docs.analyze_handler.calculate_impact_score",
+                return_value=10,
+            ),
+        ):
+            mock_get_conn.side_effect = [
+                _ConnectCM(load_conn),
+                _ConnectCM(sync_conn),
+                _ConnectCM(insert_conn),
+            ]
+            analyze_impact({"draft_id": str(_DRAFT_ID)})
+
+        # Find the INSERT INTO impact_reports call and decode the
+        # JSONB ``report_data`` blob — the partial-match row must be
+        # present and intact.
+        insert_calls = [
+            c
+            for c in insert_conn.execute.call_args_list
+            if "insert into impact_reports" in c.args[0].lower()
+        ]
+        assert insert_calls, "No INSERT into impact_reports found"
+        params = insert_calls[0].args[1]
+        # report_data is one of the JSONB params; locate it by
+        # scanning for a JSON-encoded string with the expected keys.
+        report_data_json: str | None = None
+        for value in params:
+            if isinstance(value, str) and "affected_entities" in value:
+                report_data_json = value
+                break
+        assert report_data_json is not None, (
+            f"impact_reports INSERT must carry a JSON blob containing "
+            f"affected_entities — got params {params!r}"
+        )
+        report_data = json.loads(report_data_json)
+        affected = report_data.get("affected_entities") or []
+        # Both rows survived the persistence layer unchanged.
+        assert len(affected) == 2
+        partial = [r for r in affected if r.get("uri") == "Riigieelarve seadus"]
+        assert len(partial) == 1, (
+            f"Partial-match row missing from persisted impact_reports — "
+            f"see Wave 2 Step 5A. Got: {affected!r}"
+        )
+        assert partial[0]["relation"].endswith("referencesAct")
+        assert partial[0]["label"] == "Riigieelarve seadus"
+
     def test_select_includes_partial_match_column_and_widened_where(self):
         """The SELECT must read partial_match AND the WHERE clause must
         no longer require entity_uri to be non-null. Together these

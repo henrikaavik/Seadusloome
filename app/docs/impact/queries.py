@@ -121,52 +121,82 @@ AFFECTED_ENTITIES = (
     PREFIXES
     + """
 SELECT DISTINCT ?entity ?label ?type ?relation WHERE {{
-  GRAPH <{graph_uri}> {{ ?draft estleg:references ?ref . }}
   {{
-    BIND(?ref AS ?entity)
-    BIND(estleg:references AS ?relation)
+    GRAPH <{graph_uri}> {{ ?draft estleg:references ?ref . }}
+    {{
+      BIND(?ref AS ?entity)
+      BIND(estleg:references AS ?relation)
+    }} UNION {{
+      ?ref estleg:requestedCluster ?entity .
+      BIND(estleg:requestedCluster AS ?relation)
+    }} UNION {{
+      ?ref estleg:topicCluster ?entity .
+      BIND(estleg:topicCluster AS ?relation)
+    }} UNION {{
+      ?ref estleg:definesConcept ?entity .
+      BIND(estleg:definesConcept AS ?relation)
+    }} UNION {{
+      ?ref estleg:transposesDirective ?entity .
+      BIND(estleg:transposesDirective AS ?relation)
+    }} UNION {{
+      ?ref estleg:harmonisedWith ?entity .
+      BIND(estleg:harmonisedWith AS ?relation)
+    }} UNION {{
+      ?ref estleg:interpretedBy ?entity .
+      BIND(estleg:interpretedBy AS ?relation)
+    }} UNION {{
+      ?entity estleg:interpretsLaw ?ref .
+      BIND(estleg:interpretsLaw AS ?relation)
+    }} UNION {{
+      ?ref estleg:amendedBy ?entity .
+      BIND(estleg:amendedBy AS ?relation)
+    }} UNION {{
+      ?entity estleg:amends ?ref .
+      BIND(estleg:amends AS ?relation)
+    }}
+    OPTIONAL {{ ?entity rdfs:label ?label }}
+    OPTIONAL {{ ?entity rdf:type ?type }}
+    # Step 5A live-deploy follow-up: in this corpus ``estleg:Law``
+    # instances are *topic-map clusters* (``ALKS_Map_2026``,
+    # ``RKIOMPU1974_Map_2026``, …) — thematic groupings indexed by
+    # ``estleg:requestedCluster`` from each provision. A single resolved
+    # provision (e.g. ``ATMOSF_Par_143``) traversed via that arm yields
+    # 500+ unrelated topic-map "Laws" (1974 maritime safety convention
+    # etc.). Filter them out: the referenced entity itself never satisfies
+    # ``?entity a estleg:Law`` because it is a Section/LegalProvision_
+    # subclass, so this exclusion only removes the cluster fan-out. If
+    # the upstream ontology ever types real atomic acts as ``estleg:Law``
+    # (today they are not), reconsider this filter. The FILTER lives on
+    # the URI-shaped branches only — the act-level literal branch below
+    # has no URI to type, so it is naturally unaffected.
+    FILTER NOT EXISTS {{ ?entity a estleg:Law }}
   }} UNION {{
-    ?ref estleg:requestedCluster ?entity .
-    BIND(estleg:requestedCluster AS ?relation)
-  }} UNION {{
-    ?ref estleg:topicCluster ?entity .
-    BIND(estleg:topicCluster AS ?relation)
-  }} UNION {{
-    ?ref estleg:definesConcept ?entity .
-    BIND(estleg:definesConcept AS ?relation)
-  }} UNION {{
-    ?ref estleg:transposesDirective ?entity .
-    BIND(estleg:transposesDirective AS ?relation)
-  }} UNION {{
-    ?ref estleg:harmonisedWith ?entity .
-    BIND(estleg:harmonisedWith AS ?relation)
-  }} UNION {{
-    ?ref estleg:interpretedBy ?entity .
-    BIND(estleg:interpretedBy AS ?relation)
-  }} UNION {{
-    ?entity estleg:interpretsLaw ?ref .
-    BIND(estleg:interpretsLaw AS ?relation)
-  }} UNION {{
-    ?ref estleg:amendedBy ?entity .
-    BIND(estleg:amendedBy AS ?relation)
-  }} UNION {{
-    ?entity estleg:amends ?ref .
-    BIND(estleg:amends AS ?relation)
+    # Wave 2 Step 5A partial-match surfacing
+    # (docs/2026-05-18-bugfix-plan.md). The resolver writes a distinct
+    # ``estleg:referencesAct "<title>"`` LITERAL edge whenever the act
+    # half of a reference resolved but the § could not be pinned (e.g.
+    # ``riigieelarve seaduse § 20 lõike 5`` → act_title="Riigieelarve
+    # seadus", section="20"). The literal edge is explicitly NOT
+    # traversable — there is no URI to fan out from — so it's a natural
+    # BFS dead-end. Surface it in the affected-entities list so the
+    # user sees "this draft touches Riigieelarve seadus" alongside the
+    # full URI matches; without this branch the partial_match row is
+    # persisted (PG + Jena) but invisible to ministry users reading the
+    # impact report.
+    #
+    # The ``?entity`` projection is polymorphic: existing branches bind
+    # it to a URI; this branch binds it to a literal string. The
+    # downstream analyzer/renderer reads ``?entity`` as ``str(row.get(
+    # "entity"))`` already so the polymorphism is transparent — the
+    # ``OPTIONAL`` ``rdfs:label`` / ``rdf:type`` clauses on the
+    # URI-shaped branches above simply don't fire on a literal, and the
+    # renderer falls back to the literal itself for the display.
+    # ``estleg:Law`` exclusion does not apply to literals (literals
+    # can't have rdf:type), so the FILTER NOT EXISTS above doesn't
+    # touch this branch either.
+    GRAPH <{graph_uri}> {{ ?draft estleg:referencesAct ?entity . }}
+    BIND(estleg:referencesAct AS ?relation)
   }}
-  OPTIONAL {{ ?entity rdfs:label ?label }}
-  OPTIONAL {{ ?entity rdf:type ?type }}
-  # Step 5A live-deploy follow-up: in this corpus ``estleg:Law``
-  # instances are *topic-map clusters* (``ALKS_Map_2026``,
-  # ``RKIOMPU1974_Map_2026``, …) — thematic groupings indexed by
-  # ``estleg:requestedCluster`` from each provision. A single resolved
-  # provision (e.g. ``ATMOSF_Par_143``) traversed via that arm yields
-  # 500+ unrelated topic-map "Laws" (1974 maritime safety convention
-  # etc.). Filter them out: the referenced entity itself never satisfies
-  # ``?entity a estleg:Law`` because it is a Section/LegalProvision_
-  # subclass, so this exclusion only removes the cluster fan-out. If
-  # the upstream ontology ever types real atomic acts as ``estleg:Law``
-  # (today they are not), reconsider this filter.
-  FILTER NOT EXISTS {{ ?entity a estleg:Law }}
 }}
 LIMIT 500
 """
@@ -321,6 +351,20 @@ LIMIT 100
 # act URIs to traverse; provision-level transposition + harmonisation
 # (SHACL lines 158-163 and 226-230) are the only honest paths. When
 # act-level data later lands cleanly, a new UNION arm can be added.
+#
+# 2026-05-18 (Wave 2 Step 5A, P2 review follow-up): the same
+# ``estleg:referencesAct`` literal branch was added to AFFECTED_ENTITIES
+# above to surface act-level partial matches in the impact report.
+# Deliberately NOT added here. EU compliance is intrinsically
+# provision-level: the corpus's transposition + harmonisation edges
+# attach to provisions/acts via ``transposesDirective`` /
+# ``harmonisedWith``, neither of which has a literal-title join key.
+# Adding a ``GRAPH <…> { ?draft estleg:referencesAct ?actTitle }`` arm
+# here would produce empty rows — there is no second hop from a string
+# literal to an EU directive in this data. If the source data ever
+# grows a literal-keyed predicate that ties an act title to an EU
+# instrument (e.g. ``estleg:transposedIntoTitle "<lit>"``), a new arm
+# becomes meaningful; today it would just be dead code.
 
 EU_COMPLIANCE = (
     PREFIXES

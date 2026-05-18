@@ -198,6 +198,21 @@ def _relation_cell(row: dict[str, Any]) -> str:
     return phrase or "—"
 
 
+def _is_partial_match_row(row: dict[str, Any]) -> bool:
+    """Return True for ``referencesAct`` literal-edge rows (Wave 2 Step 5A).
+
+    Mirror of :func:`app.docs.report_routes._is_partial_match_row` —
+    keeps the .docx export consistent with the HTML view. A
+    partial-match row's ``uri`` field is a LITERAL act title (not a
+    URL), so the DOCX renderer must not include a hyperlink run for
+    it. See docs/2026-05-18-bugfix-plan.md Wave 2 Step 5A.
+    """
+    relation = str(row.get("relation") or "").strip()
+    if not relation:
+        return False
+    return relation.endswith("referencesAct")
+
+
 # ---------------------------------------------------------------------------
 # Section renderers
 # ---------------------------------------------------------------------------
@@ -278,9 +293,20 @@ def _add_affected_entities(
     for index, row in enumerate(rows):
         cells = table.add_row().cells
         cells[0].text = _relation_cell(row)
-        cells[1].text = _short_type(str(row.get("type", "")))
-        cells[2].text = str(row.get("label", "") or "—")
-        cells[3].text = str(row.get("uri", "") or "—")
+        # Wave 2 Step 5A (docs/2026-05-18-bugfix-plan.md): partial-match
+        # rows (``estleg:referencesAct "<title>"`` literal edge) have
+        # no rdf:type and no URI — their ``uri`` field carries the
+        # literal act title instead. Surface a dedicated Estonian
+        # phrasing for the "Tüüp" column and render the title verbatim
+        # in the URI column (no fake URL).
+        if _is_partial_match_row(row):
+            cells[1].text = "Akt (sätet ei leitud)"
+            cells[2].text = str(row.get("label", "") or row.get("uri", "") or "—")
+            cells[3].text = str(row.get("uri", "") or "—")
+        else:
+            cells[1].text = _short_type(str(row.get("type", "")))
+            cells[2].text = str(row.get("label", "") or "—")
+            cells[3].text = str(row.get("uri", "") or "—")
         # Mid-table checkpoint: every Nth row OR the last row. Avoids
         # firing for tiny tables where the section-level publish above
         # already covers the work.

@@ -21,7 +21,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from rdflib import Dataset, Namespace, URIRef
+from rdflib import Dataset, Literal, Namespace, URIRef
 from rdflib.namespace import RDF
 
 from app.docs.impact.queries import (
@@ -40,26 +40,38 @@ DRAFT_GRAPH_URI = (
     "https://data.riik.ee/ontology/estleg/drafts/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 )
 
+# Act title used to seed the Wave 2 Step 5A partial-match branch —
+# mirrors the climate-law live draft's ``riigieelarve seaduse § 20``
+# partial match (act resolved, § not pinned).
+PARTIAL_MATCH_ACT_TITLE = "Riigieelarve seadus"
+
 
 @pytest.fixture
 def seeded_dataset() -> Dataset:
     """An rdflib Dataset with the fixture + a draft named graph.
 
     The default graph carries the canonical-predicates fixture (the
-    enacted ontology). The named graph at ``DRAFT_GRAPH_URI`` holds a
-    single ``estleg:references`` edge from a draft self-node to
-    ``estleg:Provision_1`` — the entity that participates in every
-    relation in the fixture. This lets the impact queries traverse from
-    the draft outward through the canonical edges.
+    enacted ontology). The named graph at ``DRAFT_GRAPH_URI`` holds:
+
+    * a ``estleg:references`` edge from a draft self-node to
+      ``estleg:Provision_1`` — the entity that participates in every
+      URI-shaped relation in the fixture; and
+    * a ``estleg:referencesAct "<title>"`` LITERAL edge for the Wave 2
+      Step 5A partial-match arm (act resolved, § not pinned). This
+      mirrors the production shape the graph builder writes (see
+      ``app.docs.graph_builder.build_draft_graph`` and Wave 2 Step 5A
+      of docs/2026-05-18-bugfix-plan.md).
     """
     ds = Dataset()
     ds.parse(FIXTURE_PATH, format="turtle")
 
-    # Synthetic draft graph: ``draft-self estleg:references Provision_1``.
+    # Synthetic draft graph: URI-shaped + literal-shaped edges.
     draft_graph = ds.graph(URIRef(DRAFT_GRAPH_URI))
     draft_self = URIRef("urn:draft:test")
     draft_graph.add((draft_self, RDF.type, ESTLEG.DraftLegislation))
     draft_graph.add((draft_self, ESTLEG.references, ESTLEG.Provision_1))
+    # Wave 2 Step 5A: act-level partial match — literal edge, not a URI.
+    draft_graph.add((draft_self, ESTLEG.referencesAct, Literal(PARTIAL_MATCH_ACT_TITLE)))
     return ds
 
 
@@ -212,6 +224,57 @@ class TestAffectedEntitiesQuery:
             if r["entity"].endswith("EU_Dir_1") and r["relation"].endswith("harmonisedWith")
         ]
         assert len(hs) == 1
+
+    def test_affected_entities_includes_literal_partial_match(self, seeded_dataset: Dataset):
+        """Wave 2 Step 5A (P2 review follow-up,
+        docs/2026-05-18-bugfix-plan.md): the AFFECTED_ENTITIES query must
+        surface ``estleg:referencesAct "<title>"`` literal edges from the
+        draft's named graph alongside the URI-shaped branches. Without
+        this, partial matches (act resolved, § not pinned) are persisted
+        in PG + Jena but invisible to ministry users reading the impact
+        report.
+
+        The fixture seeds ``draft-self estleg:referencesAct
+        "Riigieelarve seadus"`` (mirrors the climate-law live draft); we
+        assert the resulting row has the literal act title in ``?entity``
+        and ``?relation`` == ``estleg:referencesAct``.
+        """
+        query = build_affected_entities_query(DRAFT_GRAPH_URI)
+        rows = _rows(seeded_dataset, query)
+        partial_rows = [
+            r
+            for r in rows
+            if r["entity"] == PARTIAL_MATCH_ACT_TITLE and r["relation"].endswith("referencesAct")
+        ]
+        assert len(partial_rows) == 1, (
+            f"AFFECTED_ENTITIES is missing the literal-edge "
+            f"partial-match arm — see Wave 2 Step 5A of "
+            f"docs/2026-05-18-bugfix-plan.md. Got rows: {rows!r}"
+        )
+
+    def test_partial_match_row_has_no_type_or_label_projection(self, seeded_dataset: Dataset):
+        """The literal-edge branch deliberately leaves ``?type`` /
+        ``?label`` unbound — a literal cannot satisfy ``?entity a ?type``
+        or ``?entity rdfs:label ?label``. The analyzer reshapes the row
+        so the renderer's "Nimetus" column falls back to the title
+        itself, but the raw SPARQL projection must remain empty so we
+        catch any accidental cross-binding in future query rewrites.
+        """
+        query = build_affected_entities_query(DRAFT_GRAPH_URI)
+        rows = _rows(seeded_dataset, query)
+        partial_rows = [
+            r
+            for r in rows
+            if r["entity"] == PARTIAL_MATCH_ACT_TITLE and r["relation"].endswith("referencesAct")
+        ]
+        assert len(partial_rows) == 1
+        row = partial_rows[0]
+        # ``?type`` and ``?label`` are unbound — rdflib renders that as
+        # the empty string via our ``_rows`` helper. (A real Jena would
+        # omit the binding entirely; the test helper coerces missing
+        # bindings to ``""``.)
+        assert row.get("type", "") == ""
+        assert row.get("label", "") == ""
 
 
 # ---------------------------------------------------------------------------
