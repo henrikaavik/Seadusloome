@@ -612,6 +612,12 @@ def _canned_resolved_provision_ref():
 
 
 def _canned_resolved_law_ref():
+    """Build a ResolvedRef matching the real Wave 2 Step 2 resolver shape.
+
+    Post-Wave-2 the resolver returns ``entity_uri=None`` for law-only
+    refs and rides the canonical act title literal on ``partial_match``.
+    The route picks that title up and routes to ``list_decisions_for_act``.
+    """
     from app.docs.entity_extractor import ExtractedRef
     from app.docs.reference_resolver import ResolvedRef
 
@@ -622,9 +628,14 @@ def _canned_resolved_law_ref():
             confidence=1.0,
             location={"source": "analyysikeskus_input"},
         ),
-        entity_uri=_AVTS_URI,
+        entity_uri=None,
         matched_label="Avaliku teabe seadus",
         match_score=1.0,
+        partial_match={
+            "act_token": "AVTS",
+            "act_title": "Avaliku teabe seadus",
+            "section": None,
+        },
     )
 
 
@@ -749,7 +760,11 @@ def test_kohtupraktika_resolved_law_uses_act_query(
     mock_resolve: MagicMock,
     mock_list_act: MagicMock,
 ):
-    """A resolved ``law`` ref ⇒ the act-level query branch."""
+    """Wave 2 Step 5: a partial-match law ref routes to list_decisions_for_act(title).
+
+    The route picks the literal act title from the resolver's
+    ``partial_match`` payload and passes that to the act-level helper.
+    """
     mock_provider.return_value = _stub_provider()
     mock_resolve.return_value = [_canned_resolved_law_ref()]
     mock_list_act.return_value = _canned_decision_rows()
@@ -757,7 +772,40 @@ def test_kohtupraktika_resolved_law_uses_act_query(
     client = _authed_client()
     resp = client.get("/analyysikeskus/kohtupraktika?sisend=AvTS+%C2%A7+35")
     assert resp.status_code == 200
-    mock_list_act.assert_called_once_with(_AVTS_URI)
+    # The act-level helper accepts a literal title; the route passes
+    # the title from ``partial_match["act_title"]``.
+    mock_list_act.assert_called_once_with("Avaliku teabe seadus")
+
+
+@patch("app.analyysikeskus.routes.list_decisions_for_act")
+@patch("app.analyysikeskus.routes._rag_candidates", return_value=[])
+@patch("app.docs.reference_resolver.ReferenceResolver.resolve")
+@patch("app.auth.middleware._get_provider")
+def test_kohtupraktika_bare_law_input_routes_to_for_act(
+    mock_provider: MagicMock,
+    mock_resolve: MagicMock,
+    mock_rag: MagicMock,
+    mock_list_act: MagicMock,
+):
+    """Wave 2 Step 5: bare law sisend (``AvTS``) routes to list_decisions_for_act.
+
+    Exercises parse_user_reference → resolver → route dispatch for a
+    pure law name input (no § ref). The route picks the title from
+    the resolver's ``partial_match`` payload and does NOT fall through
+    to the unresolved/RAG branch.
+    """
+    mock_provider.return_value = _stub_provider()
+    mock_resolve.return_value = [_canned_resolved_law_ref()]
+    mock_list_act.return_value = _canned_decision_rows()
+
+    client = _authed_client()
+    resp = client.get("/analyysikeskus/kohtupraktika?sisend=AvTS")
+    assert resp.status_code == 200
+    body = resp.text
+
+    mock_list_act.assert_called_once_with("Avaliku teabe seadus")
+    mock_rag.assert_not_called()
+    assert "Ei tuvastanud õiguslikku viidet" not in body
 
 
 @patch("app.analyysikeskus.routes.list_decisions_for_provision", return_value=[])
@@ -786,11 +834,32 @@ def test_kohtupraktika_disambiguation_when_multiple_resolutions(
     mock_resolve: MagicMock,
     mock_list: MagicMock,
 ):
-    """Multiple resolved entities ⇒ a disambiguation card with clickable candidates."""
+    """Multiple distinct URI-resolved refs ⇒ a disambiguation card.
+
+    Wave 2 Step 5: the route now prefers URI-resolved refs over
+    partial-match refs when both are present. To force the
+    disambiguation branch we mock TWO distinct URI-resolved refs.
+    """
+    from app.docs.entity_extractor import ExtractedRef
+    from app.docs.reference_resolver import ResolvedRef
+
+    other_uri = "https://data.riik.ee/ontology/estleg#AvTS-p11"
+    other_ref = ResolvedRef(
+        extracted=ExtractedRef(
+            ref_text="AvTS § 11",
+            ref_type="provision",
+            confidence=1.0,
+            location={"source": "analyysikeskus_input"},
+        ),
+        entity_uri=other_uri,
+        matched_label="AvTS § 11 — Avaliku teabe seadus",
+        match_score=1.0,
+    )
+
     mock_provider.return_value = _stub_provider()
     mock_resolve.return_value = [
         _canned_resolved_provision_ref(),
-        _canned_resolved_law_ref(),
+        other_ref,
     ]
 
     client = _authed_client()
@@ -799,7 +868,7 @@ def test_kohtupraktika_disambiguation_when_multiple_resolutions(
     body = resp.text
     assert "Sisend võib viidata mitmele üksusele" in body
     assert "AvTS § 35 — Avaliku teabe seadus" in body
-    assert "Avaliku teabe seadus" in body
+    assert "AvTS § 11 — Avaliku teabe seadus" in body
     mock_list.assert_not_called()
 
 

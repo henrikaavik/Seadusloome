@@ -617,6 +617,12 @@ def _canned_resolved_provision_ref():
 
 
 def _canned_resolved_law_ref():
+    """Build a ResolvedRef matching the real Wave 2 Step 2 resolver shape.
+
+    Post-Wave-2 the resolver returns ``entity_uri=None`` for law-only
+    refs and rides the canonical act title literal on ``partial_match``.
+    The route picks that title up and routes to ``list_sanctions_for_act``.
+    """
     from app.docs.entity_extractor import ExtractedRef
     from app.docs.reference_resolver import ResolvedRef
 
@@ -627,9 +633,14 @@ def _canned_resolved_law_ref():
             confidence=1.0,
             location={"source": "analyysikeskus_input"},
         ),
-        entity_uri=_KARS_URI,
+        entity_uri=None,
         matched_label="Karistusseadustik",
         match_score=1.0,
+        partial_match={
+            "act_token": "KRIMIN",
+            "act_title": "Karistusseadustik",
+            "section": None,
+        },
     )
 
 
@@ -778,10 +789,9 @@ def test_sanctions_resolved_law_uses_act_query(
 ):
     """A resolved ``law`` ref ⇒ the act-level query branch.
 
-    Wave 2 Step 5: the route now passes the resolved title literal (the
-    ``matched_label`` surfaced by the resolver) to
-    :func:`list_sanctions_for_act` rather than the entity URI — the
-    prod corpus has no act URIs on provisions.
+    Wave 2 Step 5: the route picks the literal act title from the
+    resolver's ``partial_match`` payload and passes that to
+    :func:`list_sanctions_for_act` — the prod corpus has no act URIs.
     """
     mock_provider.return_value = _stub_provider()
     mock_resolve.return_value = [_canned_resolved_law_ref()]
@@ -795,10 +805,48 @@ def test_sanctions_resolved_law_uses_act_query(
     # act branch.
     resp = client.get("/analyysikeskus/sanktsioonid?sisend=KarS+%C2%A7+211")
     assert resp.status_code == 200
-    # The route passes the resolved label (literal title) — the
-    # ``_canned_resolved_law_ref()`` helper sets that to
-    # ``"Karistusseadustik"`` via ``matched_label``.
+    # The route passes the literal act title via partial_match.
     mock_list_act.assert_called_once_with("Karistusseadustik")
+
+
+@patch("app.analyysikeskus.routes.find_similar_sanctions", return_value=[])
+@patch("app.analyysikeskus.routes.list_sanctions_for_act")
+@patch("app.analyysikeskus.routes._rag_candidates", return_value=[])
+@patch("app.docs.reference_resolver.ReferenceResolver.resolve")
+@patch("app.auth.middleware._get_provider")
+def test_sanctions_bare_law_input_routes_to_for_act(
+    mock_provider: MagicMock,
+    mock_resolve: MagicMock,
+    mock_rag: MagicMock,
+    mock_list_act: MagicMock,
+    mock_similar: MagicMock,
+):
+    """Wave 2 Step 5: a bare law sisend (``KarS``) routes to list_sanctions_for_act.
+
+    Exercises the full path: parse_user_reference recognises ``KarS``
+    as a curated alias → emits one ``law`` ExtractedRef → resolver
+    returns the partial-match shape (no URI, title literal in
+    ``partial_match``) → route picks the title and calls
+    ``list_sanctions_for_act("Karistusseadustik")``. The route does
+    NOT fall through to the unresolved/RAG path.
+    """
+    mock_provider.return_value = _stub_provider()
+    mock_resolve.return_value = [_canned_resolved_law_ref()]
+    mock_list_act.return_value = _canned_sanction_rows()
+
+    client = _authed_client()
+    # Bare law input — no § ref. The new bare-law branch in
+    # parse_user_reference emits a single ``law`` ExtractedRef.
+    resp = client.get("/analyysikeskus/sanktsioonid?sisend=KarS")
+    assert resp.status_code == 200
+    body = resp.text
+
+    # The act-level helper was called with the literal title.
+    mock_list_act.assert_called_once_with("Karistusseadustik")
+    # The RAG fallback was NOT consulted.
+    mock_rag.assert_not_called()
+    # The "Ei tuvastanud" warning is absent — we resolved (partially).
+    assert "Ei tuvastanud õiguslikku viidet" not in body
 
 
 @patch("app.analyysikeskus.routes._rag_candidates", return_value=[])
@@ -830,12 +878,32 @@ def test_sanctions_disambiguation_when_multiple_resolutions(
     mock_resolve: MagicMock,
     mock_list: MagicMock,
 ):
-    """Multiple resolved entities ⇒ a disambiguation card with clickable candidates."""
+    """Multiple distinct URI-resolved refs ⇒ a disambiguation card.
+
+    Wave 2 Step 5: the route now prefers URI-resolved refs over
+    partial-match refs when both are present. To force the
+    disambiguation branch we mock TWO distinct URI-resolved refs.
+    """
+    from app.docs.entity_extractor import ExtractedRef
+    from app.docs.reference_resolver import ResolvedRef
+
+    other_uri = "https://data.riik.ee/ontology/estleg#KarS-p133"
+    other_ref = ResolvedRef(
+        extracted=ExtractedRef(
+            ref_text="KarS § 133",
+            ref_type="provision",
+            confidence=1.0,
+            location={"source": "analyysikeskus_input"},
+        ),
+        entity_uri=other_uri,
+        matched_label="KarS § 133 — Karistusseadustik",
+        match_score=1.0,
+    )
+
     mock_provider.return_value = _stub_provider()
-    # Two refs that resolve to two distinct URIs (provision + law).
     mock_resolve.return_value = [
         _canned_resolved_provision_ref(),
-        _canned_resolved_law_ref(),
+        other_ref,
     ]
 
     client = _authed_client()
@@ -846,7 +914,7 @@ def test_sanctions_disambiguation_when_multiple_resolutions(
     assert "Sisend võib viidata mitmele üksusele" in body
     # Both candidate labels are linked back into the workflow.
     assert "KarS § 211 — Karistusseadustik" in body
-    assert "Karistusseadustik" in body
+    assert "KarS § 133 — Karistusseadustik" in body
     # No sanctions list rendering — disambiguation short-circuits.
     mock_list.assert_not_called()
 

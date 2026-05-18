@@ -21,6 +21,15 @@ rule-based regex for §-references and law names; layer ML later"):
   ``lg <n>`` and/or ``p <n>`` → a ``provision`` ref carrying the full
   matched text *plus* a ``law`` ref carrying just the short name (the
   resolver tries the precise provision first and the law as a fallback).
+* **Bare law reference** — a curated Estonian legal abbreviation
+  (``KarS``, ``KMS``, ``TLS`` … via the resolver's
+  ``_HUMAN_ABBREV_ALIASES`` keyset) or a token ending in
+  ``seadus``/``seaduse``/``seadustik``/``seadustiku``/``seadustikust``
+  (e.g. ``Töölepingu seadus``) → one ``law`` ref. The resolver returns
+  a ``partial_match`` payload carrying the literal act title; the
+  routes pick up that payload and route to the ``list_*_for_act``
+  helpers. Length-capped at 80 chars to avoid swallowing
+  sentence-shaped queries that happen to mention "seadus".
 * **Anything else** → ``[]``. The route surfaces a friendly "no
   structured reference recognised" message + (optionally) RAG
   candidates; this function never guesses.
@@ -34,6 +43,7 @@ from __future__ import annotations
 import re
 
 from app.docs.entity_extractor import ExtractedRef
+from app.docs.reference_resolver import _HUMAN_ABBREV_ALIASES
 
 # CELEX numbers: 1-digit sector + 4-digit year + single descriptor
 # letter + 1-4 digit running number, e.g. ``32016R0679``. Mirrors the
@@ -73,6 +83,103 @@ _SECTION_RE = re.compile(
     """,
     re.IGNORECASE | re.VERBOSE,
 )
+
+# Maximum length of a bare law-name input that we will recognise. The
+# longest curated abbreviation alias is ~8 chars; the longest realistic
+# law title is ``"Karistusseadustiku rakendamise seadus"`` ≈ 38 chars.
+# 80 chars is plenty of headroom while still rejecting sentence-shaped
+# queries that happen to mention "seadus".
+_BARE_LAW_MAX_LEN = 80
+
+# Tokens that mark a string as a likely bare-law reference (case-
+# insensitive, suffix-only). Mirrors the explicit suffix list curated
+# in :func:`app.docs.reference_resolver._normalise_law_name`. Order
+# does NOT matter here — endswith() short-circuits on first hit.
+_BARE_LAW_SUFFIXES = (
+    "seadustikust",
+    "seadustikus",
+    "seadustiku",
+    "seadustik",
+    "seadustes",
+    "seadusest",
+    "seaduseni",
+    "seaduses",
+    "seaduse",
+    "seadusi",
+    "seadust",
+    "seadus",
+)
+
+# Pattern for "looks like an Estonian legal abbreviation":
+#   * 2-10 characters
+#   * letters only (incl. Estonian diacritics + optional internal lowercase)
+#   * at least one uppercase letter (avoids matching plain lowercase words
+#     like ``tööleping`` that are not abbreviations)
+#   * no whitespace, no digits, no punctuation
+#
+# Examples that match: ``KarS``, ``KMS``, ``TLS``, ``KOKS``, ``HMS``,
+# ``VõS``, ``AvTS``, ``TsÜS``, ``ÄS``.
+# Examples that DO NOT match: ``karistusseadus`` (no uppercase),
+# ``my-question`` (punctuation), ``2024`` (digits), ``Töölepingu seadus``
+# (whitespace — those are handled by the suffix heuristic).
+_BARE_LAW_ABBREV_RE = re.compile(
+    r"^[A-ZÕÄÖÜŠŽ][A-Za-zÕÄÖÜŠŽõäöüšž]{1,9}$",
+)
+
+
+def _looks_like_bare_law(text: str) -> tuple[bool, float]:
+    """Return ``(is_law, confidence)`` for a bare law-name candidate.
+
+    Recognition heuristic, in priority order:
+
+    * Exact alias match against the resolver's curated
+      :data:`_HUMAN_ABBREV_ALIASES` (case-insensitive, whitespace-
+      stripped) → 1.0 confidence. These are the ``KarS`` / ``AvTS`` /
+      ``AõKS``-style shortcuts whose corpus TOKEN the resolver knows.
+    * Suffix match against :data:`_BARE_LAW_SUFFIXES`
+      (``Töölepingu seadus``, ``Karistusseadustik``, …) → 0.8.
+    * Abbreviation-shape match against :data:`_BARE_LAW_ABBREV_RE`
+      (``KMS``, ``TLS``, ``KOKS`` — short, mixed-case, no whitespace,
+      no digits) → 0.8. These pass through to the resolver which will
+      then attempt direct TOKEN match / fuzzy title match / miss —
+      the resolver may surface them as resolved or unresolved, but
+      *not* emitting them here would deny the resolver the chance.
+    * Anything else → ``(False, 0.0)``.
+
+    The length cap (:data:`_BARE_LAW_MAX_LEN`) is enforced **before**
+    suffix matching so a long sentence ending in "…seaduses" doesn't
+    get misread as a bare law name.
+    """
+    token = (text or "").strip()
+    if not token:
+        return False, 0.0
+    if len(token) > _BARE_LAW_MAX_LEN:
+        return False, 0.0
+
+    # 1. Alias hit (case-insensitive, whitespace-stripped). Mirrors how
+    #    the resolver keys :data:`_HUMAN_ABBREV_ALIASES` — lowercase,
+    #    no internal whitespace.
+    alias_key = token.lower().replace(" ", "")
+    if alias_key in _HUMAN_ABBREV_ALIASES:
+        return True, 1.0
+
+    # 2. Suffix heuristic. Case-insensitive endswith() on the curated
+    #    set of explicit Estonian legal-reference suffixes.
+    lower = token.lower()
+    for suffix in _BARE_LAW_SUFFIXES:
+        if lower.endswith(suffix):
+            return True, 0.8
+
+    # 3. Abbreviation-shape heuristic — covers ``KMS``, ``TLS``,
+    #    ``KOKS`` etc. that aren't yet in the curated alias map but
+    #    *look* like Estonian legal abbreviations a user would type.
+    #    The resolver's downstream lookups (TOKEN match / fuzzy) get
+    #    a chance to resolve or report a miss; without this branch
+    #    they're denied even the attempt.
+    if _BARE_LAW_ABBREV_RE.fullmatch(token):
+        return True, 0.8
+
+    return False, 0.0
 
 
 def parse_user_reference(sisend: str) -> list[ExtractedRef]:
@@ -133,7 +240,16 @@ def parse_user_reference(sisend: str) -> list[ExtractedRef]:
             _ref(law_short, "law"),
         ]
 
-    # 4. Nothing structured recognised.
+    # 4. Bare law reference — ``KarS``, ``KMS``, ``Töölepingu seadus``…
+    #    Only fires for inputs the heuristic recognises as a law name
+    #    (curated alias OR explicit Estonian legal-reference suffix);
+    #    everything else (free prose, descriptive intent) falls through
+    #    to the empty-list branch.
+    is_law, confidence = _looks_like_bare_law(text)
+    if is_law:
+        return [_ref(text, "law", confidence=confidence)]
+
+    # 5. Nothing structured recognised.
     return []
 
 
@@ -142,17 +258,23 @@ def parse_user_reference(sisend: str) -> list[ExtractedRef]:
 # ---------------------------------------------------------------------------
 
 
-def _ref(ref_text: str, ref_type: str) -> ExtractedRef:
-    """Build a flat-confidence :class:`ExtractedRef` from a recognised token.
+def _ref(ref_text: str, ref_type: str, *, confidence: float = 1.0) -> ExtractedRef:
+    """Build an :class:`ExtractedRef` from a recognised token.
 
     ``location`` records that the ref came from the Analüüsikeskus
     search box rather than a parsed document — handy for debugging and
     harmless to the resolver, which only reads ``ref_text`` / ``ref_type``.
+
+    ``confidence`` defaults to ``1.0`` (a regex match is deterministic
+    recognition, not a probability). Bare law-name refs override this
+    to ``0.8`` for suffix-only matches and ``1.0`` for curated alias
+    hits — see :func:`_looks_like_bare_law` and the ranking documented
+    in this module's docstring.
     """
     return ExtractedRef(
         ref_text=ref_text,
         ref_type=ref_type,
-        confidence=1.0,
+        confidence=confidence,
         location={"source": "analyysikeskus_input"},
     )
 

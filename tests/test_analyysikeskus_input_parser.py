@@ -113,8 +113,100 @@ class TestPlainProse:
         assert parse_user_reference("   ") == []
         assert parse_user_reference("\t\n") == []
 
-    def test_law_name_alone_without_section_returns_empty(self):
-        # A bare law abbreviation with no "§" is too ambiguous — the
-        # parser is conservative and returns nothing (the route then
-        # surfaces the "no structured ref" branch).
-        assert parse_user_reference("karistusseadustik") == []
+
+class TestBareLawReference:
+    """Bare law-name recognition — the post-Wave-2-Step-5 fix.
+
+    A bare law abbreviation like ``KarS`` / ``KMS`` / ``AvTS`` (matched
+    via the resolver's curated :data:`_HUMAN_ABBREV_ALIASES`) or a
+    full law title ending in an Estonian legal-reference suffix
+    (``Töölepingu seadus``, ``Karistusseadustik``) emits one ``law``
+    ref. The downstream resolver returns a ``partial_match`` payload
+    carrying the canonical act title, and the analüüsikeskus routes
+    pick up that payload to call the ``list_*_for_act`` helpers.
+    """
+
+    def test_curated_abbreviation_kars(self):
+        refs = parse_user_reference("KarS")
+        assert _types(refs) == ["law"]
+        assert refs[0].ref_text == "KarS"
+        # Curated alias hits are high-confidence (1.0).
+        assert refs[0].confidence == 1.0
+
+    def test_curated_abbreviation_avts(self):
+        # AvTS is in the curated alias map. Case-insensitive match.
+        refs = parse_user_reference("AvTS")
+        assert _types(refs) == ["law"]
+        assert refs[0].ref_text == "AvTS"
+        assert refs[0].confidence == 1.0
+
+    def test_abbreviation_shape_kms(self):
+        # KMS is not in the curated alias map (the resolver's
+        # _HUMAN_ABBREV_ALIASES intentionally omits abbreviations
+        # whose corpus TOKEN hasn't been confirmed). The parser still
+        # emits a law ref via the abbreviation-shape heuristic so the
+        # resolver gets a chance to TOKEN-match or fuzzy-match it.
+        # Confidence is the lower suffix-tier (0.8).
+        refs = parse_user_reference("KMS")
+        assert _types(refs) == ["law"]
+        assert refs[0].ref_text == "KMS"
+        assert refs[0].confidence == 0.8
+
+    def test_abbreviation_shape_tls(self):
+        # TLS is the analogous case for the burden test fixtures.
+        refs = parse_user_reference("TLS")
+        assert _types(refs) == ["law"]
+        assert refs[0].ref_text == "TLS"
+        assert refs[0].confidence == 0.8
+
+    def test_curated_alias_avts_asciified(self):
+        # AOKS is asciified AõKS — the asciified key is curated in
+        # _HUMAN_ABBREV_ALIASES so this hits the 1.0 branch.
+        refs = parse_user_reference("AOKS")
+        assert _types(refs) == ["law"]
+        assert refs[0].ref_text == "AOKS"
+        assert refs[0].confidence == 1.0
+
+    def test_full_title_with_seadus_suffix(self):
+        refs = parse_user_reference("Töölepingu seadus")
+        assert _types(refs) == ["law"]
+        assert refs[0].ref_text == "Töölepingu seadus"
+        # Suffix-only matches get 0.8 confidence.
+        assert refs[0].confidence == 0.8
+
+    def test_full_title_with_seadustik_suffix(self):
+        refs = parse_user_reference("karistusseadustik")
+        assert _types(refs) == ["law"]
+        assert refs[0].ref_text == "karistusseadustik"
+        assert refs[0].confidence == 0.8
+
+    def test_inflected_seadus_form(self):
+        # The suffix list covers Estonian inflected forms.
+        refs = parse_user_reference("töölepingu seaduses")
+        assert _types(refs) == ["law"]
+        assert refs[0].confidence == 0.8
+
+    def test_freetext_question_with_seadus_word_returns_empty(self):
+        # A question shape that happens to contain the word "tööleping"
+        # but no curated alias or suffix should fall through to free-text.
+        assert parse_user_reference("mida tähendab tööleping?") == []
+
+    def test_sentence_shaped_input_above_length_cap_returns_empty(self):
+        # Long sentence-shaped input — even if it ends in "seaduses" we
+        # cap recognition at 80 chars to avoid swallowing free-text.
+        long_sentence = (
+            "Mind huvitab, milline on praegune regulatsioon riigieelarve "
+            "ülevaate koostamise seaduses ja kuidas seda kohaldatakse "
+            "kohalikule omavalitsusele"
+        )
+        assert len(long_sentence) > 80
+        assert parse_user_reference(long_sentence) == []
+
+    def test_section_reference_unchanged_by_bare_law_branch(self):
+        # Regression: existing §-reference behaviour must not change.
+        refs = parse_user_reference("KarS § 211")
+        # provision first, then the law short name (from the §-branch).
+        assert _types(refs) == ["provision", "law"]
+        prov = _by_type(refs, "provision")
+        assert prov.ref_text == "KarS § 211"
+        assert _by_type(refs, "law").ref_text == "KarS"

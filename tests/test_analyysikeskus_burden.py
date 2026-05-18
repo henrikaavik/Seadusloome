@@ -421,6 +421,12 @@ def _canned_resolved_provision_ref():
 
 
 def _canned_resolved_law_ref():
+    """Build a ResolvedRef matching the real Wave 2 Step 2 resolver shape.
+
+    Post-Wave-2 the resolver returns ``entity_uri=None`` for law-only
+    refs and rides the canonical act title literal on ``partial_match``.
+    The route picks that title up and routes to ``list_burden_for_act``.
+    """
     from app.docs.entity_extractor import ExtractedRef
     from app.docs.reference_resolver import ResolvedRef
 
@@ -431,9 +437,14 @@ def _canned_resolved_law_ref():
             confidence=1.0,
             location={"source": "analyysikeskus_input"},
         ),
-        entity_uri=_TLS_URI,
+        entity_uri=None,
         matched_label="Töölepingu seadus",
         match_score=1.0,
+        partial_match={
+            "act_token": "TLS",
+            "act_title": "Töölepingu seadus",
+            "section": None,
+        },
     )
 
 
@@ -533,6 +544,12 @@ def test_burden_resolved_law_uses_act_query(
     mock_resolve: MagicMock,
     mock_list_act: MagicMock,
 ):
+    """Wave 2 Step 5: a partial-match law ref routes to list_burden_for_act(title).
+
+    The Wave 2 Step 2 resolver returns ``entity_uri=None`` plus a
+    ``partial_match`` payload carrying the literal act title for any
+    law-only ref. The route's new dispatch picks that title up.
+    """
     mock_provider.return_value = _stub_provider()
     mock_resolve.return_value = [_canned_resolved_law_ref()]
     mock_list_act.return_value = _canned_summary()
@@ -543,7 +560,46 @@ def test_burden_resolved_law_uses_act_query(
     # branch (mirrors test_sanctions_resolved_law_uses_act_query).
     resp = client.get("/analyysikeskus/halduskoormus?sisend=TLS+%C2%A7+12")
     assert resp.status_code == 200
-    mock_list_act.assert_called_once_with(_TLS_URI)
+    # The route now passes the literal act title (from partial_match)
+    # rather than a fake URI — matches the real resolver shape.
+    mock_list_act.assert_called_once_with("Töölepingu seadus")
+
+
+@patch("app.analyysikeskus.routes.list_burden_for_act")
+@patch("app.analyysikeskus.routes._rag_candidates", return_value=[])
+@patch("app.docs.reference_resolver.ReferenceResolver.resolve")
+@patch("app.auth.middleware._get_provider")
+def test_burden_bare_law_input_routes_to_for_act(
+    mock_provider: MagicMock,
+    mock_resolve: MagicMock,
+    mock_rag: MagicMock,
+    mock_list_act: MagicMock,
+):
+    """Wave 2 Step 5: a bare law sisend (``TLS``) routes to list_burden_for_act.
+
+    Exercises the full path: parse_user_reference recognises ``TLS`` as
+    a bare law abbreviation → resolver returns the partial-match shape
+    → route picks the title from ``partial_match`` and calls
+    ``list_burden_for_act("Töölepingu seadus")``. The route does NOT
+    fall through to the unresolved/RAG path.
+    """
+    mock_provider.return_value = _stub_provider()
+    mock_resolve.return_value = [_canned_resolved_law_ref()]
+    mock_list_act.return_value = _canned_summary()
+
+    client = _authed_client()
+    # Bare law input — no § ref. The new bare-law branch in
+    # parse_user_reference emits a single ``law`` ExtractedRef.
+    resp = client.get("/analyysikeskus/halduskoormus?sisend=TLS")
+    assert resp.status_code == 200
+    body = resp.text
+
+    # The act-level helper was called with the literal title.
+    mock_list_act.assert_called_once_with("Töölepingu seadus")
+    # The RAG fallback was NOT consulted.
+    mock_rag.assert_not_called()
+    # The "Ei tuvastanud" warning is absent — we resolved (partially).
+    assert "Ei tuvastanud õiguslikku viidet" not in body
 
 
 @patch("app.analyysikeskus.routes._rag_candidates", return_value=[])
@@ -570,10 +626,34 @@ def test_burden_disambiguation_when_multiple_resolutions(
     mock_resolve: MagicMock,
     mock_list: MagicMock,
 ):
+    """Two distinct URI-resolved refs ⇒ disambiguation card.
+
+    Wave 2 Step 5: the route now prefers URI-resolved refs over
+    partial-match refs when both are present (a §-ref input naturally
+    produces one URI + one partial-match for the same act — they
+    collapse to one). To force the disambiguation branch we have to
+    mock TWO distinct URI-resolved refs.
+    """
+    from app.docs.entity_extractor import ExtractedRef
+    from app.docs.reference_resolver import ResolvedRef
+
+    other_uri = "https://data.riik.ee/ontology/estleg#TLS-p15"
+    other_ref = ResolvedRef(
+        extracted=ExtractedRef(
+            ref_text="TLS § 15",
+            ref_type="provision",
+            confidence=1.0,
+            location={"source": "analyysikeskus_input"},
+        ),
+        entity_uri=other_uri,
+        matched_label="TLS § 15 — Töölepingu seadus",
+        match_score=1.0,
+    )
+
     mock_provider.return_value = _stub_provider()
     mock_resolve.return_value = [
         _canned_resolved_provision_ref(),
-        _canned_resolved_law_ref(),
+        other_ref,
     ]
 
     client = _authed_client()
@@ -582,7 +662,7 @@ def test_burden_disambiguation_when_multiple_resolutions(
     body = resp.text
     assert "Sisend võib viidata mitmele üksusele" in body
     assert "TLS § 12 — Töölepingu seadus" in body
-    assert "Töölepingu seadus" in body
+    assert "TLS § 15 — Töölepingu seadus" in body
     mock_list.assert_not_called()
 
 

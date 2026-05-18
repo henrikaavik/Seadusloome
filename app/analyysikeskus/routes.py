@@ -1403,6 +1403,97 @@ def _resolve_refs(refs: list[ExtractedRef]) -> list[Any]:
         return []
 
 
+def _partial_act_title(resolved: Any) -> str | None:
+    """Return the literal act title from a partial-match :class:`ResolvedRef`.
+
+    The Wave 2 Step 2 resolver returns ``entity_uri=None`` for law-only
+    references — the prod corpus has no act-level URIs (Step 1 spike).
+    Instead, the canonical act title literal rides along on
+    ``partial_match["act_title"]``. Routes use that title as the key
+    for the ``list_*_for_act(act_title=…)`` helpers.
+
+    Returns ``None`` when the ref has no partial-match payload or
+    ``act_title`` is empty. The resolver guarantees the dict shape
+    ``{"act_token", "act_title", "section"}`` when ``partial_match``
+    is set, but we defensively handle missing keys.
+    """
+    partial = getattr(resolved, "partial_match", None)
+    if not isinstance(partial, dict):
+        return None
+    title = partial.get("act_title")
+    if title is None:
+        return None
+    title_str = str(title).strip()
+    return title_str or None
+
+
+def _has_resolved_target(resolved: Any) -> bool:
+    """Return True when *resolved* has a usable target — URI OR partial-match.
+
+    The routes used to filter on ``entity_uri is not None`` only,
+    which dropped law-only refs returned by the Wave 2 Step 2
+    resolver (``entity_uri=None``, ``partial_match={"act_title": …}``).
+    The combined check brings those refs back into the dispatch flow
+    so the routes can call the ``list_*_for_act`` helpers with the
+    literal title.
+    """
+    entity_uri = getattr(resolved, "entity_uri", None)
+    if entity_uri and str(entity_uri).strip():
+        return True
+    return _partial_act_title(resolved) is not None
+
+
+def _resolved_key(resolved: Any) -> str:
+    """Return a dedupe key for *resolved* — entity URI or partial-match title.
+
+    Used to dedupe a ``[provision_ref, law_ref]`` pair that resolved to
+    the same act. The provision branch sets ``entity_uri``; the law
+    branch may set only ``partial_match["act_title"]``. We dedupe on
+    whichever is set so a ``"AvTS § 35"`` input doesn't render both
+    a provision view and a law view side-by-side.
+    """
+    entity_uri = getattr(resolved, "entity_uri", None)
+    if entity_uri and str(entity_uri).strip():
+        return f"uri:{str(entity_uri).strip()}"
+    title = _partial_act_title(resolved)
+    if title is not None:
+        return f"title:{title}"
+    return ""
+
+
+def _select_dispatchable(resolved: list[Any]) -> list[Any]:
+    """Filter & dedupe a resolver output for route-level dispatch.
+
+    Prefers URI-resolved refs over partial-match-only refs: when at
+    least one ref carries a real ``entity_uri``, only those are kept
+    (so a ``"AvTS § 35"`` input — which resolves to a provision URI
+    plus a law partial-match for the same act — picks the provision
+    view, not a two-row disambiguation card). When no URI refs are
+    present, falls back to partial-match refs (the law-only input
+    flow).
+
+    Returns a deduped list (by :func:`_resolved_key`) preserving
+    input order.
+    """
+    uri_refs = [
+        r for r in resolved if getattr(r, "entity_uri", None) and str(r.entity_uri).strip()
+    ]
+    if uri_refs:
+        candidates = uri_refs
+    else:
+        candidates = [r for r in resolved if _partial_act_title(r) is not None]
+
+    seen: set[str] = set()
+    out: list[Any] = []
+    for r in candidates:
+        key = _resolved_key(r)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(r)
+    return out
+
+
 def _rag_candidates(sisend: str, org_id: str | None) -> list[dict[str, str]]:
     """Light RAG fallback: top provision-ish chunks for *sisend*.
 
@@ -2851,16 +2942,28 @@ def _render_sanctions_result(
 ) -> Any:
     """Render the result page for a single resolved entity.
 
-    Branches on the resolved ref_type:
-    * provision → :func:`list_sanctions_for_provision`
-    * anything else with a URI → :func:`list_sanctions_for_act`
+    Branches on the resolved ref shape:
+    * URI + provision ref_type → :func:`list_sanctions_for_provision`
+    * URI + any other ref_type → :func:`list_sanctions_for_act` (literal title)
+    * No URI but ``partial_match["act_title"]`` set (bare law input
+      like ``KarS`` / ``Karistusseadustik``) → :func:`list_sanctions_for_act`
+      against that title. The Wave 2 Step 2 resolver returns this
+      shape for any law-only reference because the corpus has no
+      act-level URIs (Step 1 spike).
     """
-    entity_uri = str(resolved.entity_uri)
+    entity_uri_raw = getattr(resolved, "entity_uri", None)
+    entity_uri = str(entity_uri_raw) if entity_uri_raw else ""
     label = _resolved_label(resolved, sisend)
     type_label = _resolved_type_label(resolved)
+    partial_title = _partial_act_title(resolved)
 
-    if _is_provision_resolved(resolved):
+    if entity_uri and _is_provision_resolved(resolved):
         rows = list_sanctions_for_provision(entity_uri)
+    elif partial_title is not None and not entity_uri:
+        # Bare law input — Wave 2 Step 2 resolver returns
+        # entity_uri=None, partial_match.act_title=<literal title>.
+        # Route directly to the act-level helper with that title.
+        rows = list_sanctions_for_act(partial_title)
     else:
         # The act join is on the ``estleg:sourceAct`` literal title in
         # prod (no act URIs exist on provisions — see the Wave 2 spike
@@ -3029,17 +3132,13 @@ def sanktsioonid_page(req: Request):
 
     parsed_refs = parse_user_reference(sisend)
     resolved = _resolve_refs(parsed_refs)
-    resolved_with_uri = [
-        r for r in resolved if getattr(r, "entity_uri", None) and str(r.entity_uri).strip()
-    ]
-    seen: set[str] = set()
-    unique_resolved: list[Any] = []
-    for r in resolved_with_uri:
-        uri = str(r.entity_uri)
-        if uri in seen:
-            continue
-        seen.add(uri)
-        unique_resolved.append(r)
+    # Wave 2 Step 5 (#801 follow-up): include partial-match refs so a
+    # bare law input (``KarS``, ``Karistusseadustik``) reaches the
+    # ``list_sanctions_for_act(act_title)`` branch in the renderer.
+    # The selector prefers URI-resolved refs when both are present so
+    # ``"KarS § 211"`` still picks the provision view, not a two-row
+    # disambiguation card.
+    unique_resolved = _select_dispatchable(resolved)
 
     if len(unique_resolved) == 1:
         return _render_sanctions_result(
@@ -3391,13 +3490,27 @@ def _render_court_practice_result(
     sisend: str,
     scope: _Scope,
 ) -> Any:
-    """Render the result page for a single resolved entity."""
-    entity_uri = str(resolved.entity_uri)
+    """Render the result page for a single resolved entity.
+
+    Branches on the resolved ref shape:
+    * URI + provision → :func:`list_decisions_for_provision`
+    * URI + non-provision → :func:`list_decisions_for_act` (URI; the
+      helper reverse-looks-up the label internally).
+    * No URI but ``partial_match["act_title"]`` set (bare law input
+      like ``KarS``) → :func:`list_decisions_for_act` against that
+      literal title. Wave 2 Step 5 (#801 follow-up).
+    """
+    entity_uri_raw = getattr(resolved, "entity_uri", None)
+    entity_uri = str(entity_uri_raw) if entity_uri_raw else ""
     label = _resolved_label(resolved, sisend)
     type_label = _resolved_type_label(resolved)
+    partial_title = _partial_act_title(resolved)
 
-    if _is_court_practice_provision(resolved):
+    if entity_uri and _is_court_practice_provision(resolved):
         rows = list_decisions_for_provision(entity_uri)
+    elif partial_title is not None and not entity_uri:
+        # Bare law input — the act-level helper accepts a literal title.
+        rows = list_decisions_for_act(partial_title)
     else:
         rows = list_decisions_for_act(entity_uri)
 
@@ -3563,17 +3676,10 @@ def kohtupraktika_page(req: Request):
 
     parsed_refs = parse_user_reference(sisend)
     resolved = _resolve_refs(parsed_refs)
-    resolved_with_uri = [
-        r for r in resolved if getattr(r, "entity_uri", None) and str(r.entity_uri).strip()
-    ]
-    seen: set[str] = set()
-    unique_resolved: list[Any] = []
-    for r in resolved_with_uri:
-        uri = str(r.entity_uri)
-        if uri in seen:
-            continue
-        seen.add(uri)
-        unique_resolved.append(r)
+    # Wave 2 Step 5 (#801 follow-up): include partial-match refs so a
+    # bare law input (``KarS``, ``Karistusseadustik``) reaches the
+    # ``list_decisions_for_act(act_title)`` branch in the renderer.
+    unique_resolved = _select_dispatchable(resolved)
 
     if len(unique_resolved) == 1:
         return _render_court_practice_result(
@@ -3939,23 +4045,35 @@ def _render_burden_result(
 ) -> Any:
     """Render the result page for a single resolved entity.
 
-    Branches on the resolved ref_type:
-    * provision → :func:`list_burden_for_provision`
-    * draft → :func:`burden_delta_for_draft`
-    * anything else with a URI → :func:`list_burden_for_act`
+    Branches on the resolved ref shape:
+    * URI + provision ref_type → :func:`list_burden_for_provision`
+    * URI + draft ref_type → :func:`burden_delta_for_draft`
+    * URI + any other ref_type → :func:`list_burden_for_act` (URI;
+      the helper accepts both URI and literal title and dispatches
+      via ``_looks_like_uri``).
+    * No URI but ``partial_match["act_title"]`` set (bare law input
+      like ``TLS``) → :func:`list_burden_for_act` against the literal
+      title. Wave 2 Step 5 (#801 follow-up).
     """
-    entity_uri = str(resolved.entity_uri)
+    entity_uri_raw = getattr(resolved, "entity_uri", None)
+    entity_uri = str(entity_uri_raw) if entity_uri_raw else ""
     label = _resolved_label(resolved, sisend)
     type_label = _resolved_type_label(resolved)
+    partial_title = _partial_act_title(resolved)
 
-    if _is_provision_resolved(resolved):
+    if entity_uri and _is_provision_resolved(resolved):
         summary = list_burden_for_provision(entity_uri)
         results_block: Any = _burden_results_block(summary)
         evidence_summary = summary
-    elif _is_draft_resolved(resolved):
+    elif entity_uri and _is_draft_resolved(resolved):
         delta = burden_delta_for_draft(entity_uri)
         results_block = _burden_delta_block(delta)
         evidence_summary = delta.before
+    elif partial_title is not None and not entity_uri:
+        # Bare law input — pass the literal title to the act helper.
+        summary = list_burden_for_act(partial_title)
+        results_block = _burden_results_block(summary)
+        evidence_summary = summary
     else:
         summary = list_burden_for_act(entity_uri)
         results_block = _burden_results_block(summary)
@@ -4099,17 +4217,10 @@ def halduskoormus_page(req: Request):
 
     parsed_refs = parse_user_reference(sisend)
     resolved = _resolve_refs(parsed_refs)
-    resolved_with_uri = [
-        r for r in resolved if getattr(r, "entity_uri", None) and str(r.entity_uri).strip()
-    ]
-    seen: set[str] = set()
-    unique_resolved: list[Any] = []
-    for r in resolved_with_uri:
-        uri = str(r.entity_uri)
-        if uri in seen:
-            continue
-        seen.add(uri)
-        unique_resolved.append(r)
+    # Wave 2 Step 5 (#801 follow-up): include partial-match refs so a
+    # bare law input (``TLS``, ``Töölepingu seadus``) reaches the
+    # ``list_burden_for_act(act_title)`` branch in the renderer.
+    unique_resolved = _select_dispatchable(resolved)
 
     if len(unique_resolved) == 1:
         return _render_burden_result(
@@ -5161,14 +5272,30 @@ def _render_ajalugu_result(
     sisend: str,
     scope: _Scope,
 ) -> Any:
-    """Render the result page for a single resolved entity."""
-    entity_uri = str(resolved.entity_uri)
+    """Render the result page for a single resolved entity.
+
+    A URI-resolved ref runs :func:`get_history_bundle` against the URI.
+    A partial-match-only ref (bare law input like ``KarS``) routes the
+    literal act title through the same helper with ``input_type="act"``
+    — ``get_history_bundle`` accepts either a URI or a literal title
+    (Wave 2 Step 5 (#801 follow-up)).
+    """
+    entity_uri_raw = getattr(resolved, "entity_uri", None)
+    entity_uri = str(entity_uri_raw) if entity_uri_raw else ""
     label = _resolved_label(resolved, sisend)
     type_label = _resolved_type_label(resolved)
-    input_type = _ajalugu_input_type(resolved)
+    partial_title = _partial_act_title(resolved)
+    # Force act-type when the only signal is a partial-match act title.
+    # Otherwise honour the resolver's ref_type → input_type mapping.
+    if partial_title is not None and not entity_uri:
+        input_type = "act"
+        bundle_input = partial_title
+    else:
+        input_type = _ajalugu_input_type(resolved)
+        bundle_input = entity_uri
     is_provision = input_type == "provision"
 
-    bundle = get_history_bundle(entity_uri, input_type=input_type)
+    bundle = get_history_bundle(bundle_input, input_type=input_type)
 
     input_summary = P(  # noqa: F405
         "Analüüsisin: ",
@@ -5323,17 +5450,10 @@ def ajalugu_page(req: Request):
 
     parsed_refs = parse_user_reference(sisend)
     resolved = _resolve_refs(parsed_refs)
-    resolved_with_uri = [
-        r for r in resolved if getattr(r, "entity_uri", None) and str(r.entity_uri).strip()
-    ]
-    seen: set[str] = set()
-    unique_resolved: list[Any] = []
-    for r in resolved_with_uri:
-        uri = str(r.entity_uri)
-        if uri in seen:
-            continue
-        seen.add(uri)
-        unique_resolved.append(r)
+    # Wave 2 Step 5 (#801 follow-up): include partial-match refs so a
+    # bare law input (``KarS``, ``Karistusseadustik``) reaches the
+    # act-level history bundle in the renderer.
+    unique_resolved = _select_dispatchable(resolved)
 
     if len(unique_resolved) == 1:
         return _render_ajalugu_result(

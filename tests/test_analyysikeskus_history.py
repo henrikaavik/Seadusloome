@@ -770,6 +770,13 @@ def _canned_resolved_provision_ref():
 
 
 def _canned_resolved_law_ref():
+    """Build a ResolvedRef matching the real Wave 2 Step 2 resolver shape.
+
+    Post-Wave-2 the resolver returns ``entity_uri=None`` for law-only
+    refs and rides the canonical act title literal on ``partial_match``.
+    The route picks that title up and passes it to ``get_history_bundle``
+    with ``input_type="act"``.
+    """
     from app.docs.entity_extractor import ExtractedRef
     from app.docs.reference_resolver import ResolvedRef
 
@@ -780,9 +787,14 @@ def _canned_resolved_law_ref():
             confidence=1.0,
             location={"source": "analyysikeskus_input"},
         ),
-        entity_uri=_KARS_URI,
+        entity_uri=None,
         matched_label="Karistusseadustik",
         match_score=1.0,
+        partial_match={
+            "act_token": "KRIMIN",
+            "act_title": "Karistusseadustik",
+            "section": None,
+        },
     )
 
 
@@ -933,6 +945,45 @@ def test_ajalugu_act_input_hides_banner(
 
 
 @patch("app.analyysikeskus.routes.get_history_bundle")
+@patch("app.analyysikeskus.routes._rag_candidates", return_value=[])
+@patch("app.docs.reference_resolver.ReferenceResolver.resolve")
+@patch("app.auth.middleware._get_provider")
+def test_ajalugu_bare_law_input_routes_to_act_bundle(
+    mock_provider: MagicMock,
+    mock_resolve: MagicMock,
+    mock_rag: MagicMock,
+    mock_bundle: MagicMock,
+):
+    """Wave 2 Step 5: bare law sisend (``KarS``) routes to act-level bundle.
+
+    The route picks the act title from the resolver's ``partial_match``
+    payload and passes it to ``get_history_bundle`` with
+    ``input_type="act"``. The route does NOT fall through to the
+    unresolved/RAG branch.
+    """
+    mock_provider.return_value = _stub_provider()
+    mock_resolve.return_value = [_canned_resolved_law_ref()]
+    mock_bundle.return_value = _canned_bundle_act_input()
+
+    client = _authed_client()
+    resp = client.get("/analyysikeskus/ajalugu?sisend=KarS")
+    assert resp.status_code == 200
+    body = resp.text
+
+    # Bundle was invoked with the literal title and input_type="act".
+    mock_bundle.assert_called_once()
+    args, kwargs = mock_bundle.call_args
+    # First positional arg is the bundle input (title literal, not URI).
+    bundle_arg = args[0] if args else kwargs.get("input_uri")
+    assert bundle_arg == "Karistusseadustik"
+    assert kwargs.get("input_type") == "act"
+
+    # The route did not fall through to the unresolved/RAG branch.
+    mock_rag.assert_not_called()
+    assert "Ei tuvastanud õiguslikku viidet" not in body
+
+
+@patch("app.analyysikeskus.routes.get_history_bundle")
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve")
 @patch("app.auth.middleware._get_provider")
 def test_ajalugu_disambiguation_when_multiple_resolutions(
@@ -940,11 +991,32 @@ def test_ajalugu_disambiguation_when_multiple_resolutions(
     mock_resolve: MagicMock,
     mock_bundle: MagicMock,
 ):
-    """Multiple resolved entities ⇒ disambiguation card; no bundle query."""
+    """Multiple distinct URI-resolved refs ⇒ disambiguation card.
+
+    Wave 2 Step 5: the route now prefers URI-resolved refs over
+    partial-match refs when both are present. To force the
+    disambiguation branch we mock TWO distinct URI-resolved refs.
+    """
+    from app.docs.entity_extractor import ExtractedRef
+    from app.docs.reference_resolver import ResolvedRef
+
+    other_uri = "https://data.riik.ee/ontology/estleg#KarS-p133"
+    other_ref = ResolvedRef(
+        extracted=ExtractedRef(
+            ref_text="KarS § 133",
+            ref_type="provision",
+            confidence=1.0,
+            location={"source": "analyysikeskus_input"},
+        ),
+        entity_uri=other_uri,
+        matched_label="KarS § 133 — Karistusseadustik",
+        match_score=1.0,
+    )
+
     mock_provider.return_value = _stub_provider()
     mock_resolve.return_value = [
         _canned_resolved_provision_ref(),
-        _canned_resolved_law_ref(),
+        other_ref,
     ]
 
     client = _authed_client()
@@ -953,6 +1025,7 @@ def test_ajalugu_disambiguation_when_multiple_resolutions(
     body = resp.text
     assert "Sisend võib viidata mitmele üksusele" in body
     assert "KarS § 211 — Karistusseadustik" in body
+    assert "KarS § 133 — Karistusseadustik" in body
     mock_bundle.assert_not_called()
 
 
