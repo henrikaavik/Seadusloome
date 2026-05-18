@@ -84,8 +84,30 @@ class SparqlClient:
         """SPARQL query endpoint URL."""
         return f"{self.jena_url}/{self.dataset}/sparql"
 
-    def _execute(self, sparql: str) -> dict:  # type: ignore[type-arg]
-        """Send a SPARQL query and return the raw JSON response dict."""
+    def _execute(self, sparql: str, *, on_error: str = "swallow") -> dict:  # type: ignore[type-arg]
+        """Send a SPARQL query and return the raw JSON response dict.
+
+        Parameters
+        ----------
+        sparql:
+            The SPARQL query string.
+        on_error:
+            How to handle httpx-level failures (connection refused,
+            timeout, HTTP 5xx).  Two modes:
+
+            * ``"swallow"`` (default, legacy behaviour) — log and return
+              an empty ``{"results": {"bindings": []}}`` dict so callers
+              get an empty result list and can keep working.  This is
+              the right default for read-only display paths where a
+              dead Jena should degrade gracefully.
+
+            * ``"raise"`` — re-raise the underlying :class:`httpx.HTTPError`
+              so the caller can distinguish "Jena returned 0 rows" from
+              "Jena was unreachable / timed out".  Used by code that
+              caches the result and must avoid poisoning the cache on
+              transient outages (e.g. the resolver's abbreviation-map
+              warm-up — see ``app/docs/reference_resolver.py``).
+        """
         try:
             response = httpx.post(
                 self.endpoint,
@@ -97,15 +119,23 @@ class SparqlClient:
             return response.json()  # type: ignore[no-any-return]
         except httpx.ConnectError:
             logger.exception("Cannot connect to Jena Fuseki at %s", self.endpoint)
+            if on_error == "raise":
+                raise
             return {"results": {"bindings": []}}
         except httpx.TimeoutException:
             logger.exception("SPARQL query timed out (%ss)", self.timeout)
+            if on_error == "raise":
+                raise
             return {"results": {"bindings": []}}
         except httpx.HTTPStatusError:
             logger.exception("SPARQL query returned HTTP error")
+            if on_error == "raise":
+                raise
             return {"results": {"bindings": []}}
         except httpx.HTTPError:
             logger.exception("SPARQL query failed")
+            if on_error == "raise":
+                raise
             return {"results": {"bindings": []}}
 
     def _inject_bindings(self, sparql: str, bindings: dict[str, str]) -> str:
@@ -166,6 +196,8 @@ class SparqlClient:
         sparql: str,
         bindings: dict[str, str] | None = None,
         uri_bindings: dict[str, str] | None = None,
+        *,
+        on_error: str = "swallow",
     ) -> list[dict[str, str]]:
         """Execute a SPARQL SELECT query and return a list of result dicts.
 
@@ -180,12 +212,21 @@ class SparqlClient:
         uri_bindings:
             Optional URI variable bindings injected via VALUES clause with
             ``<uri>`` syntax.  Validates each URI against a strict pattern.
+        on_error:
+            How to handle httpx-level failures (connection refused,
+            timeout, HTTP 5xx). ``"swallow"`` (default) returns an empty
+            list and logs; ``"raise"`` re-raises the underlying
+            :class:`httpx.HTTPError`. Callers that cache results and need
+            to distinguish "Jena returned 0 rows" from "Jena was down"
+            should pass ``on_error="raise"`` so a transient failure
+            does not permanently poison the cache. See
+            :func:`_execute` for the full semantics.
         """
         if bindings:
             sparql = self._inject_bindings(sparql, bindings)
         if uri_bindings:
             sparql = self._inject_uri_bindings(sparql, uri_bindings)
-        raw = self._execute(sparql)
+        raw = self._execute(sparql, on_error=on_error)
         return _extract_bindings(raw)
 
     def ask(self, sparql: str) -> bool:

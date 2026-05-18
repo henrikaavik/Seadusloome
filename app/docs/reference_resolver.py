@@ -135,6 +135,61 @@ _PROVISION_RE = re.compile(
 _REF_HASH_SECRET_ENV = "RESOLVER_REF_HASH_SECRET"
 
 
+# Human-facing Estonian legal abbreviations that users actually type
+# (``KarS``, ``AvTS``, ``TLS``, …). The ontology-derived abbreviation
+# map only knows the corpus's internal TOKENs (``KRIMIN``, ``ATMOSF``,
+# ``RIIGIL_2``, etc., per the Step 1 spike in
+# ``docs/2026-05-18-bugfix-plan.md``), so an alias map is the only way
+# a paste like ``KarS § 211`` lands on the right URI.
+#
+# Keys are lowercased + ASCII-folded user input (so ``KarS``,
+# ``kars``, and ``KARS`` all hit the same row, and ``VõS`` matches via
+# both ``võs`` and ``vos``). Values are the corpus TOKEN.
+#
+# Each row is annotated with whether it has been verified against the
+# prod abbreviation map (built from ``LegalProvision_<TOKEN>`` rdf:type
+# rows + most-frequent ``sourceAct`` literal). Verified entries cite
+# the prod-confirmed token + canonical title in the comment. Aliases
+# that point at tokens not yet verified against prod are intentionally
+# **omitted** rather than guessed — a wrong alias is worse than no
+# alias because it silently routes the resolver to the wrong act.
+#
+# Sources for the verified entries:
+#   - Step 1 spike output (``docs/2026-05-18-bugfix-plan.md`` lines
+#     230-232, 312-314), which enumerated real prod TOKENs:
+#     ``KRIMIN``, ``ATMOSF``, ``RIIGIL_2``, ``KAITSE_3``, ``VTMS``,
+#     ``VANGIS``, ``VPTS``, ``TMS``, ``KINDLU``, ``VALISM``, ``AVTS``,
+#     ``REELS``.
+#   - The existing test corpus
+#     (``tests/test_docs_reference_resolver.py``) which exercises
+#     ``AVTS`` and ``KRIMIN`` end-to-end against the abbreviation map.
+_HUMAN_ABBREV_ALIASES: dict[str, str] = {
+    # user-facing shortcut → corpus TOKEN
+    # ---- VERIFIED against the Step 1 spike's enumerated tokens ----
+    "kars": "KRIMIN",  # Karistusseadustik (prod TOKEN KRIMIN, confirmed by spike)
+    "avts": "AVTS",  # Avaliku teabe seadus (prod TOKEN AVTS, confirmed by spike)
+    "res": "REELS",  # Riigieelarve seadus (prod TOKEN REELS, confirmed by spike)
+    "aõks": "ATMOSF",  # Atmosfääriõhu kaitse seadus (prod TOKEN ATMOSF, spike)
+    "aoks": "ATMOSF",  # asciified form
+    "vtms": "VTMS",  # Väärteomenetluse seadustik (prod TOKEN VTMS, spike)
+    "vangis": "VANGIS",  # Vangistusseadus (prod TOKEN VANGIS, spike)
+    "vpts": "VPTS",  # Väärtpaberituru seadus (prod TOKEN VPTS, spike)
+    "tms": "TMS",  # Täitemenetluse seadustik (prod TOKEN TMS, spike)
+    "kindls": "KINDLU",  # Kindlustustegevuse seadus (prod TOKEN KINDLU, spike)
+    "kindlus": "KINDLU",  # alternate user-facing form
+    "vsms": "VALISM",  # Välismaalaste seadus (prod TOKEN VALISM, spike)
+    # NOTE: human-friendly abbreviations whose prod TOKEN we have NOT
+    # confirmed from the spike (e.g. ``TLS`` → tööleping?, ``KMS`` →
+    # kaubamärgi vs. käibemaksu?, ``VõS``, ``TsÜS``, ``HKMS``,
+    # ``ÄS``, ``KMS``, ``ASjaõS``) are intentionally OMITTED here —
+    # adding them without prod verification risks silently routing
+    # the resolver to the wrong act. A follow-up to extend this map
+    # should run the same probe (count ``LegalProvision_<TOKEN>``
+    # rows + their canonical ``sourceAct`` literals) and add each
+    # confirmed pair as a new row with the spike-citation comment.
+}
+
+
 @dataclass(frozen=True)
 class ResolvedRef:
     """A resolver output bundling the extracted ref with its match.
@@ -232,12 +287,31 @@ class ReferenceResolver:
     # -- law ----------------------------------------------------------------
 
     def _resolve_law(self, ref: ExtractedRef) -> ResolvedRef:
-        """Resolve a law reference to its canonical title literal.
+        """Resolve a law-only reference (act name with no ``§ N``).
 
-        Returns ``ResolvedRef.entity_uri`` as the literal title string
-        (NOT a URI — the corpus has no act URIs). When the act half is
-        a known TOKEN abbreviation, ``matched_label`` carries the title
-        and the resolver behaves the same as for full titles.
+        The corpus contains no act-level URIs (Step 1 spike — see
+        ``docs/2026-05-18-bugfix-plan.md``). So a law-only ref is
+        **structurally a partial match**, not a full resolution:
+
+          * ``entity_uri`` is always ``None`` (it would otherwise hold a
+            non-URI literal that downstream RDF serialisation would
+            mistake for an absolute IRI — the original P1#1 bug).
+          * The canonical title literal + optional TOKEN ride along on
+            ``partial_match`` in the same shape ``_resolve_provision``
+            uses for "act resolved, section not found", with
+            ``section=None`` to mark "no section was even asked for".
+
+        Downstream code (graph_builder.py:121-211) already handles the
+        partial_match state — it emits an ``estleg:referencesAct``
+        literal triple instead of an ``estleg:references`` URI edge,
+        so the impact engine's BFS does not try to fan out from a
+        string literal masquerading as a URI.
+
+        Lookup order:
+          1. Human-abbreviation alias map (``KarS`` → ``KRIMIN``).
+          2. Exact corpus TOKEN match (``KRIMIN`` → ``Karistusseadustik``).
+          3. Exact title match (normalised).
+          4. Fuzzy fallback on normalised titles (``SequenceMatcher``).
         """
         token_map, title_map, _ = self._get_abbrev_maps()
         if not token_map and not title_map:
@@ -249,41 +323,43 @@ class ReferenceResolver:
         # (TOKENs are conventionally uppercase like ``AVTS``, ``KRIMIN``).
         token_key = normalised.upper().replace(" ", "")
 
+        # 0) Human-abbreviation alias map (``KarS`` → ``KRIMIN``).
+        #    Checked first because the corpus TOKENs don't carry the
+        #    user-facing shortcuts that practitioners actually type.
+        alias_token = _HUMAN_ABBREV_ALIASES.get(normalised.replace(" ", ""))
+        if alias_token and alias_token in token_map:
+            title = token_map[alias_token]
+            return _law_partial(ref, token=alias_token, title=title, score=1.0)
+
         # 1) Exact token match.
         if token_key in token_map:
             title = token_map[token_key]
-            return ResolvedRef(
-                extracted=ref,
-                entity_uri=title,
-                matched_label=title,
-                match_score=1.0,
-            )
+            return _law_partial(ref, token=token_key, title=title, score=1.0)
 
         # 2) Exact title match (normalised).
         if normalised in title_map:
             title = title_map[normalised]
-            return ResolvedRef(
-                extracted=ref,
-                entity_uri=title,
-                matched_label=title,
-                match_score=1.0,
-            )
+            token = self._title_to_token.get(normalised)
+            return _law_partial(ref, token=token, title=title, score=1.0)
 
         # 3) Fuzzy fallback on normalised titles.
         best_title: str | None = None
+        best_key: str | None = None
         best_score = 0.0
         for candidate_key, title in title_map.items():
             score = SequenceMatcher(None, normalised, candidate_key).ratio()
             if score > best_score:
                 best_score = score
                 best_title = title
+                best_key = candidate_key
 
         if best_title is not None and best_score >= _FUZZY_THRESHOLD:
-            return ResolvedRef(
-                extracted=ref,
-                entity_uri=best_title,
-                matched_label=best_title,
-                match_score=round(best_score, 3),
+            token = self._title_to_token.get(best_key or "")
+            return _law_partial(
+                ref,
+                token=token,
+                title=best_title,
+                score=round(best_score, 3),
             )
 
         self._log_miss(
@@ -303,6 +379,10 @@ class ReferenceResolver:
               nothing matched.
             - ``score`` is ``1.0`` for exact, ``<1.0`` for fuzzy,
               ``0.0`` for miss.
+
+        Lookup order mirrors :meth:`_resolve_law` so a provision like
+        ``KarS § 211`` and a bare law reference ``KarS`` route through
+        the same alias map. See :data:`_HUMAN_ABBREV_ALIASES`.
         """
         token_map, title_map, _ = self._get_abbrev_maps()
         if not token_map and not title_map:
@@ -311,18 +391,25 @@ class ReferenceResolver:
         normalised = _normalise_law_name(act_text)
         token_key = normalised.upper().replace(" ", "")
 
-        # Token match wins.
+        # 0) Human-abbreviation alias (``KarS`` → ``KRIMIN``). Checked
+        #    first so paste-style provisions like ``KarS § 211`` and
+        #    ``AvTS § 35`` find their corpus TOKEN.
+        alias_token = _HUMAN_ABBREV_ALIASES.get(normalised.replace(" ", ""))
+        if alias_token and alias_token in token_map:
+            return alias_token, token_map[alias_token], 1.0
+
+        # 1) Direct corpus TOKEN match.
         if token_key in token_map:
             return token_key, token_map[token_key], 1.0
 
-        # Exact title match (no TOKEN known).
+        # 2) Exact title match (no TOKEN known).
         if normalised in title_map:
             title = title_map[normalised]
             # Reverse-lookup the token if we have one for this title.
             token = self._title_to_token.get(normalised)
             return token, title, 1.0
 
-        # Fuzzy on titles.
+        # 3) Fuzzy on titles.
         best_title: str | None = None
         best_key: str | None = None
         best_score = 0.0
@@ -342,12 +429,31 @@ class ReferenceResolver:
     def _get_abbrev_maps(self) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
         """Return the lazily-loaded abbreviation maps.
 
-        Returns ``(token_to_title, title_to_token_normalised_keys, normalised_titles)``.
+        Returns ``(token_to_title, normalised_titles, title_to_token)``.
         Loaded once per resolver instance with thread-safe
-        double-checked locking. On Jena failure returns empty dicts and
-        logs a warning — subsequent calls will re-attempt the load
-        (unlike a populated cache, an empty cache is treated as "not
-        yet loaded" on purpose so transient outages can recover).
+        double-checked locking.
+
+        Cache lifecycle (P2#5 fix — Wave 2 Step 2 review feedback):
+
+          * ``self._token_to_title is None`` — not loaded yet.  The
+            initial state.
+          * ``self._token_to_title == {}`` (and ``self._normalised_titles == {}``)
+            — load **succeeded** but Jena genuinely returned zero rows
+            (e.g. a misconfigured deploy pointing at an empty dataset).
+            This is a one-shot cache so we don't hammer Jena on every
+            resolve call when there is no data to find. Restart fixes
+            it.
+          * Populated dict — load succeeded, cached for the resolver's
+            lifetime.
+
+        Critically, when the SPARQL call **raises** (Jena unreachable,
+        timeout, HTTP 5xx — anything ``SparqlClient.query(...,
+        on_error="raise")`` propagates), we treat the load as "did not
+        happen": ``self._token_to_title`` stays ``None`` so the NEXT
+        resolve call retries the load. This prevents the original bug
+        where a single transient Jena hiccup at warm-up time
+        permanently poisoned the singleton (every subsequent resolve
+        returning unresolved until process restart).
 
         Build strategy (per spike findings):
             1. Walk every ``?prov a ?cls ; estleg:sourceAct ?actLit``
@@ -378,10 +484,24 @@ class ReferenceResolver:
                 }
                 """
             )
+            # NOTE: ``on_error="raise"`` distinguishes a transient Jena
+            # failure (httpx.ConnectError / TimeoutException / HTTPError)
+            # from a genuine empty result.  Without this, a transient
+            # failure would surface as ``rows == []`` (the legacy
+            # ``swallow`` behaviour) and we'd cache an empty map
+            # forever.  See P2#5 in the Wave 2 review.
             try:
-                rows = self._sparql.query(sparql)
+                rows = self._sparql.query(sparql, on_error="raise")
             except Exception as exc:  # noqa: BLE001
-                logger.warning("resolve: abbreviation map SPARQL load failed: %s", exc)
+                # Transient failure — leave ``_token_to_title`` as
+                # ``None`` so the next call retries.  WARN-level so ops
+                # can see "we tried, Jena was down, we'll retry next
+                # call" without grepping for an exception trace.
+                logger.warning(
+                    "resolver: abbreviation-map load failed transiently "
+                    "(will retry on next resolve call): %s",
+                    exc,
+                )
                 return {}, {}, {}
 
             # token → Counter[title_literal]
@@ -423,6 +543,9 @@ class ReferenceResolver:
             for title in distinct_titles:
                 normalised_titles[_normalise_law_name(title)] = title
 
+            # Cache the (possibly empty) result.  Empty caches are a
+            # one-shot "this deploy has no data" signal — they are NOT
+            # retried, per the lifecycle contract documented above.
             self._token_to_title = token_to_title
             self._title_to_token = title_to_token
             self._normalised_titles = normalised_titles
@@ -697,6 +820,39 @@ def _unresolved(ref: ExtractedRef) -> ResolvedRef:
         matched_label=None,
         match_score=0.0,
         partial_match=None,
+    )
+
+
+def _law_partial(
+    ref: ExtractedRef,
+    *,
+    token: str | None,
+    title: str,
+    score: float,
+) -> ResolvedRef:
+    """Build a partial-match :class:`ResolvedRef` for a law-only ref.
+
+    Law-only references (no ``§ N`` half) cannot resolve to a real
+    ontology URI — the corpus has no act-level URIs (Step 1 spike).
+    We therefore mirror the shape ``_resolve_provision`` uses for
+    "act resolved, section not found": ``entity_uri=None`` plus
+    ``partial_match={"act_token", "act_title", "section": None}``.
+
+    ``section=None`` is the distinguishing marker between
+    "law-only ref" and "provision ref whose section we couldn't
+    find" — downstream consumers (graph_builder, renderer,
+    .docx export) can use it to choose appropriate UI copy.
+    """
+    return ResolvedRef(
+        extracted=ref,
+        entity_uri=None,
+        matched_label=title,
+        match_score=score,
+        partial_match={
+            "act_token": token,
+            "act_title": title,
+            "section": None,
+        },
     )
 
 

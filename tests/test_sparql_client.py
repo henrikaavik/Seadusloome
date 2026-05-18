@@ -228,6 +228,85 @@ class TestSparqlClientQuery:
         assert result == []
 
 
+class TestSparqlClientQueryOnErrorRaise:
+    """``on_error='raise'`` lets callers distinguish "Jena returned 0 rows"
+    from "Jena was unreachable". The default ``'swallow'`` keeps the
+    legacy behaviour (return ``[]`` and log) so existing call sites are
+    untouched.
+
+    This option exists for callers that cache results and must avoid
+    poisoning the cache on a transient outage — see
+    ``app/docs/reference_resolver.py::_get_abbrev_maps`` (P2#5).
+    """
+
+    def test_connection_error_raises_when_on_error_is_raise(self):
+        client = SparqlClient()
+        with patch(
+            "app.ontology.sparql_client.httpx.post",
+            side_effect=httpx.ConnectError("Connection refused"),
+        ):
+            with pytest.raises(httpx.ConnectError):
+                client.query(
+                    "SELECT ?s WHERE { ?s ?p ?o }",
+                    on_error="raise",
+                )
+
+    def test_timeout_raises_when_on_error_is_raise(self):
+        client = SparqlClient()
+        with patch(
+            "app.ontology.sparql_client.httpx.post",
+            side_effect=httpx.ReadTimeout("Timed out"),
+        ):
+            with pytest.raises(httpx.TimeoutException):
+                client.query(
+                    "SELECT ?s WHERE { ?s ?p ?o }",
+                    on_error="raise",
+                )
+
+    def test_http_status_error_raises_when_on_error_is_raise(self):
+        client = SparqlClient()
+        mock_response = MagicMock()
+        mock_response.status_code = 500
+        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "Server error", request=MagicMock(), response=mock_response
+        )
+        with patch("app.ontology.sparql_client.httpx.post", return_value=mock_response):
+            with pytest.raises(httpx.HTTPStatusError):
+                client.query(
+                    "SELECT ?s WHERE { ?s ?p ?o }",
+                    on_error="raise",
+                )
+
+    def test_empty_result_does_not_raise_under_on_error_raise(self):
+        """``on_error='raise'`` only fires on httpx-level errors.
+
+        A genuine empty result set (HTTP 200 + zero bindings) must
+        still come back as an empty list, not raise. Without this the
+        resolver's "Jena exists but has no data yet" deploy state
+        would look like an outage.
+        """
+        client = SparqlClient()
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"results": {"bindings": []}}
+        mock_response.raise_for_status = MagicMock()
+        with patch("app.ontology.sparql_client.httpx.post", return_value=mock_response):
+            result = client.query(
+                "SELECT ?s WHERE { ?s ?p ?o }",
+                on_error="raise",
+            )
+        assert result == []
+
+    def test_default_swallow_preserves_legacy_behaviour(self):
+        """Without ``on_error`` the legacy behaviour is preserved: log + empty."""
+        client = SparqlClient()
+        with patch(
+            "app.ontology.sparql_client.httpx.post",
+            side_effect=httpx.ConnectError("Connection refused"),
+        ):
+            # No on_error kwarg → swallows + returns empty (legacy).
+            assert client.query("SELECT ?s WHERE { ?s ?p ?o }") == []
+
+
 # ---------------------------------------------------------------------------
 # SparqlClient.ask — mocked HTTP
 # ---------------------------------------------------------------------------

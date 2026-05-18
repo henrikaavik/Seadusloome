@@ -124,6 +124,13 @@ def _make_sparql_router(
 
 class TestResolveLaw:
     def test_resolve_law_exact_token_match(self):
+        """Law-only refs resolve to a partial-match, never a literal entity_uri.
+
+        Per P1#1: the corpus has no act-level URIs, so a law-only ref
+        (no ``§ N``) cannot have ``entity_uri`` set without polluting
+        downstream RDF with malformed triples like ``<Karistusseadustik>``.
+        The canonical title + TOKEN ride along on ``partial_match``.
+        """
         sparql = _make_sparql_router(
             abbrev_rows=_abbrev_map_rows(("KRIMIN", "Karistusseadustik")),
         )
@@ -132,9 +139,13 @@ class TestResolveLaw:
         result = resolver.resolve([_ref("KRIMIN", "law")])
 
         assert len(result) == 1
-        assert result[0].entity_uri == "Karistusseadustik"
+        assert result[0].entity_uri is None
         assert result[0].matched_label == "Karistusseadustik"
         assert result[0].match_score == 1.0
+        assert result[0].partial_match is not None
+        assert result[0].partial_match["act_token"] == "KRIMIN"
+        assert result[0].partial_match["act_title"] == "Karistusseadustik"
+        assert result[0].partial_match["section"] is None
 
     def test_resolve_law_exact_title_match(self):
         sparql = _make_sparql_router(
@@ -147,10 +158,13 @@ class TestResolveLaw:
         # ``karistusseadustik`` normalises to ``karistus`` because
         # ``seadustik`` is stripped — the abbreviation map should
         # still produce a match via the title index, NOT match an
-        # unrelated act fuzzily.
-        # We accept either the token route (preferred) or the title
-        # route; both should land on the canonical title.
-        assert result[0].entity_uri == "Karistusseadustik"
+        # unrelated act fuzzily. Per P1#1, the match surfaces as a
+        # partial_match, not an entity_uri literal.
+        assert result[0].entity_uri is None
+        assert result[0].matched_label == "Karistusseadustik"
+        assert result[0].partial_match is not None
+        assert result[0].partial_match["act_title"] == "Karistusseadustik"
+        assert result[0].partial_match["section"] is None
 
     def test_resolve_law_fuzzy_match(self):
         sparql = _make_sparql_router(
@@ -164,7 +178,10 @@ class TestResolveLaw:
         # Slight typo on a title → fuzzy match
         result = resolver.resolve([_ref("Atmosfääriõhu kaitse", "law")])
 
-        assert result[0].entity_uri == "Atmosfääriõhu kaitse seadus"
+        assert result[0].entity_uri is None
+        assert result[0].matched_label == "Atmosfääriõhu kaitse seadus"
+        assert result[0].partial_match is not None
+        assert result[0].partial_match["act_title"] == "Atmosfääriõhu kaitse seadus"
         assert 0.7 <= result[0].match_score <= 1.0
 
     def test_resolve_law_no_match(self, caplog: pytest.LogCaptureFixture):
@@ -177,8 +194,34 @@ class TestResolveLaw:
             result = resolver.resolve([_ref("Täiesti tundmatu seadus", "law")])
 
         assert result[0].entity_uri is None
+        assert result[0].partial_match is None
         assert result[0].match_score == 0.0
         assert any("resolver: law unresolved" in rec.message for rec in caplog.records)
+
+    def test_resolve_law_only_match_does_not_populate_entity_uri(self):
+        """P1#1 regression guard.
+
+        ``Karistusseadustik`` (a bare law name, no ``§``) used to land
+        in ``entity_uri`` as the literal title string. The
+        graph_builder then serialised that as ``<Karistusseadustik>``,
+        producing malformed RDF and poisoning the impact-engine BFS.
+
+        Today the same input must produce ``entity_uri=None`` with the
+        title living on ``partial_match["act_title"]``.
+        """
+        sparql = _make_sparql_router(
+            abbrev_rows=_abbrev_map_rows(("KRIMIN", "Karistusseadustik")),
+        )
+        resolver = ReferenceResolver(sparql_client=sparql)
+
+        result = resolver.resolve([_ref("Karistusseadustik", "law")])
+
+        assert result[0].entity_uri is None
+        assert result[0].partial_match is not None
+        assert result[0].partial_match["act_title"] == "Karistusseadustik"
+        # And — critically — the title literal must NOT have leaked
+        # into entity_uri.
+        assert result[0].entity_uri != "Karistusseadustik"
 
     def test_resolve_law_suffix_false_positive_guard(self):
         """``karistusseaduselt`` must NOT match — ``seaduselt`` is not stripped."""
@@ -198,9 +241,11 @@ class TestResolveLaw:
         # collapse them to the same key — verify by comparing the
         # match_score against an exact token match.
         # If a match happens, it MUST be flagged as fuzzy (<1.0), not
-        # an exact 1.0 collapse.
-        if result[0].entity_uri is not None:
+        # an exact 1.0 collapse. Per P1#1 the match also lives on
+        # partial_match (entity_uri stays None for law-only refs).
+        if result[0].matched_label is not None:
             assert result[0].match_score < 1.0
+            assert result[0].entity_uri is None
 
 
 # ---------------------------------------------------------------------------
@@ -345,6 +390,12 @@ class TestResolveProvision:
         assert result[0].entity_uri == f"{ESTLEG}ATMOSF_Par_143"
 
     def test_provision_with_lg_punkt(self):
+        """``KarS § 211 lg 2`` resolves via the human-abbreviation alias map.
+
+        Per P1#3: the corpus TOKEN is ``KRIMIN``, but practitioners
+        type ``KarS``. The :data:`_HUMAN_ABBREV_ALIASES` map bridges
+        that, so the URI-guess path lands on ``KRIMIN_Par_211``.
+        """
         sparql = _make_sparql_router(
             abbrev_rows=_abbrev_map_rows(("KRIMIN", "Karistusseadustik")),
             ask_result={"KRIMIN_Par_211": True},
@@ -353,13 +404,10 @@ class TestResolveProvision:
 
         result = resolver.resolve([_ref("KarS § 211 lg 2", "provision")])
 
-        # Note: KarS isn't in the abbreviation map (KRIMIN is the
-        # canonical TOKEN for karistusseadustik in our spike). With
-        # only KRIMIN in the map, "KarS" cannot match the token route.
-        # The act-half resolver returns title=None → unresolved.
-        # This documents the current behaviour: the source data drives
-        # the TOKEN names, and we don't hard-code "KarS" → "KRIMIN".
-        assert result[0].entity_uri is None
+        # KarS → KRIMIN via _HUMAN_ABBREV_ALIASES → URI-guess
+        # ASK hits on KRIMIN_Par_211 → fully resolved.
+        assert result[0].entity_uri == f"{ESTLEG}KRIMIN_Par_211"
+        assert result[0].match_score == 1.0
 
     def test_provision_regex_no_match(self, caplog: pytest.LogCaptureFixture):
         """Free-form text with no ``§`` marker is unresolved with a log."""
@@ -637,3 +685,264 @@ class TestRefIdLogging:
         monkeypatch.setenv(_REF_HASH_SECRET_ENV, "explicit-test-value")
 
         assert _get_ref_hash_secret() == b"explicit-test-value"
+
+
+# ---------------------------------------------------------------------------
+# Human-abbreviation alias map (P1#3)
+# ---------------------------------------------------------------------------
+
+
+class TestHumanAbbreviationAliases:
+    """The corpus's TOKENs (``KRIMIN``, ``AVTS``, …) are not what users
+    type. Users type human-friendly Estonian legal shortcuts (``KarS``,
+    ``AvTS``, ``RES``, …). :data:`_HUMAN_ABBREV_ALIASES` bridges that.
+
+    Each test below mocks the abbreviation-map SPARQL so the alias's
+    target TOKEN is present, then drives a real resolve call and
+    asserts the alias landed on the expected corpus TOKEN.
+    """
+
+    def test_kars_alias_resolves_via_human_abbreviation_map(self):
+        """``KarS § 211`` → ``KRIMIN_Par_211`` via the alias map."""
+        sparql = _make_sparql_router(
+            abbrev_rows=_abbrev_map_rows(("KRIMIN", "Karistusseadustik")),
+            ask_result={"KRIMIN_Par_211": True},
+        )
+        resolver = ReferenceResolver(sparql_client=sparql)
+
+        result = resolver.resolve([_ref("KarS § 211", "provision")])
+
+        assert result[0].entity_uri == f"{ESTLEG}KRIMIN_Par_211"
+        assert result[0].match_score == 1.0
+
+    def test_avts_alias_resolves(self):
+        """``AvTS § 35`` → act half resolves to AVTS via the alias map.
+
+        Per the Step 1 spike, ``AVTS_Par_35`` doesn't exist in the
+        corpus (AvTS provisions are thematic, not section-numbered),
+        so the URI-guess + structural fallback both miss and the
+        result is a ``partial_match`` rather than a fully-resolved URI.
+        The test asserts the act-half routing through the alias map
+        regardless.
+        """
+        sparql = _make_sparql_router(
+            abbrev_rows=_abbrev_map_rows(("AVTS", "Avaliku teabe seadus")),
+            ask_result=False,
+            provision_rows=[],
+        )
+        resolver = ReferenceResolver(sparql_client=sparql)
+
+        result = resolver.resolve([_ref("AvTS § 35", "provision")])
+
+        assert result[0].partial_match is not None
+        assert result[0].partial_match["act_token"] == "AVTS"
+        assert result[0].partial_match["act_title"] == "Avaliku teabe seadus"
+        assert result[0].partial_match["section"] == "35"
+
+    def test_res_alias_resolves_to_riigieelarve(self):
+        """``RES § 20`` → ``REELS_Par_20`` via the alias map."""
+        sparql = _make_sparql_router(
+            abbrev_rows=_abbrev_map_rows(("REELS", "Riigieelarve seadus")),
+            ask_result={"REELS_Par_20": True},
+        )
+        resolver = ReferenceResolver(sparql_client=sparql)
+
+        result = resolver.resolve([_ref("RES § 20", "provision")])
+
+        assert result[0].entity_uri == f"{ESTLEG}REELS_Par_20"
+
+    def test_alias_map_is_case_insensitive(self):
+        """``KARS``, ``KarS``, ``kars`` all route to ``KRIMIN``."""
+        sparql = _make_sparql_router(
+            abbrev_rows=_abbrev_map_rows(("KRIMIN", "Karistusseadustik")),
+            ask_result={"KRIMIN_Par_1": True},
+        )
+        resolver = ReferenceResolver(sparql_client=sparql)
+
+        for variant in ("KARS § 1", "KarS § 1", "kars § 1"):
+            result = resolver.resolve([_ref(variant, "provision")])
+            assert result[0].entity_uri == f"{ESTLEG}KRIMIN_Par_1", variant
+
+    def test_law_only_kars_alias_returns_partial_match(self):
+        """A bare ``KarS`` (law-only, no §) gives partial_match with TOKEN."""
+        sparql = _make_sparql_router(
+            abbrev_rows=_abbrev_map_rows(("KRIMIN", "Karistusseadustik")),
+        )
+        resolver = ReferenceResolver(sparql_client=sparql)
+
+        result = resolver.resolve([_ref("KarS", "law")])
+
+        assert result[0].entity_uri is None
+        assert result[0].partial_match is not None
+        assert result[0].partial_match["act_token"] == "KRIMIN"
+        assert result[0].partial_match["act_title"] == "Karistusseadustik"
+        assert result[0].partial_match["section"] is None
+
+
+# ---------------------------------------------------------------------------
+# Abbreviation-map cache lifecycle (P2#5)
+# ---------------------------------------------------------------------------
+
+
+class TestAbbrevMapCacheLifecycle:
+    """A transient Jena failure on the first ``_get_abbrev_maps`` call
+    used to poison the resolver singleton forever (empty dict cached
+    as if loaded). P2#5 fixes that: a raise from ``SparqlClient.query``
+    leaves the cache un-populated so the next call retries.
+    """
+
+    def test_get_abbrev_maps_does_not_cache_empty_on_transient_failure(self):
+        """First call: SPARQL raises → empty result, NOT cached.
+        Second call: SPARQL returns real rows → map populates.
+        """
+        from app.docs.reference_resolver import ReferenceResolver
+
+        call_count = {"n": 0}
+        good_rows = _abbrev_map_rows(("KRIMIN", "Karistusseadustik"))
+
+        def _query_flaky(q: str, bindings=None, **kwargs):
+            # The abbreviation-map query is the only one we route here;
+            # all other branches return [] (which is fine because the
+            # test only exercises law resolution).
+            if "LegalProvision_" in q and "?cls" in q:
+                call_count["n"] += 1
+                if call_count["n"] == 1:
+                    # Simulate the SparqlClient on_error="raise" path
+                    # firing on a transient httpx.ConnectError.
+                    raise RuntimeError("connection refused")
+                return good_rows
+            return []
+
+        sparql = MagicMock()
+        sparql.query.side_effect = _query_flaky
+        sparql.ask.return_value = False
+        resolver = ReferenceResolver(sparql_client=sparql)
+
+        # First call: should hit the transient failure path → unresolved.
+        result_1 = resolver.resolve([_ref("KRIMIN", "law")])
+        assert result_1[0].entity_uri is None
+        assert result_1[0].partial_match is None
+        # Cache must remain un-populated (None) so the next call retries.
+        assert resolver._token_to_title is None
+
+        # Second call: SPARQL now returns rows → map populates →
+        # KRIMIN resolves.
+        result_2 = resolver.resolve([_ref("KRIMIN", "law")])
+        assert result_2[0].partial_match is not None
+        assert result_2[0].partial_match["act_token"] == "KRIMIN"
+        # Cache populated this time.
+        assert resolver._token_to_title is not None
+        assert "KRIMIN" in resolver._token_to_title
+
+    def test_get_abbrev_maps_logs_warning_on_transient_failure(
+        self, caplog: pytest.LogCaptureFixture
+    ):
+        """A WARN line on transient failure so ops can see the retry signal."""
+        sparql = MagicMock()
+        sparql.query.side_effect = RuntimeError("jena unreachable")
+        sparql.ask.return_value = False
+        resolver = ReferenceResolver(sparql_client=sparql)
+
+        with caplog.at_level("WARNING"):
+            resolver.resolve([_ref("KRIMIN", "law")])
+
+        warn_msgs = [
+            rec for rec in caplog.records if "abbreviation-map load failed" in rec.message
+        ]
+        assert warn_msgs, "expected a WARN log line on transient SPARQL failure"
+        assert warn_msgs[0].levelname == "WARNING"
+
+    def test_get_abbrev_maps_does_cache_genuinely_empty_response(self):
+        """If Jena really has no provisions, the load is one-shot, not retried."""
+        sparql = MagicMock()
+        sparql.query.return_value = []  # genuinely empty, no exception
+        sparql.ask.return_value = False
+        resolver = ReferenceResolver(sparql_client=sparql)
+
+        resolver.resolve([_ref("KRIMIN", "law")])
+        resolver.resolve([_ref("AvTS", "law")])
+        resolver.resolve([_ref("foo", "law")])
+
+        # The abbreviation-map SPARQL query must have been issued
+        # exactly ONCE despite three resolve calls — a genuine empty
+        # response caches as "loaded but empty" and we don't hammer
+        # Jena on every subsequent call.
+        abbrev_query_calls = [
+            c
+            for c in sparql.query.call_args_list
+            if "LegalProvision_" in (c.args[0] if c.args else "")
+        ]
+        assert len(abbrev_query_calls) == 1
+        # The on_error="raise" kwarg should be present so transient
+        # failures are still distinguished from empty responses.
+        assert abbrev_query_calls[0].kwargs.get("on_error") == "raise"
+
+    def test_get_abbrev_maps_passes_on_error_raise_to_sparql(self):
+        """Sanity check: the loader calls SparqlClient with on_error='raise'."""
+        sparql = MagicMock()
+        sparql.query.return_value = _abbrev_map_rows(("KRIMIN", "Karistusseadustik"))
+        sparql.ask.return_value = False
+        resolver = ReferenceResolver(sparql_client=sparql)
+
+        resolver._get_abbrev_maps()
+
+        # The abbrev-map call site should pass on_error="raise" so the
+        # SparqlClient surfaces transient failures instead of swallowing
+        # them as an empty list.
+        first_call = sparql.query.call_args_list[0]
+        assert first_call.kwargs.get("on_error") == "raise"
+
+
+# ---------------------------------------------------------------------------
+# Static invariant: entity_uri is either None or an absolute URI
+# ---------------------------------------------------------------------------
+
+
+class TestEntityUriIsURIOrNone:
+    """P1#1 invariant guard: ``ResolvedRef.entity_uri`` must never
+    contain a non-URI literal. Either it's ``None`` (unresolved /
+    partial) or it's an absolute ``https://`` URI that downstream
+    RDF code can serialise as ``<uri>`` without producing malformed
+    triples.
+    """
+
+    @pytest.mark.parametrize(
+        "input_text, ref_type",
+        [
+            # The seven canonical refs from the climate-law test draft
+            # (per docs/2026-05-18-bugfix-plan.md Step 2 acceptance).
+            ("Karistusseadustik", "law"),
+            ("Atmosfääriõhu kaitse seadus", "law"),
+            ("AvTS", "law"),
+            ("KarS § 211", "provision"),
+            ("Atmosfääriõhu kaitse seaduse § 143", "provision"),
+            ("AvTS § 35", "provision"),
+            ("32016R0679", "eu_act"),
+        ],
+    )
+    def test_entity_uri_is_either_none_or_absolute_uri(self, input_text: str, ref_type: str):
+        sparql = _make_sparql_router(
+            abbrev_rows=_abbrev_map_rows(
+                ("KRIMIN", "Karistusseadustik"),
+                ("ATMOSF", "Atmosfääriõhu kaitse seadus"),
+                ("AVTS", "Avaliku teabe seadus"),
+            ),
+            ask_result={
+                "ATMOSF_Par_143": True,
+                "KRIMIN_Par_211": True,
+            },
+            eu_rows=[{"uri": f"{ESTLEG}EU_GDPR", "label": "GDPR"}],
+        )
+        resolver = ReferenceResolver(sparql_client=sparql)
+
+        result = resolver.resolve([_ref(input_text, ref_type)])
+        uri = result[0].entity_uri
+
+        # Either None or a real absolute URI — never a bare title literal.
+        if uri is not None:
+            assert uri.startswith("https://") or uri.startswith("http://"), (
+                f"entity_uri {uri!r} for {input_text!r} is not an absolute URI"
+            )
+            # Title literals like ``Karistusseadustik`` must NEVER
+            # leak in here. Negative guard:
+            assert " " not in uri, f"entity_uri {uri!r} contains whitespace — looks like a literal"
