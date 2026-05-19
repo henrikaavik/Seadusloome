@@ -13,6 +13,7 @@ Route map:
     POST /drafts/{draft_id}/link-vtk — set or clear ``parent_vtk_id`` (#640)
     GET  /drafts/{draft_id}/diff     — side-by-side version diff (#618 PR-C)
     POST /drafts/{draft_id}/retry    — retry a failed draft's pipeline (#656)
+    POST /drafts/{draft_id}/review-outcome — reviewer outcome (#817)
 
 All routes require authentication (they are **not** in ``SKIP_PATHS``).
 The listing and detail pages additionally enforce ``draft.org_id ==
@@ -71,8 +72,13 @@ not for patch-path equivalence. Pinned by regression tests in
 from __future__ import annotations
 
 from app.docs.routes._detail import (
+    _REVIEW_SECTION_ID,
     _draft_detail_body,
     _draft_metadata_block,
+    _review_history,
+    _review_history_item,
+    _review_outcome_form,
+    _review_outcome_section,
     _seotud_vtk_row,
     _similar_drafts_card,
     _vtk_children_card,
@@ -122,6 +128,7 @@ from app.docs.routes._list import (
     drafts_list_page,
     list_drafts_for_org_filtered,
 )
+from app.docs.routes._review import submit_review_outcome_handler
 from app.docs.routes._shared import (
     _DELETE_CONFIRM,
     _PAGE_SIZE,
@@ -232,6 +239,14 @@ __all__ = [
     "draft_detail_page",
     "draft_status_fragment",
     "link_vtk_handler",
+    # _detail.py review section (#817)
+    "_REVIEW_SECTION_ID",
+    "_review_history",
+    "_review_history_item",
+    "_review_outcome_form",
+    "_review_outcome_section",
+    # _review.py handler (#817)
+    "submit_review_outcome_handler",
     # _detail_versions.py (#704 PR-E)
     "_EELNOU_INITIAL_LABEL_ET",
     "_READING_STAGE_LABELS_ET",
@@ -266,6 +281,8 @@ def register_draft_routes(rt) -> None:  # type: ignore[no-untyped-def]
     rt("/drafts/{draft_id}/keep", methods=["POST"])(keep_draft_handler)
     rt("/drafts/{draft_id}/delete", methods=["POST"])(delete_draft_handler)
     rt("/drafts/{draft_id}/link-vtk", methods=["POST"])(link_vtk_handler)
+    # #817: reviewer-only outcome submission.
+    rt("/drafts/{draft_id}/review-outcome", methods=["POST"])(submit_review_outcome_handler)
     # #618 PR-C: side-by-side diff between two versions of a draft.
     rt("/drafts/{draft_id}/diff", methods=["GET"])(draft_diff_page)
     # #656: retry a failed draft's pipeline from the parse stage.

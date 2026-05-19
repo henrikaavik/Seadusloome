@@ -40,3 +40,27 @@ def log_draft_view(user_id: str | None, draft_id: Any, **extra: Any) -> None:
     """
     detail: dict[str, Any] = {"draft_id": str(draft_id), **extra}
     log_action(user_id, "draft.view", detail)
+
+
+def log_review_outcome(
+    user_id: str | None,
+    draft_id: Any,
+    *,
+    outcome: str,
+    comment_present: bool,
+    **extra: Any,
+) -> None:
+    """Record a ``draft.review_outcome.created`` event (issue #817).
+
+    The comment body is deliberately NOT logged — only a boolean flag
+    indicating whether the reviewer supplied a narrative. Reviewers may
+    quote sensitive draft content in comments, and the audit log is read
+    by org admins who would not otherwise have access to that text.
+    """
+    detail: dict[str, Any] = {
+        "draft_id": str(draft_id),
+        "outcome": outcome,
+        "comment_present": bool(comment_present),
+        **extra,
+    }
+    log_action(user_id, "draft.review_outcome.created", detail)
