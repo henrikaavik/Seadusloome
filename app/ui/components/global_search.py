@@ -98,7 +98,8 @@ def GlobalSearchBar(  # noqa: ANN201
         "hx_swap": "innerHTML",
     }
     if autofocus:
-        input_attrs["autofocus"] = True
+        # #813: HTML4 string form survives FastHTML's HTTP renderer.
+        input_attrs["autofocus"] = "autofocus"
 
     return Div(  # noqa: F405
         Div(  # noqa: F405

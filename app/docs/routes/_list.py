@@ -349,7 +349,8 @@ def _filter_bar(*, filters: dict, uploaders: list[dict]):
             "id": f"filter-type-{value}",
         }
         if value in selected_types:
-            attrs["checked"] = True
+            # #813: HTML4 string form survives FastHTML's HTTP renderer.
+            attrs["checked"] = "checked"
         type_inputs.append(
             Label(  # noqa: F405
                 Input(**attrs),  # noqa: F405
@@ -375,7 +376,8 @@ def _filter_bar(*, filters: dict, uploaders: list[dict]):
             "id": f"filter-status-{value}",
         }
         if value in selected_statuses:
-            attrs["checked"] = True
+            # #813: HTML4 string form survives FastHTML's HTTP renderer.
+            attrs["checked"] = "checked"
         spec = STATUS_BY_VALUE.get(value)
         status_inputs.append(
             Label(  # noqa: F405
@@ -398,7 +400,8 @@ def _filter_bar(*, filters: dict, uploaders: list[dict]):
     for u in uploaders:
         opt_attrs: dict = {"value": u["id"]}
         if u["id"] == selected_uploader_str:
-            opt_attrs["selected"] = True
+            # #813: HTML4 string form survives FastHTML's HTTP renderer.
+            opt_attrs["selected"] = "selected"
         label_text = u.get("full_name") or u.get("email") or u["id"]
         uploader_options.append(Option(label_text, **opt_attrs))  # noqa: F405
 
@@ -445,7 +448,8 @@ def _filter_bar(*, filters: dict, uploaders: list[dict]):
     for value, label in _SORT_CHOICES:
         opt_attrs = {"value": value}
         if value == current_sort:
-            opt_attrs["selected"] = True
+            # #813: HTML4 string form survives FastHTML's HTTP renderer.
+            opt_attrs["selected"] = "selected"
         sort_options.append(Option(label, **opt_attrs))  # noqa: F405
     sort_field = Div(  # noqa: F405
         Label("Sorteeri", For="filter-sort", cls="form-field-label"),  # noqa: F405

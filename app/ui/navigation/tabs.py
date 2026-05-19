@@ -81,6 +81,8 @@ def TabPanel(tab_id: str, *children, active: bool = False, cls: str = "", **kwar
         "cls": classes,
     }
     if not active:
-        attrs["hidden"] = True
+        # #813: HTML4 string form survives FastHTML's HTTP renderer
+        # (bool-true is dropped on the wire).
+        attrs["hidden"] = "hidden"
     attrs.update(kwargs)
     return ft_hx("div", *children, **attrs)
