@@ -424,6 +424,74 @@ class TestStepPage:
         assert resp.status_code == 200
         assert "Jätka uurimisega" in resp.text
 
+    @patch("app.drafter.routes._find_latest_job")
+    @patch("app.drafter.routes.fetch_session")
+    @patch("app.auth.middleware._get_provider")
+    def test_step_2_shows_advance_after_3_of_8_answered(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_find_job: MagicMock,
+    ):
+        """#816: the continue button must appear after 3 answers even if
+        additional unanswered questions remain (8 total, 3 answered)."""
+        mock_get_provider.return_value = _stub_provider()
+        session = _make_session(current_step=2)
+        session.clarifications = [
+            {"question": "Q1?", "answer": "A1"},
+            {"question": "Q2?", "answer": "A2"},
+            {"question": "Q3?", "answer": "A3"},
+            {"question": "Q4?", "answer": None},
+            {"question": "Q5?", "answer": None},
+            {"question": "Q6?", "answer": None},
+            {"question": "Q7?", "answer": None},
+            {"question": "Q8?", "answer": None},
+        ]
+        mock_fetch.return_value = session
+        mock_find_job.return_value = {"status": "success", "result": {}, "error_message": None}
+
+        client = _authed_client()
+        resp = client.get(f"/drafter/{_SESSION_ID}/step/2")
+
+        assert resp.status_code == 200
+        assert "Jätka uurimisega" in resp.text
+        # The Q4 form is still rendered for the remaining questions.
+        assert "Q4?" in resp.text
+        # Helper copy clarifying the partial-answer semantics.
+        assert "Võite jätkata 3 vastuse järel — ülejäänud küsimused on valikulised." in resp.text
+
+    @patch("app.drafter.routes._find_latest_job")
+    @patch("app.drafter.routes.fetch_session")
+    @patch("app.auth.middleware._get_provider")
+    def test_step_2_hides_advance_when_no_answers(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_find_job: MagicMock,
+    ):
+        """#816: the continue button must NOT appear before any answer is
+        given — prevents trivial skip past the clarification step."""
+        mock_get_provider.return_value = _stub_provider()
+        session = _make_session(current_step=2)
+        session.clarifications = [
+            {"question": "Q1?", "answer": None},
+            {"question": "Q2?", "answer": None},
+            {"question": "Q3?", "answer": None},
+            {"question": "Q4?", "answer": None},
+            {"question": "Q5?", "answer": None},
+            {"question": "Q6?", "answer": None},
+            {"question": "Q7?", "answer": None},
+            {"question": "Q8?", "answer": None},
+        ]
+        mock_fetch.return_value = session
+        mock_find_job.return_value = {"status": "success", "result": {}, "error_message": None}
+
+        client = _authed_client()
+        resp = client.get(f"/drafter/{_SESSION_ID}/step/2")
+
+        assert resp.status_code == 200
+        assert "Jätka uurimisega" not in resp.text
+
     @patch("app.drafter.routes.fetch_session")
     @patch("app.auth.middleware._get_provider")
     def test_nonexistent_session_returns_404(

@@ -93,15 +93,83 @@ class TestCanAdvance:
         assert can_advance(session, Step.CLARIFY) is True
 
     def test_can_advance_clarify_requires_3_answers(self):
+        """#816: counts ``answer``-populated rows, not raw list length."""
         session = FakeSession(current_step=2, intent="ok")
         session.clarifications = []
         assert can_advance(session, Step.RESEARCH) is False
 
-        session.clarifications = [{"q": "a"}, {"q": "b"}]
+        # Two answered rows — not enough.
+        session.clarifications = [
+            {"question": "a", "answer": "yes"},
+            {"question": "b", "answer": "no"},
+        ]
         assert can_advance(session, Step.RESEARCH) is False
 
-        session.clarifications = [{"q": "a"}, {"q": "b"}, {"q": "c"}]
+        # Three answered rows — exactly the threshold.
+        session.clarifications = [
+            {"question": "a", "answer": "yes"},
+            {"question": "b", "answer": "no"},
+            {"question": "c", "answer": "maybe"},
+        ]
         assert can_advance(session, Step.RESEARCH) is True
+
+    def test_can_advance_clarify_rejects_unanswered_rows(self):
+        """#816: rows without an ``answer`` must not count toward the threshold."""
+        session = FakeSession(current_step=2, intent="ok")
+
+        # 3 rows but all have ``answer=None`` — guard must reject.
+        session.clarifications = [
+            {"question": "x", "answer": None},
+            {"question": "y", "answer": None},
+            {"question": "z", "answer": None},
+        ]
+        assert can_advance(session, Step.RESEARCH) is False
+
+        # 3 rows all answered — accepted.
+        session.clarifications = [
+            {"question": "x", "answer": "a"},
+            {"question": "y", "answer": "b"},
+            {"question": "z", "answer": "c"},
+        ]
+        assert can_advance(session, Step.RESEARCH) is True
+
+        # 8 rows total, only 2 answered — rejected (the bug case).
+        session.clarifications = [
+            {"question": "x", "answer": "a"},
+            {"question": "y", "answer": "b"},
+            {"question": "z", "answer": None},
+            {"question": "w", "answer": None},
+            {"question": "v", "answer": None},
+            {"question": "u", "answer": None},
+            {"question": "t", "answer": None},
+            {"question": "s", "answer": None},
+        ]
+        assert can_advance(session, Step.RESEARCH) is False
+
+    def test_can_advance_clarify_accepts_3_of_8_answered(self):
+        """#816: the original bug — 3 answered of 8 must allow advance."""
+        session = FakeSession(current_step=2, intent="ok")
+        session.clarifications = [
+            {"question": "x", "answer": "a"},
+            {"question": "y", "answer": "b"},
+            {"question": "z", "answer": "c"},
+            {"question": "w", "answer": None},
+            {"question": "v", "answer": None},
+            {"question": "u", "answer": None},
+            {"question": "t", "answer": None},
+            {"question": "s", "answer": None},
+        ]
+        assert can_advance(session, Step.RESEARCH) is True
+
+    def test_can_advance_clarify_empty_string_answer_does_not_count(self):
+        """#816: an empty-string answer is falsy and must not count."""
+        session = FakeSession(current_step=2, intent="ok")
+        session.clarifications = [
+            {"question": "x", "answer": "a"},
+            {"question": "y", "answer": "b"},
+            {"question": "z", "answer": ""},
+        ]
+        assert can_advance(session, Step.RESEARCH) is False
 
     def test_can_advance_clarify_none_clarifications_fails(self):
         session = FakeSession(current_step=2, intent="ok")

@@ -258,7 +258,12 @@ def _step_2_page(session: DraftingSession, auth: UserDict):
             unanswered_idx = i
             break
 
-    all_answered = unanswered_idx is None and len(clarifications) >= 3
+    # #816: the user can advance after answering >= 3 questions, even if
+    # additional unanswered questions remain. Counting only rows whose
+    # ``answer`` is populated (mirrors the state-machine guard in
+    # ``state_machine._can_leave_clarify``).
+    answered_count = sum(1 for c in clarifications if c.get("answer"))
+    can_advance = answered_count >= 3
 
     children: list[Any] = []
 
@@ -313,19 +318,28 @@ def _step_2_page(session: DraftingSession, auth: UserDict):
             )
         )
 
-    # Show "proceed" button if all answered
-    if all_answered:
+    # #816: show the "proceed" button once 3 questions have been answered;
+    # additional questions remain optional. The state-machine guard
+    # (``state_machine._can_leave_clarify``) uses the same rule.
+    if can_advance:
+        all_answered = unanswered_idx is None
+        alert_text = (
+            "Kõik küsimused on vastatud. Võite jätkata uurimise sammuga."
+            if all_answered
+            else "Olete vastanud piisavale arvule küsimustele. Võite jätkata uurimise sammuga."
+        )
         children.append(
             Div(  # noqa: F405
-                Alert(
-                    "Kõik küsimused on vastatud. Võite jätkata uurimise sammuga.",
-                    variant="success",
-                ),
+                Alert(alert_text, variant="success"),
                 AppForm(
                     Button("Jätka uurimisega", type="submit", variant="primary"),
                     Input(type="hidden", name="action", value="advance"),  # noqa: F405
                     method="post",
                     action=f"/drafter/{session.id}/step/2",
+                ),
+                Small(  # noqa: F405
+                    "Võite jätkata 3 vastuse järel — ülejäänud küsimused on valikulised.",
+                    cls="form-field-help",
                 ),
                 cls="step-advance",
             )

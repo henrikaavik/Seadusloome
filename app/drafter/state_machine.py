@@ -66,11 +66,17 @@ def _can_leave_intent(session: Any) -> bool:
 
 
 def _can_leave_clarify(session: Any) -> bool:
-    """CLARIFY -> RESEARCH: at least 3 clarifications recorded."""
+    """CLARIFY -> RESEARCH: at least 3 *answered* clarifications recorded.
+
+    #816: counts only rows with a non-empty ``answer`` field. The renderer
+    populates an unanswered ``question`` row per LLM-proposed question
+    (e.g. 8 rows for an 8-question interview); counting all rows would
+    let the user advance without actually answering anything.
+    """
     clarifications = session.clarifications
     if clarifications is None:
         return False
-    return len(clarifications) >= 3
+    return sum(1 for c in clarifications if c.get("answer")) >= 3
 
 
 def _can_leave_research(session: Any) -> bool:
