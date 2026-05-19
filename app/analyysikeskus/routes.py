@@ -6458,31 +6458,30 @@ async def moju_poliitikamottest_extract(req: Request):
 
     # Run the LLM-driven extractor (cost-tracked with
     # ``feature="intent_analysis"``).
-    candidates = extract_candidates(
+    llm_candidates = extract_candidates(
         intent_text,
         user_id=user_id,
         org_id=org_id,
     )
 
-    # Augment the LLM candidates with the user's manually entered
-    # known refs — split on commas, treat each as a literal ``ref_text``
-    # for the resolver. ``ref_type`` defaults to ``provision`` since
-    # most known-ref entries from the usability tests are §-shaped; the
-    # resolver tolerates the guess (a law name still resolves cleanly
-    # through ``_resolve_provision`` because the act-only branch fires
-    # on partial matches).
+    # Collect the user's manually entered known refs — split on commas,
+    # treat each as a literal ``ref_text`` for the resolver. ``ref_type``
+    # defaults to ``provision`` since most known-ref entries from the
+    # usability tests are §-shaped; the resolver tolerates the guess (a
+    # law name still resolves cleanly through ``_resolve_provision``
+    # because the act-only branch fires on partial matches).
     #
     # Cap to ``_MAX_INTENT_KNOWN_REFS`` so a comma-bomb POST can't
     # trigger an unbounded number of resolver SPARQL lookups.
+    manual_candidates: list[IntentCandidate] = []
     if known_refs_raw:
-        known_count = 0
         for raw_ref in known_refs_raw.split(","):
-            if known_count >= _MAX_INTENT_KNOWN_REFS:
+            if len(manual_candidates) >= _MAX_INTENT_KNOWN_REFS:
                 break
             ref_text = raw_ref.strip()
             if not ref_text:
                 continue
-            candidates.append(
+            manual_candidates.append(
                 IntentCandidate(
                     ref_text=ref_text,
                     ref_type="provision",
@@ -6490,14 +6489,23 @@ async def moju_poliitikamottest_extract(req: Request):
                     reasoning="Kasutaja sisestatud käsitsi teadaolev viide.",
                 )
             )
-            known_count += 1
 
-    # Defence in depth: clamp the combined LLM + manual candidate list to
-    # ``_MAX_INTENT_CANDIDATES`` before resolving, so a misbehaving extractor
-    # (or future prompt drift that returns more than the documented 3-8)
-    # can't fan out into the resolver beyond what the UI can render.
-    if len(candidates) > _MAX_INTENT_CANDIDATES:
-        candidates = candidates[:_MAX_INTENT_CANDIDATES]
+    # Merge with manual refs winning over LLM. A previous revision of
+    # this handler appended manual refs after the LLM list and then
+    # truncated to ``_MAX_INTENT_CANDIDATES`` from the front — which
+    # silently dropped every manual ref whenever the LLM filled the cap
+    # (#822 PR review P2). Explicit user input outranks inferred
+    # candidates, so manual refs go in first; LLM rows then fill the
+    # remaining slots in confidence order, highest first.
+    candidates: list[IntentCandidate] = list(manual_candidates)
+    llm_slots_remaining = _MAX_INTENT_CANDIDATES - len(candidates)
+    if llm_slots_remaining > 0:
+        sorted_llm = sorted(
+            llm_candidates,
+            key=lambda c: c.confidence,
+            reverse=True,
+        )
+        candidates.extend(sorted_llm[:llm_slots_remaining])
 
     # Resolve every candidate to a URI (or ``None`` for unresolvable).
     resolved = resolve_candidates(candidates)

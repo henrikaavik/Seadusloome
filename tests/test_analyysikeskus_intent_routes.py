@@ -680,6 +680,146 @@ def test_extract_caps_manual_known_refs_to_max_intent_known_refs(
 
 
 @patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.intent_analysis.extract_intent_candidates")
+@patch("app.docs.reference_resolver.ReferenceResolver.resolve")
+@patch("app.auth.middleware._get_provider")
+def test_extract_manual_refs_win_when_llm_fills_the_cap(
+    mock_provider: MagicMock,
+    mock_resolve: MagicMock,
+    mock_extract: MagicMock,
+    mock_recent: MagicMock,
+):
+    """#822 PR review P2 (round 2): if the LLM returns _MAX_INTENT_CANDIDATES
+    rows, a previous revision truncated post-append and silently dropped
+    every manual known_ref. Explicit user input must reach the resolver
+    even when the LLM list is full — manual refs win over inferred ones.
+    """
+    from app.analyysikeskus.intent_extractor import IntentCandidate
+    from app.analyysikeskus.routes import _MAX_INTENT_CANDIDATES
+    from app.docs.entity_extractor import ExtractedRef
+    from app.docs.reference_resolver import ResolvedRef
+
+    mock_provider.return_value = _stub_provider()
+
+    # LLM returns exactly _MAX_INTENT_CANDIDATES candidates (12) — would
+    # have completely displaced the manual ref under the old behaviour.
+    mock_extract.return_value = [
+        IntentCandidate(
+            ref_text=f"LLM{n}",
+            ref_type="provision",
+            confidence=0.5 + (n * 0.01),  # ascending confidence
+            reasoning=f"LLM kandidaat #{n}.",
+        )
+        for n in range(_MAX_INTENT_CANDIDATES)
+    ]
+
+    captured: list[ExtractedRef] = []
+
+    def _capture(refs: list[ExtractedRef]) -> list[ResolvedRef]:
+        captured.extend(refs)
+        return [
+            ResolvedRef(
+                extracted=r,
+                entity_uri=f"uri-{r.ref_text}",
+                matched_label=r.ref_text,
+                match_score=1.0,
+            )
+            for r in refs
+        ]
+
+    mock_resolve.side_effect = _capture
+
+    client = _authed_client()
+    resp = client.post(
+        "/analyysikeskus/moju-poliitikamottest/extract",
+        data={
+            "intent": "mingi kavatsus",
+            "known_refs": "Manual § 1, Manual § 2",
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.text
+
+    ref_texts = {r.ref_text for r in captured}
+    # The manual refs MUST have reached the resolver.
+    assert "Manual § 1" in ref_texts, f"Manual ref 1 dropped — captured: {sorted(ref_texts)}"
+    assert "Manual § 2" in ref_texts, f"Manual ref 2 dropped — captured: {sorted(ref_texts)}"
+    # Combined count still respects the overall cap.
+    assert len(captured) <= _MAX_INTENT_CANDIDATES
+    # The lowest-confidence LLM rows are the ones that got squeezed out.
+    assert "LLM0" not in ref_texts  # lowest confidence — bumped by manual
+    # Highest-confidence LLM rows survive.
+    assert f"LLM{_MAX_INTENT_CANDIDATES - 1}" in ref_texts
+    # The confirmation panel renders the manual refs so the user can see them.
+    assert "Manual § 1" in body
+    assert "Manual § 2" in body
+
+
+@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.intent_analysis.extract_intent_candidates")
+@patch("app.docs.reference_resolver.ReferenceResolver.resolve")
+@patch("app.auth.middleware._get_provider")
+def test_extract_manual_refs_capped_when_overflowing_total(
+    mock_provider: MagicMock,
+    mock_resolve: MagicMock,
+    mock_extract: MagicMock,
+    mock_recent: MagicMock,
+):
+    """Manual refs are themselves capped at _MAX_INTENT_KNOWN_REFS (10).
+    If the user crams more than the cap into the comma list, only the
+    first 10 reach the resolver (no LLM rows fit at all in this case
+    because the manual list already meets the global cap)."""
+    from app.analyysikeskus.intent_extractor import IntentCandidate
+    from app.analyysikeskus.routes import _MAX_INTENT_KNOWN_REFS
+    from app.docs.entity_extractor import ExtractedRef
+    from app.docs.reference_resolver import ResolvedRef
+
+    mock_provider.return_value = _stub_provider()
+    mock_extract.return_value = [
+        IntentCandidate(
+            ref_text="LLM_extra",
+            ref_type="law",
+            confidence=0.9,
+            reasoning="LLM kandidaat.",
+        )
+    ]
+
+    captured: list[ExtractedRef] = []
+
+    def _capture(refs: list[ExtractedRef]) -> list[ResolvedRef]:
+        captured.extend(refs)
+        return [
+            ResolvedRef(
+                extracted=r,
+                entity_uri=f"uri-{r.ref_text}",
+                matched_label=r.ref_text,
+                match_score=1.0,
+            )
+            for r in refs
+        ]
+
+    mock_resolve.side_effect = _capture
+
+    # 15 manual refs > _MAX_INTENT_KNOWN_REFS (10).
+    flood = ", ".join(f"Manual{n}" for n in range(15))
+
+    client = _authed_client()
+    resp = client.post(
+        "/analyysikeskus/moju-poliitikamottest/extract",
+        data={"intent": "mingi kavatsus", "known_refs": flood},
+    )
+    assert resp.status_code == 200
+
+    manual_in_captured = [r for r in captured if r.ref_text.startswith("Manual")]
+    assert len(manual_in_captured) <= _MAX_INTENT_KNOWN_REFS
+    # The first N manual entries are taken in order (split-on-comma order).
+    captured_texts = {r.ref_text for r in manual_in_captured}
+    assert "Manual0" in captured_texts
+    assert "Manual9" in captured_texts
+    assert "Manual10" not in captured_texts  # past the cap
+
+
+@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
 @patch("app.analyysikeskus.intent_analysis.run_adhoc_impact_analysis")
 @patch("app.auth.middleware._get_provider")
 def test_analyze_caps_confirmed_uris_to_max_intent_confirmed_uris(
