@@ -259,7 +259,8 @@ def _vtk_picker(
         return Div(  # noqa: F405
             Label(label, fr=field_id, cls="form-field-label"),  # noqa: F405
             Select(  # noqa: F405
-                Option("— vali —", value="", selected=True),  # noqa: F405
+                # #813: HTML4 string form survives FastHTML's HTTP renderer.
+                Option("— vali —", value="", selected="selected"),  # noqa: F405
                 name=name,
                 id=field_id,
                 cls="input input-select",
@@ -409,7 +410,8 @@ def _upload_form(
                 type="text",
                 id="field-title",
                 value=title_value,
-                required=True,
+                # #813: HTML4 string form survives FastHTML's HTTP renderer.
+                required="required",
                 maxlength="200",
                 cls="input",
             ),
@@ -441,7 +443,8 @@ def _upload_form(
                 type="file",
                 id="field-file",
                 accept=".docx,.pdf",
-                required=True,
+                # #813: HTML4 string form survives FastHTML's HTTP renderer.
+                required="required",
                 cls="input input-file",
             ),
             Small(  # noqa: F405
@@ -462,7 +465,8 @@ def _upload_form(
                 id="field-file-error",
                 cls="form-field-error",
                 role="alert",
-                hidden=True,
+                # #813: HTML4 string form survives FastHTML's HTTP renderer.
+                hidden="hidden",
             ),
             cls="form-field",
         ),

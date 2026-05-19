@@ -62,7 +62,8 @@ def _link(label: str, url: str | None, *, active: bool = False, disabled: bool =
             label,
             type="button",
             cls="pagination-link pagination-disabled",
-            disabled=True,
+            # #813: HTML4 string form survives FastHTML's HTTP renderer.
+            disabled="disabled",
         )
 
     classes = "pagination-link"

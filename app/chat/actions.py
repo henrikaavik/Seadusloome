@@ -403,7 +403,8 @@ def chat_actions_block(rag_context: list[dict] | None) -> Any:
         cls="chat-actions",
         # Open by default — the whole point of C1 is to make the
         # next-step affordance visible, not hide it behind a click.
-        open=True,
+        # #813: HTML4 string form survives the FastHTML HTTP renderer.
+        open="open",
     )
 
 

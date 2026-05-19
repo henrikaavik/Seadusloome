@@ -74,7 +74,8 @@ def AnnotationPopover(
             placeholder="Lisa markus...",
             rows="3",
             cls="annotation-form-input",
-            required=True,
+            # #813: HTML4 string form survives FastHTML's HTTP renderer.
+            required="required",
         ),
         Button(  # noqa: F405
             "Lisa markus",

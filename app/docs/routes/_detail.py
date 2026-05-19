@@ -457,7 +457,8 @@ def _draft_detail_body(
                 hx_swap="outerHTML",
                 hx_indicator=".delete-spinner",
                 cls="inline-form",
-                hidden=True,
+                # #813: HTML4 string form survives FastHTML's HTTP renderer.
+                hidden="hidden",
             )
         )
         actions.append(

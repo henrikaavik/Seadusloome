@@ -81,7 +81,8 @@ def Modal(
         dialog,
         id=id,
         cls="modal-root",
-        hidden=True,
+        # #813: HTML4 string form survives FastHTML's HTTP renderer.
+        hidden="hidden",
         data_modal_dismissible="true" if dismissible else "false",
         **kwargs,
     )

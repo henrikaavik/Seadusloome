@@ -276,7 +276,8 @@ def _conversation_list_columns() -> list[Column]:
                 name="title",
                 placeholder="Uus pealkiri",
                 cls="chat-list-rename-input",
-                required=True,
+                # #813: HTML4 string form survives the FastHTML HTTP renderer.
+                required="required",
             ),
             Button("Nimeta", variant="secondary", size="sm", type="submit"),
             method="post",
@@ -1286,8 +1287,10 @@ def conversation_view_page(req: Request, conv_id: str):
             "Vajuta / nupuks, et n\u00e4ha k\u00e4sklusi.",
             cls="form-field-help",
         ),
-        # Slash-command palette (populated by chat.js)
-        Div(id="chat-slash-palette", cls="chat-slash-palette", hidden=True),  # noqa: F405
+        # Slash-command palette (populated by chat.js).
+        # #813: ``hidden="hidden"`` HTML4 string form survives the FastHTML
+        # HTTP renderer (bool-true is dropped on the wire).
+        Div(id="chat-slash-palette", cls="chat-slash-palette", hidden="hidden"),  # noqa: F405
         # Input area
         Div(  # noqa: F405
             Textarea(  # noqa: F405
@@ -1311,7 +1314,8 @@ def conversation_view_page(req: Request, conv_id: str):
                 id="chat-stop-btn",
                 variant="secondary",
                 type="button",
-                hidden=True,
+                # #813: HTML4 string form survives FastHTML's HTTP renderer.
+                hidden="hidden",
             ),
             cls="chat-input-area",
         ),

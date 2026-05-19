@@ -1124,7 +1124,8 @@ def _sanctions_delta_section(findings: dict[str, Any], draft_id: str = "") -> An
             Span(summary_line, cls="muted-text report-collapsible-summary"),  # noqa: F405
         ),
         Div(body, cls="report-collapsible-body"),  # noqa: F405
-        open=True,
+        # #813: HTML4 string form survives FastHTML's HTTP renderer.
+        open="open",
         cls="report-collapsible report-sanctions-delta",
         # data-section drives localStorage state in the inline script
         # appended to the page (see ``_collapsible_state_script``).
@@ -1221,7 +1222,8 @@ def _burden_delta_section(findings: dict[str, Any], draft_id: str = "") -> Any:
             Span(summary_line, cls="muted-text report-collapsible-summary"),  # noqa: F405
         ),
         Div(body, cls="report-collapsible-body"),  # noqa: F405
-        open=True,
+        # #813: HTML4 string form survives FastHTML's HTTP renderer.
+        open="open",
         cls="report-collapsible report-burden-delta",
         data_section="burden_delta",
     )

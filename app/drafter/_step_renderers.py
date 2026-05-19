@@ -118,7 +118,8 @@ def _step_1_content(
                 id="field-intent",
                 rows="6",
                 maxlength=str(_INTENT_MAX_LENGTH),
-                required=True,
+                # #813: HTML4 string form survives FastHTML's HTTP renderer.
+                required="required",
                 placeholder=(
                     "Nt: Soovin koostada seaduse, mis reguleerib tehisintellekti "
                     "kasutamist avalikus sektoris, sealhulgas andmekaitse "
@@ -295,7 +296,8 @@ def _step_2_page(session: DraftingSession, auth: UserDict):
                         "",
                         name="answer",
                         rows="3",
-                        required=True,
+                        # #813: HTML4 string form survives the HTTP renderer.
+                        required="required",
                         placeholder="Kirjutage oma vastus siia...",
                         cls="input textarea",
                     ),

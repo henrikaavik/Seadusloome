@@ -223,7 +223,8 @@ def _annotation_item(
             placeholder="Kirjutage vastus...",
             rows="2",
             cls="annotation-reply-input",
-            required=True,
+            # #813: HTML4 string form survives FastHTML's HTTP renderer.
+            required="required",
         ),
         Button(  # noqa: F405
             "Vasta",
@@ -854,14 +855,18 @@ def _row_panel_fragment(
             ),
             rows="3",
             cls="annotation-compose-input",
-            required=True,
-            disabled=is_resolved,
+            # #813: HTML4 string form survives FastHTML's HTTP renderer.
+            required="required",
+            disabled="disabled" if is_resolved else None,
         ),
         UiButton(
             "Saada",
             type="submit",
             variant="primary",
             size="sm",
+            # ``Button`` primitive already emits the HTML4 string form
+            # (see app/ui/primitives/button.py); the bool here is consumed
+            # by its Python signature.
             disabled=is_resolved,
         ),
         hx_post=f"{base}/messages",

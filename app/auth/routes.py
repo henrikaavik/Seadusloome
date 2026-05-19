@@ -72,7 +72,9 @@ def _login_form(email: str = "", error: str | None = None):
                 method="post",
                 action="/auth/login",
                 cls="auth-form",
-                novalidate=True,
+                # #813: HTML4 string form survives FastHTML 0.13.3's
+                # HTTP renderer, where ``novalidate=True`` would be dropped.
+                novalidate="novalidate",
             ),
         ),
         cls="auth-card",
