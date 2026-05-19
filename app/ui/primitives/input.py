@@ -8,6 +8,16 @@ All components:
     - Accept a ``cls`` string appended to the defaults
     - Pass arbitrary HTMX / ARIA / data attributes via ``**kwargs``
     - Set ``aria-invalid="true"`` when ``error=True``
+
+FastHTML 0.13.3 bool-attr drop trap (#813)
+------------------------------------------
+The HTTP-response renderer silently drops bool-true HTML attributes:
+``<input required>`` round-trips through ``to_xml()`` but loses the
+attribute on the wire. The HTML4-compatible string form
+(``required="required"``) survives every serializer path in every
+FastHTML version, and is what the rendered HTML must contain for
+WebKit / Safari to see it on the form-submission activation path.
+See commits da51a5d, 222dab4, 4b65dce, 754b9af for the prior fixes.
 """
 
 from typing import Literal
@@ -50,11 +60,11 @@ def Input(
     if placeholder is not None:
         attrs["placeholder"] = placeholder
     if required:
-        attrs["required"] = True
+        attrs["required"] = "required"
     if disabled:
-        attrs["disabled"] = True
+        attrs["disabled"] = "disabled"
     if readonly:
-        attrs["readonly"] = True
+        attrs["readonly"] = "readonly"
     if error:
         attrs["aria_invalid"] = "true"
     attrs.update(kwargs)
@@ -82,9 +92,9 @@ def Textarea(
     if placeholder is not None:
         attrs["placeholder"] = placeholder
     if required:
-        attrs["required"] = True
+        attrs["required"] = "required"
     if disabled:
-        attrs["disabled"] = True
+        attrs["disabled"] = "disabled"
     if error:
         attrs["aria_invalid"] = "true"
     attrs.update(kwargs)
@@ -109,8 +119,15 @@ def Select(
             opt_value, opt_label = opt
         else:
             opt_value = opt_label = opt
+        # #813: HTML4 string form for ``selected`` — the HTTP renderer
+        # drops bool-true; ``"selected" if matches else None`` survives.
+        is_selected = value is not None and opt_value == value
         option_tags.append(
-            Option(opt_label, value=opt_value, selected=(value is not None and opt_value == value))
+            Option(
+                opt_label,
+                value=opt_value,
+                selected="selected" if is_selected else None,
+            )
         )
 
     attrs: dict = {
@@ -118,9 +135,9 @@ def Select(
         "cls": _input_classes("input input-select", error, cls),
     }
     if required:
-        attrs["required"] = True
+        attrs["required"] = "required"
     if disabled:
-        attrs["disabled"] = True
+        attrs["disabled"] = "disabled"
     if error:
         attrs["aria_invalid"] = "true"
     attrs.update(kwargs)
@@ -145,9 +162,9 @@ def Checkbox(
         "cls": f"check-input {cls}".strip(),
     }
     if checked:
-        attrs["checked"] = True
+        attrs["checked"] = "checked"
     if disabled:
-        attrs["disabled"] = True
+        attrs["disabled"] = "disabled"
     attrs.update(kwargs)
     box = ft_hx("input", **attrs)
     if label is None:
@@ -173,9 +190,9 @@ def Radio(
         "cls": f"check-input {cls}".strip(),
     }
     if checked:
-        attrs["checked"] = True
+        attrs["checked"] = "checked"
     if disabled:
-        attrs["disabled"] = True
+        attrs["disabled"] = "disabled"
     attrs.update(kwargs)
     box = ft_hx("input", **attrs)
     if label is None:

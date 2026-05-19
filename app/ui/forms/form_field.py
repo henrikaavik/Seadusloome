@@ -99,12 +99,16 @@ def FormField(
     # Hide the error placeholder from assistive tech when no validator is
     # attached and no error is present, so screen readers do not announce
     # an empty alert region (#421).
+    #
+    # #813: HTML4 ``hidden="hidden"`` string form survives the FastHTML
+    # 0.13.3 HTTP renderer, where bool-true would be dropped.
+    is_hidden = not error and not validator
     error_div = Div(
         error or "",
         id=error_id,
         cls="form-field-error",
         role="alert" if error else None,
-        hidden=(not error and not validator),
+        hidden="hidden" if is_hidden else None,
     )
 
     return Div(

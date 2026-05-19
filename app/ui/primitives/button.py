@@ -10,6 +10,11 @@ Accessibility (NFR §10):
     - ``:focus-visible`` ring via ``.btn`` base class in ``ui.css``
     - ``IconButton`` requires an ``aria_label`` for screen readers
     - Loading state disables interaction so assistive tech sees ``disabled``
+
+#813: HTML4-compatible ``disabled="disabled"`` (not ``disabled=True``)
+is emitted to the renderer so the attribute survives FastHTML 0.13.3's
+HTTP-response serializer. See ``app.ui.primitives.input`` module
+docstring for the full story.
 """
 
 from typing import Literal
@@ -57,12 +62,20 @@ def Button(
         inner.append(Icon(icon, size=_button_icon_size(size)))
     inner.extend(children)
 
+    # #813: emit the HTML4 string form so the attribute survives the
+    # FastHTML HTTP renderer (bool-true is dropped on the wire). When
+    # neither ``disabled`` nor ``loading`` is set we omit the attribute
+    # entirely rather than passing ``disabled=False``.
+    extra_attrs: dict = {}
+    if disabled or loading:
+        extra_attrs["disabled"] = "disabled"
+
     return ft_hx(
         "button",
         *inner,
         cls=classes,
         type=type,
-        disabled=(disabled or loading),
+        **extra_attrs,
         **kwargs,
     )
 
