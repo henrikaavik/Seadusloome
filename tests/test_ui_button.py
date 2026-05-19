@@ -98,3 +98,32 @@ def test_icon_button_custom_cls_appended():
 def test_icon_button_kwargs_pass_through():
     html = to_xml(IconButton("trash", aria_label="Kustuta", hx_delete="/items/1"))
     assert 'hx-delete="/items/1"' in html
+
+
+# ---------------------------------------------------------------------------
+# #813 — HTML4 string form survives the FastHTML 0.13.3 HTTP renderer
+# ---------------------------------------------------------------------------
+#
+# See ``tests/test_ui_input.py::TestBoolAttrStringForm813`` for the
+# full context. The Button primitive previously passed
+# ``disabled=(disabled or loading)`` to ``ft_hx`` — a bool — which the
+# HTTP renderer drops on the wire. The fix emits ``disabled="disabled"``
+# when truthy and omits the attribute entirely when falsy.
+
+
+def test_button_disabled_true_emits_string_form_813():
+    html = to_xml(Button("Nope", disabled=True))
+    assert 'disabled="disabled"' in html
+
+
+def test_button_loading_emits_string_form_813():
+    """Loading state implies disabled; the same string form must be used."""
+    html = to_xml(Button("Salvestan", loading=True))
+    assert 'disabled="disabled"' in html
+
+
+def test_button_not_disabled_omits_attribute_813():
+    """When neither ``disabled`` nor ``loading`` is set, the attribute
+    must not appear at all (no ``disabled=""`` or ``disabled="False"``)."""
+    html = to_xml(Button("Salvesta"))
+    assert "disabled" not in html

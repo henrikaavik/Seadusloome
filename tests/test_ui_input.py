@@ -147,3 +147,97 @@ class TestRadio:
     def test_disabled(self):
         html = _xml(Radio("size", "lg", disabled=True))
         assert "disabled" in html
+
+
+# ---------------------------------------------------------------------------
+# #813 — HTML4 string form survives the FastHTML 0.13.3 HTTP renderer
+# ---------------------------------------------------------------------------
+#
+# The HTTP-response renderer silently drops bool-true HTML attributes
+# (verified live post-deploy in commit da51a5d). ``to_xml()`` keeps
+# them, which is why earlier ``to_xml``-based tests passed while the
+# rendered page was broken. The HTML4-compatible string form
+# (``required="required"`` etc.) round-trips through every serializer
+# path; the primitives in ``app/ui/primitives/input.py`` are the
+# single source of truth and write the string form before calling
+# ``ft_hx``.
+#
+# These tests pin the string form so a future contributor doesn't
+# revert to bool-true based on "looks the same locally" — the trap
+# only fires through the full HTTP renderer (see test_auth_routes.py
+# for the integration-level pin).
+
+
+class TestBoolAttrStringForm813:
+    def test_input_required_emits_string_form(self):
+        html = _xml(Input("email", required=True))
+        assert 'required="required"' in html
+
+    def test_input_disabled_emits_string_form(self):
+        html = _xml(Input("x", disabled=True))
+        assert 'disabled="disabled"' in html
+
+    def test_input_readonly_emits_string_form(self):
+        html = _xml(Input("x", readonly=True))
+        assert 'readonly="readonly"' in html
+
+    def test_textarea_required_emits_string_form(self):
+        html = _xml(Textarea("bio", required=True))
+        assert 'required="required"' in html
+
+    def test_textarea_disabled_emits_string_form(self):
+        html = _xml(Textarea("bio", disabled=True))
+        assert 'disabled="disabled"' in html
+
+    def test_select_disabled_emits_string_form(self):
+        html = _xml(Select("x", ["a", "b"], disabled=True))
+        assert 'disabled="disabled"' in html
+
+    def test_select_required_emits_string_form(self):
+        html = _xml(Select("x", ["a", "b"], required=True))
+        assert 'required="required"' in html
+
+    def test_select_option_selected_emits_string_form(self):
+        html = _xml(Select("x", [("a", "A"), ("b", "B")], value="a"))
+        # Selected option uses HTML4 string form; non-selected option
+        # has no ``selected`` attribute at all. The exact substring
+        # ``selected="selected"`` appears exactly once (matching the
+        # one selected option). ``b`` must render with no ``selected``
+        # attribute at all so the browser does not mark both selected.
+        assert 'selected="selected"' in html
+        assert html.count('selected="selected"') == 1
+        assert '<option value="b">B</option>' in html
+
+    def test_select_option_no_selection_when_no_value(self):
+        html = _xml(Select("x", [("a", "A"), ("b", "B")]))
+        # When ``value`` is None, no option should be marked selected.
+        assert "selected" not in html
+
+    def test_checkbox_checked_emits_string_form(self):
+        html = _xml(Checkbox("agree", checked=True))
+        assert 'checked="checked"' in html
+
+    def test_checkbox_disabled_emits_string_form(self):
+        html = _xml(Checkbox("agree", disabled=True))
+        assert 'disabled="disabled"' in html
+
+    def test_radio_checked_emits_string_form(self):
+        html = _xml(Radio("size", "md", checked=True))
+        assert 'checked="checked"' in html
+
+    def test_radio_disabled_emits_string_form(self):
+        html = _xml(Radio("size", "md", disabled=True))
+        assert 'disabled="disabled"' in html
+
+    def test_bool_attrs_omitted_when_false(self):
+        """When the bool kwarg is False, the attribute must not appear
+        at all in the output — not as ``required=""`` or any other
+        zombie form. This pins the ``if X:`` guard in each primitive."""
+        html = _xml(Input("x", required=False, disabled=False, readonly=False))
+        assert "required" not in html
+        assert "disabled" not in html
+        assert "readonly" not in html
+
+        html2 = _xml(Checkbox("x", checked=False, disabled=False))
+        assert "checked" not in html2
+        assert "disabled" not in html2

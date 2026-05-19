@@ -114,3 +114,37 @@ def test_login_page_renders_form():
     assert 'name="email"' in resp.text
     assert 'name="password"' in resp.text
     assert "Sisselogimine" in resp.text
+
+
+def test_login_page_bool_attrs_survive_http_renderer():
+    """#813 regression — FastHTML 0.13.3's HTTP renderer drops bool-true
+    HTML attributes (``required=True`` → no attribute on the wire),
+    silently breaking Safari/WebKit form-submission paths and assistive
+    tech. The HTML4-compatible string form (``required="required"``)
+    round-trips through every serializer path in every FastHTML version.
+
+    This test pins the actual HTTP response (not ``to_xml()`` — that
+    serializer path renders bool-true correctly and would mask the bug);
+    a regression that re-introduces ``required=True`` on the email/
+    password fields, ``novalidate=True`` on the form, or any of the
+    other affected attrs would flip these assertions.
+
+    Mirrors the diagnostic shape from commits da51a5d / 222dab4 / 754b9af.
+    """
+    client = TestClient(app, follow_redirects=False)
+    resp = client.get("/auth/login")
+
+    assert resp.status_code == 200
+    # email + password ``<input>`` must carry the string form so the
+    # browser-side validation actually triggers on submit.
+    assert 'required="required"' in resp.text, (
+        "Expected required='required' string form to survive the HTTP "
+        "renderer; bool-true is silently dropped by FastHTML 0.13.3. "
+        "See app/ui/primitives/input.py module docstring."
+    )
+    # The form itself must use ``novalidate="novalidate"`` so client-side
+    # browser validation is bypassed (server is the source of truth).
+    assert 'novalidate="novalidate"' in resp.text, (
+        "Expected novalidate='novalidate' on /auth/login form; bool-true "
+        "is dropped on the wire even though to_xml() renders it correctly."
+    )
