@@ -154,21 +154,16 @@ CAPABILITIES: list[Capability] = [
             "ja teostab mõjuanalüüsi kinnitatud sätete kohta."
         ),
         icon="lightbulb",
-        # ``target_url`` points to the Analüüsikeskus directory while the
-        # real route is wired by #814 Phase 2b (held until #805/#815 lands
-        # to avoid routes.py merge contention). The convention used by
-        # the other ``status="planned"`` entries above is to link to a
-        # related, already-live landing surface so a curious click goes
-        # somewhere useful instead of 404-ing. When Phase 2b lands, this
-        # entry flips to ``target_url="/analyysikeskus/moju-poliitikamottest"``
-        # + ``status="live"``.
-        target_url="/analyysikeskus",
+        # Wired by #814 Phase 2b. The handler lives at
+        # :func:`app.analyysikeskus.routes.moju_poliitikamottest_page` and
+        # registers the three-step flow (GET intake form, POST extract,
+        # POST analyze) on the FastHTML route decorator.
+        target_url="/analyysikeskus/moju-poliitikamottest",
         example_input=(
             "Soovin lihtsustada puudega inimese toetuse taotlemist nii, "
             "et osa andmeid liiguks automaatselt Tervisekassast ja Töötukassast."
         ),
         use_case_from_section_2=3,
-        status="planned",
     ),
     Capability(
         slug="normi-mojuahel",
