@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 from rdflib import Graph
+from rdflib.query import ResultRow
 
 from app.ontology.relations import (
     ESTLEG_NS,
@@ -399,7 +400,10 @@ class TestFixtureGraphSparql:
                 """
             )
         )
-        cluster_uris = {str(row[1]).split("#")[-1] for row in rows}
+        # rdflib's Result.__iter__ is typed as Iterator[ResultRow | bool | None]
+        # (covers SELECT/ASK/CONSTRUCT). The SELECT here always yields
+        # ResultRow, so narrow the type for pyright via isinstance.
+        cluster_uris = {str(row[1]).split("#")[-1] for row in rows if isinstance(row, ResultRow)}
         assert cluster_uris == {"Cluster_1", "TopicMapLaw_1"}, (
             f"Expected exactly Cluster_1 + TopicMapLaw_1 as requestedCluster "
             f"targets in the fixture. Got: {cluster_uris}"

@@ -354,7 +354,12 @@ class TestBuildImpactReportDocx:
 
             def _make_table(*_args: Any, **_kwargs: Any) -> MagicMock:
                 table = MagicMock()
-                table_rows: list[MagicMock] = []
+                # The row list legitimately mixes MagicMock and _RecordingRow
+                # instances (header row is a recording row, subsequent rows
+                # via add_row.side_effect are also recording rows). pyright
+                # needs the broader Any here so .append calls don't reject
+                # _RecordingRow as "not MagicMock".
+                table_rows: list[Any] = []
 
                 # Header row (rows=1 in add_table). The renderer reads
                 # ``table.rows[0].cells`` first.
