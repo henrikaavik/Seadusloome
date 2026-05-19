@@ -403,6 +403,61 @@ def _add_eu_compliance(
     return 1 + extra_units
 
 
+def _add_unresolved_eu_refs(doc: Any, findings: dict[str, Any]) -> int:
+    """Write the "EL-i kaardistamata viited" warning section (#815).
+
+    Mirrors the renderer's :func:`_unresolved_eu_refs_section` so the
+    exported .docx surfaces the same warning the on-page report does:
+    the analyzer detected EU references in the draft text but couldn't
+    map them against the ontology snapshot. Returns 0 work units when
+    there's nothing to render (legacy reports or clean resolution), so
+    progress reporting is unaffected. Returns 1 unit when the section
+    is rendered.
+    """
+    raw = findings.get("unresolved_eu_refs") or []
+    if not raw:
+        return 0
+
+    seen: set[str] = set()
+    unique: list[str] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        ref_text = str(entry.get("ref_text") or "").strip()
+        if not ref_text or ref_text in seen:
+            continue
+        seen.add(ref_text)
+        unique.append(ref_text)
+    if not unique:
+        return 0
+
+    doc.add_heading("EL-i kaardistamata viited", level=1)
+    count = len(unique)
+    # The persisted ``unresolved_eu_refs`` rows can include both
+    # canonical CELEX numbers (e.g. ``32016R0679``) and title/acronym
+    # mentions (e.g. ``GDPR``) — the extractor accepts both forms — so
+    # the copy says "EL viidet" (EU references), not "CELEX-numbrit".
+    doc.add_paragraph(
+        f"Tuvastasime dokumendis viiteid EL õigusele "
+        f"({count} EL viidet), mida ei õnnestunud ontoloogias "
+        "kaardistada:"
+    )
+    # List each ref as its own bullet so they're easy to scan in the
+    # printed report. python-docx's "List Bullet" style ships with the
+    # default template.
+    for ref_text in unique:
+        para = doc.add_paragraph(ref_text, style="List Bullet")
+        # Render the ref text in monospace via the run-level font
+        # attribute so it visually matches the on-page <code> styling
+        # (works equally for CELEX shapes and acronyms).
+        for run in para.runs:
+            run.font.name = "Courier New"
+    doc.add_paragraph(
+        "Kontrollige käsitsi — kaardistamata aktid ei kajastu mõjuanalüüsi tulemustes."
+    )
+    return 1
+
+
 def _add_gaps(
     doc: Any,
     findings: dict[str, Any],
@@ -520,6 +575,10 @@ def _compute_progress_total(report_data: dict[str, Any]) -> int:
     the ``<progress>`` bar's ``max`` attribute is right from the first
     push (browsers can render an indeterminate bar if ``value > max``,
     which looks broken).
+
+    The #815 "unresolved EU refs" section contributes 1 unit when
+    non-empty and 0 otherwise — it's an alert-style block (no per-row
+    table) so the cost is constant.
     """
     fixed = 4  # cover, summary, footer, save
     sections = ("affected_entities", "conflicts", "eu_compliance", "gaps")
@@ -528,6 +587,14 @@ def _compute_progress_total(report_data: dict[str, Any]) -> int:
         rows = report_data.get(key) or []
         # 1 unit for the section heading + 1 unit per N rows.
         table_units += 1 + (len(rows) // _PROGRESS_BATCH)
+    # #815: optional unresolved-EU-refs warning. Detect by the same
+    # rule the helper uses (non-empty list of ref_text-bearing dicts).
+    unresolved = report_data.get("unresolved_eu_refs") or []
+    if any(
+        isinstance(entry, dict) and str(entry.get("ref_text") or "").strip()
+        for entry in unresolved
+    ):
+        table_units += 1
     return fixed + table_units
 
 
@@ -608,6 +675,15 @@ def build_impact_report_docx(
     )
     done += consumed
     _safe_publish(progress_callback, done, total)
+
+    # #815: render the unresolved-EU-refs warning between EU compliance
+    # and Lüngad so it sits next to the EU section it qualifies. The
+    # helper returns 0 work units when there's nothing to warn about,
+    # which matches the zero contribution from ``_compute_progress_total``.
+    consumed = _add_unresolved_eu_refs(doc, report_data)
+    done += consumed
+    if consumed:
+        _safe_publish(progress_callback, done, total)
 
     consumed = _add_gaps(
         doc,

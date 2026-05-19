@@ -665,6 +665,131 @@ def test_el_ulevott_unrecognised_input_shows_warning(
     assert "Uuenda ulatust" in body
 
 
+# ---------------------------------------------------------------------------
+# #805 — canonical-shaped CELEX missing from the ontology gets its own copy
+# ---------------------------------------------------------------------------
+#
+# Distinguishes "user typed a real CELEX (GDPR / Working Conditions / …)
+# that just isn't in our snapshot yet" from "user typed prose / garbage".
+# The route reaches ``_render_eu_unresolved`` when:
+#   * resolver returns nothing (no entity_uri match), AND
+#   * label search returns nothing (CELEX is unknown, label is empty).
+# Both paths are mocked here so the test pins the BRANCH inside
+# ``_render_eu_unresolved`` (canonical-shape vs. generic) rather than
+# the upstream wiring.
+
+
+@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.routes.search_eu_acts_by_label", return_value=[])
+@patch("app.docs.reference_resolver.ReferenceResolver.resolve", return_value=[])
+@patch("app.auth.middleware._get_provider")
+def test_el_ulevott_canonical_celex_missing_from_data_shows_specific_warning(
+    mock_provider: MagicMock,
+    mock_resolve: MagicMock,
+    mock_search: MagicMock,
+    mock_recent: MagicMock,
+):
+    """The user typed GDPR's CELEX, which is well-formed but missing
+    from the ontology — the warning must name the CELEX so they know
+    to look it up manually rather than wonder if they mistyped.
+    """
+    mock_provider.return_value = _stub_provider()
+    client = _authed_client()
+    resp = client.get("/analyysikeskus/el-ulevott?sisend=32016R0679")
+    assert resp.status_code == 200
+    body = resp.text
+    # The canonical-CELEX message names the input + tells the user to
+    # check manually.
+    assert "32016R0679" in body
+    assert "ei ole veel" in body and "ontoloogias kaardistatud" in body
+    assert "Kontrollige käsitsi" in body
+    # The generic copy must NOT appear (avoids confusing double messaging).
+    assert "Ei tuvastanud EL õigusakti" not in body
+    # Still a full result shell with the standard headings + scope form.
+    for heading in ("Sisend", "Ulatus", "Tulemused", "Tõendid", "Soovitatud tegevused"):
+        assert heading in body, heading
+    assert "Uuenda ulatust" in body
+
+
+@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.routes.search_eu_acts_by_label", return_value=[])
+@patch("app.docs.reference_resolver.ReferenceResolver.resolve", return_value=[])
+@patch("app.auth.middleware._get_provider")
+def test_el_ulevott_lowercase_celex_shows_specific_warning(
+    mock_provider: MagicMock,
+    mock_resolve: MagicMock,
+    mock_search: MagicMock,
+    mock_recent: MagicMock,
+):
+    """#821 P3 regression: the resolver uppercases CELEX form letters
+    before SPARQL lookup, so the shape classifier must agree.
+    Lowercase ``32016r0679`` should fire the canonical-but-missing
+    warning, not the generic "ei tuvastatud" copy.
+    """
+    mock_provider.return_value = _stub_provider()
+    client = _authed_client()
+    resp = client.get("/analyysikeskus/el-ulevott?sisend=32016r0679")
+    assert resp.status_code == 200
+    body = resp.text
+    # Lowercase CELEX should be recognised as canonical-shape.
+    assert "32016r0679" in body  # input echoed verbatim
+    assert "ei ole veel" in body and "ontoloogias kaardistatud" in body
+    assert "Kontrollige käsitsi" in body
+    # The generic copy must NOT appear.
+    assert "Ei tuvastanud EL õigusakti" not in body
+
+
+@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.routes.search_eu_acts_by_label", return_value=[])
+@patch("app.docs.reference_resolver.ReferenceResolver.resolve", return_value=[])
+@patch("app.auth.middleware._get_provider")
+def test_el_ulevott_near_celex_garbage_shows_generic_warning(
+    mock_provider: MagicMock,
+    mock_resolve: MagicMock,
+    mock_search: MagicMock,
+    mock_recent: MagicMock,
+):
+    """An alphanumeric string that ISN'T a canonical CELEX (``12abc34``)
+    keeps the generic "Ei tuvastatud" copy with the CELEX example as
+    a hint — we don't want to imply ``12abc34`` is a real CELEX.
+    """
+    mock_provider.return_value = _stub_provider()
+    client = _authed_client()
+    resp = client.get("/analyysikeskus/el-ulevott?sisend=12abc34")
+    assert resp.status_code == 200
+    body = resp.text
+    # Generic copy + the example CELEX hint.
+    assert "Ei tuvastanud EL õigusakti" in body
+    assert "32016R0679" in body  # example hint
+    # The canonical-CELEX-specific copy must NOT fire.
+    assert "ei ole veel" not in body or "ontoloogias kaardistatud" not in body
+
+
+@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.routes.search_eu_acts_by_label", return_value=[])
+@patch("app.docs.reference_resolver.ReferenceResolver.resolve", return_value=[])
+@patch("app.auth.middleware._get_provider")
+def test_el_ulevott_directive_title_shows_generic_warning(
+    mock_provider: MagicMock,
+    mock_resolve: MagicMock,
+    mock_search: MagicMock,
+    mock_recent: MagicMock,
+):
+    """A free-text directive name with no label-search match keeps
+    the generic "Ei tuvastatud" copy — we don't have anything specific
+    to tell the user about a string that doesn't even look like a
+    CELEX.
+    """
+    mock_provider.return_value = _stub_provider()
+    client = _authed_client()
+    resp = client.get("/analyysikeskus/el-ulevott?sisend=just+some+directive+name")
+    assert resp.status_code == 200
+    body = resp.text
+    assert "Ei tuvastanud EL õigusakti" in body
+    # No canonical-shape copy.
+    assert "ontoloogias kaardistatud" not in body
+
+
 @patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
 @patch("app.analyysikeskus.routes.search_eu_acts_by_label")
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve", return_value=[])

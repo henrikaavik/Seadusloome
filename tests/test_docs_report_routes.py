@@ -377,6 +377,226 @@ class TestDraftReportPage:
 
 
 # ---------------------------------------------------------------------------
+# #815 — unresolved EU references warning block
+# ---------------------------------------------------------------------------
+#
+# The analyze_handler persists ``ref_type='eu_act'`` rows that the
+# resolver couldn't map into ``report_data["unresolved_eu_refs"]``.
+# When non-empty, the report page surfaces a warning alert near the
+# EL-i õigusaktide section so the user knows the analysis is missing
+# coverage rather than treating "no EU findings" as "no EU impact".
+
+
+class TestUnresolvedEuRefsSection:
+    @patch("app.docs.report_routes._fetch_latest_report")
+    @patch("app.docs.report_routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_warning_shown_when_unresolved_refs_present(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_fetch_report: MagicMock,
+    ):
+        """A draft mentioning GDPR + Working Conditions whose CELEXes
+        weren't mapped must show a "kaardistamata viited" warning
+        listing both CELEX numbers as inline <code>.
+        """
+        mock_get_provider.return_value = _stub_provider()
+        mock_fetch.return_value = _make_draft()
+        findings = {
+            "affected_entities": [],
+            "conflicts": [],
+            "eu_compliance": [],
+            "gaps": [],
+            "unresolved_eu_refs": [
+                {"ref_text": "32016R0679", "confidence": 0.95},
+                {"ref_text": "32019L1152", "confidence": 0.88},
+            ],
+        }
+        mock_fetch_report.return_value = _make_report_row(
+            affected=0, conflicts=0, gaps=0, findings=findings
+        )
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{_DRAFT_ID}/report")
+
+        assert resp.status_code == 200
+        body = resp.text
+        # Estonian alert title.
+        assert "EL-i kaardistamata viited" in body
+        # The summary line mentions the count using the inclusive
+        # "EL viidet" wording (extractor's eu_act ref_type covers both
+        # CELEX numbers AND title/acronym mentions like GDPR — see #821
+        # P2 follow-up).
+        assert "2 EL viidet" in body
+        assert "CELEX-numbrit" not in body, (
+            "The summary line must not assert all refs are CELEX-shaped — "
+            "GDPR/title/acronym mentions are also persisted to "
+            "unresolved_eu_refs."
+        )
+        assert "kaardistada" in body
+        # Both CELEX values are rendered inside <code> tags so they're
+        # visually distinct + copy-paste friendly.
+        assert "<code>32016R0679</code>" in body
+        assert "<code>32019L1152</code>" in body
+        # Action prompt.
+        assert "Kontrollige käsitsi" in body
+
+    @patch("app.docs.report_routes._fetch_latest_report")
+    @patch("app.docs.report_routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_warning_hidden_when_unresolved_refs_empty(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_fetch_report: MagicMock,
+    ):
+        """No warning when every EU ref resolved cleanly (or there
+        were no EU refs at all). The existing "EL-i õigusaktide seoseid
+        ei tuvastatud" copy remains in the regular section.
+        """
+        mock_get_provider.return_value = _stub_provider()
+        mock_fetch.return_value = _make_draft()
+        findings = {
+            "affected_entities": [],
+            "conflicts": [],
+            "eu_compliance": [],
+            "gaps": [],
+            "unresolved_eu_refs": [],
+        }
+        mock_fetch_report.return_value = _make_report_row(
+            affected=0, conflicts=0, gaps=0, findings=findings
+        )
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{_DRAFT_ID}/report")
+
+        assert resp.status_code == 200
+        body = resp.text
+        # The warning title must NOT appear.
+        assert "EL-i kaardistamata viited" not in body
+        # The regular "no EU findings" copy still shows in the
+        # eu_compliance section.
+        assert "EL-i õigusaktide seoseid ei tuvastatud" in body
+
+    @patch("app.docs.report_routes._fetch_latest_report")
+    @patch("app.docs.report_routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_legacy_report_without_unresolved_key_renders_cleanly(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_fetch_report: MagicMock,
+    ):
+        """Reports written BEFORE #815 don't carry the
+        ``unresolved_eu_refs`` key. The renderer must treat this as
+        "nothing to warn about" rather than crashing or showing the
+        warning.
+        """
+        mock_get_provider.return_value = _stub_provider()
+        mock_fetch.return_value = _make_draft()
+        # Legacy findings: no unresolved_eu_refs key at all.
+        legacy_findings = {
+            "affected_entities": [],
+            "conflicts": [],
+            "eu_compliance": [],
+            "gaps": [],
+        }
+        mock_fetch_report.return_value = _make_report_row(
+            affected=0, conflicts=0, gaps=0, findings=legacy_findings
+        )
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{_DRAFT_ID}/report")
+
+        assert resp.status_code == 200
+        body = resp.text
+        assert "EL-i kaardistamata viited" not in body
+
+    @patch("app.docs.report_routes._fetch_latest_report")
+    @patch("app.docs.report_routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_duplicate_celex_refs_are_deduplicated(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_fetch_report: MagicMock,
+    ):
+        """A long draft can mention the same CELEX many times. The
+        warning lists each CELEX once, not N times.
+        """
+        mock_get_provider.return_value = _stub_provider()
+        mock_fetch.return_value = _make_draft()
+        findings = {
+            "affected_entities": [],
+            "conflicts": [],
+            "eu_compliance": [],
+            "gaps": [],
+            "unresolved_eu_refs": [
+                {"ref_text": "32016R0679", "confidence": 0.95},
+                {"ref_text": "32016R0679", "confidence": 0.85},
+                {"ref_text": "32016R0679", "confidence": 0.75},
+            ],
+        }
+        mock_fetch_report.return_value = _make_report_row(
+            affected=0, conflicts=0, gaps=0, findings=findings
+        )
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{_DRAFT_ID}/report")
+
+        assert resp.status_code == 200
+        body = resp.text
+        # Count reflects unique refs, not row count.
+        assert "1 EL viidet" in body
+        # The ref is rendered exactly once.
+        assert body.count("<code>32016R0679</code>") == 1
+
+    @patch("app.docs.report_routes._fetch_latest_report")
+    @patch("app.docs.report_routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_title_acronym_refs_rendered_without_celex_claim(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_fetch_report: MagicMock,
+    ):
+        """#821 P2 regression: the extractor's ``eu_act`` ref_type covers
+        BOTH canonical CELEX numbers and title/acronym mentions like
+        ``GDPR``. The unresolved-EU section must NOT label acronym
+        mentions as "CELEX-numbrit" in the copy. The inclusive "EL
+        viidet" wording covers both shapes truthfully.
+        """
+        mock_get_provider.return_value = _stub_provider()
+        mock_fetch.return_value = _make_draft()
+        findings = {
+            "affected_entities": [],
+            "conflicts": [],
+            "eu_compliance": [],
+            "gaps": [],
+            "unresolved_eu_refs": [
+                {"ref_text": "GDPR", "confidence": 0.92},
+                {"ref_text": "Working Conditions Directive", "confidence": 0.71},
+            ],
+        }
+        mock_fetch_report.return_value = _make_report_row(
+            affected=0, conflicts=0, gaps=0, findings=findings
+        )
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{_DRAFT_ID}/report")
+
+        assert resp.status_code == 200
+        body = resp.text
+        assert "2 EL viidet" in body
+        # The acronym/title mentions must NOT be labelled "CELEX".
+        assert "CELEX-numbrit" not in body
+        # Both refs render inside <code> tags regardless of shape.
+        assert "<code>GDPR</code>" in body
+        assert "<code>Working Conditions Directive</code>" in body
+
+
+# ---------------------------------------------------------------------------
 # POST /drafts/{id}/export
 # ---------------------------------------------------------------------------
 

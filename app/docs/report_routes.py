@@ -947,6 +947,76 @@ def _eu_compliance_section(
     )
 
 
+def _unresolved_eu_refs_section(findings: dict[str, Any]) -> Any:
+    """Build the "EU references detected but not mapped" warning (#815).
+
+    The analyze handler persists every ``ref_type='eu_act'`` row that
+    failed to resolve to either an ``entity_uri`` or an act-level
+    ``partial_match`` into ``report_data["unresolved_eu_refs"]``. When
+    that list is non-empty, the user uploaded a draft mentioning EU
+    references (typically a CELEX number such as ``32016R0679`` for
+    GDPR) that the resolver couldn't map against the current ontology
+    snapshot — usually because the act simply hasn't been imported
+    yet. Without this warning, the impact report shows the misleading
+    "EL-i õigusaktide seoseid ei tuvastatud" copy as if the draft
+    had no EU references at all.
+
+    Returns the empty string when the key is missing (legacy reports)
+    or empty (resolver mapped everything cleanly), so it composes
+    cleanly into the page tree.
+    """
+    refs = list(findings.get("unresolved_eu_refs") or [])
+    if not refs:
+        return ""
+
+    # Deduplicate identical ``ref_text`` values (a long draft can
+    # mention the same CELEX many times). Preserve first-seen order so
+    # the list reads naturally.
+    seen: set[str] = set()
+    unique: list[str] = []
+    for entry in refs:
+        if not isinstance(entry, dict):
+            continue
+        ref_text = str(entry.get("ref_text") or "").strip()
+        if not ref_text or ref_text in seen:
+            continue
+        seen.add(ref_text)
+        unique.append(ref_text)
+    if not unique:
+        return ""
+
+    count = len(unique)
+    # Render the ref values (CELEX numbers AND title/acronym mentions
+    # like "GDPR") as inline <code> for visual emphasis and so they're
+    # easily copy-paste-able into EurLex by the user. The persisted
+    # `unresolved_eu_refs` rows come from any extracted ``eu_act`` ref
+    # that didn't resolve — not only canonical CELEX shapes — so the
+    # copy says "EL viidet" (EU references), not "CELEX-numbrit".
+    code_items: list[Any] = []
+    for index, ref_text in enumerate(unique):
+        if index > 0:
+            code_items.append(", ")
+        code_items.append(Code(ref_text))  # noqa: F405
+
+    body = Div(  # noqa: F405
+        P(  # noqa: F405
+            f"Tuvastasime dokumendis viiteid EL õigusele "
+            f"({count} EL viidet), mida ei õnnestunud "
+            "ontoloogias kaardistada:",
+        ),
+        P(*code_items, cls="unresolved-eu-refs-list"),  # noqa: F405
+        P(  # noqa: F405
+            "Kontrollige käsitsi — kaardistamata aktid ei kajastu mõjuanalüüsi tulemustes.",
+            cls="muted-text",
+        ),
+    )
+    return Alert(
+        body,
+        variant="warning",
+        title="EL-i kaardistamata viited",
+    )
+
+
 def _gaps_section(
     findings: dict[str, Any],
     draft_id: str = "",
@@ -1549,6 +1619,12 @@ def draft_report_page(req: Request, draft_id: str):
             draft_version_id=draft_version_id,
             counts=unresolved_counts,
         ),
+        # #815: surfaces draft_entities rows where the resolver detected
+        # an EU reference (typically a CELEX number) but couldn't map it
+        # against the ontology snapshot. Returns "" when there are no
+        # such rows so the section disappears cleanly when ontology
+        # coverage catches up (no app change needed in that case).
+        _unresolved_eu_refs_section(findings),
         _gaps_section(
             findings,
             draft_id=str(draft.id),
