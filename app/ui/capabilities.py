@@ -146,6 +146,23 @@ CAPABILITIES: list[Capability] = [
         use_case_from_section_2=3,
     ),
     Capability(
+        slug="moju-poliitikamottest",
+        canonical_name_et="Analüüsi poliitikamõttest",
+        one_line_description_et=(
+            "Kirjeldage seadusandlikku kavatsust vabas vormis — "
+            "süsteem pakub välja kandidaadid mõjutatud õigusaktidest "
+            "ja teostab mõjuanalüüsi kinnitatud sätete kohta."
+        ),
+        icon="lightbulb",
+        target_url="/analyysikeskus/moju-poliitikamottest",
+        example_input=(
+            "Soovin lihtsustada puudega inimese toetuse taotlemist nii, "
+            "et osa andmeid liiguks automaatselt Tervisekassast ja Töötukassast."
+        ),
+        use_case_from_section_2=3,
+        status="live",
+    ),
+    Capability(
         slug="normi-mojuahel",
         canonical_name_et="Käivita Normi mõjuahel",
         one_line_description_et=(
