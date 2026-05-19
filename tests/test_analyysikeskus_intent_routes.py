@@ -164,12 +164,15 @@ def test_intent_intake_form_renders(mock_provider: MagicMock, mock_recent: Magic
     assert 'name="intent"' in body
     # Intent is a textarea, not a single-line input.
     assert "<textarea" in body
-    # Target-group chips — chip group label + at least one canonical chip.
-    assert "Sihtrühm (valikuline)" in body
+    # Target-group chips — chip group label includes the explicit
+    # "scope metadata only, doesn't influence search" disclaimer so users
+    # don't expect chip selection to silently shape candidates (#822 P2-2).
+    assert "Sihtrühm" in body
+    assert "ei mõjuta kandidaatide otsingut" in body
     assert "Lapsed" in body
     assert "Puuetega inimesed" in body
-    # Affected-area chips.
-    assert "Mõjutatud valdkonnad (valikuline)" in body
+    # Affected-area chips with the same disclaimer.
+    assert "Mõjutatud valdkonnad" in body
     assert "Sotsiaalhoolekanne" in body
     # Known-refs optional text input.
     assert "Teadaolevad õiguslikud viited (valikuline)" in body
@@ -588,3 +591,131 @@ def test_intent_analyze_drops_confirmed_rows_without_uri(
     # The unresolved label does NOT appear as a "Mõjuahel sätte ..." heading.
     assert "Mõjuahel sätte Unresolved ref analüüsist" not in body
     assert "Mõjuahel sätte KarS § 121 analüüsist" in body
+
+
+# ---------------------------------------------------------------------------
+# #822 review follow-ups (P2 caps + P3 prefill)
+# ---------------------------------------------------------------------------
+
+
+@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
+@patch("app.auth.middleware._get_provider")
+def test_intake_form_prefills_intent_from_sisend_query_param(
+    mock_provider: MagicMock,
+    mock_recent: MagicMock,
+):
+    """#822 P3: the capability-card / global-search helpers append
+    ?sisend=<example> to /analyysikeskus/* deep-links. The intake page
+    must read it and prefill the textarea, otherwise clicking the
+    dashboard "Näide:" affordance lands on a blank form."""
+    mock_provider.return_value = _stub_provider()
+    client = _authed_client()
+    sisend = "Soovin lihtsustada puudega inimese toetuse taotlemist."
+    resp = client.get(
+        "/analyysikeskus/moju-poliitikamottest",
+        params={"sisend": sisend},
+    )
+    assert resp.status_code == 200
+    body = resp.text
+    # The textarea value attribute carries the prefill.
+    assert sisend in body
+    # Belt-and-braces: an empty sisend doesn't crash + renders blank textarea.
+    resp_blank = client.get(
+        "/analyysikeskus/moju-poliitikamottest",
+        params={"sisend": ""},
+    )
+    assert resp_blank.status_code == 200
+
+
+@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.intent_analysis.extract_intent_candidates")
+@patch("app.docs.reference_resolver.ReferenceResolver.resolve")
+@patch("app.auth.middleware._get_provider")
+def test_extract_caps_manual_known_refs_to_max_intent_known_refs(
+    mock_provider: MagicMock,
+    mock_resolve: MagicMock,
+    mock_extract: MagicMock,
+    mock_recent: MagicMock,
+):
+    """#822 P2-1: an unbounded comma-separated known_refs list would
+    fan out into N resolver SPARQL lookups. Cap at
+    ``_MAX_INTENT_KNOWN_REFS`` (10)."""
+    from app.analyysikeskus.routes import _MAX_INTENT_KNOWN_REFS
+    from app.docs.entity_extractor import ExtractedRef
+    from app.docs.reference_resolver import ResolvedRef
+
+    mock_provider.return_value = _stub_provider()
+    mock_extract.return_value = []  # No LLM candidates.
+
+    captured: list[ExtractedRef] = []
+
+    def _capture(refs: list[ExtractedRef]) -> list[ResolvedRef]:
+        captured.extend(refs)
+        return [
+            ResolvedRef(
+                extracted=r,
+                entity_uri=f"uri-{i}",
+                matched_label=r.ref_text,
+                match_score=1.0,
+            )
+            for i, r in enumerate(refs)
+        ]
+
+    mock_resolve.side_effect = _capture
+
+    # 25 manually entered refs — well above the cap.
+    flood = ", ".join(f"REF{n}" for n in range(25))
+
+    client = _authed_client()
+    resp = client.post(
+        "/analyysikeskus/moju-poliitikamottest/extract",
+        data={"intent": "mingi kavatsus", "known_refs": flood},
+    )
+    assert resp.status_code == 200
+    # Resolver received at most the cap, not all 25.
+    assert len(captured) <= _MAX_INTENT_KNOWN_REFS, (
+        f"Expected at most {_MAX_INTENT_KNOWN_REFS} refs to reach the "
+        f"resolver, got {len(captured)}"
+    )
+
+
+@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.intent_analysis.run_adhoc_impact_analysis")
+@patch("app.auth.middleware._get_provider")
+def test_analyze_caps_confirmed_uris_to_max_intent_confirmed_uris(
+    mock_provider: MagicMock,
+    mock_adhoc: MagicMock,
+    mock_recent: MagicMock,
+):
+    """#822 P2-1: each confirmed URI triggers a per-URI Jena impact
+    run. An unbounded POST would fan out N Jena roundtrips. Cap at
+    ``_MAX_INTENT_CONFIRMED_URIS`` (10)."""
+    from app.analyysikeskus.adhoc_analysis import AdhocAnalysisResult
+    from app.analyysikeskus.routes import _MAX_INTENT_CONFIRMED_URIS
+
+    mock_provider.return_value = _stub_provider()
+    mock_adhoc.return_value = AdhocAnalysisResult(
+        findings=_canned_findings(),
+        score=50,
+        graph_uri="g",
+    )
+
+    # 25 confirmed rows posted — well above the cap.
+    data: dict[str, Any] = {
+        "intent": "midagi",
+        "confirmed": [str(i) for i in range(25)],
+    }
+    for i in range(25):
+        data[f"uri_{i}"] = f"uri-{i}"
+        data[f"label_{i}"] = f"label-{i}"
+
+    client = _authed_client()
+    resp = client.post(
+        "/analyysikeskus/moju-poliitikamottest/analyze",
+        data=data,
+    )
+    assert resp.status_code == 200
+    # The analyser was invoked at most the cap, not all 25.
+    assert mock_adhoc.call_count <= _MAX_INTENT_CONFIRMED_URIS, (
+        f"Expected at most {_MAX_INTENT_CONFIRMED_URIS} per-URI runs, got {mock_adhoc.call_count}"
+    )

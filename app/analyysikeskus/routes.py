@@ -6011,6 +6011,20 @@ _INTENT_CONFIDENCE_PRE_CHECK = 0.7
 # pathological input can't bloat the LLM call.
 _MAX_INTENT_LEN = 5000
 
+# Cap manually entered ``known_refs`` rows before the resolver runs.
+# Without this, a comma-separated list of N items would trigger N
+# resolver lookups (each a SPARQL roundtrip) — easy to weaponise from
+# a single authenticated POST. 10 is well above the realistic 1-3 refs
+# a ministry lawyer adds manually.
+_MAX_INTENT_KNOWN_REFS = 10
+
+# Cap how many confirmed URIs the ``/analyze`` handler will run a per-URI
+# impact analysis for. Each URI triggers a Jena-backed ``run_adhoc_impact_analysis``
+# call, so an unbounded confirmed list is an easy fan-out vector. 10 is
+# generous for the realistic VTK workflow (3-8 candidates from the
+# extractor + 1-2 manual additions = ~10 max).
+_MAX_INTENT_CONFIRMED_URIS = 10
+
 
 def _intent_back_link() -> Any:
     """The shared "← Analüüsikeskus" back link rendered above the intake form."""
@@ -6055,8 +6069,14 @@ def _intent_chip_group(
     )
 
 
-def _intent_intake_form() -> Any:
-    """Render the policy-intent intake form (the Step-1 surface)."""
+def _intent_intake_form(prefill: str = "") -> Any:
+    """Render the policy-intent intake form (the Step-1 surface).
+
+    ``prefill`` is the value to seed the intent textarea with — typically
+    the capability example carried in via ``?sisend=`` (so the dashboard
+    "Näide:" affordance + global-search row land the user on a populated
+    form, not a blank one).
+    """
     ctx = prepare_intent_form_context()
     return Form(  # noqa: F405
         # Intent textarea — required, multiline, captures the policy idea.
@@ -6067,6 +6087,7 @@ def _intent_intake_form() -> Any:
             ),
             Textarea(
                 "intent",
+                value=prefill or None,
                 placeholder=(
                     "Kirjelda poliitilist kavatsust vabas vormis. Nt: «Soovin "
                     "lihtsustada puudega inimese toetuse taotlemist nii, et "
@@ -6080,16 +6101,24 @@ def _intent_intake_form() -> Any:
             ),
             cls="form-field",
         ),
-        # Target-group chip group — optional.
+        # Scope-metadata chips below. These currently DO NOT influence
+        # the LLM extractor — they're captured as user-visible context
+        # and echoed back in the result page's Ulatus block so the user
+        # has a record of their stated scope. Chip-driven extraction is
+        # a future enhancement (would require passing them into
+        # ``extract_candidates`` and tuning the prompt). The label copy
+        # makes this expectation explicit so users don't think a chip
+        # selection silently changed the suggestions.
         _intent_chip_group(
             name="target_groups",
-            label="Sihtrühm (valikuline)",
+            label="Sihtrühm (kuvatakse tulemustes — ei mõjuta kandidaatide otsingut)",
             chips=ctx.target_groups,
         ),
-        # Affected-area chip group — optional.
         _intent_chip_group(
             name="affected_areas",
-            label="Mõjutatud valdkonnad (valikuline)",
+            label=(
+                "Mõjutatud valdkonnad (kuvatakse tulemustes — ei mõjuta kandidaatide otsingut)"
+            ),
             chips=ctx.affected_areas,
         ),
         # Optional known-refs free-text input.
@@ -6136,13 +6165,23 @@ def _intent_intake_page(req: Request) -> Any:
     the ``Sisend`` block, and an empty ``#moju-poliitikamottest-result``
     div sits in the ``Tulemused`` block — both POST handlers swap their
     fragments into the latter so the user never leaves the page.
+
+    Reads ``?sisend=`` from the query string and pre-fills the intent
+    textarea — this is the same param the capability-card / global-
+    search helpers already weave into deep-links for any
+    ``/analyysikeskus/*`` workflow, so landing from the dashboard's
+    "Näide:" affordance puts the example policy intent into the form
+    automatically. Length-capped to ``_MAX_INTENT_LEN`` for parity with
+    the POST handler.
     """
     auth = req.scope.get("auth") or None
     theme = get_theme_from_request(req)
 
+    prefill = str(req.query_params.get("sisend") or "").strip()[:_MAX_INTENT_LEN]
+
     return analysis_result_shell(
         workflow_title="Analüüsi poliitikamõttest",
-        input_summary=_intent_intake_form(),
+        input_summary=_intent_intake_form(prefill=prefill),
         results_block=_intent_result_region(
             P(  # noqa: F405
                 "Esita ülal poliitiline kavatsus. Süsteem pakub välja "
@@ -6432,8 +6471,14 @@ async def moju_poliitikamottest_extract(req: Request):
     # resolver tolerates the guess (a law name still resolves cleanly
     # through ``_resolve_provision`` because the act-only branch fires
     # on partial matches).
+    #
+    # Cap to ``_MAX_INTENT_KNOWN_REFS`` so a comma-bomb POST can't
+    # trigger an unbounded number of resolver SPARQL lookups.
     if known_refs_raw:
+        known_count = 0
         for raw_ref in known_refs_raw.split(","):
+            if known_count >= _MAX_INTENT_KNOWN_REFS:
+                break
             ref_text = raw_ref.strip()
             if not ref_text:
                 continue
@@ -6445,6 +6490,14 @@ async def moju_poliitikamottest_extract(req: Request):
                     reasoning="Kasutaja sisestatud käsitsi teadaolev viide.",
                 )
             )
+            known_count += 1
+
+    # Defence in depth: clamp the combined LLM + manual candidate list to
+    # ``_MAX_INTENT_CANDIDATES`` before resolving, so a misbehaving extractor
+    # (or future prompt drift that returns more than the documented 3-8)
+    # can't fan out into the resolver beyond what the UI can render.
+    if len(candidates) > _MAX_INTENT_CANDIDATES:
+        candidates = candidates[:_MAX_INTENT_CANDIDATES]
 
     # Resolve every candidate to a URI (or ``None`` for unresolvable).
     resolved = resolve_candidates(candidates)
@@ -6614,6 +6667,18 @@ async def moju_poliitikamottest_analyze(req: Request):
     # Empty-confirmation friendly state.
     if not confirmed_uris:
         return _intent_empty_state()
+
+    # Cap fan-out before running per-URI Jena impact: each URI triggers
+    # a ``run_adhoc_impact_analysis`` SPARQL roundtrip, so an unbounded
+    # confirmed list is an easy DOS vector from an authenticated POST.
+    # The cap aligns with ``_MAX_INTENT_CANDIDATES`` (12) — anything
+    # above is suspicious for a single-intent workflow.
+    if len(confirmed_uris) > _MAX_INTENT_CONFIRMED_URIS:
+        confirmed_uris = confirmed_uris[:_MAX_INTENT_CONFIRMED_URIS]
+        confirmed_labels = confirmed_labels[:_MAX_INTENT_CONFIRMED_URIS]
+        # Drop matching ``source_labels`` keys so the result page doesn't
+        # carry stale attribution for URIs we trimmed.
+        source_labels = {uri: source_labels[uri] for uri in confirmed_uris if uri in source_labels}
 
     # Run the per-URI aggregated analysis (each URI runs in its own
     # ephemeral synthetic graph; the orchestrator sums the counts).
