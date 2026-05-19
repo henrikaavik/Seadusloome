@@ -424,8 +424,16 @@ class TestUnresolvedEuRefsSection:
         body = resp.text
         # Estonian alert title.
         assert "EL-i kaardistamata viited" in body
-        # The summary line mentions the count.
-        assert "2 CELEX-numbrit" in body
+        # The summary line mentions the count using the inclusive
+        # "EL viidet" wording (extractor's eu_act ref_type covers both
+        # CELEX numbers AND title/acronym mentions like GDPR — see #821
+        # P2 follow-up).
+        assert "2 EL viidet" in body
+        assert "CELEX-numbrit" not in body, (
+            "The summary line must not assert all refs are CELEX-shaped — "
+            "GDPR/title/acronym mentions are also persisted to "
+            "unresolved_eu_refs."
+        )
         assert "kaardistada" in body
         # Both CELEX values are rendered inside <code> tags so they're
         # visually distinct + copy-paste friendly.
@@ -539,10 +547,53 @@ class TestUnresolvedEuRefsSection:
 
         assert resp.status_code == 200
         body = resp.text
-        # Count reflects unique CELEXes, not row count.
-        assert "1 CELEX-numbrit" in body
-        # The CELEX is rendered exactly once.
+        # Count reflects unique refs, not row count.
+        assert "1 EL viidet" in body
+        # The ref is rendered exactly once.
         assert body.count("<code>32016R0679</code>") == 1
+
+    @patch("app.docs.report_routes._fetch_latest_report")
+    @patch("app.docs.report_routes.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_title_acronym_refs_rendered_without_celex_claim(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+        mock_fetch_report: MagicMock,
+    ):
+        """#821 P2 regression: the extractor's ``eu_act`` ref_type covers
+        BOTH canonical CELEX numbers and title/acronym mentions like
+        ``GDPR``. The unresolved-EU section must NOT label acronym
+        mentions as "CELEX-numbrit" in the copy. The inclusive "EL
+        viidet" wording covers both shapes truthfully.
+        """
+        mock_get_provider.return_value = _stub_provider()
+        mock_fetch.return_value = _make_draft()
+        findings = {
+            "affected_entities": [],
+            "conflicts": [],
+            "eu_compliance": [],
+            "gaps": [],
+            "unresolved_eu_refs": [
+                {"ref_text": "GDPR", "confidence": 0.92},
+                {"ref_text": "Working Conditions Directive", "confidence": 0.71},
+            ],
+        }
+        mock_fetch_report.return_value = _make_report_row(
+            affected=0, conflicts=0, gaps=0, findings=findings
+        )
+
+        client = _authed_client()
+        resp = client.get(f"/drafts/{_DRAFT_ID}/report")
+
+        assert resp.status_code == 200
+        body = resp.text
+        assert "2 EL viidet" in body
+        # The acronym/title mentions must NOT be labelled "CELEX".
+        assert "CELEX-numbrit" not in body
+        # Both refs render inside <code> tags regardless of shape.
+        assert "<code>GDPR</code>" in body
+        assert "<code>Working Conditions Directive</code>" in body
 
 
 # ---------------------------------------------------------------------------

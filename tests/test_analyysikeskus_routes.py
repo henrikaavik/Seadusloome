@@ -715,6 +715,34 @@ def test_el_ulevott_canonical_celex_missing_from_data_shows_specific_warning(
 @patch("app.analyysikeskus.routes.search_eu_acts_by_label", return_value=[])
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve", return_value=[])
 @patch("app.auth.middleware._get_provider")
+def test_el_ulevott_lowercase_celex_shows_specific_warning(
+    mock_provider: MagicMock,
+    mock_resolve: MagicMock,
+    mock_search: MagicMock,
+    mock_recent: MagicMock,
+):
+    """#821 P3 regression: the resolver uppercases CELEX form letters
+    before SPARQL lookup, so the shape classifier must agree.
+    Lowercase ``32016r0679`` should fire the canonical-but-missing
+    warning, not the generic "ei tuvastatud" copy.
+    """
+    mock_provider.return_value = _stub_provider()
+    client = _authed_client()
+    resp = client.get("/analyysikeskus/el-ulevott?sisend=32016r0679")
+    assert resp.status_code == 200
+    body = resp.text
+    # Lowercase CELEX should be recognised as canonical-shape.
+    assert "32016r0679" in body  # input echoed verbatim
+    assert "ei ole veel" in body and "ontoloogias kaardistatud" in body
+    assert "Kontrollige käsitsi" in body
+    # The generic copy must NOT appear.
+    assert "Ei tuvastanud EL õigusakti" not in body
+
+
+@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.routes.search_eu_acts_by_label", return_value=[])
+@patch("app.docs.reference_resolver.ReferenceResolver.resolve", return_value=[])
+@patch("app.auth.middleware._get_provider")
 def test_el_ulevott_near_celex_garbage_shows_generic_warning(
     mock_provider: MagicMock,
     mock_resolve: MagicMock,

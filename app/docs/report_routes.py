@@ -986,8 +986,12 @@ def _unresolved_eu_refs_section(findings: dict[str, Any]) -> Any:
         return ""
 
     count = len(unique)
-    # Render the CELEX values as inline <code> for visual emphasis and
-    # so they're easily copy-paste-able into EurLex by the user.
+    # Render the ref values (CELEX numbers AND title/acronym mentions
+    # like "GDPR") as inline <code> for visual emphasis and so they're
+    # easily copy-paste-able into EurLex by the user. The persisted
+    # `unresolved_eu_refs` rows come from any extracted ``eu_act`` ref
+    # that didn't resolve — not only canonical CELEX shapes — so the
+    # copy says "EL viidet" (EU references), not "CELEX-numbrit".
     code_items: list[Any] = []
     for index, ref_text in enumerate(unique):
         if index > 0:
@@ -997,7 +1001,7 @@ def _unresolved_eu_refs_section(findings: dict[str, Any]) -> Any:
     body = Div(  # noqa: F405
         P(  # noqa: F405
             f"Tuvastasime dokumendis viiteid EL õigusele "
-            f"({count} CELEX-numbrit), mida ei õnnestunud "
+            f"({count} EL viidet), mida ei õnnestunud "
             "ontoloogias kaardistada:",
         ),
         P(*code_items, cls="unresolved-eu-refs-list"),  # noqa: F405

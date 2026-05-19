@@ -479,7 +479,16 @@ class TestUnresolvedEuRefsDocxSection:
         joined = " | ".join(paragraphs)
         assert "32016R0679" in joined, "GDPR CELEX must appear in DOCX"
         assert "32019L1152" in joined, "Working Conditions CELEX must appear in DOCX"
-        assert "2 CELEX-numbrit" in joined, "DOCX must mention the count of unresolved CELEXes"
+        assert "2 EL viidet" in joined, (
+            "DOCX must mention the count of unresolved EU refs using the "
+            "inclusive 'EL viidet' wording — the extractor accepts both "
+            "CELEX numbers and title/acronym mentions like GDPR, so a "
+            "blanket 'CELEX-numbrit' claim is wrong (#821 P2)."
+        )
+        assert "CELEX-numbrit" not in joined, (
+            "Do not label the unresolved set as CELEX-only — some entries "
+            "may be acronyms or titles."
+        )
         assert "Kontrollige käsitsi" in joined
 
     def test_warning_section_omitted_when_empty(self, tmp_export_dir: Path):
@@ -570,6 +579,48 @@ class TestUnresolvedEuRefsDocxSection:
         assert len(celex_bullets) == 1, (
             "Duplicate CELEX numbers must collapse to a single bullet — got " + repr(celex_bullets)
         )
-        # The summary line shows the unique count.
+        # The summary line shows the unique count using the inclusive
+        # "EL viidet" wording.
         joined = " | ".join(paragraphs)
-        assert "1 CELEX-numbrit" in joined
+        assert "1 EL viidet" in joined
+
+    def test_title_acronym_refs_rendered_without_celex_claim(self, tmp_export_dir: Path):
+        """#821 P2 regression — same as the HTML renderer test: the
+        DOCX export must use the inclusive "EL viidet" wording when
+        unresolved_eu_refs contains title/acronym mentions (not only
+        CELEX numbers).
+        """
+        draft = _make_draft()
+        findings = {
+            "affected_entities": [],
+            "conflicts": [],
+            "eu_compliance": [],
+            "gaps": [],
+            "unresolved_eu_refs": [
+                {"ref_text": "GDPR", "confidence": 0.92},
+                {"ref_text": "Working Conditions Directive", "confidence": 0.71},
+            ],
+        }
+        row = _build_report_row(
+            affected=0,
+            conflicts=0,
+            gaps=0,
+            findings=findings,
+        )
+
+        with patch("app.docs.docx_export.Document") as mock_doc_cls:
+            mock_doc = MagicMock()
+            mock_doc.sections = []
+            mock_doc_cls.return_value = mock_doc
+
+            build_impact_report_docx(draft, row)
+
+        paragraphs = _paragraph_texts(mock_doc)
+        joined = " | ".join(paragraphs)
+        # Inclusive wording, count is 2.
+        assert "2 EL viidet" in joined
+        # Acronym/title mentions must NOT be labelled "CELEX".
+        assert "CELEX-numbrit" not in joined
+        # Both refs appear as bullet entries.
+        assert "GDPR" in paragraphs
+        assert "Working Conditions Directive" in paragraphs

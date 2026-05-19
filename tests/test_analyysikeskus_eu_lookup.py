@@ -65,9 +65,17 @@ class TestIsCanonicalCelexShape:
         # behaviour is cheap and prevents a TypeError if a caller forgets.
         assert is_canonical_celex_shape(None) is False  # type: ignore[arg-type]
 
-    def test_rejects_lowercase_form_letter(self):
-        # Real CELEX form letters are always uppercase.
-        assert is_canonical_celex_shape("32016r0679") is False
+    def test_accepts_lowercase_form_letter(self):
+        # The resolver itself uppercases CELEX form letters before SPARQL
+        # lookup (see reference_resolver._normalize_celex). The shape helper
+        # must agree, otherwise lowercase input that the resolver *would*
+        # have recognised falls through to the generic "ei tuvastatud"
+        # message instead of the canonical "ei ole veel ontoloogias
+        # kaardistatud" warning. Reported as #821 P3.
+        assert is_canonical_celex_shape("32016r0679") is True
+        assert is_canonical_celex_shape("32019l1152") is True
+        # Mixed case also accepted.
+        assert is_canonical_celex_shape("32016r0679".upper()) is True
 
     def test_rejects_invalid_form_letter_x(self):
         # Acceptance criterion from #805 plan: X is outside the

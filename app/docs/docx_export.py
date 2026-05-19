@@ -433,18 +433,23 @@ def _add_unresolved_eu_refs(doc: Any, findings: dict[str, Any]) -> int:
 
     doc.add_heading("EL-i kaardistamata viited", level=1)
     count = len(unique)
+    # The persisted ``unresolved_eu_refs`` rows can include both
+    # canonical CELEX numbers (e.g. ``32016R0679``) and title/acronym
+    # mentions (e.g. ``GDPR``) — the extractor accepts both forms — so
+    # the copy says "EL viidet" (EU references), not "CELEX-numbrit".
     doc.add_paragraph(
         f"Tuvastasime dokumendis viiteid EL õigusele "
-        f"({count} CELEX-numbrit), mida ei õnnestunud ontoloogias "
+        f"({count} EL viidet), mida ei õnnestunud ontoloogias "
         "kaardistada:"
     )
-    # List each CELEX as its own bullet so they're easy to scan in the
+    # List each ref as its own bullet so they're easy to scan in the
     # printed report. python-docx's "List Bullet" style ships with the
     # default template.
     for ref_text in unique:
         para = doc.add_paragraph(ref_text, style="List Bullet")
-        # Render the CELEX text in monospace via the run-level font
-        # attribute so it visually matches the on-page <code> styling.
+        # Render the ref text in monospace via the run-level font
+        # attribute so it visually matches the on-page <code> styling
+        # (works equally for CELEX shapes and acronyms).
         for run in para.runs:
             run.font.name = "Courier New"
     doc.add_paragraph(

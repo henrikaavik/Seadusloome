@@ -57,6 +57,13 @@ _CANONICAL_CELEX_RE = re.compile(r"^[1-9]\d{4}[RLDHSFGABCEJMOPQTUK]\d{4}$")
 def is_canonical_celex_shape(s: str) -> bool:
     """True if *s* looks like a real CELEX number.
 
+    Case-insensitive: ``32016R0679`` and ``32016r0679`` both match.
+    The resolver itself uppercases lowercase form-letters before
+    SPARQL lookup (see :func:`app.docs.reference_resolver._normalize_celex`),
+    so the user-facing classifier must do the same — otherwise lowercase
+    CELEX input that the resolver *would* recognise still fell through
+    to the generic "ei tuvastatud" message.
+
     Used by the EL ülevõtt route (#805) and the impact-report renderer
     (#815) to distinguish "user typed a canonical-shaped CELEX that
     happens to be missing from our ontology" from "user typed prose /
@@ -88,6 +95,8 @@ def is_canonical_celex_shape(s: str) -> bool:
     Examples:
         >>> is_canonical_celex_shape("32016R0679")  # GDPR
         True
+        >>> is_canonical_celex_shape("32016r0679")  # lowercase form letter
+        True
         >>> is_canonical_celex_shape("32019L1152")  # Working Conditions
         True
         >>> is_canonical_celex_shape("12abc34")
@@ -100,7 +109,10 @@ def is_canonical_celex_shape(s: str) -> bool:
     stripped = (s or "").strip()
     if not stripped:
         return False
-    return bool(_CANONICAL_CELEX_RE.match(stripped))
+    # Uppercase the form letter (and any incidental letter casing) before
+    # the strict whitelist match. The resolver itself uppercases CELEX
+    # form letters before SPARQL lookup, so this helper must agree.
+    return bool(_CANONICAL_CELEX_RE.match(stripped.upper()))
 
 
 # Cap the candidate list — the disambiguation card stays scannable, and
