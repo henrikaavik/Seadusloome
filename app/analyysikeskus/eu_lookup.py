@@ -58,11 +58,11 @@ def is_canonical_celex_shape(s: str) -> bool:
     """True if *s* looks like a real CELEX number.
 
     Case-insensitive: ``32016R0679`` and ``32016r0679`` both match.
-    The resolver itself uppercases lowercase form-letters before
-    SPARQL lookup (see :func:`app.docs.reference_resolver._normalize_celex`),
-    so the user-facing classifier must do the same — otherwise lowercase
-    CELEX input that the resolver *would* recognise still fell through
-    to the generic "ei tuvastatud" message.
+    The resolver itself uppercases CELEX form-letters before SPARQL
+    lookup (inline ``.upper()`` calls at ``reference_resolver.py:664``
+    and ``:669``), so this user-facing classifier must do the same —
+    otherwise lowercase CELEX input that the resolver *would* recognise
+    still fell through to the generic "ei tuvastatud" message.
 
     Used by the EL ülevõtt route (#805) and the impact-report renderer
     (#815) to distinguish "user typed a canonical-shaped CELEX that
