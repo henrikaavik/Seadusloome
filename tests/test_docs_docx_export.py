@@ -420,3 +420,156 @@ class TestBuildImpactReportDocx:
         # phrasing — verify by counting occurrences of the partial
         # phrase (should equal 1 for the one partial row only).
         assert joined.count("Akt (sätet ei leitud)") == 1
+
+
+# ---------------------------------------------------------------------------
+# #815 — unresolved EU references warning section in DOCX
+# ---------------------------------------------------------------------------
+
+
+def _paragraph_texts(doc_mock: MagicMock) -> list[str]:
+    """Collect the text passed to every ``doc.add_paragraph`` call."""
+    out: list[str] = []
+    for call in doc_mock.add_paragraph.call_args_list:
+        if call.args:
+            out.append(call.args[0])
+    return out
+
+
+class TestUnresolvedEuRefsDocxSection:
+    """The DOCX export must surface the same warning the on-page
+    report does when ``report_data["unresolved_eu_refs"]`` is
+    non-empty.
+    """
+
+    def test_warning_section_rendered_with_celexes(self, tmp_export_dir: Path):
+        draft = _make_draft()
+        findings_with_unresolved = {
+            "affected_entities": [],
+            "conflicts": [],
+            "eu_compliance": [],
+            "gaps": [],
+            "unresolved_eu_refs": [
+                {"ref_text": "32016R0679", "confidence": 0.95},
+                {"ref_text": "32019L1152", "confidence": 0.88},
+            ],
+        }
+        row = _build_report_row(
+            affected=0,
+            conflicts=0,
+            gaps=0,
+            findings=findings_with_unresolved,
+        )
+
+        with patch("app.docs.docx_export.Document") as mock_doc_cls:
+            mock_doc = MagicMock()
+            mock_doc.sections = []
+            mock_doc_cls.return_value = mock_doc
+
+            build_impact_report_docx(draft, row)
+
+        headings = _heading_calls(mock_doc)
+        assert "EL-i kaardistamata viited" in headings, (
+            "DOCX export must emit the 'kaardistamata viited' heading "
+            "when unresolved_eu_refs is non-empty"
+        )
+
+        # Collect every CELEX-bearing paragraph (the bullet list).
+        paragraphs = _paragraph_texts(mock_doc)
+        joined = " | ".join(paragraphs)
+        assert "32016R0679" in joined, "GDPR CELEX must appear in DOCX"
+        assert "32019L1152" in joined, "Working Conditions CELEX must appear in DOCX"
+        assert "2 CELEX-numbrit" in joined, "DOCX must mention the count of unresolved CELEXes"
+        assert "Kontrollige käsitsi" in joined
+
+    def test_warning_section_omitted_when_empty(self, tmp_export_dir: Path):
+        """No section, no heading, no extra paragraphs when the list is empty."""
+        draft = _make_draft()
+        findings_empty = {
+            "affected_entities": [],
+            "conflicts": [],
+            "eu_compliance": [],
+            "gaps": [],
+            "unresolved_eu_refs": [],
+        }
+        row = _build_report_row(
+            affected=0,
+            conflicts=0,
+            gaps=0,
+            findings=findings_empty,
+        )
+
+        with patch("app.docs.docx_export.Document") as mock_doc_cls:
+            mock_doc = MagicMock()
+            mock_doc.sections = []
+            mock_doc_cls.return_value = mock_doc
+
+            build_impact_report_docx(draft, row)
+
+        headings = _heading_calls(mock_doc)
+        assert "EL-i kaardistamata viited" not in headings
+
+    def test_warning_section_omitted_when_key_missing(self, tmp_export_dir: Path):
+        """Legacy reports (pre-#815) have no key — must not crash, must
+        not render the section."""
+        draft = _make_draft()
+        # Note: NO ``unresolved_eu_refs`` key at all.
+        legacy_findings = {
+            "affected_entities": [],
+            "conflicts": [],
+            "eu_compliance": [],
+            "gaps": [],
+        }
+        row = _build_report_row(
+            affected=0,
+            conflicts=0,
+            gaps=0,
+            findings=legacy_findings,
+        )
+
+        with patch("app.docs.docx_export.Document") as mock_doc_cls:
+            mock_doc = MagicMock()
+            mock_doc.sections = []
+            mock_doc_cls.return_value = mock_doc
+
+            build_impact_report_docx(draft, row)
+
+        headings = _heading_calls(mock_doc)
+        assert "EL-i kaardistamata viited" not in headings
+
+    def test_duplicate_celex_refs_are_deduplicated(self, tmp_export_dir: Path):
+        """Same CELEX in the JSON N times → one bullet in the .docx."""
+        draft = _make_draft()
+        findings = {
+            "affected_entities": [],
+            "conflicts": [],
+            "eu_compliance": [],
+            "gaps": [],
+            "unresolved_eu_refs": [
+                {"ref_text": "32016R0679", "confidence": 0.95},
+                {"ref_text": "32016R0679", "confidence": 0.85},
+                {"ref_text": "32016R0679", "confidence": 0.75},
+            ],
+        }
+        row = _build_report_row(
+            affected=0,
+            conflicts=0,
+            gaps=0,
+            findings=findings,
+        )
+
+        with patch("app.docs.docx_export.Document") as mock_doc_cls:
+            mock_doc = MagicMock()
+            mock_doc.sections = []
+            mock_doc_cls.return_value = mock_doc
+
+            build_impact_report_docx(draft, row)
+
+        paragraphs = _paragraph_texts(mock_doc)
+        celex_bullets = [p for p in paragraphs if p == "32016R0679"]
+        assert len(celex_bullets) == 1, (
+            "Duplicate CELEX numbers must collapse to a single bullet — got " + repr(celex_bullets)
+        )
+        # The summary line shows the unique count.
+        joined = " | ".join(paragraphs)
+        assert "1 CELEX-numbrit" in joined

@@ -81,7 +81,7 @@ from app.analyysikeskus.court_practice import (
     list_decisions_for_act,
     list_decisions_for_provision,
 )
-from app.analyysikeskus.eu_lookup import search_eu_acts_by_label
+from app.analyysikeskus.eu_lookup import is_canonical_celex_shape, search_eu_acts_by_label
 from app.analyysikeskus.history import get_history_bundle, temporal_status_label
 from app.analyysikeskus.input_parser import parse_user_reference
 from app.analyysikeskus.result_shell import analysis_result_shell
@@ -2338,15 +2338,39 @@ def _render_eu_unresolved(
     sisend: str,
     scope: _Scope,
 ) -> Any:
-    """Render the "Ei tuvastanud EL õigusakti" warning page."""
+    """Render the "Ei tuvastanud EL õigusakti" warning page.
+
+    Two message variants (#805):
+
+    * **Canonical-CELEX shape** (e.g. ``32016R0679`` for GDPR,
+      ``32019L1152`` for Working Conditions): the user typed a
+      well-formed CELEX that simply hasn't been imported into the
+      ontology yet. Tell them *which* CELEX is missing so they know
+      to check the act manually rather than wondering if they
+      mistyped.
+    * **Anything else** (free prose, garbage, malformed CELEX): keep
+      the generic "Ei tuvastatud" hint with an example to nudge the
+      user toward a structured input.
+
+    The same ``Alert`` warning variant is used in both branches so the
+    surrounding scope block / actions / result-shell layout is
+    identical — only the copy changes.
+    """
+    if is_canonical_celex_shape(sisend):
+        message = (
+            f"EL õigusakt CELEX-numbriga {sisend.strip()} ei ole veel "
+            "ontoloogias kaardistatud. Kontrollige käsitsi või "
+            "proovige akti pealkirja."
+        )
+    else:
+        message = (
+            "Ei tuvastanud EL õigusakti. Proovige CELEX-numbrit "
+            "(nt 32016R0679) või akti pealkirja."
+        )
     return analysis_result_shell(
         workflow_title="EL ülevõtt ja harmoneerimine",
         input_summary=P(f"Sisestasite: «{sisend}»"),  # noqa: F405
-        results_block=Alert(
-            "Ei tuvastanud EL õigusakti. Proovige CELEX-numbrit (nt 32016R0679) "
-            "või akti pealkirja.",
-            variant="warning",
-        ),
+        results_block=Alert(message, variant="warning"),
         evidence_block=_missing_row("—"),
         actions=[
             {"label": "Küsi nõustajalt", "href": "/chat/new"},

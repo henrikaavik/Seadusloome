@@ -108,6 +108,25 @@ def analyze_impact(
         draft = get_draft(conn, draft_id)
         if draft is None:
             raise ValueError(f"Draft {draft_id} not found")
+        # #815: fetch fully-unresolved EU references BEFORE the resolved
+        # SELECT below filters them out. The downstream analyzer never
+        # sees these rows (entity_uri IS NULL AND partial_match IS NULL),
+        # but the impact-report renderer + .docx export use them to
+        # surface a "we detected EU refs but couldn't map them" warning
+        # so the user knows the analysis is missing coverage rather
+        # than silently treating "no EU findings" as "no EU impact".
+        unresolved_eu_rows = conn.execute(
+            """
+            select ref_text, confidence
+            from draft_entities
+            where draft_id = %s
+              and ref_type = 'eu_act'
+              and entity_uri is null
+              and partial_match is null
+            order by confidence desc
+            """,
+            (str(draft_id),),
+        ).fetchall()
         entity_rows = conn.execute(
             """
             select ref_text, entity_uri, confidence, ref_type, location,
@@ -118,6 +137,27 @@ def analyze_impact(
             """,
             (str(draft_id),),
         ).fetchall()
+
+    # Normalise the unresolved rows into the JSON-friendly shape that
+    # gets persisted in ``report_data["unresolved_eu_refs"]``.
+    # Tolerates both tuple-style rows (psycopg default) and dict-style
+    # rows (rare; some test fixtures use DictRow).
+    unresolved_eu_refs: list[dict[str, Any]] = []
+    for row in unresolved_eu_rows or []:
+        if isinstance(row, dict):
+            ref_text = row.get("ref_text")
+            confidence = row.get("confidence")
+        else:
+            ref_text = row[0] if len(row) > 0 else None
+            confidence = row[1] if len(row) > 1 else None
+        ref_text_str = str(ref_text or "").strip()
+        if not ref_text_str:
+            continue
+        try:
+            conf = float(confidence) if confidence is not None else 0.0
+        except (TypeError, ValueError):
+            conf = 0.0
+        unresolved_eu_refs.append({"ref_text": ref_text_str, "confidence": conf})
 
     resolved_refs = [_row_to_resolved_ref(row) for row in entity_rows]
     logger.info(
@@ -191,6 +231,13 @@ def analyze_impact(
             findings_dict_for_report["sanctions_delta"] = dataclasses.asdict(sanctions_delta)
         if burden_delta is not None:
             findings_dict_for_report["burden_delta"] = dataclasses.asdict(burden_delta)
+        # #815: persist unresolved-EU-ref list (may be empty). The
+        # renderer + .docx export read this key to surface a "EU refs
+        # detected but couldn't be mapped" warning when non-empty.
+        # Legacy reports lack the key entirely; readers use
+        # ``report_data.get("unresolved_eu_refs", [])`` to stay
+        # backward-compatible.
+        findings_dict_for_report["unresolved_eu_refs"] = unresolved_eu_refs
         report_data = json.dumps(findings_dict_for_report)
 
         with get_connection() as conn:

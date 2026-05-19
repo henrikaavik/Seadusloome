@@ -103,15 +103,39 @@ def _make_load_conn(
     *,
     draft: Draft | None = None,
     entity_rows: list[tuple] | None = None,
+    unresolved_eu_rows: list[tuple] | None = None,
 ) -> MagicMock:
     """Build a mock for the initial ``get_connection`` block.
 
     ``get_draft`` is patched separately, so this connection only needs
-    to answer the ``select ... from draft_entities`` query.
+    to answer the two ``select ... from draft_entities`` queries:
+
+    1. ``where ref_type='eu_act' AND entity_uri IS NULL ...`` — the
+       #815 unresolved-EU-refs query. ``unresolved_eu_rows`` (each row
+       a ``(ref_text, confidence)`` tuple) drives this.
+    2. ``where (entity_uri IS NOT NULL OR partial_match IS NOT NULL)``
+       — the existing resolved-refs query. ``entity_rows`` (each row a
+       6-tuple per ``_row_to_resolved_ref``) drives this.
+
+    The order is preserved by ``side_effect``: the handler calls (1)
+    BEFORE (2), so the first execute → first list, second → second.
     """
     conn = MagicMock()
-    fetchall_result = entity_rows or []
-    conn.execute.return_value.fetchall.return_value = fetchall_result
+    unresolved_rows = unresolved_eu_rows or []
+    resolved_rows = entity_rows or []
+
+    # The handler issues the unresolved-EU query first, then the
+    # resolved-refs query. Build cursor-mocks for each so .fetchall()
+    # returns the matching row list per call.
+    def _cursor_for(rows: list[tuple]) -> MagicMock:
+        cursor = MagicMock()
+        cursor.fetchall.return_value = rows
+        return cursor
+
+    conn.execute.side_effect = [
+        _cursor_for(unresolved_rows),
+        _cursor_for(resolved_rows),
+    ]
     return conn
 
 
@@ -685,15 +709,37 @@ class TestAnalyzeImpactPartialMatch:
             ]
             analyze_impact({"draft_id": str(_DRAFT_ID)})
 
-        # The load-connection's SELECT must contain ``partial_match``
-        # (widened column projection) and must NOT have the old
-        # ``entity_uri is not null`` filter that hid act-level rows.
-        select_calls = [
+        # Post-#815 the handler issues TWO SELECTs against
+        # ``draft_entities``: one for fully-unresolved EU refs (no
+        # ``partial_match`` in the projection), and one for resolved /
+        # act-level rows (which MUST project ``partial_match``). We
+        # filter to the resolved-refs SELECT for the original
+        # column-widening assertion — that one is identified by the
+        # ``entity_uri`` column appearing in the projection (the
+        # unresolved-EU SELECT projects only ref_text + confidence).
+        all_drafts_selects = [
             c.args[0]
             for c in load_conn.execute.call_args_list
             if "from draft_entities" in c.args[0].lower()
         ]
-        assert len(select_calls) == 1
+        assert len(all_drafts_selects) == 2, (
+            "Post-#815 the handler must issue exactly two SELECTs from "
+            "draft_entities (unresolved-EU + resolved/partial-match). "
+            f"Got: {all_drafts_selects!r}"
+        )
+        # Identify the resolved-refs SELECT by the ``entity_uri`` token
+        # appearing BEFORE the FROM clause — only that projection lists
+        # entity_uri as a column. The unresolved-EU SELECT only
+        # references it in the WHERE clause.
+        select_calls = [
+            s
+            for s in all_drafts_selects
+            if "entity_uri" in s.lower().split("from draft_entities")[0]
+        ]
+        assert len(select_calls) == 1, (
+            "Exactly one SELECT must project entity_uri (the resolved-refs "
+            "query). Got: " + repr(select_calls)
+        )
         select_sql = select_calls[0].lower()
         assert "partial_match" in select_sql, (
             "The entity-load SELECT must project partial_match — "
@@ -716,6 +762,228 @@ class TestAnalyzeImpactPartialMatch:
                 "it must be paired with OR partial_match is not null "
                 "so act-level rows still flow through"
             )
+
+
+class TestUnresolvedEuRefs:
+    """#815 — unresolved EU refs surface in ``report_data``.
+
+    The analyzer is explicitly Postgres-free, so the warning must come
+    from the handler. Before the resolver's filtered SELECT runs, we
+    query for rows where ``ref_type='eu_act'`` and BOTH ``entity_uri``
+    AND ``partial_match`` are NULL. Those rows are persisted into
+    ``report_data["unresolved_eu_refs"]`` so the renderer / .docx
+    export can surface them as a warning to the user.
+    """
+
+    def _run_with_rows(
+        self,
+        *,
+        unresolved_eu_rows: list[tuple],
+        entity_rows: list[tuple] | None = None,
+    ) -> str:
+        """Run analyze_impact with the given row fixtures and return
+        the JSON-encoded ``report_data`` blob written to impact_reports.
+        """
+        draft = _make_draft()
+        load_conn = _make_load_conn(
+            entity_rows=entity_rows or [],
+            unresolved_eu_rows=unresolved_eu_rows,
+        )
+        insert_conn = _make_insert_conn()
+        sync_conn = _make_sync_conn((datetime(2026, 5, 19, 12, 0, tzinfo=UTC), 1))
+
+        mock_analyzer = MagicMock()
+        mock_analyzer.analyze.return_value = _findings(affected=0)
+
+        with (
+            patch("app.docs.analyze_handler.get_connection") as mock_get_conn,
+            patch("app.docs.analyze_handler.get_draft", return_value=draft),
+            patch("app.docs.analyze_handler.get_latest_version", return_value=_make_version()),
+            patch("app.docs.analyze_handler.build_draft_graph", return_value="# t"),
+            patch("app.docs.analyze_handler.put_named_graph", return_value=True),
+            patch("app.docs.analyze_handler.write_doc_lineage", return_value=None),
+            patch("app.docs.analyze_handler.fetch_draft", return_value=None),
+            patch(
+                "app.docs.analyze_handler.ImpactAnalyzer",
+                return_value=mock_analyzer,
+            ),
+            patch(
+                "app.docs.analyze_handler.calculate_impact_score",
+                return_value=0,
+            ),
+        ):
+            mock_get_conn.side_effect = [
+                _ConnectCM(load_conn),
+                _ConnectCM(sync_conn),
+                _ConnectCM(insert_conn),
+            ]
+            analyze_impact({"draft_id": str(_DRAFT_ID)})
+
+        # Pull the report_data JSON out of the INSERT params.
+        insert_calls = [
+            c
+            for c in insert_conn.execute.call_args_list
+            if "insert into impact_reports" in c.args[0].lower()
+        ]
+        assert insert_calls, "No INSERT into impact_reports found"
+        params = insert_calls[0].args[1]
+        for value in params:
+            if isinstance(value, str) and "affected_entities" in value:
+                return value
+        raise AssertionError("report_data JSON not present in INSERT params")
+
+    def test_unresolved_eu_rows_appear_in_report_data(self):
+        """A draft mentioning GDPR + Working Conditions whose CELEXes
+        weren't resolved must surface both ref_texts in
+        ``report_data["unresolved_eu_refs"]``.
+        """
+        unresolved_rows: list[tuple] = [
+            ("32016R0679", 0.95),
+            ("32019L1152", 0.88),
+        ]
+        report_data_json = self._run_with_rows(unresolved_eu_rows=unresolved_rows)
+        report_data = json.loads(report_data_json)
+
+        assert "unresolved_eu_refs" in report_data, (
+            "report_data must always carry the unresolved_eu_refs key "
+            "(empty list when nothing to warn about)"
+        )
+        refs = report_data["unresolved_eu_refs"]
+        assert len(refs) == 2
+        ref_texts = {r["ref_text"] for r in refs}
+        assert ref_texts == {"32016R0679", "32019L1152"}
+        # Confidence is preserved as a float so the renderer can sort
+        # or filter by it in a follow-up.
+        for ref in refs:
+            assert isinstance(ref["confidence"], float)
+            assert 0.0 <= ref["confidence"] <= 1.0
+
+    def test_no_unresolved_rows_yields_empty_list(self):
+        """When the resolver maps every EU ref cleanly,
+        ``unresolved_eu_refs`` is an empty list — never missing — so
+        the renderer's ``.get(...)`` fallback hits a consistent shape.
+        """
+        report_data_json = self._run_with_rows(unresolved_eu_rows=[])
+        report_data = json.loads(report_data_json)
+
+        assert report_data.get("unresolved_eu_refs") == []
+
+    def test_resolved_rows_do_not_appear_in_unresolved_list(self):
+        """A row that the resolver mapped to an ``entity_uri`` must NOT
+        appear in ``unresolved_eu_refs`` — the handler's two SELECTs
+        partition draft_entities by resolution status and only the
+        first one feeds the warning list.
+        """
+        # The DB layer is mocked, so this test pins the contract:
+        # rows whose resolver-output (entity_uri non-null) make it to
+        # the unresolved-EU SELECT are excluded BY THE QUERY. We
+        # therefore only need to assert the handler doesn't somehow
+        # forward resolved entity_rows into the unresolved list.
+        resolved_eu_rows: list[tuple] = [
+            (
+                "32016R0679",
+                "https://data.riik.ee/ontology/estleg#EU-32016R0679",
+                0.95,
+                "eu_act",
+                json.dumps({}),
+                None,
+            ),
+        ]
+        report_data_json = self._run_with_rows(
+            unresolved_eu_rows=[],
+            entity_rows=resolved_eu_rows,
+        )
+        report_data = json.loads(report_data_json)
+        assert report_data.get("unresolved_eu_refs") == [], (
+            "Resolved rows must NOT appear in unresolved_eu_refs"
+        )
+
+    def test_blank_ref_text_rows_are_skipped(self):
+        """Defensive: a row with NULL/empty ref_text (unexpected, but
+        possible if the extractor wrote a sentinel) is silently
+        dropped from the warning list. The user gets nothing useful
+        from an empty ``<code></code>`` chip.
+        """
+        report_data_json = self._run_with_rows(
+            unresolved_eu_rows=[
+                ("", 0.5),
+                ("   ", 0.5),
+                ("32016R0679", 0.9),
+            ],
+        )
+        report_data = json.loads(report_data_json)
+        refs = report_data["unresolved_eu_refs"]
+        # Only the GDPR CELEX should survive — the empty/blank ones are filtered.
+        assert len(refs) == 1
+        assert refs[0]["ref_text"] == "32016R0679"
+
+    def test_unresolved_eu_select_uses_correct_filters(self):
+        """The unresolved-EU SELECT must filter on ref_type='eu_act'
+        AND entity_uri IS NULL AND partial_match IS NULL — these
+        together are the "draft mentioned an EU reference but we
+        couldn't map it" predicate.
+        """
+        draft = _make_draft()
+        load_conn = _make_load_conn(unresolved_eu_rows=[], entity_rows=[])
+        insert_conn = _make_insert_conn()
+        sync_conn = _make_sync_conn(None)
+
+        mock_analyzer = MagicMock()
+        mock_analyzer.analyze.return_value = _findings(affected=0)
+
+        with (
+            patch("app.docs.analyze_handler.get_connection") as mock_get_conn,
+            patch("app.docs.analyze_handler.get_draft", return_value=draft),
+            patch("app.docs.analyze_handler.get_latest_version", return_value=_make_version()),
+            patch("app.docs.analyze_handler.build_draft_graph", return_value="# t"),
+            patch("app.docs.analyze_handler.put_named_graph", return_value=True),
+            patch("app.docs.analyze_handler.write_doc_lineage", return_value=None),
+            patch("app.docs.analyze_handler.fetch_draft", return_value=None),
+            patch(
+                "app.docs.analyze_handler.ImpactAnalyzer",
+                return_value=mock_analyzer,
+            ),
+            patch(
+                "app.docs.analyze_handler.calculate_impact_score",
+                return_value=0,
+            ),
+        ):
+            mock_get_conn.side_effect = [
+                _ConnectCM(load_conn),
+                _ConnectCM(sync_conn),
+                _ConnectCM(insert_conn),
+            ]
+            analyze_impact({"draft_id": str(_DRAFT_ID)})
+
+        # Two SELECTs from draft_entities — one of them is the
+        # unresolved-EU query and must carry the three required
+        # WHERE-clause predicates.
+        drafts_selects = [
+            c.args[0]
+            for c in load_conn.execute.call_args_list
+            if "from draft_entities" in c.args[0].lower()
+        ]
+        # Identify by absence of "entity_uri" in the SELECT projection.
+        unresolved_select = next(
+            (
+                s
+                for s in drafts_selects
+                if "entity_uri" not in s.lower().split("from draft_entities")[0]
+            ),
+            None,
+        )
+        assert unresolved_select is not None, "No unresolved-EU SELECT found"
+        sql_lower = unresolved_select.lower()
+        # The three required predicates.
+        assert "ref_type" in sql_lower and "'eu_act'" in sql_lower, (
+            "unresolved-EU SELECT must filter on ref_type = 'eu_act'"
+        )
+        assert "entity_uri is null" in sql_lower, (
+            "unresolved-EU SELECT must filter on entity_uri IS NULL"
+        )
+        assert "partial_match is null" in sql_lower, (
+            "unresolved-EU SELECT must filter on partial_match IS NULL"
+        )
 
 
 class TestRegistration:

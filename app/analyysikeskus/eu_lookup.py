@@ -21,12 +21,87 @@ the "ei tuvastanud EL õigusakti" warning rather than 500.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from app.docs.impact.queries import PREFIXES
 from app.ontology.sparql_client import SparqlClient
 
 logger = logging.getLogger(__name__)
+
+# Canonical CELEX shape: 1-digit sector (1-9) + 4-digit year + single
+# uppercase form letter (R/L/D/H/…) + 4-digit running number.
+# Examples: ``32016R0679`` (GDPR), ``32019L1152`` (Working Conditions).
+# Counter-examples: ``12abc34``, ``GDPR``, ``directive 95/46``,
+# ``32016X0679`` (invalid form letter — see below).
+#
+# Form-letter whitelist: the documented binding-instrument letters that
+# a Seadusloome user is realistically going to look up. ``X`` and other
+# rarely-used letters are deliberately excluded so the warning message
+# stays a high-signal "this looks like a real CELEX missing from data"
+# rather than firing on every alphanumeric near-CELEX shape. Tightening
+# this set would require a follow-up change with user data on which
+# letters get typed in practice.
+#
+# Note this is intentionally STRICTER than the matchers in
+# :mod:`app.analyysikeskus.input_parser` (``\\d{5}[A-Z]\\d{1,4}``).
+# Those have to accept sloppy CELEX shapes embedded in pasted phrases
+# so the resolver gets a chance to look them up. This helper is the
+# user-facing "is this a CELEX we should report as canonical-but-missing
+# from the ontology" check — when it matches, we tell the user "this
+# looks like a real CELEX number, it's just not in our data yet";
+# when it doesn't, we keep the generic "ei tuvastatud" message.
+_CANONICAL_CELEX_RE = re.compile(r"^[1-9]\d{4}[RLDHSFGABCEJMOPQTUK]\d{4}$")
+
+
+def is_canonical_celex_shape(s: str) -> bool:
+    """True if *s* looks like a real CELEX number.
+
+    Used by the EL ülevõtt route (#805) and the impact-report renderer
+    (#815) to distinguish "user typed a canonical-shaped CELEX that
+    happens to be missing from our ontology" from "user typed prose /
+    garbage that doesn't look like an EU reference at all". When True,
+    the UI surfaces a "kontrollige käsitsi" warning naming the CELEX;
+    when False, it shows the generic "Ei tuvastanud EL õigusakti" hint.
+
+    The regex matches the canonical CELEX shape:
+
+    * Sector: a single non-zero digit (``1`` – ``9``) — sector ``0``
+      doesn't exist in EurLex.
+    * Year: four digits (``1957`` – present).
+    * Form letter: one uppercase ASCII letter drawn from the binding-
+      instrument whitelist (``R`` regulation, ``L`` directive,
+      ``D`` decision, ``H`` recommendation, …). The rarely-used ``X``
+      ("other") is deliberately excluded — see the regex comment
+      above for the rationale.
+    * Running number: four digits (zero-padded).
+
+    Args:
+        s: The candidate string. Leading/trailing whitespace is
+            stripped before matching; an empty/blank input returns
+            ``False``.
+
+    Returns:
+        ``True`` when *s* (stripped) matches the canonical CELEX shape;
+        ``False`` otherwise. Never raises.
+
+    Examples:
+        >>> is_canonical_celex_shape("32016R0679")  # GDPR
+        True
+        >>> is_canonical_celex_shape("32019L1152")  # Working Conditions
+        True
+        >>> is_canonical_celex_shape("12abc34")
+        False
+        >>> is_canonical_celex_shape("GDPR")
+        False
+        >>> is_canonical_celex_shape("")
+        False
+    """
+    stripped = (s or "").strip()
+    if not stripped:
+        return False
+    return bool(_CANONICAL_CELEX_RE.match(stripped))
+
 
 # Cap the candidate list — the disambiguation card stays scannable, and
 # a 2-char query like "EL" shouldn't dump hundreds of rows.
