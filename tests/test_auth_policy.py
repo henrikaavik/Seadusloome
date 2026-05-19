@@ -18,6 +18,7 @@ from app.auth.policy import (
     can_access_conversation,
     can_access_drafter_session,
     can_delete_draft,
+    can_review_draft,
     can_view_draft,
     is_org_admin,
     is_system_admin,
@@ -85,6 +86,51 @@ class TestCanDeleteDraft:
 
     def test_none_resource_denied(self):
         assert can_delete_draft(_auth(), None) is False
+
+
+# ---------------------------------------------------------------------------
+# Drafts: reviewer-only outcome posting (issue #817)
+# ---------------------------------------------------------------------------
+
+
+class TestCanReviewDraft:
+    def test_reviewer_in_same_org_can_review(self):
+        assert can_review_draft(_auth(user_id="reviewer", role=ROLE_REVIEWER), _resource()) is True
+
+    def test_drafter_cannot_review_even_in_same_org(self):
+        """Drafters lack the reviewer role; they can view but not post outcomes."""
+        assert can_review_draft(_auth(role=ROLE_DRAFTER), _resource()) is False
+
+    def test_org_admin_cannot_review(self):
+        """Org admins are not reviewers — they're org-management, not legal."""
+        assert can_review_draft(_auth(user_id="admin", role=ROLE_ORG_ADMIN), _resource()) is False
+
+    def test_other_org_reviewer_cannot_review(self):
+        """A reviewer in a different org cannot post outcomes on this org's drafts."""
+        assert (
+            can_review_draft(
+                _auth(user_id="reviewer", org_id="org-b", role=ROLE_REVIEWER),
+                _resource(),
+            )
+            is False
+        )
+
+    def test_system_admin_cross_org_can_review(self):
+        """System admin keeps the cross-org override (matches view + delete patterns)."""
+        assert (
+            can_review_draft(
+                _auth(user_id="admin", org_id="org-b", role=ROLE_SYSTEM_ADMIN),
+                _resource(),
+            )
+            is True
+        )
+
+    @pytest.mark.parametrize("auth", [None, {}])
+    def test_missing_auth_denied(self, auth):
+        assert can_review_draft(auth, _resource()) is False
+
+    def test_none_resource_denied(self):
+        assert can_review_draft(_auth(role=ROLE_REVIEWER), None) is False
 
 
 # ---------------------------------------------------------------------------

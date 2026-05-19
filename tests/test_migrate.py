@@ -58,3 +58,45 @@ def test_migration_032_impact_reports_version_fk_present():
     assert "select id from draft_versions" in body_lower
     assert "order by version_number desc" in body_lower
     assert "where ir.draft_version_id is null" in body_lower
+
+
+def test_migration_035_draft_reviews_present():
+    """Migration 035 (#817) introduces ``draft_reviews`` with a nullable
+    ``reviewer_id`` (ON DELETE SET NULL) so review records survive a
+    reviewer deletion.
+
+    The migration must:
+
+    * Create the table with ``IF NOT EXISTS`` (idempotent re-run).
+    * Cascade-delete with the parent ``drafts`` row.
+    * Use ``ON DELETE SET NULL`` for the reviewer FK and keep a name
+      snapshot column for UI display after deletion.
+    * CHECK-constrain ``outcome`` to the three legal values.
+    * Add indexes for the draft-level history query and the reviewer
+      anti-join used by the dashboard widget.
+    """
+    migrations_dir = Path(__file__).parent.parent / "migrations"
+    migration = migrations_dir / "035_draft_reviews.sql"
+    assert migration.exists(), "migration 035 must exist for #817"
+
+    body = migration.read_text()
+    body_lower = body.lower()
+
+    # Schema mutation (idempotent).
+    assert "create table if not exists draft_reviews" in body_lower
+    # Draft FK cascades.
+    assert "references drafts(id) on delete cascade" in body_lower
+    # Reviewer FK is SET NULL — preserves the row across user deletion.
+    assert "references users(id) on delete set null" in body_lower
+    # Snapshot column for deleted-user UI rendering.
+    assert "reviewer_name_snapshot" in body_lower
+    # Outcome CHECK constraint values.
+    assert "check (outcome in" in body_lower
+    assert "no_issue" in body_lower
+    assert "issue_found" in body_lower
+    assert "needs_discussion" in body_lower
+    # Indexes are idempotent.
+    assert "create index if not exists idx_draft_reviews_draft_id" in body_lower
+    assert "create index if not exists idx_draft_reviews_reviewer" in body_lower
+    # Partial index on non-null reviewer.
+    assert "where reviewer_id is not null" in body_lower

@@ -131,6 +131,27 @@ def can_edit_draft(auth: Mapping[str, Any] | None, draft: Any) -> bool:
     return can_delete_draft(auth, draft)
 
 
+def can_review_draft(auth: Mapping[str, Any] | None, draft: Any) -> bool:
+    """Reviewer (or system admin) on a draft they can view (issue #817).
+
+    Allows a same-org reviewer (or a system admin) to mark a review
+    outcome ("no issue" / "issue found" / "needs discussion") against a
+    draft they can see. The rule composes :func:`can_view_draft` so a
+    cross-org reviewer can never post an outcome on a draft they cannot
+    even see.
+
+    MVP scope: reviewer role + can_view_draft is sufficient. The
+    drafter-on-own-draft self-review question is deferred per #817 — if
+    test feedback later indicates a drafter should not self-review even
+    when they hold the reviewer role on the org level, this helper is
+    the single place to harden.
+    """
+    if not can_view_draft(auth, draft):
+        return False
+    role = _auth_role(auth)
+    return role in (ROLE_REVIEWER, ROLE_SYSTEM_ADMIN)
+
+
 # ---------------------------------------------------------------------------
 # Chat conversation policy
 # ---------------------------------------------------------------------------

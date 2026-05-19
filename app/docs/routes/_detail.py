@@ -54,7 +54,12 @@ from starlette.responses import HTMLResponse, Response
 
 from app.auth.audit import log_action
 from app.auth.helpers import require_auth as _require_auth
-from app.auth.policy import can_delete_draft, can_edit_draft, can_view_draft
+from app.auth.policy import (
+    can_delete_draft,
+    can_edit_draft,
+    can_review_draft,
+    can_view_draft,
+)
 from app.auth.users import list_users
 from app.db import get_connection as _connect
 from app.docs._helpers import _not_found_page, _parse_uuid
@@ -69,6 +74,11 @@ from app.docs.draft_model import (
 )
 from app.docs.graph_builder import write_doc_lineage
 from app.docs.report_routes import explorer_draft_url
+from app.docs.review_model import (
+    REVIEW_OUTCOME_LABELS_ET,
+    DraftReview,
+    list_reviews_for_draft,
+)
 from app.docs.routes._detail_modals import (
     _DELETE_FORM_ID,
     _DELETE_MODAL_ID,
@@ -326,6 +336,186 @@ def _similar_drafts_card(similar: list[dict]) -> Any:
         CardHeader(H3("Sarnased eelnõud", cls="card-title")),  # noqa: F405
         CardBody(*items),
     )
+
+
+# ---------------------------------------------------------------------------
+# Review outcome section (#817) — reviewer-only UI
+# ---------------------------------------------------------------------------
+
+
+# Stable DOM id used as the HTMX swap target for review-section refreshes.
+_REVIEW_SECTION_ID = "draft-review-section"
+
+
+# Badge variants per outcome — keeps the colour code consistent across
+# the detail page and the reviewer Töölaud. Mirrors the design-system
+# vocabulary used for impact-band badges.
+_OUTCOME_BADGE_VARIANT: dict[str, str] = {
+    "no_issue": "success",
+    "issue_found": "danger",
+    "needs_discussion": "warning",
+}
+
+
+def _review_chip(outcome: str) -> Any:
+    """Render a single outcome badge using the canonical Estonian label."""
+    label = REVIEW_OUTCOME_LABELS_ET.get(outcome, outcome)
+    variant = _OUTCOME_BADGE_VARIANT.get(outcome, "default")
+    return Badge(label, variant=variant)  # type: ignore[arg-type]
+
+
+def _review_history_item(review: DraftReview) -> Any:
+    """One row in the chronological review history.
+
+    Renders reviewer name with a "(kustutatud kasutaja)" placeholder when
+    ``reviewer_id`` is NULL but the snapshot is present (the reviewer's
+    account was deleted but the review record is preserved).
+    """
+    if review.reviewer_id is None:
+        if review.reviewer_name_snapshot:
+            reviewer_label: str = f"{review.reviewer_name_snapshot} (kustutatud kasutaja)"
+        else:
+            reviewer_label = "Kustutatud kasutaja"
+    else:
+        reviewer_label = review.reviewer_name_snapshot or "Tundmatu kasutaja"
+
+    parts: list[Any] = [
+        Div(  # noqa: F405
+            Span(reviewer_label, cls="review-history__reviewer"),  # noqa: F405
+            _review_chip(review.outcome),
+            Span(  # noqa: F405
+                _format_timestamp(review.created_at),
+                cls="review-history__timestamp",
+            ),
+            cls="review-history__meta",
+        ),
+    ]
+    if review.comment:
+        parts.append(
+            P(  # noqa: F405
+                review.comment,
+                cls="review-history__comment",
+            )
+        )
+    return Li(*parts, cls="review-history__item")  # noqa: F405
+
+
+def _review_history(reviews: list[DraftReview]) -> Any:
+    """Render the chronological list of review outcomes for the draft."""
+    if not reviews:
+        return P(  # noqa: F405
+            "Selle eelnõu kohta pole veel ülevaatuse tulemusi.",
+            cls="muted-text",
+        )
+    items = [_review_history_item(r) for r in reviews]
+    return Ul(*items, cls="review-history")  # noqa: F405
+
+
+def _review_outcome_form(draft: Draft) -> Any:
+    """Render the reviewer-only outcome form with three buttons + optional comment.
+
+    Three outcome buttons share one ``<form>`` and disambiguate via the
+    ``name="outcome"`` value on each ``<button>``. HTMX posts the form and
+    swaps the section in place using ``hx-target`` / ``hx-swap``.
+    """
+    # The three outcome buttons. Submit-by-name is the cleanest way to
+    # send the chosen value without an extra hidden radio set.
+    no_issue_btn = Button(
+        REVIEW_OUTCOME_LABELS_ET["no_issue"],
+        type="submit",
+        name="outcome",
+        value="no_issue",
+        variant="primary",
+        size="md",
+    )
+    issue_found_btn = Button(
+        REVIEW_OUTCOME_LABELS_ET["issue_found"],
+        type="submit",
+        name="outcome",
+        value="issue_found",
+        variant="danger",
+        size="md",
+    )
+    needs_discussion_btn = Button(
+        REVIEW_OUTCOME_LABELS_ET["needs_discussion"],
+        type="submit",
+        name="outcome",
+        value="needs_discussion",
+        variant="secondary",
+        size="md",
+    )
+
+    return Form(  # noqa: F405
+        Label(  # noqa: F405
+            "Lisa märkus (valikuline)",
+            For="review-comment",
+            cls="form-label",
+        ),
+        Textarea(  # noqa: F405
+            "",
+            name="comment",
+            id="review-comment",
+            rows="3",
+            placeholder="Selgitage oma järeldust või tooge esile põhilised tähelepanekud.",
+            cls="form-textarea",
+        ),
+        Div(  # noqa: F405
+            no_issue_btn,
+            issue_found_btn,
+            needs_discussion_btn,
+            cls="review-outcome__actions",
+        ),
+        method="post",
+        action=f"/drafts/{draft.id}/review-outcome",
+        enctype="application/x-www-form-urlencoded",
+        hx_post=f"/drafts/{draft.id}/review-outcome",
+        hx_target=f"#{_REVIEW_SECTION_ID}",
+        hx_swap="outerHTML",
+        cls="review-outcome__form",
+    )
+
+
+def _review_outcome_section(
+    draft: Draft,
+    auth: Mapping[str, Any] | None = None,
+    *,
+    reviews: list[DraftReview] | None = None,
+) -> Any:
+    """Render the reviewer-outcome card (#817).
+
+    Only visible to users whose ``auth`` satisfies
+    :func:`app.auth.policy.can_review_draft` — reviewer role + draft view
+    rights. Returns an empty placeholder div for everyone else so HTMX
+    swaps don't fail when the section is hidden.
+
+    Layout:
+
+    * Three outcome buttons + optional comment textarea (top).
+    * Chronological list of previous reviews (below the form).
+
+    Wrapped in a stable ``#draft-review-section`` div so the POST
+    handler can ``outerHTML``-swap the section after a new review lands
+    without rebuilding the entire detail page.
+    """
+    # Placeholder div for non-reviewers so the layout doesn't shift.
+    if not can_review_draft(auth, draft):
+        return Div("", id=_REVIEW_SECTION_ID)  # noqa: F405
+
+    review_rows: list[DraftReview] = reviews if reviews is not None else []
+    card = Card(
+        CardHeader(H3("Ülevaatus", cls="card-title")),  # noqa: F405
+        CardBody(
+            P(  # noqa: F405
+                "Märkige eelnõu ülevaatuse tulemus. Saate hiljem oma järelduse "
+                "uuendada — kõik tulemused jäävad ajalukku alles.",
+                cls="muted-text",
+            ),
+            _review_outcome_form(draft),
+            H4("Varasemad tulemused", cls="card-subtitle"),  # noqa: F405
+            _review_history(review_rows),
+        ),
+    )
+    return Div(card, id=_REVIEW_SECTION_ID)  # noqa: F405
 
 
 def _draft_detail_body(
@@ -607,6 +797,23 @@ def draft_detail_page(req: Request, draft_id: str):
             exc_info=True,
         )
 
+    # #817: load existing review outcomes for this draft. Only fetched
+    # when the caller actually has reviewer rights — drafters never see
+    # the section so spending an extra query for them would be waste.
+    # Best-effort: any DB error degrades to an empty list and the form
+    # still renders with no history below it.
+    reviews: list[DraftReview] = []
+    if can_review_draft(auth, draft):
+        try:
+            with _connect() as conn:
+                reviews = list_reviews_for_draft(conn, draft.id)
+        except Exception:
+            logger.warning(
+                "draft_detail_page: failed to load draft_reviews for draft=%s",
+                draft.id,
+                exc_info=True,
+            )
+
     return PageShell(
         H1(draft.title, cls="page-title"),  # noqa: F405
         P(A("← Tagasi eelnõude nimekirja", href="/drafts"), cls="back-link"),  # noqa: F405
@@ -636,6 +843,11 @@ def draft_detail_page(req: Request, draft_id: str):
             # user-facing detail page omits it.
             CardBody(*detail_body),
         ),
+        # #817: reviewer-only outcome section. Renders an empty stub div
+        # for non-reviewers so the in-place HTMX swap target stays valid
+        # but no UI surfaces. The stable ``#draft-review-section`` id is
+        # also the HTMX target for the POST handler's reload.
+        _review_outcome_section(draft, auth=auth, reviews=reviews),
         # #621: similar-drafts card; hidden (returns "") when no results.
         _similar_drafts_card(similar),
         # #618 PR-C: "Versioonide ajalugu" — one row per draft_versions

@@ -36,6 +36,7 @@ from app.analyysikeskus.eu_transposition import (
     list_overdue_or_upcoming_transpositions,
 )
 from app.auth.audit import log_action
+from app.auth.policy import ROLE_REVIEWER, ROLE_SYSTEM_ADMIN
 from app.db import get_connection as _connect
 from app.docs.impact.scoring import IMPACT_BAND_LABELS_ET, ImpactBand, impact_band
 from app.drafter.state_machine import STEP_LABELS_ET, Step
@@ -67,6 +68,12 @@ _MAX_STALE = 8
 _MAX_SYNCS = 5
 _MAX_EXPORTS = 5
 _MAX_UNRESOLVED = 8
+
+# #817: reviewer "awaiting my review" widget — number of drafts surfaced
+# on the reviewer's Töölaud where this reviewer has not yet submitted a
+# review outcome. Same shape as the other operational widgets so the
+# dashboard stays dense-but-calm.
+_MAX_AWAITING_REVIEW = 8
 
 # A6 (EU transposition deadlines widget): how many deadline rows the
 # Töölaud renders inline; the rest go behind "Näita kõiki" → /analyysikeskus/el-ulevott.
@@ -358,6 +365,62 @@ def _get_recent_exports(org_id: str | None, *, limit: int = _MAX_EXPORTS) -> lis
         # Payloads with a missing/garbled draft_id make the ``::uuid`` cast
         # throw — log it and degrade to an empty widget rather than 500.
         logger.exception("Failed to fetch recent exports for org %s", org_id)
+        return []
+
+
+def _get_awaiting_review_drafts(  # type: ignore[type-arg]
+    user_id: str,
+    org_id: str | None,
+    *,
+    limit: int = _MAX_AWAITING_REVIEW,
+) -> list[dict]:
+    """Return drafts in the user's org that this reviewer has not yet reviewed (#817).
+
+    Powers the "Ülevaatuse järgi ootavad" widget on the reviewer Töölaud.
+    A draft surfaces when:
+
+    * It belongs to the caller's org (existing org-scoping rule).
+    * Its status is ``ready`` (the analysis pipeline has finished — there
+      is something for a reviewer to look at).
+    * The caller has NOT submitted a ``draft_reviews`` row for it. A
+      reviewer who has already posted any outcome (even
+      "needs_discussion") is treated as having taken action; if they
+      want to revise their conclusion they can re-open the draft and
+      add a new review — the draft will stay off the queue meanwhile.
+
+    Returns ``[{draft_id, title, created_at}]`` newest first. Empty
+    list on any DB error so a dead DB never bricks the dashboard.
+    """
+    if not user_id or not org_id:
+        return []
+    try:
+        with _connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT d.id, d.title, d.created_at
+                FROM drafts d
+                WHERE d.org_id = %s
+                  AND d.status = 'ready'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM draft_reviews r
+                      WHERE r.draft_id = d.id
+                        AND r.reviewer_id = %s
+                  )
+                ORDER BY d.created_at DESC
+                LIMIT %s
+                """,
+                (org_id, user_id, limit),
+            ).fetchall()
+        return [
+            {
+                "draft_id": str(r[0]),
+                "title": r[1] or "Pealkirjata eelnõu",
+                "created_at": r[2],
+            }
+            for r in rows
+        ]
+    except Exception:
+        logger.exception("Failed to fetch awaiting-review drafts for user %s", user_id)
         return []
 
 
@@ -1143,6 +1206,45 @@ def _exports_card(exports: list[dict]):  # type: ignore[type-arg, no-untyped-def
 # ---------------------------------------------------------------------------
 
 
+def _awaiting_review_card(drafts: list[dict]):  # type: ignore[type-arg, no-untyped-def]
+    """Render the reviewer "Ülevaatuse järgi ootavad" widget (#817).
+
+    Only called when the caller has the reviewer role — the dashboard
+    page-handler gates this card behind a role check. Renders ``None``
+    when no drafts await this reviewer so the caller can omit the
+    section entirely (consistent with the EU deadlines widget).
+    """
+    if not drafts:
+        return _section_card(
+            "Ülevaatuse järgi ootavad",
+            _empty_row("Hetkel pole eelnõusid, mis ootaks Teie ülevaatust."),
+        )
+    columns = [
+        Column(key="title", label="Eelnõu", sortable=False),
+        Column(
+            key="created_at",
+            label="Üles laaditud",
+            sortable=False,
+            render=lambda r: r["created_at_label"],
+        ),
+        Column(
+            key="actions",
+            label="",
+            sortable=False,
+            render=lambda r: A("Ava ülevaatuseks", href=r["href"], cls="table-link"),
+        ),
+    ]
+    rows = [
+        {
+            "title": d["title"],
+            "created_at_label": format_tallinn(d["created_at"]) if d["created_at"] else "—",
+            "href": f"/drafts/{d['draft_id']}",
+        }
+        for d in drafts
+    ]
+    return _section_card("Ülevaatuse järgi ootavad", DataTable(columns=columns, rows=rows))
+
+
 def _unresolved_card(drafts: list[dict]):  # type: ignore[type-arg, no-untyped-def]
     if not drafts:
         return _section_card(
@@ -1259,10 +1361,18 @@ def dashboard_page(req: Request):
         bookmarks = _get_bookmarks(user_id)
         org_info = _get_user_org_info(user_id)
         eu_deadlines = _get_eu_transposition_deadlines(org_id)
+        # #817: only reviewers (and system admins) get the
+        # "Ülevaatuse järgi ootavad" widget — drafters / org admins
+        # don't review, so the query and section are skipped.
+        user_role = (org_info or {}).get("role") if org_info else None
+        awaiting_review: list[dict] = []
+        if user_role in (ROLE_REVIEWER, ROLE_SYSTEM_ADMIN):
+            awaiting_review = _get_awaiting_review_drafts(user_id, org_id)
     else:
         sessions = high_risk = unviewed = stale = syncs = exports = unresolved = bookmarks = []
         org_info = None
         eu_deadlines = []
+        awaiting_review = []
 
     next_actions = _build_next_actions(sessions, high_risk, stale, unviewed)
 
@@ -1295,6 +1405,13 @@ def dashboard_page(req: Request):
             _high_risk_card(high_risk),
         ]
     )
+    # #817: reviewer-only "Ülevaatuse järgi ootavad" — surfaced when the
+    # caller has the reviewer role (the gate that controls whether the
+    # query runs in the first place). Drafters / org admins never see
+    # the section even when the org has unreviewed drafts.
+    user_role = (org_info or {}).get("role") if org_info else None
+    if user_role in (ROLE_REVIEWER, ROLE_SYSTEM_ADMIN):
+        content_parts.append(_awaiting_review_card(awaiting_review))
     if eu_deadlines_card is not None:
         content_parts.append(eu_deadlines_card)
     content_parts.extend(
