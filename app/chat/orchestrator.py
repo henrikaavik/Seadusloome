@@ -1375,6 +1375,13 @@ class ChatOrchestrator:
                 {
                     "content": chunk.content,
                     "source_uri": chunk.metadata.get("source_uri"),
+                    # #833 review: persist source_type so the drift
+                    # detector in app.chat.routes can distinguish
+                    # ontology-grounded chunks (``ontology`` / ``law_text``
+                    # / ``court_decision`` / ``eu_act``) from private
+                    # draft-grounded chunks (``draft``) — only the former
+                    # should trigger the "Ontoloogia on uuenenud" banner.
+                    "source_type": chunk.metadata.get("source_type"),
                     "score": chunk.score,
                 }
                 for chunk in ctx.rag_chunks

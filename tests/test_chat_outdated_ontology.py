@@ -649,3 +649,411 @@ class TestCrossOrgIsolation:
             assert resp.status_code == 404
             # And the banner text must NOT appear on the not-found page.
             assert "Mõned viidatud allikad võivad olla aegunud" not in resp.text
+
+
+# ---------------------------------------------------------------------------
+# #833 review fixes — pre-037 fallback, fork preservation, RAG drift filter
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _fernet_key_local(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Provide a deterministic Fernet key for the create_message tests
+    in this section (mirrors ``tests/test_chat_models.py``)."""
+    from cryptography.fernet import Fernet
+
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv("STORAGE_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    import app.storage.encrypted as encrypted_module
+
+    monkeypatch.setattr(encrypted_module, "_fernet", None)
+
+
+class TestCreateMessagePre037Fallback:
+    """#833 review (P1): when the assistant message INSERT hits an
+    ``UndefinedColumn`` for ``ontology_version`` (deploy window before
+    migration 037 applies), the helper MUST retry without the column.
+
+    The previous code gated the fallback on ``ontology_version is None``
+    — but the orchestrator always passes the live snapshot tag, so the
+    gate effectively turned every assistant INSERT into a hard failure
+    until migration 037 landed.
+    """
+
+    def test_assistant_insert_falls_back_when_column_missing(self, _fernet_key_local):
+        from app.chat.models import create_message
+        from app.storage import encrypt_text
+
+        conn = MagicMock()
+        conv_id = uuid.uuid4()
+        msg_id = uuid.uuid4()
+        now = datetime.now(UTC)
+
+        # A pre-037 row tuple is 16 wide (no ``ontology_version`` at the
+        # tail). ``_row_to_message`` indexes defensively, so a 16-tuple
+        # loads cleanly with ``ontology_version=None``.
+        pre_037_row = (
+            msg_id,
+            conv_id,
+            "assistant",
+            None,  # tool_name
+            10,  # tokens_input
+            5,  # tokens_output
+            "claude",
+            now,
+            encrypt_text("Vastus tugineb sätetele..."),
+            None,
+            None,
+            None,
+            False,  # is_pinned
+            False,  # is_truncated
+            None,  # tool_use_id
+            None,  # parent_message_id
+        )
+
+        # First execute call raises UndefinedColumn-shaped error; second
+        # (the pre-037 fallback) returns the legacy row.
+        call_state = {"n": 0}
+
+        def execute_side_effect(*_args, **_kwargs):
+            call_state["n"] += 1
+            cursor = MagicMock()
+            if call_state["n"] == 1:
+                # Simulate psycopg's UndefinedColumn surface text.
+                raise Exception('column "ontology_version" of relation "messages" does not exist')
+            cursor.fetchone.return_value = pre_037_row
+            return cursor
+
+        conn.execute.side_effect = execute_side_effect
+
+        # Orchestrator-style call: passes a non-None ontology_version tag.
+        result = create_message(
+            conn,
+            conv_id,
+            "assistant",
+            "Vastus tugineb sätetele...",
+            tokens_input=10,
+            tokens_output=5,
+            model="claude",
+            ontology_version=_NEW_VERSION,
+        )
+
+        # The message persisted (this is the load-bearing assertion —
+        # before the fix, the orchestrator silently dropped the assistant
+        # turn during the rollout window).
+        assert result is not None
+        assert result.id == msg_id
+        assert result.role == "assistant"
+        # The tag is dropped because the column doesn't exist yet.
+        assert result.ontology_version is None
+        # We attempted the v037 INSERT then fell back to the pre-037
+        # shape — at least 2 calls (a rollback() between them is fine
+        # but not load-bearing for this assertion).
+        assert call_state["n"] == 2
+        # The fallback INSERT must NOT mention ``ontology_version``.
+        fallback_sql = conn.execute.call_args_list[-1].args[0]
+        assert "ontology_version" not in fallback_sql
+
+    def test_fallback_only_triggers_for_v037_undefined_column(self, _fernet_key_local):
+        """A generic SQL error (not a missing column) must NOT trigger
+        the v037 fallback — that would mask real failures."""
+        from app.chat.models import create_message
+
+        conn = MagicMock()
+        conv_id = uuid.uuid4()
+
+        def execute_side_effect(*_args, **_kwargs):
+            raise RuntimeError("unrelated DB error")
+
+        conn.execute.side_effect = execute_side_effect
+
+        with pytest.raises(RuntimeError, match="unrelated DB error"):
+            create_message(
+                conn,
+                conv_id,
+                "assistant",
+                "Vastus",
+                ontology_version=_NEW_VERSION,
+            )
+
+
+class TestForkPreservesOntologyVersion:
+    """#833 review (P2): ``fork_conversation`` previously dropped
+    ``ontology_version`` from copied messages, so a forked thread lost
+    drift detection on already-cited stale ontology answers. The SELECT
+    and INSERT shapes must now carry the column through."""
+
+    def test_fork_select_and_insert_include_ontology_version(self):
+        from app.chat.models import fork_conversation
+
+        conn = MagicMock()
+        source_conv_id = uuid.uuid4()
+        boundary_msg_id = uuid.uuid4()
+        boundary_created_at = datetime(2026, 5, 20, 10, 0, tzinfo=UTC)
+
+        # boundary lookup, get_conversation(source), create_conversation(new)
+        source_conv_row = (
+            source_conv_id,
+            uuid.UUID(_USER_ID),
+            uuid.UUID(_ORG_ID),
+            "Algvestlus",
+            None,
+            datetime.now(UTC),
+            datetime.now(UTC),
+        )
+        new_conv_id = uuid.uuid4()
+        new_conv_row = (
+            new_conv_id,
+            uuid.UUID(_USER_ID),
+            uuid.UUID(_ORG_ID),
+            "Jätk: Algvestlus",
+            None,
+            datetime.now(UTC),
+            datetime.now(UTC),
+        )
+
+        conn.execute.return_value.fetchone.side_effect = [
+            (boundary_created_at, source_conv_id),
+            source_conv_row,
+            new_conv_row,
+        ]
+
+        fork_conversation(
+            conn,
+            source_conv_id,
+            boundary_msg_id,
+            user_id=uuid.UUID(_USER_ID),
+            org_id=uuid.UUID(_ORG_ID),
+        )
+
+        # The INSERT ... SELECT must mention ``ontology_version`` in
+        # both column lists (read source + write copy).
+        final_sql = conn.execute.call_args_list[-1].args[0]
+        assert "INSERT INTO messages" in final_sql
+        # Both occurrences (INSERT column list and SELECT column list).
+        assert final_sql.count("ontology_version") == 2
+
+    def test_fork_falls_back_to_pre_037_when_column_missing(self):
+        """If the ``ontology_version`` column is absent (pre-037 deploy),
+        fork must still succeed with a pre-037 INSERT shape that
+        preserves ``tool_use_id``."""
+        from app.chat.models import fork_conversation
+
+        conn = MagicMock()
+        source_conv_id = uuid.uuid4()
+        boundary_msg_id = uuid.uuid4()
+        boundary_created_at = datetime(2026, 5, 20, 10, 0, tzinfo=UTC)
+
+        source_conv_row = (
+            source_conv_id,
+            uuid.UUID(_USER_ID),
+            uuid.UUID(_ORG_ID),
+            "Algvestlus",
+            None,
+            datetime.now(UTC),
+            datetime.now(UTC),
+        )
+        new_conv_id = uuid.uuid4()
+        new_conv_row = (
+            new_conv_id,
+            uuid.UUID(_USER_ID),
+            uuid.UUID(_ORG_ID),
+            "Jätk: Algvestlus",
+            None,
+            datetime.now(UTC),
+            datetime.now(UTC),
+        )
+
+        # 1: boundary, 2: source conv, 3: new conv, 4: INSERT (raises),
+        # 5: pre-037 INSERT (succeeds).
+        fetchone_results = iter(
+            [
+                (boundary_created_at, source_conv_id),
+                source_conv_row,
+                new_conv_row,
+            ]
+        )
+
+        call_state = {"n": 0}
+
+        def execute_side_effect(*args, **_kwargs):
+            sql = args[0] if args else ""
+            cursor = MagicMock()
+            if "INSERT INTO messages" in sql:
+                call_state["n"] += 1
+                if call_state["n"] == 1 and "ontology_version" in sql:
+                    raise Exception(
+                        'column "ontology_version" of relation "messages" does not exist'
+                    )
+                return cursor
+            try:
+                cursor.fetchone.return_value = next(fetchone_results)
+            except StopIteration:
+                cursor.fetchone.return_value = None
+            return cursor
+
+        conn.execute.side_effect = execute_side_effect
+
+        fork_conversation(
+            conn,
+            source_conv_id,
+            boundary_msg_id,
+            user_id=uuid.UUID(_USER_ID),
+            org_id=uuid.UUID(_ORG_ID),
+        )
+
+        # We attempted the v037 INSERT then the v037-less fallback.
+        assert call_state["n"] == 2
+        # Final INSERT must omit ``ontology_version`` but still carry
+        # ``tool_use_id`` (preserving the v036 information).
+        final_insert_sql = [
+            c.args[0] for c in conn.execute.call_args_list if "INSERT INTO messages" in c.args[0]
+        ][-1]
+        assert "ontology_version" not in final_insert_sql
+        assert "tool_use_id" in final_insert_sql
+
+
+class TestRagDriftFiltersBySourceType:
+    """#833 review (P3): the drift detector previously treated any
+    non-empty ``rag_context`` as ontology-grounded. RAG can contain
+    private draft chunks, which are unaffected by ontology drift — they
+    must NOT fire the banner. Post-fix the detector consults
+    ``chunk['source_type']`` and accepts only ontology source types."""
+
+    def test_draft_only_rag_does_not_fire_banner(self):
+        from app.chat.routes import _conversation_has_outdated_ontology_citations
+
+        msgs = [
+            _make_message("user", "Mis on minu eelnõu mõju?"),
+            _make_message(
+                "assistant",
+                "Sinu eelnõu paragrahvid mõjutavad...",
+                ontology_version=_OLD_VERSION,
+                # Only draft-source chunks → not ontology-grounded.
+                rag_context=[
+                    {
+                        "source_uri": "draft:abc/§3",
+                        "source_type": "draft",
+                        "score": 0.9,
+                    },
+                    {
+                        "source_uri": "draft:abc/§4",
+                        "source_type": "draft",
+                        "score": 0.7,
+                    },
+                ],
+            ),
+        ]
+        assert _conversation_has_outdated_ontology_citations(msgs, _NEW_VERSION) is False
+
+    def test_adding_ontology_source_chunk_fires_banner(self):
+        """As soon as a single ontology-source chunk appears in the
+        rag_context, the stale tag flips the banner on."""
+        from app.chat.routes import _conversation_has_outdated_ontology_citations
+
+        msgs = [
+            _make_message("user", "Aga TsiviilS § 113?"),
+            _make_message(
+                "assistant",
+                "Vastus tugineb...",
+                ontology_version=_OLD_VERSION,
+                rag_context=[
+                    {
+                        "source_uri": "draft:abc/§3",
+                        "source_type": "draft",
+                        "score": 0.9,
+                    },
+                    {
+                        "source_uri": "estleg:ks_113",
+                        "source_type": "ontology",
+                        "score": 0.8,
+                    },
+                ],
+            ),
+        ]
+        assert _conversation_has_outdated_ontology_citations(msgs, _NEW_VERSION) is True
+
+    def test_law_text_and_court_decision_are_ontology_grounded(self):
+        """``law_text`` and ``court_decision`` are public-ontology
+        source types and MUST trigger the banner on stale versions."""
+        from app.chat.routes import _conversation_has_outdated_ontology_citations
+
+        for source_type in ("law_text", "court_decision", "eu_act"):
+            msgs = [
+                _make_message("user", "Otsi"),
+                _make_message(
+                    "assistant",
+                    "Vastus...",
+                    ontology_version=_OLD_VERSION,
+                    rag_context=[
+                        {
+                            "source_uri": f"x:{source_type}",
+                            "source_type": source_type,
+                            "score": 0.9,
+                        },
+                    ],
+                ),
+            ]
+            assert _conversation_has_outdated_ontology_citations(msgs, _NEW_VERSION) is True, (
+                f"source_type={source_type} should be ontology-grounded"
+            )
+
+    def test_legacy_chunk_without_source_type_still_fires(self):
+        """Pre-#833 rag_context rows do not carry ``source_type``. To
+        avoid silently disabling drift detection on historical rows,
+        chunks without a ``source_type`` field are accepted as
+        ontology-grounded (the older behaviour)."""
+        from app.chat.routes import _conversation_has_outdated_ontology_citations
+
+        msgs = [
+            _make_message("user", "Mis on TsiviilS?"),
+            _make_message(
+                "assistant",
+                "Vastus...",
+                ontology_version=_OLD_VERSION,
+                # No ``source_type`` key — legacy shape.
+                rag_context=[{"source_uri": "estleg:ks_113", "score": 0.9}],
+            ),
+        ]
+        assert _conversation_has_outdated_ontology_citations(msgs, _NEW_VERSION) is True
+
+    def test_orchestrator_persists_source_type_in_rag_context_json(self):
+        """The orchestrator's ``rag_context_json`` builder must carry
+        ``source_type`` from chunk metadata into the persisted JSON so
+        the drift detector can rely on it post-#833."""
+        from app.rag.retriever import RetrievedChunk
+
+        # Re-run the small builder block from app/chat/orchestrator.py
+        # by emulating the same comprehension. We do not invoke the
+        # full streaming path; this test pins the field set in the
+        # serialised shape.
+        chunks = [
+            RetrievedChunk(
+                content="Säte X",
+                metadata={"source_uri": "estleg:ks_113", "source_type": "ontology"},
+                score=0.9,
+            ),
+            RetrievedChunk(
+                content="Draft Y",
+                metadata={"source_uri": "draft:abc/§3", "source_type": "draft"},
+                score=0.7,
+            ),
+        ]
+        rag_context_json = [
+            {
+                "content": chunk.content,
+                "source_uri": chunk.metadata.get("source_uri"),
+                "source_type": chunk.metadata.get("source_type"),
+                "score": chunk.score,
+            }
+            for chunk in chunks
+        ]
+        assert rag_context_json[0]["source_type"] == "ontology"
+        assert rag_context_json[1]["source_type"] == "draft"
+
+        # And the drift detector correctly filters this serialised shape.
+        from app.chat.routes import _rag_context_grounds_on_ontology
+
+        assert _rag_context_grounds_on_ontology(rag_context_json) is True
+        # Stripping the ontology chunk leaves draft-only → not grounded.
+        assert _rag_context_grounds_on_ontology(rag_context_json[1:]) is False

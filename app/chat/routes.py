@@ -1010,6 +1010,55 @@ _ONTOLOGY_TOOL_NAMES: frozenset[str] = frozenset(
 )
 
 
+# RAG ``source_type`` values that are sourced from the public ontology
+# (the JSON-LD source graph synced into Jena Fuseki) — see
+# ``migrations/009_rag_chunks.sql`` for the CHECK constraint. A chunk
+# tagged with one of these source types reflects ontology state at
+# retrieval time, so a stale snapshot tag on the same turn means the
+# answer may now be outdated. ``draft`` chunks (private uploads) are
+# explicitly excluded — they are tenant-private and unaffected by
+# ontology-side drift.
+_ONTOLOGY_RAG_SOURCE_TYPES: frozenset[str] = frozenset(
+    {
+        "ontology",
+        "law_text",
+        "court_decision",
+        "eu_act",
+    }
+)
+
+
+def _rag_context_grounds_on_ontology(rag_context: Any) -> bool:
+    """Return True when at least one chunk in *rag_context* is sourced
+    from the public ontology (not a private draft).
+
+    ``rag_context`` is the persisted list-of-dicts produced by
+    :mod:`app.chat.orchestrator` (see ``rag_context_json`` build site).
+    Post-#833 each chunk carries a ``source_type`` field — when present,
+    we accept the chunk only if its ``source_type`` is in
+    :data:`_ONTOLOGY_RAG_SOURCE_TYPES`. Pre-#833 chunks (and any chunk
+    where ``source_type`` is missing/None) are accepted to preserve the
+    older behaviour and keep the banner working for legacy rows.
+    """
+    if not rag_context or not isinstance(rag_context, list):
+        return False
+    for chunk in rag_context:
+        if not isinstance(chunk, dict):
+            # Unexpected shape — be defensive and treat as
+            # ontology-grounded to preserve the older behaviour.
+            return True
+        source_type = chunk.get("source_type")
+        if source_type is None:
+            # Legacy chunk persisted before #833 — no source_type was
+            # captured, so we cannot rule it out. Treat as
+            # ontology-grounded so historical drift detection still
+            # fires for those rows.
+            return True
+        if source_type in _ONTOLOGY_RAG_SOURCE_TYPES:
+            return True
+    return False
+
+
 def _conversation_has_outdated_ontology_citations(
     messages: list[Any],
     current_version: str,
@@ -1030,6 +1079,12 @@ def _conversation_has_outdated_ontology_citations(
     whether the answer was grounded on the ontology at all — a turn
     that asked the model a generic question with no RAG chunks and no
     SPARQL tool use does not deserve a drift banner.
+
+    #833 review: RAG ``source_type`` is now consulted before accepting
+    the chunk as ontology-grounded. A chunk tagged ``source_type='draft'``
+    is private to the tenant and unaffected by ontology drift, so
+    seeing only draft chunks in ``rag_context`` does NOT fire the
+    banner.
     """
     if not current_version or current_version == "unknown":
         return False
@@ -1057,7 +1112,7 @@ def _conversation_has_outdated_ontology_citations(
 
         # Drift candidate — confirm the turn was ontology-grounded.
         rag_context = getattr(msg, "rag_context", None)
-        if rag_context:
+        if _rag_context_grounds_on_ontology(rag_context):
             return True
         children = tools_by_parent.get(getattr(msg, "id", None), [])
         if any((c.tool_name or "") in _ONTOLOGY_TOOL_NAMES for c in children):
