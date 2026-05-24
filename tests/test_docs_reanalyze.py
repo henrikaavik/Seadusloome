@@ -145,12 +145,16 @@ class TestReanalyzeHappyPath:
         assert resp.status_code == 204
         assert resp.headers["HX-Redirect"] == f"/drafts/{draft.id}"
 
-        # update_draft_status called with the analyzing status.
+        # update_draft_status called with the analyzing status AND the
+        # ``expected_status=prior_status`` optimistic-concurrency guard
+        # (PR #826 P1 review fix — without this kwarg, two concurrent
+        # POSTs both flip ``ready`` -> ``analyzing`` and both enqueue).
         mock_update.assert_called_once()
         update_args = mock_update.call_args.args
         assert update_args[0] is conn
         assert update_args[1] == draft.id
         assert update_args[2] == "analyzing"
+        assert mock_update.call_args.kwargs["expected_status"] == "ready"
 
         # Stale queue entries purged in the same transaction.
         delete_calls = [
@@ -213,6 +217,10 @@ class TestReanalyzeHappyPath:
         mock_queue.enqueue.assert_called_once()
         # Prior status captured in audit log for traceability.
         assert mock_log.call_args.kwargs["prior_status"] == "failed"
+        # And the same prior status is the predicate on the conditional
+        # UPDATE so a parallel reanalyze on a ``failed`` draft can only
+        # succeed once (PR #826 P1).
+        assert mock_update.call_args.kwargs["expected_status"] == "failed"
 
     @patch("app.docs.routes._lifecycle.log_draft_reanalyze")
     @patch("app.docs.routes._lifecycle.JobQueue")
@@ -317,6 +325,7 @@ class TestReanalyzeStateMachine:
         mock_update.assert_not_called()
         mock_queue.enqueue.assert_not_called()
 
+    @patch("app.docs.routes._lifecycle.log_draft_reanalyze")
     @patch("app.docs.routes._lifecycle.JobQueue")
     @patch("app.docs.routes._lifecycle.update_draft_status")
     @patch("app.docs.routes._lifecycle._connect")
@@ -329,9 +338,18 @@ class TestReanalyzeStateMachine:
         mock_connect: MagicMock,
         mock_update: MagicMock,
         mock_queue_cls: MagicMock,
+        mock_log: MagicMock,
     ):
         """``update_draft_status`` matching 0 rows means a parallel writer
-        won — bounce back to the detail page without enqueueing."""
+        won — bounce back to the detail page without enqueueing, without
+        purging the winner's queue entries, and without writing an audit
+        row.
+
+        Pinned by PR #826 P1 review fix: without ``expected_status``
+        passed to the SSOT helper the underlying UPDATE has no row-level
+        guard and two concurrent POSTs would both flip ``ready`` ->
+        ``analyzing`` idempotently and both would land here as winners.
+        """
         mock_get_provider.return_value = _stub_provider()
         draft = _make_draft(status="ready")
         mock_fetch.return_value = draft
@@ -346,7 +364,80 @@ class TestReanalyzeStateMachine:
 
         assert resp.status_code == 303
         assert resp.headers["location"] == f"/drafts/{draft.id}"
+        # The handler MUST have asked for the optimistic guard.
+        assert mock_update.call_args.kwargs["expected_status"] == "ready"
+        # Loser-of-the-race side effects: no enqueue, no purge, no audit.
         mock_queue.enqueue.assert_not_called()
+        delete_calls = [
+            c for c in conn.execute.call_args_list if "delete from background_jobs" in c.args[0]
+        ]
+        assert delete_calls == [], "loser of the race must NOT purge the winner's queue entries"
+        mock_log.assert_not_called()
+
+    def test_concurrent_writers_only_one_enqueues(self):
+        """End-to-end simulation: two POSTs against the same ``ready``
+        draft arrive concurrently. The conditional UPDATE on
+        ``app.docs.status.update_draft_status`` is the choke point: the
+        first writer's ``UPDATE drafts SET status='analyzing' WHERE id=?
+        AND status='ready'`` matches one row; the second sees zero rows
+        because the row is now ``analyzing``. Only the winner enqueues
+        ``analyze_impact`` and only the winner purges the queue.
+
+        We simulate this by driving two sequential handler invocations
+        against a single shared fake DB whose draft row tracks its own
+        status. The second invocation models the second tab — it reads
+        the SAME ``ready`` draft (the read happens BEFORE the first
+        writer commits in the real race) and then loses on the
+        conditional UPDATE.
+        """
+        from unittest.mock import patch as _patch
+
+        # Shared row state — mutated by the first writer, observed by
+        # the second. ``fetch_draft`` always returns ``ready`` to mimic
+        # the race window where both reads happen before either write.
+        row_status = {"value": "ready"}
+
+        def fake_update(conn, draft_id, status, **kwargs):
+            expected = kwargs.get("expected_status")
+            if expected is not None and row_status["value"] != expected:
+                # The conditional WHERE matched zero rows.
+                return False
+            row_status["value"] = status
+            return True
+
+        draft = _make_draft(status="ready")
+
+        with (
+            _patch("app.auth.middleware._get_provider", return_value=_stub_provider()),
+            _patch("app.docs.routes._lifecycle.fetch_draft", return_value=draft),
+            _patch("app.docs.routes._lifecycle._connect") as mock_connect,
+            _patch(
+                "app.docs.routes._lifecycle.update_draft_status",
+                side_effect=fake_update,
+            ),
+            _patch("app.docs.routes._lifecycle.JobQueue") as mock_queue_cls,
+            _patch("app.docs.routes._lifecycle.log_draft_reanalyze") as mock_log,
+        ):
+            mock_connect.return_value.__enter__.return_value = MagicMock()
+            mock_queue = MagicMock()
+            mock_queue.enqueue.return_value = 1234
+            mock_queue_cls.return_value = mock_queue
+
+            client = _authed_client()
+            first = client.post(f"/drafts/{draft.id}/reanalyze")
+            second = client.post(f"/drafts/{draft.id}/reanalyze")
+
+        # Both responses are user-visible redirects; the user can't
+        # tell which one won, and both UIs will reload the detail page.
+        assert first.status_code == 303
+        assert second.status_code == 303
+
+        # The first POST flipped ``ready`` -> ``analyzing`` (winner).
+        # The second POST's UPDATE matched zero rows so its handler
+        # short-circuited: NO duplicate enqueue, NO duplicate audit row.
+        assert mock_queue.enqueue.call_count == 1
+        assert mock_log.call_count == 1
+        assert row_status["value"] == "analyzing"
 
 
 # ---------------------------------------------------------------------------

@@ -344,12 +344,27 @@ def reanalyze_draft_handler(req: Request, draft_id: str):
     prior_status = draft.status
 
     # Flip the row to ``analyzing`` and clear any stale error / completion
-    # timestamps in a single transaction via the SSOT helper. Same
-    # transaction purges in-flight queue entries so the fresh analyze
-    # can't race a stuck prior job.
+    # timestamps in a single transaction via the SSOT helper. The
+    # ``expected_status=prior_status`` predicate is the optimistic-
+    # concurrency guard that makes this safe under concurrent POSTs
+    # (two open tabs, a double-click, a retried request): the underlying
+    # ``UPDATE drafts SET status='analyzing' WHERE id=? AND status=?``
+    # matches at most one writer. The loser sees ``updated=False`` and
+    # short-circuits below WITHOUT enqueuing a duplicate analyze job or
+    # purging the winner's freshly-enqueued queue entry. Without this
+    # predicate, both callers would see ``updated=True`` (both flip a
+    # ``ready`` row to ``analyzing`` idempotently) and both would enqueue
+    # — defeating the state-machine guard above. Same transaction also
+    # purges any in-flight queue entries left over from a previous
+    # stuck analyze, so the fresh job can't race them.
     try:
         with _connect() as conn:
-            updated = update_draft_status(conn, parsed, "analyzing")
+            updated = update_draft_status(
+                conn,
+                parsed,
+                "analyzing",
+                expected_status=prior_status,
+            )
             if updated:
                 conn.execute(
                     """
@@ -366,8 +381,11 @@ def reanalyze_draft_handler(req: Request, draft_id: str):
 
     if not updated:
         # Either the row vanished mid-flight or a parallel writer beat
-        # us to a status change. Treat as a no-op and bounce back to the
-        # detail page where the user will see the actual state.
+        # us to the status flip (concurrent reanalyze POSTs from two
+        # tabs / a double-click — the ``expected_status`` predicate
+        # above lets exactly one of them win). Treat as a no-op and
+        # bounce back to the detail page where the user will see the
+        # actual state. NO job is enqueued and NO queue entry is purged.
         logger.info(
             "reanalyze_draft_handler: draft=%s update_draft_status matched 0 rows (race)",
             parsed,
