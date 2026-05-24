@@ -422,6 +422,7 @@ def _persist_partial_assistant(
     error_suffix: str | None = None,
     tokens_input: int | None = None,
     tokens_output: int | None = None,
+    placeholder_message_id: uuid.UUID | None = None,
 ) -> uuid.UUID | None:
     """Persist a partial / truncated assistant message.
 
@@ -436,6 +437,16 @@ def _persist_partial_assistant(
     persisted the partial assistant row with NULL tokens despite the
     LLM having produced billable output that ``_log_cost`` already
     recorded in the ``llm_usage`` table.
+
+    #315 review fix (double-insert): when ``placeholder_message_id`` is
+    set (a tool turn had already inserted the parent assistant row up
+    front so tool rows could link via ``parent_message_id``), UPDATE
+    that row in place with the partial content + tokens + rag_context
+    + ``is_truncated`` flag and bump ``created_at = NOW()`` so it sorts
+    after the tool rows. Without this, the timeout / cancel / error
+    paths inserted a SECOND assistant row alongside the placeholder,
+    leaving two assistant messages for one logical turn (one empty
+    parent + one partial sibling).
     """
     if not full_content and not error_suffix:
         return None
@@ -444,6 +455,42 @@ def _persist_partial_assistant(
     if error_suffix:
         text = f"{text}{error_suffix}"
 
+    # Tool-turn path: a placeholder assistant row already exists. UPDATE
+    # in place instead of inserting a second row.
+    if placeholder_message_id is not None:
+        try:
+            with get_connection() as conn:
+                _update_assistant_payload(
+                    conn,
+                    placeholder_message_id,
+                    content=text,
+                    tokens_input=tokens_input if tokens_input else None,
+                    tokens_output=tokens_output if tokens_output else None,
+                    rag_context=rag_context_json,
+                )
+                if is_truncated:
+                    try:
+                        conn.execute(
+                            "UPDATE messages SET is_truncated = TRUE WHERE id = %s",
+                            (str(placeholder_message_id),),
+                        )
+                    except Exception:
+                        # Column may not exist yet (migration 017 not applied).
+                        logger.debug(
+                            "Could not set is_truncated on placeholder %s — column missing?",
+                            placeholder_message_id,
+                            exc_info=True,
+                        )
+                conn.commit()
+                return placeholder_message_id
+        except Exception:
+            logger.exception(
+                "Failed to update placeholder assistant message %s with partial content",
+                placeholder_message_id,
+            )
+            return None
+
+    # Non-tool turn: no placeholder, INSERT as before.
     try:
         with get_connection() as conn:
             msg = create_message(
@@ -577,6 +624,16 @@ def _update_assistant_payload(
     used by :func:`app.chat.models.create_message` — so the on-disk
     representation matches a fresh INSERT exactly. ``rag_context`` is
     JSON-encoded then encrypted (NULL for None).
+
+    #315 review fix (ordering): also bumps ``created_at = NOW()`` so the
+    placeholder sorts AFTER the tool rows that were inserted between the
+    initial placeholder INSERT and this UPDATE. Without this, history
+    loaded by ``list_messages`` (``ORDER BY created_at ASC``) returns
+    ``[assistant_final, tool_call, tool_result, next_user]`` — the wrong
+    semantic order for replay to Claude, which requires
+    ``tool_call → tool_result → assistant_final``. Using the DB's
+    ``NOW()`` rather than Python's ``datetime.now()`` avoids clock-skew
+    issues between the app process and PostgreSQL.
     """
     from app.storage import encrypt_text
 
@@ -592,7 +649,8 @@ def _update_assistant_payload(
         SET content_encrypted = %s,
             tokens_input = %s,
             tokens_output = %s,
-            rag_context_encrypted = %s
+            rag_context_encrypted = %s,
+            created_at = NOW()
         WHERE id = %s
         """,
         (
@@ -1544,6 +1602,10 @@ class ChatOrchestrator:
                 # Post-review fix to #688: forward the per-turn token
                 # counts captured so far so the assistant message row
                 # records billable tokens even on the deadline path.
+                # #315 review fix: when a placeholder already exists
+                # (tool turn that timed out after the parent INSERT but
+                # before the final UPDATE), UPDATE the placeholder
+                # rather than INSERTing a second assistant row.
                 await asyncio.to_thread(
                     _persist_partial_assistant,
                     ctx.conversation_id,
@@ -1554,6 +1616,7 @@ class ChatOrchestrator:
                     error_suffix=" [Viga: serveri vastus võttis liiga kaua aega]",
                     tokens_input=ctx.tokens_in,
                     tokens_output=ctx.tokens_out,
+                    placeholder_message_id=ctx.assistant_msg_id,
                 )
             try:
                 await _safe_send(
@@ -1575,6 +1638,9 @@ class ChatOrchestrator:
             # already chose to record the partial; let it complete. Also
             # offload to a thread so psycopg I/O doesn't block the event
             # loop during the cancellation path.
+            # #315 review fix: when a placeholder already exists (tool
+            # turn cancelled mid-flight), UPDATE it rather than INSERTing
+            # a second assistant row.
             ctx.assistant_msg_id = await asyncio.shield(
                 asyncio.to_thread(
                     _persist_partial_assistant,
@@ -1585,6 +1651,7 @@ class ChatOrchestrator:
                     is_truncated=True,
                     tokens_input=ctx.tokens_in,
                     tokens_output=ctx.tokens_out,
+                    placeholder_message_id=ctx.assistant_msg_id,
                 )
             )
             # #661: shield the stopped-event send from a second cancel
@@ -1615,6 +1682,9 @@ class ChatOrchestrator:
             # and bail without sending further events.
             # #660: offload the sync persist so the event loop is free
             # to drain other connections while we save the partial.
+            # #315 review fix: forward the placeholder id so a tool turn
+            # interrupted by an unresponsive socket UPDATEs the parent
+            # row rather than inserting a sibling.
             await asyncio.to_thread(
                 _persist_partial_assistant,
                 ctx.conversation_id,
@@ -1624,6 +1694,7 @@ class ChatOrchestrator:
                 is_truncated=True,
                 tokens_input=ctx.tokens_in,
                 tokens_output=ctx.tokens_out,
+                placeholder_message_id=ctx.assistant_msg_id,
             )
             return False
         except Exception:
@@ -1632,6 +1703,9 @@ class ChatOrchestrator:
             if ctx.full_content:
                 # #660: offload the sync persist so the
                 # cancellation/error path doesn't block the event loop.
+                # #315 review fix: forward the placeholder id so a tool
+                # turn that errored after the parent INSERT UPDATEs that
+                # row rather than inserting a sibling assistant row.
                 await asyncio.to_thread(
                     _persist_partial_assistant,
                     ctx.conversation_id,
@@ -1642,6 +1716,7 @@ class ChatOrchestrator:
                     error_suffix=" [Viga: vastus katkestati]",
                     tokens_input=ctx.tokens_in,
                     tokens_output=ctx.tokens_out,
+                    placeholder_message_id=ctx.assistant_msg_id,
                 )
             try:
                 await _safe_send(

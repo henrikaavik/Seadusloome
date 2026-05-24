@@ -1295,7 +1295,10 @@ class TestPartialPersistTokensCapture:
                 else:
                     raise asyncio.CancelledError()
 
-        with patch("app.chat.orchestrator.execute_tool", return_value={"results": []}):
+        with (
+            patch("app.chat.orchestrator.execute_tool", return_value={"results": []}),
+            patch("app.chat.orchestrator._update_assistant_payload") as mock_update,
+        ):
             llm = CancellingLLM()
             collector = _Collector()
             orchestrator = ChatOrchestrator(llm, FakeSparql())
@@ -1307,14 +1310,21 @@ class TestPartialPersistTokensCapture:
         # The orchestrator should have persisted a partial assistant row
         # via the CancelledError handler with the tokens captured from
         # round 1's stop event.
-        assistant_calls = [
-            c for c in mock_create_msg.call_args_list if c.args[2:3] == ("assistant",)
-        ]
-        assert assistant_calls, "CancelledError path must persist a partial assistant row"
-        # Last call is the partial-persist (round 1's stop set tokens=300/80).
-        assistant_call = assistant_calls[-1]
-        assert assistant_call.kwargs.get("tokens_input") == 300
-        assert assistant_call.kwargs.get("tokens_output") == 80
+        #
+        # #315 Fix 2: when the tool turn was already underway (placeholder
+        # assistant INSERTed before the tool ran), the cancel path now
+        # UPDATEs that placeholder in place rather than inserting a
+        # second assistant row. So the tokens land on the
+        # ``_update_assistant_payload`` call, not on a new
+        # ``create_message`` call. Pre-fix this test relied on the buggy
+        # double-insert; post-fix it verifies the UPDATE carries the
+        # tokens.
+        assert mock_update.called, (
+            "CancelledError path on a tool turn must UPDATE the assistant placeholder"
+        )
+        update_kwargs = mock_update.call_args.kwargs
+        assert update_kwargs.get("tokens_input") == 300
+        assert update_kwargs.get("tokens_output") == 80
 
 
 class TestOrchestratorPartialPersistence:

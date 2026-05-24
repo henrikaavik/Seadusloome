@@ -715,3 +715,446 @@ def test_check_constraint_rejects_tool_use_id_on_non_tool_role():
         conn.execute("DELETE FROM users WHERE id = %s", (str(user_id),))
         conn.execute("DELETE FROM organizations WHERE id = %s", (str(org_id),))
         conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# #315 review fixes — placeholder UPDATE shifts created_at; partial persist
+# UPDATEs the placeholder instead of inserting a sibling row.
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateAssistantPayloadBumpsCreatedAt:
+    """Fix 1 (ordering): ``_update_assistant_payload`` must bump
+    ``created_at`` to ``NOW()`` so the placeholder sorts AFTER the tool
+    rows that were inserted between the initial placeholder INSERT and
+    the final UPDATE. Otherwise ``list_messages`` ``ORDER BY created_at
+    ASC`` returns the placeholder first and the replay path emits
+    ``[assistant_final, tool_call, tool_result]`` instead of
+    ``[tool_call, tool_result, assistant_final]``.
+    """
+
+    def test_update_sql_includes_created_at_now(self):
+        from app.chat.orchestrator import _update_assistant_payload
+
+        conn = MagicMock()
+        _update_assistant_payload(
+            conn,
+            uuid.uuid4(),
+            content="Lõplik vastus",
+            tokens_input=100,
+            tokens_output=50,
+            rag_context=None,
+        )
+        # The UPDATE statement is the only call.
+        sql = conn.execute.call_args.args[0]
+        # The SET clause must include ``created_at = NOW()`` so the
+        # placeholder sorts after the tool rows inserted while streaming.
+        normalized = " ".join(sql.split()).lower()
+        assert "set" in normalized
+        assert "created_at = now()" in normalized
+        # The non-deprecated payload columns are still updated.
+        assert "content_encrypted" in normalized
+        assert "tokens_input" in normalized
+        assert "tokens_output" in normalized
+        assert "rag_context_encrypted" in normalized
+
+
+class TestToolTurnReplayOrdering:
+    """Fix 1 end-to-end: simulate a tool turn through the orchestrator
+    and assert the persisted ordering is suitable for replay.
+
+    We can't observe row ``created_at`` directly without a real DB, so
+    we assert the *UPDATE* on the assistant placeholder fires AFTER the
+    tool row INSERTs — which is the operational guarantee that, combined
+    with ``SET created_at = NOW()``, produces the
+    ``tool_call → tool_result → assistant_final`` order on the next
+    ``list_messages`` call.
+    """
+
+    @patch("app.chat.orchestrator.execute_tool")
+    @patch("app.chat.orchestrator.get_connection")
+    def test_placeholder_update_happens_after_tool_inserts(self, mock_get_conn, mock_exec_tool):
+        # Order log: each create_message INSERT and each
+        # _update_assistant_payload UPDATE appends here.
+        ordering: list[str] = []
+
+        assistant_uuid = uuid.uuid4()
+
+        def _fake_create(conn, conv_id, role, content, **kwargs):
+            ordering.append(f"INSERT:{role}")
+            msg_id = assistant_uuid if role == "assistant" else uuid.uuid4()
+            return MagicMock(id=msg_id)
+
+        def _fake_update(conn, message_id, **kwargs):
+            ordering.append(f"UPDATE:{message_id}")
+
+        conn = MagicMock()
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
+
+        conv = _make_conversation()
+        base_conv_row = (
+            conv.id,
+            conv.user_id,
+            conv.org_id,
+            conv.title,
+            None,
+            conv.created_at,
+            conv.updated_at,
+        )
+        conn.execute.return_value.fetchone.return_value = base_conv_row
+        conn.execute.return_value.fetchall.return_value = []
+
+        async def fake_exec_tool(name, inp, sparql, auth=None):
+            return {"results": [{"uri": "estleg:X"}]}
+
+        mock_exec_tool.side_effect = fake_exec_tool
+
+        with (
+            patch("app.chat.orchestrator.create_message", side_effect=_fake_create),
+            patch("app.chat.orchestrator._update_assistant_payload", side_effect=_fake_update),
+        ):
+            orchestrator = ChatOrchestrator(_FakeToolLLM(), _FakeSparql())
+            collector = _Collector()
+            asyncio.run(
+                orchestrator.handle_message(
+                    _CONV_ID, "Otsi", {"id": _USER_ID, "org_id": _ORG_ID}, collector
+                )
+            )
+
+        # Filter to the events we care about for ordering.
+        tool_inserts = [i for i, ev in enumerate(ordering) if ev == "INSERT:tool"]
+        assistant_updates = [i for i, ev in enumerate(ordering) if ev.startswith("UPDATE:")]
+        assistant_inserts = [i for i, ev in enumerate(ordering) if ev == "INSERT:assistant"]
+
+        assert tool_inserts, "tool row INSERT must occur"
+        assert assistant_inserts, "assistant placeholder INSERT must occur"
+        assert assistant_updates, (
+            "the assistant placeholder must be UPDATEd with the final answer "
+            "(this is the path that bumps created_at to NOW())"
+        )
+        # The placeholder INSERT comes first, then tool rows, then the
+        # final UPDATE — that UPDATE is where created_at is bumped, so
+        # the row's effective sort key ends up AFTER the tool rows.
+        assert assistant_inserts[0] < tool_inserts[0], (
+            "placeholder must be inserted before tool rows so they can link via parent_message_id"
+        )
+        assert tool_inserts[-1] < assistant_updates[-1], (
+            "tool rows must be inserted before the placeholder UPDATE — "
+            "otherwise NOW() on the UPDATE wouldn't push created_at past the tool rows"
+        )
+
+    def test_list_messages_replay_order_after_update(self):
+        """Direct unit test on the replay shape: when an assistant row's
+        ``created_at`` is greater than the tool rows' ``created_at``
+        (the post-fix state), ``_build_llm_messages`` over a
+        ``created_at`` ASC ordering renders
+        ``[TOOL_CALL → TOOL_RESULT → assistant_final]`` — the correct
+        replay order for the next Claude turn.
+        """
+        from datetime import timedelta
+
+        from app.chat.orchestrator import _build_llm_messages
+
+        t0 = datetime.now(UTC)
+
+        user_msg = Message(
+            id=uuid.uuid4(),
+            conversation_id=_CONV_ID,
+            role="user",
+            content="Otsi sätteid",
+            tool_name=None,
+            tool_input=None,
+            tool_output=None,
+            rag_context=None,
+            tokens_input=None,
+            tokens_output=None,
+            model=None,
+            created_at=t0,
+        )
+        tool_msg = Message(
+            id=uuid.uuid4(),
+            conversation_id=_CONV_ID,
+            role="tool",
+            content='{"results": []}',
+            tool_name="search_provisions",
+            tool_input={"keywords": "andmekaitse"},
+            tool_output=None,
+            rag_context=None,
+            tokens_input=None,
+            tokens_output=None,
+            model=None,
+            created_at=t0 + timedelta(seconds=1),
+            tool_use_id="toolu_ordering_001",
+        )
+        # POST-FIX: the placeholder UPDATE bumps created_at past the
+        # tool row, so the ASC-ordered list sees the assistant row LAST.
+        assistant_msg = Message(
+            id=uuid.uuid4(),
+            conversation_id=_CONV_ID,
+            role="assistant",
+            content="Leidsin §1.",
+            tool_name=None,
+            tool_input=None,
+            tool_output=None,
+            rag_context=None,
+            tokens_input=None,
+            tokens_output=None,
+            model=None,
+            created_at=t0 + timedelta(seconds=2),
+        )
+
+        history = [user_msg, tool_msg, assistant_msg]
+        parts = _build_llm_messages(history, "Mis veel?")
+
+        # Find the indices of the three semantically relevant entries.
+        tool_idx = next(i for i, p in enumerate(parts) if "TOOL_CALL" in p and "TOOL_RESULT" in p)
+        assistant_idx = next(i for i, p in enumerate(parts) if p.startswith("[ASSISTANT]:"))
+        user_idx = next(i for i, p in enumerate(parts) if p == "[USER]: Mis veel?")
+
+        # The tool turn comes BEFORE the assistant's final answer,
+        # which comes BEFORE the new user message. This is the order
+        # Claude requires; the pre-fix state had assistant_idx <
+        # tool_idx and broke replay.
+        assert tool_idx < assistant_idx < user_idx, (
+            f"Expected tool_call -> assistant_final -> user, got order: {parts}"
+        )
+
+
+class TestPartialPersistUpdatesPlaceholder:
+    """Fix 2 (double-insert): when a placeholder assistant row already
+    exists for a tool turn, ``_persist_partial_assistant`` must UPDATE
+    that row in place rather than INSERTing a second assistant row.
+    Otherwise the timeout / cancel / error paths leave two assistant
+    messages for a single logical turn — the empty parent + a partial
+    sibling — and replay sees a corrupted history.
+    """
+
+    @patch("app.chat.orchestrator._update_assistant_payload")
+    @patch("app.chat.orchestrator.create_message")
+    @patch("app.chat.orchestrator.get_connection")
+    def test_with_placeholder_updates_in_place(
+        self, mock_get_conn, mock_create_msg, mock_update_payload
+    ):
+        """When ``placeholder_message_id`` is set, the helper must:
+
+        * NOT call ``create_message`` (would insert a second row).
+        * Call ``_update_assistant_payload`` with the existing id.
+        * Return the placeholder id unchanged.
+        """
+        from app.chat.orchestrator import _persist_partial_assistant
+
+        conn = MagicMock()
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
+
+        placeholder_id = uuid.uuid4()
+
+        result = _persist_partial_assistant(
+            _CONV_ID,
+            "osaline sisu",
+            "fake-model",
+            None,
+            is_truncated=True,
+            tokens_input=42,
+            tokens_output=17,
+            placeholder_message_id=placeholder_id,
+        )
+
+        assert result == placeholder_id, (
+            "Returning the placeholder id signals to callers that the same row was reused"
+        )
+        # Critical: no second assistant INSERT happened.
+        mock_create_msg.assert_not_called()
+        # The placeholder was UPDATEd with the partial content + tokens.
+        mock_update_payload.assert_called_once()
+        call_kwargs = mock_update_payload.call_args.kwargs
+        # The id passed positionally as the second arg.
+        positional = mock_update_payload.call_args.args
+        assert positional[1] == placeholder_id
+        assert call_kwargs.get("content") == "osaline sisu"
+        assert call_kwargs.get("tokens_input") == 42
+        assert call_kwargs.get("tokens_output") == 17
+
+    @patch("app.chat.orchestrator._update_assistant_payload")
+    @patch("app.chat.orchestrator.create_message")
+    @patch("app.chat.orchestrator.get_connection")
+    def test_without_placeholder_inserts_as_before(
+        self, mock_get_conn, mock_create_msg, mock_update_payload
+    ):
+        """Backwards compatibility: non-tool turns (no placeholder)
+        still INSERT a fresh assistant row as before."""
+        from app.chat.orchestrator import _persist_partial_assistant
+
+        conn = MagicMock()
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
+        new_msg_id = uuid.uuid4()
+        mock_create_msg.return_value = MagicMock(id=new_msg_id)
+
+        result = _persist_partial_assistant(
+            _CONV_ID,
+            "osaline sisu",
+            "fake-model",
+            None,
+            is_truncated=True,
+            tokens_input=42,
+            tokens_output=17,
+            placeholder_message_id=None,
+        )
+
+        assert result == new_msg_id
+        mock_create_msg.assert_called_once()
+        # The UPDATE helper must NOT have been used in the non-tool path.
+        mock_update_payload.assert_not_called()
+
+    @patch("app.chat.orchestrator.execute_tool")
+    @patch("app.chat.orchestrator._persist_partial_assistant")
+    @patch("app.chat.orchestrator.get_connection")
+    def test_timeout_on_tool_turn_passes_placeholder(
+        self, mock_get_conn, mock_persist, mock_exec_tool
+    ):
+        """End-to-end: a tool turn that hits the turn deadline AFTER
+        the placeholder is inserted must pass ``placeholder_message_id``
+        into ``_persist_partial_assistant`` so the helper UPDATEs the
+        existing placeholder rather than inserting a second assistant
+        row."""
+        from app.chat.orchestrator import _TURN_DEADLINE_SECONDS  # noqa: F401
+
+        conn = MagicMock()
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
+
+        conv = _make_conversation()
+        base_conv_row = (
+            conv.id,
+            conv.user_id,
+            conv.org_id,
+            conv.title,
+            None,
+            conv.created_at,
+            conv.updated_at,
+        )
+        conn.execute.return_value.fetchone.return_value = base_conv_row
+        conn.execute.return_value.fetchall.return_value = []
+
+        async def fake_exec_tool(name, inp, sparql, auth=None):
+            return {"results": []}
+
+        mock_exec_tool.side_effect = fake_exec_tool
+
+        assistant_uuid = uuid.uuid4()
+
+        # The LLM emits a tool_use on round 1 (which inserts the
+        # placeholder), then hangs on round 2 by sleeping past the
+        # turn deadline. We force a TimeoutError directly to avoid a
+        # real 120s sleep.
+        class HangingToolLLM(LLMProvider):
+            def __init__(self):
+                self._model = "fake-model"
+                self._calls = 0
+
+            def complete(self, prompt, **kw):  # pragma: no cover
+                return "x"
+
+            def extract_json(self, prompt, **kw):  # pragma: no cover
+                return {}
+
+            def count_tokens(self, text):  # pragma: no cover
+                return 0
+
+            async def acomplete(self, prompt, **kw):  # pragma: no cover
+                return "x"
+
+            async def astream(self, prompt, **kw):  # type: ignore[override]
+                if self._calls == 0:
+                    self._calls += 1
+                    yield StreamEvent(type="content", delta="Otsin...")
+                    yield StreamEvent(
+                        type="tool_use",
+                        tool_name="search_provisions",
+                        tool_input={"keywords": "x"},
+                        tool_use_id="toolu_timeout",
+                    )
+                    yield StreamEvent(type="stop")
+                else:
+                    # Simulate a stuck upstream by sleeping forever; the
+                    # orchestrator's asyncio.wait_for will cancel us.
+                    await asyncio.sleep(3600)
+
+        with patch("app.chat.orchestrator.create_message") as mock_create:
+
+            def _fake_create(conn, conv_id, role, content, **kwargs):
+                msg_id = assistant_uuid if role == "assistant" else uuid.uuid4()
+                return MagicMock(id=msg_id)
+
+            mock_create.side_effect = _fake_create
+
+            # Squeeze the turn deadline so the test runs in <1s.
+            with patch("app.chat.orchestrator._TURN_DEADLINE_SECONDS", 0.05):
+                orchestrator = ChatOrchestrator(HangingToolLLM(), _FakeSparql())
+                collector = _Collector()
+                asyncio.run(
+                    orchestrator.handle_message(
+                        _CONV_ID, "Otsi", {"id": _USER_ID, "org_id": _ORG_ID}, collector
+                    )
+                )
+
+        # _persist_partial_assistant must have been called from the
+        # timeout path with the placeholder id forwarded.
+        assert mock_persist.called, "the timeout path must call _persist_partial_assistant"
+        call_kwargs = mock_persist.call_args.kwargs
+        assert call_kwargs.get("placeholder_message_id") == assistant_uuid, (
+            "Fix 2: the timeout path must forward the placeholder id so the "
+            "partial-persist UPDATEs the existing assistant row instead of "
+            "inserting a sibling. Got "
+            f"placeholder_message_id={call_kwargs.get('placeholder_message_id')!r}, "
+            f"expected={assistant_uuid!r}"
+        )
+
+    @patch("app.chat.orchestrator._update_assistant_payload")
+    @patch("app.chat.orchestrator.create_message")
+    @patch("app.chat.orchestrator.get_connection")
+    def test_only_one_row_for_timed_out_tool_turn(
+        self, mock_get_conn, mock_create_msg, mock_update_payload
+    ):
+        """End-to-end count: when a tool turn times out after the
+        placeholder is inserted, the partial-persist path must NOT call
+        ``create_message`` again. Otherwise the conversation ends up with
+        TWO assistant rows (the original empty placeholder + a new
+        partial sibling) for one logical turn — the exact double-insert
+        bug Fix 2 addresses.
+        """
+        from app.chat.orchestrator import _persist_partial_assistant
+
+        conn = MagicMock()
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
+
+        # Simulate the orchestrator-level flow: the placeholder was
+        # already inserted earlier in the tool-turn pre-insert step
+        # (mocked away here; we just hold its id). Now the timeout path
+        # calls _persist_partial_assistant with the placeholder id.
+        placeholder_id = uuid.uuid4()
+
+        result = _persist_partial_assistant(
+            _CONV_ID,
+            "osaline...",
+            "fake-model",
+            None,
+            is_truncated=True,
+            error_suffix=" [Viga: aegus]",
+            tokens_input=10,
+            tokens_output=5,
+            placeholder_message_id=placeholder_id,
+        )
+
+        assert result == placeholder_id
+        # Crucial assertion: NO new assistant INSERT happened during the
+        # partial-persist path. Pre-fix this method always called
+        # create_message, producing the double-insert.
+        mock_create_msg.assert_not_called()
+        # And the UPDATE on the placeholder did happen.
+        mock_update_payload.assert_called_once()
+        positional = mock_update_payload.call_args.args
+        assert positional[1] == placeholder_id
