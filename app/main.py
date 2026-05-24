@@ -112,14 +112,40 @@ async def lifespan(_app):  # type: ignore[no-untyped-def]
         yield
         return
 
+    # WORKER_MODE gate (#348): in 'standalone' mode the worker runs in
+    # a separate Coolify container launched via ``scripts/run_worker.py``,
+    # so the web container's lifespan must NOT spawn its own worker
+    # thread (otherwise jobs get double-claimed at low priority load).
+    # The archive-warning scheduler is co-located with whichever
+    # process is acting as the worker, so it follows the same gate.
+    from app.config import get_worker_mode
+
+    worker_mode = get_worker_mode()
+    if worker_mode == "standalone":
+        logger.info(
+            "WORKER_MODE=standalone — skipping in-process worker startup; "
+            "expecting a separate worker process (scripts/run_worker.py)"
+        )
+        yield
+        return
+
     # Local import so tests that patch app.jobs.worker see the module
     # freshly re-imported if they reload after setting env vars.
     from app.jobs.archive_warning import start_archive_warning_scheduler
+    from app.jobs.registry import register_all_handlers
     from app.jobs.worker import start_worker_thread
+
+    # Ensure the handler registry is populated before the worker thread
+    # claims its first job. The route-registration imports at module top
+    # transitively import ``app.docs`` and ``app.drafter`` (which trigger
+    # @register_handler as a side effect), but we call this explicitly so
+    # the wiring is identical to standalone mode and any future refactor
+    # of the route imports cannot accidentally drop a handler.
+    register_all_handlers()
 
     _stop_worker.clear()
     _worker_thread = start_worker_thread(_stop_worker)
-    logger.info("Background worker started")
+    logger.info("Background worker started (WORKER_MODE=inproc)")
 
     _stop_archive_scheduler.clear()
     _archive_thread = start_archive_warning_scheduler(_stop_archive_scheduler)

@@ -31,6 +31,55 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # ---------------------------------------------------------------------------
+  # Standalone background-job worker (#348) — OPT-IN.
+  # ---------------------------------------------------------------------------
+  #
+  # By default the FastHTML `app` container runs the worker in-process via
+  # its ASGI lifespan hook (WORKER_MODE=inproc, the historical behaviour).
+  # That's the right choice for local dev and small deployments.
+  #
+  # UNCOMMENT this block when:
+  #   * scaling the web tier beyond a single container (otherwise each
+  #     web replica would spawn its own worker thread, doubling the
+  #     dispatch concurrency without any rate-limiting),
+  #   * background job latency or CPU is dominating the web container,
+  #   * or you want to deploy worker code without bouncing the web tier.
+  #
+  # When uncommented, ALSO set `WORKER_MODE=standalone` on the `app:`
+  # service so its lifespan hook skips spawning the in-process worker.
+  # Mixing modes (one inproc + N standalone) works but is rarely useful
+  # — pick one and stay consistent.
+  #
+  # The worker reuses the same image, .env, and Postgres connection as
+  # `app:`. It does NOT need draftsdata/exportsdata volumes mounted
+  # unless your handlers read/write those paths (parse/extract/export
+  # do; they share STORAGE_DIR/EXPORT_DIR with the web tier in prod).
+  #
+  # worker:
+  #   build:
+  #     context: ..
+  #     dockerfile: docker/Dockerfile
+  #   env_file:
+  #     - ../.env
+  #   environment:
+  #     WORKER_MODE: standalone
+  #     TIKA_URL: http://tika:9998
+  #     STORAGE_DIR: /var/seadusloome/drafts
+  #     EXPORT_DIR: /var/seadusloome/exports
+  #   command: ["python", "scripts/run_worker.py"]
+  #   volumes:
+  #     - draftsdata:/var/seadusloome/drafts
+  #     - exportsdata:/var/seadusloome/exports
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     jena:
+  #       condition: service_healthy
+  #     tika:
+  #       condition: service_healthy
+  #   restart: unless-stopped
+
   postgres:
     image: pgvector/pgvector:pg18
     ports:

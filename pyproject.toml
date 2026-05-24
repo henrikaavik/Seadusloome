@@ -23,6 +23,11 @@ dependencies = [
     "postmarker>=1.0",
 ]
 
+[project.scripts]
+# Standalone background-job worker entrypoint (#348).
+# Usage: `WORKER_MODE=standalone seadusloome-worker`
+seadusloome-worker = "scripts.run_worker:main"
+
 [dependency-groups]
 dev = [
     "ruff",
