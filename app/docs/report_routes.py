@@ -61,8 +61,10 @@ from app.auth.audit import log_action
 from app.auth.helpers import require_auth as _require_auth
 from app.auth.policy import can_view_draft
 from app.db import get_connection as _connect
+from app.docs.audit import log_draft_download
 from app.docs.draft_model import Draft, fetch_draft, touch_draft_access_conn
 from app.docs.labels import TYPE_LABELS_ET as _TYPE_LABELS_ET
+from app.docs.signed_urls import make_download_token, validate_download_token
 from app.jobs.queue import JobQueue
 from app.ontology.relations import legal_phrase
 from app.ui.data.data_table import Column, DataTable
@@ -1381,8 +1383,15 @@ def _print_summary_button(draft: Draft) -> Any:
     )
 
 
-def _export_button(draft: Draft, *, fmt: str, label: str, variant: ButtonVariant) -> Any:
-    """Render one export-trigger anchor for a single output format (#613, #811).
+def _export_button(
+    draft: Draft,
+    *,
+    fmt: str,
+    label: str,
+    variant: ButtonVariant,
+    user_id: str | None = None,
+) -> Any:
+    """Render one export-trigger anchor for a single output format (#613, #811, #307).
 
     Both the .docx and .pdf controls are plain ``<a href download>``
     GETs pointing at the synchronous ``/drafts/<id>/report/full.<fmt>``
@@ -1396,12 +1405,25 @@ def _export_button(draft: Draft, *, fmt: str, label: str, variant: ButtonVariant
     The ``download`` attribute pre-populates Safari's "Save As" dialog
     with a slugified filename derived from the draft title (mirrors the
     existing ``Prindi kokkuvõte`` link a few lines above, which works
-    cross-browser for exactly this reason)."""
+    cross-browser for exactly this reason).
+
+    #307: when ``user_id`` is provided, the href is suffixed with a
+    short-lived ``?token=...`` HMAC signed for that draft+user. The
+    download endpoint accepts the token in lieu of a session cookie so
+    the link is safe to share / cache for the token TTL (1 hour). The
+    legacy session-auth path stays in place for callers that omit the
+    token (admin tools, scripted exports), so this is an additive
+    hardening, not a breaking change.
+    """
     suffix = "pdf" if fmt == "pdf" else "docx"
     filename = f"impact_report_{_slugify(draft.title)}.{suffix}"
+    href = f"/drafts/{draft.id}/report/full.{suffix}"
+    if user_id:
+        token = make_download_token(str(draft.id), str(user_id))
+        href = f"{href}?token={token}"
     return LinkButton(
         label,
-        href=f"/drafts/{draft.id}/report/full.{suffix}",
+        href=href,
         variant=variant,
         # ``download`` hints to the browser to treat this as a file
         # download rather than navigating to the URL. Safari respects
@@ -1411,15 +1433,20 @@ def _export_button(draft: Draft, *, fmt: str, label: str, variant: ButtonVariant
     )
 
 
-def _export_section(draft: Draft) -> Any:
-    """Build the export action card (#613, #811).
+def _export_section(draft: Draft, *, user_id: str | None = None) -> Any:
+    """Build the export action card (#613, #811, #307).
 
     Two anchors: .docx (primary, default) and .pdf (secondary). Both
     are plain ``<a href download>`` GETs hitting the synchronous
     ``/report/full.<fmt>`` routes — the response streams the file with
     ``Content-Disposition: attachment``, which Safari handles natively
     (the prior HTMX form-post + async-job flow did not produce a
-    Safari download — #811)."""
+    Safari download — #811).
+
+    #307: the user-id is forwarded to ``_export_button`` so each
+    button mints its own short-lived HMAC token. Re-rendering the
+    page rotates the token (a fresh token is minted every time the
+    report page is built)."""
     return Card(
         CardHeader(H3("Eksport", cls="card-title")),  # noqa: F405
         CardBody(
@@ -1428,8 +1455,20 @@ def _export_section(draft: Draft) -> Any:
                 cls="muted-text",
             ),
             Div(  # noqa: F405
-                _export_button(draft, fmt="docx", label="Laadi alla .docx", variant="primary"),
-                _export_button(draft, fmt="pdf", label="Laadi alla .pdf", variant="secondary"),
+                _export_button(
+                    draft,
+                    fmt="docx",
+                    label="Laadi alla .docx",
+                    variant="primary",
+                    user_id=user_id,
+                ),
+                _export_button(
+                    draft,
+                    fmt="pdf",
+                    label="Laadi alla .pdf",
+                    variant="secondary",
+                    user_id=user_id,
+                ),
                 cls="export-actions",
             ),
         ),
@@ -1631,7 +1670,7 @@ def draft_report_page(req: Request, draft_id: str):
             draft_version_id=draft_version_id,
             counts=unresolved_counts,
         ),
-        _export_section(draft),
+        _export_section(draft, user_id=str(auth.get("id")) if auth.get("id") else None),
         # C6 (#791): print stylesheet expands collapsibles in print
         # media so a browser-native print of the page shows full
         # content. The localStorage script persists user choice on
@@ -2320,7 +2359,7 @@ def executive_summary_download_handler(req: Request, draft_id: str):
 
 
 def report_full_download_handler(req: Request, draft_id: str, fmt: str):
-    """GET /drafts/{draft_id}/report/full.{docx,pdf} — synchronous download (#811).
+    """GET /drafts/{draft_id}/report/full.{docx,pdf} — synchronous download (#811, #307).
 
     Renders the full impact-report .docx (and optionally converts to
     PDF) on the fly and streams the file with ``Content-Disposition:
@@ -2329,8 +2368,21 @@ def report_full_download_handler(req: Request, draft_id: str, fmt: str):
     GET that Safari treats as a native file download (the prior async
     HTMX-form pipeline silently failed in Safari — #811).
 
-    Auth + org-scoping mirror :func:`draft_report_page`: a missing /
-    cross-org draft resolves to the 404 page.
+    Two authentication paths are supported (#307):
+
+    * **Signed-URL path** — when ``?token=...`` is present, the token
+      is HMAC-validated against the draft id. A valid token bypasses
+      session auth (the token IS the bearer credential). Invalid or
+      expired tokens return 403 — never 200, never 404 (the latter
+      would let an attacker probe draft existence).
+    * **Legacy session path** — when no token is present, the handler
+      falls through to the original session-auth + org-scope check.
+      A missing or cross-org draft returns 404 so we don't leak the
+      existence of other orgs' reports.
+
+    Both paths audit the download via :func:`log_draft_download`
+    with a ``via_token`` flag so ops can trace whether a download came
+    through a shared signed URL or the original logged-in session.
 
     DOCX rendering is well within request-timeout territory (matches the
     summary path). PDF conversion shells out to headless LibreOffice
@@ -2338,11 +2390,6 @@ def report_full_download_handler(req: Request, draft_id: str, fmt: str):
     (:data:`app.docs.docx_export._SOFFICE_TIMEOUT_SECONDS` caps it at
     60 s).
     """
-    auth_or_redirect = _require_auth(req)
-    if isinstance(auth_or_redirect, Response):
-        return auth_or_redirect
-    auth = auth_or_redirect
-
     fmt_normalised = (fmt or "").lower()
     if fmt_normalised not in _VALID_EXPORT_FORMATS:
         return _not_found_page(req)
@@ -2351,12 +2398,54 @@ def report_full_download_handler(req: Request, draft_id: str, fmt: str):
     if parsed is None:
         return _not_found_page(req)
 
+    # ----- #307 token branch ------------------------------------------------
+    # If a token is supplied, validate it FIRST and bypass session-auth
+    # on success. A supplied-but-invalid token is an explicit 403 — not
+    # 404 — because the caller deliberately presented a credential. The
+    # legacy 404-for-cross-org path stays reserved for the
+    # session-cookie-only callers below.
+    token = req.query_params.get("token")
+    via_token = False
+    auth_user_id: str | None = None
+    if token is not None:
+        payload = validate_download_token(token, str(parsed))
+        if payload is None:
+            return Response(
+                "Allalaadimise link on aegunud või vigane.",
+                status_code=403,
+                media_type="text/plain; charset=utf-8",
+            )
+        via_token = True
+        # The minter's id is in the payload; that's the user we attribute
+        # the audit row to (handy when the URL is shared — the audit
+        # trail still points at the user who originally requested it).
+        auth_user_id = str(payload.get("user_id") or "") or None
+    else:
+        # ----- Legacy session-auth branch -----------------------------------
+        auth_or_redirect = _require_auth(req)
+        if isinstance(auth_or_redirect, Response):
+            return auth_or_redirect
+        auth = auth_or_redirect
+        auth_user_id = str(auth.get("id")) if auth.get("id") else None
+
     draft = fetch_draft(parsed)
-    if draft is None or not can_view_draft(auth, draft):
+    if draft is None:
         return _not_found_page(req)
+    if not via_token:
+        # Legacy callers must satisfy the org-scope policy. Token
+        # callers already proved authorisation via the HMAC.
+        # ``auth`` is in scope only on this branch — guarded by the
+        # else-arm above. We re-pull it from the request scope for
+        # type narrowing.
+        legacy_auth = req.scope.get("auth")
+        if not can_view_draft(legacy_auth, draft):
+            return _not_found_page(req)
 
     report_row = _fetch_latest_report(parsed)
     if report_row is None:
+        # Token holders see 404 here too — the token claim was valid but
+        # the report has since been deleted. There's no information leak
+        # because a token holder already proved they know the draft id.
         return _not_found_page(req)
 
     # Lazy import keeps the top-level module light and avoids a cycle
@@ -2389,8 +2478,10 @@ def report_full_download_handler(req: Request, draft_id: str, fmt: str):
         suffix = "docx"
 
     filename = f"impact_report_{_slugify(draft.title)}.{suffix}"
+    # Legacy audit event preserved verbatim for back-compat with the
+    # existing audit-log dashboards. Both paths emit it.
     log_action(
-        auth.get("id"),
+        auth_user_id,
         "draft.report.export.download",
         {
             "draft_id": str(parsed),
@@ -2398,7 +2489,19 @@ def report_full_download_handler(req: Request, draft_id: str, fmt: str):
             "filename": filename,
             "format": suffix,
             "transport": "sync",
+            "via_token": via_token,
         },
+    )
+    # #307: dedicated audit hook with structured ``via_token`` flag so
+    # ops dashboards can pivot directly on the auth path used. Mirrors
+    # the existing log_draft_view / log_draft_delete shape.
+    log_draft_download(
+        auth_user_id,
+        parsed,
+        via_token=via_token,
+        report_id=str(report_row[0]),
+        format=suffix,
+        transport="sync",
     )
     # #572: download counts as access; reset the archive clock.
     touch_draft_access_conn(parsed)

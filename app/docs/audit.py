@@ -56,6 +56,33 @@ def log_draft_reanalyze(user_id: str | None, draft_id: Any, **extra: Any) -> Non
     log_action(user_id, "draft.reanalyze", detail)
 
 
+def log_draft_download(
+    user_id: str | None,
+    draft_id: Any,
+    *,
+    via_token: bool,
+    **extra: Any,
+) -> None:
+    """Record a ``draft.report.download`` event (issue #307).
+
+    Captured every time the impact-report .docx/.pdf is downloaded —
+    whether the caller authenticated via session cookie (the legacy
+    path) or via an HMAC-signed expiring URL token. The ``via_token``
+    flag lets ops distinguish the two paths in the audit timeline so
+    a leaked token can be traced back to its mint event.
+
+    Sensitive fields (the token itself, the file bytes) are NEVER
+    logged. Only the draft id + the boolean + any caller-supplied
+    ``extra`` keyword args (format, filename, transport mode).
+    """
+    detail: dict[str, Any] = {
+        "draft_id": str(draft_id),
+        "via_token": bool(via_token),
+        **extra,
+    }
+    log_action(user_id, "draft.report.download", detail)
+
+
 def log_review_outcome(
     user_id: str | None,
     draft_id: Any,
