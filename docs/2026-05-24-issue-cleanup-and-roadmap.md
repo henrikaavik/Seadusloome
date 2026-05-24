@@ -10,7 +10,7 @@ This document records the 2026-05-24 audit + cleanup pass and lays out the next 
 
 ## Cleanup pass (closed by audit)
 
-157 tickets closed as already-shipped. Audit evidence (file paths, migration numbers, PR/commit SHAs) lives in each ticket's closure comment. (`327 − 170 open = 157 closed`.)
+157 tickets closed as already-shipped in the morning audit, then a same-day **wave 2 of 10 Section A items shipped via PRs #823–#833** (driven from sibling agent worktrees while this doc was being drafted). Audit evidence (file paths, migration numbers, PR/commit SHAs) lives in each ticket's closure comment. Net: `327 − 160 open = 167 closed`.
 
 | Group | Count | Range / notes |
 |---|---|---|
@@ -22,34 +22,38 @@ This document records the 2026-05-24 audit + cleanup pass and lays out the next 
 | Phase 4 Notifications | 11 | #162, #177–#179, #296, #298, #300–#303, #346 |
 | Phase 4 Admin/Observability (subset) | 5 | #184, #191, #193, #194, #340 |
 | Misc completed | 12 | #305, #310, #312–#314, #318–#321, #345, #349, #353 |
-| **Total closed** | **157** |  |
+| **Subtotal (morning audit)** | **157** |  |
+| Section A wave 2 (shipped via PRs #823–#833) | 10 | #176 (#825), #180 (#823), #299 (#824), #306 (#826), #307 (#827), #311 (#830), #315 (#832), #347 (#828), #348 (#829), #352 (#833). #354 closed via #831 also bundled the #196 LLM-latency collector. |
+| **Total closed** | **167** |  |
 
 > **Note (revision pass, 2026-05-24 PM):** the original draft listed #105 and #111 as "Skipped"; in fact both parent epics were closed by the same audit run (their still-open *children* #121, #123, #149 are what was skipped). Row description corrected above; counts unchanged.
+>
+> **Note (evening pass, 2026-05-24 PM):** Section A drained almost entirely during the audit afternoon — 10 items shipped via parallel agent-driven PRs #823–#833, and #354 (PR #831) also bundled the #196 LLM-call-latency collector (a Sprint 1 / §D item). Only #304 remains in §A as a re-audit task.
 
-Result: **170 open issues remain** (real work). Zero `bug`-labeled tickets remain — all 17 prod-verification bugs from 2026-05-19 are closed.
+Result: **160 open issues remain** (real work). Zero `bug`-labeled tickets remain — all 17 prod-verification bugs from 2026-05-19 are closed.
 
 ---
 
 ## Remaining open — grouped + prioritized
 
-### A. Bugs / quality fixes (small, near-term) — TARGET: this sprint
+### A. Bugs / quality fixes — **DONE except #304** (shipped 2026-05-24 PM via PRs #823–#833)
 
-Mostly missing test coverage, deferred edge-cases, and one or two small UX gaps surfaced by audits.
+The original Section A table (12 items) is collapsed below. 11 items shipped on 2026-05-24 PM; only **#304** remains as a re-audit task. The cross-cutting #180 pattern note (durable row + outbound delivery + graceful fallback) is now live in `app/notifications/` — see Phase 5C webhooks for reuse.
 
-| # | Title | Effort | Priority |
-|---|---|---|---|
-| #180 | WebSocket notification delivery (currently DB + 30s poll) | M | P1 |
-| #299 | Wire notify(): draft_shared event | S | P1 |
-| #176 | @mention autocomplete frontend typeahead | M | P2 |
-| #306 | Draft re-analyze button + handler | S | P2 |
-| #307 | Expiring signed URL for impact-report .docx | M | P2 |
-| #315 | Persist tool_use/tool_result with parent message id | S | P2 |
-| #347 | HTMX status polling fallback on draft detail | S | P2 |
-| #348 | Worker process standalone entrypoint (Coolify run mode) | S | P2 |
-| #304 | JobWorker startup/shutdown in FastHTML lifespan | XS | P3 — **re-audit before working**; `app/main.py:60–141` already wires the worker + archive-scheduler into the lifespan with `_stop_*` events and a 5 s join. Original DoD wanted a 30 s join timeout; verify, then close (or open a tiny follow-up to bump the timeout) |
-| #311 | Retriever metadata filtering (org/date/source) | M | P3 |
-| #352 | Chat cites outdated-ontology warning banner | S | P3 |
-| #354 | LLM call retry logic with backoff (currently job-queue level) | M | P3 |
+| # | Title | Status |
+|---|---|---|
+| #180 | WebSocket notification delivery | ✅ PR #823 |
+| #299 | Wire notify(): draft_shared event | ✅ PR #824 |
+| #176 | @mention autocomplete frontend typeahead | ✅ PR #825 |
+| #306 | Draft re-analyze button + handler | ✅ PR #826 |
+| #307 | Expiring signed URL for impact-report .docx | ✅ PR #827 |
+| #347 | HTMX status polling fallback on draft detail | ✅ PR #828 |
+| #348 | Worker process standalone entrypoint | ✅ PR #829 |
+| #311 | Retriever metadata filtering (org/date/source) | ✅ PR #830 |
+| #354 | LLM call retry with backoff (*also bundles the #196 metric collector*) | ✅ PR #831 |
+| #315 | Persist tool_use/tool_result with parent message id | ✅ PR #832 |
+| #352 | Chat cites outdated-ontology warning | ✅ PR #833 |
+| **#304** | **JobWorker startup/shutdown in FastHTML lifespan** | **OPEN — re-audit:** `app/main.py:60–141` already wires the worker + archive-scheduler into the lifespan with `_stop_*` events and a 5 s join. Original DoD wanted a 30 s join timeout; verify, then either close as already-shipped or open a 1-line follow-up to bump the timeout. |
 
 ### B. Test coverage hardening — TARGET: rolling
 
@@ -158,14 +162,21 @@ These are open-ended "edge case" tickets. Either pull into an active sprint with
 
 ## Concrete sprint plan
 
-Section A runs separately (P1 notification bugs + #304 re-audit). The plan below sequences D + B before Phase 5 so that public surfaces launch with metrics, audit visibility, fixtures, and regression coverage already in place.
+Section A is done bar #304 (re-audit). The plan below sequences D + B before Phase 5 so that public surfaces launch with metrics, audit visibility, fixtures, and regression coverage already in place.
 
-### Sprint 1 — Admin data + visible admin win
+### Sprint 1 — Admin data + visible admin win — **IN FLIGHT (2026-05-24 PM)**
 
-1. **#182 estimate → DEFER to Sprint 3.** `app/admin/` is already a 14-module package; `app/templates/admin_dashboard.py` is a 291-line *load-bearing shim* (uses `_rebind()` to rewire `__globals__` so `@patch("app.templates.admin_dashboard.X")` still works at call-time; 14 test sites in `tests/test_dashboard.py` depend on this). Not package cleanup — keep for Sprint 3.
-2. **Metric collectors:** #195 (worker), #196 (`app/llm/claude.py`), #197 (`app/ontology/sparql_client.py`), #323 (`app/rag/retriever.py`). All four wrap at *call time*, not import time, so the lazy-init singleton pattern survives stub mode.
-3. **#322 sync-status polish + history view** — the basic card ships; this adds paginated history from `sync_log` and empty/error-state polish. Cheap bundle with the collectors.
-4. **Smoke test collector imports in stub mode** — `APP_ENV=development` with neither `anthropic` nor `voyageai` installed: importing `app.main` must not force-construct any SDK client. Add a regression test if not already covered.
+| # | Status |
+|---|---|
+| **#182** estimate → **DEFER to Sprint 3** | Done — shim is load-bearing test infrastructure (`_rebind()` rewires `__globals__` so `@patch("app.templates.admin_dashboard.X")` reaches call-time; 14 sites in `tests/test_dashboard.py` depend on this). Not package cleanup. |
+| **#195** job execution time (`app/jobs/worker.py`) | Done — on `feat/sprint1-collectors` (`record_metric("job_execution_ms", …)` with `{handler, status}`). |
+| **#196** LLM call latency (`app/llm/claude.py`) | ✅ **shipped to origin/main via PR #831** (bundled into the #354 retry refactor at the agent's discretion — the metric wraps the retry-wrapped call cleanly). |
+| **#197** SPARQL duration (`app/ontology/sparql_client.py`) | Done — on `feat/sprint1-collectors` (`_execute` is the single instrumented choke-point; `ask()` refactored to route through it). |
+| **#323** RAG retrieval latency (`app/rag/retriever.py`) | Done — on `feat/sprint1-collectors` (`feature` kwarg + `record_metric` wrap; 3 callers updated to tag retrievals). |
+| **#322** sync-status polish + history view (`app/admin/sync.py`) | Done — on `feat/sprint1-collectors` (`/admin/sync/history` paginated page with "Vaata ajalugu →" link from the card; full shim integration + 7 new tests). |
+| Stub-mode smoke test (`tests/test_import_safety.py`) | Done — subprocess test blocks `anthropic` + `voyageai` at `builtins.__import__`, asserts `app.main` imports clean and both SDK singletons stay `None`. |
+
+**Sprint 1 status:** all 5 work-items done; `feat/sprint1-collectors` is 2 commits ahead of origin/main but **11 commits behind** (origin advanced via the Section A wave-2 merges). Needs a rebase before PR. Touched files overlap with merged PRs (notably #311's `retriever.py` signature change and #354's `claude.py` rewrite), so rebase warrants careful conflict review — but `git merge-tree` dry-run shows no marker collisions.
 
 ### Sprint 2 — Admin panels on top of real data + test fixtures
 
@@ -194,7 +205,9 @@ Do *not* start any 5B endpoint group until its gating controls from §E are sche
 
 ### Cross-cutting
 
-- **#180 pattern note:** once WebSocket notification delivery lands in section A, document the reusable pattern (durable row + outbound delivery + graceful fallback) — that becomes the template for Phase 5C webhook delivery/retry (#268, #270, #359), not just a notification fix.
+- **#180 pattern (shipped via PR #823):** WebSocket notification delivery now lives in `app/notifications/`. When Phase 5C webhook delivery (#268, #270) and retry/stale-payload guard (#359) start, copy the pattern — durable DB row + outbound delivery + graceful fallback to polling — rather than reinventing it.
+- **#311 retriever filters (shipped via PR #830):** the new `filters` kwarg on `Retriever.retrieve()` composes with Sprint 1's `feature` kwarg on the same surface; Phase 5B `/api/v1/provisions/search` and the chat retriever can both use both.
+- **#354 retry pattern (shipped via PR #831, file `app/llm/retry.py`):** `retry_sync` / `retry_async` are now generic enough to wrap Voyage embeddings too. Phase 5C webhook delivery retries (#270, #359) should consider reusing the same backoff schedule + classification logic instead of writing their own.
 - **Continuously:** section B test-coverage backlog (any agent dispatched on a bug should leave a cassette or fixture behind).
 - **Triage call:** section F design tickets — either commit a spec or close as "WONTFIX (specify when needed)".
 
