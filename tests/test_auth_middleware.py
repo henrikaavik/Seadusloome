@@ -77,12 +77,20 @@ def test_protected_path_is_not_skipped(path: str):
 def _make_request(
     cookies: dict[str, str] | None = None,
     path: str = "/dashboard",
+    query_string: bytes | None = None,
 ) -> MagicMock:
-    """Return a Starlette-Request-like mock carrying ``cookies`` and a url."""
+    """Return a Starlette-Request-like mock carrying ``cookies`` and a url.
+
+    ``query_string`` (bytes, ASGI shape) and ``path`` are surfaced through
+    ``req.scope`` so the #307 signed-URL bypass check can read them.
+    """
     req = MagicMock()
     req.cookies = cookies or {}
     req.url = f"http://testserver{path}"
-    req.scope = {}
+    scope: dict[str, Any] = {"path": path}
+    if query_string is not None:
+        scope["query_string"] = query_string
+    req.scope = scope
     return req
 
 
@@ -184,3 +192,80 @@ def test_only_refresh_cookie_still_refreshes(stub_provider: MagicMock):
     assert result.status_code == 307
     stub_provider.get_current_user.assert_not_called()
     stub_provider.verify_refresh_token.assert_called_once_with("ok")
+
+
+# ---------------------------------------------------------------------------
+# #307 signed-URL bypass — happy path and substring-false-positive regressions
+# ---------------------------------------------------------------------------
+
+
+_SIGNED_DOWNLOAD_PATH = "/drafts/00000000-0000-0000-0000-000000000001/report/full.docx"
+
+
+def test_signed_download_with_real_token_param_bypasses_auth(
+    stub_provider: MagicMock,
+):
+    """Happy path: a real ``?token=...`` on a signed-download path
+    short-circuits cookie-auth and is forwarded to the handler."""
+    req = _make_request(
+        cookies={},
+        path=_SIGNED_DOWNLOAD_PATH,
+        query_string=b"token=abc123",
+    )
+
+    result = auth_before(req)
+
+    # None == "let the request through" (middleware deferred to handler).
+    assert result is None
+    # Provider was never consulted because the bypass triggered first.
+    stub_provider.get_current_user.assert_not_called()
+    stub_provider.verify_refresh_token.assert_not_called()
+
+
+def test_signed_download_with_notoken_param_does_not_bypass(
+    stub_provider: MagicMock,
+):
+    """Regression: ``?notoken=abc`` must NOT trigger the bypass.
+
+    Before the fix the substring ``b"token="`` inside ``b"notoken=abc"``
+    matched, short-circuited cookie-auth, and the request fell through
+    to a 403/login redirect even for authenticated users.
+    """
+    stub_provider.get_current_user.return_value = None
+    stub_provider.verify_refresh_token.return_value = None
+
+    req = _make_request(
+        cookies={},
+        path=_SIGNED_DOWNLOAD_PATH,
+        query_string=b"notoken=abc",
+    )
+    result = auth_before(req)
+
+    # Cookie-auth ran and produced the normal "no creds" redirect.
+    assert isinstance(result, RedirectResponse)
+    assert result.status_code == 303
+    assert result.headers["location"] == "/auth/login"
+
+
+def test_signed_download_with_token_substring_in_other_param_does_not_bypass(
+    stub_provider: MagicMock,
+):
+    """Regression: ``?next=x-token=y`` must NOT trigger the bypass either.
+
+    The substring ``token=`` appears inside the value of the ``next``
+    param but there is no real ``token`` query key, so cookie-auth must
+    run as normal.
+    """
+    stub_provider.get_current_user.return_value = None
+    stub_provider.verify_refresh_token.return_value = None
+
+    req = _make_request(
+        cookies={},
+        path=_SIGNED_DOWNLOAD_PATH,
+        query_string=b"next=x-token=y",
+    )
+    result = auth_before(req)
+
+    assert isinstance(result, RedirectResponse)
+    assert result.status_code == 303
+    assert result.headers["location"] == "/auth/login"

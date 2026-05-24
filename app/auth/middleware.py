@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from typing import TYPE_CHECKING, Any
+from urllib.parse import parse_qsl
 
 from starlette.requests import Request
 from starlette.responses import RedirectResponse, Response
@@ -53,6 +54,19 @@ SKIP_PATHS: list[str] = [
     r"/ws/explorer",
     r"/webhooks/github",
     r"/api/validate/.*",
+]
+
+
+# #307: paths that carry their own bearer credential in a ``?token=``
+# query param and therefore must reach the handler even when the
+# session cookie is missing. The handler is responsible for validating
+# the token and returning 403 on failure — middleware only checks that
+# the param is present (no validation here) so we don't duplicate the
+# HMAC logic. When the token param is absent, the path falls through
+# to the normal cookie-auth flow.
+_TOKEN_BEARER_PATHS: list[str] = [
+    r"/drafts/[^/]+/report/full\.docx",
+    r"/drafts/[^/]+/report/full\.pdf",
 ]
 
 # Paths an authenticated user with ``must_change_password=True`` may
@@ -180,7 +194,43 @@ def auth_before(req: Request) -> Response | None:
       healthchecks, redirects to ``/profile/password``.
     - Returns ``None`` when the user is authenticated (lets the request through).
     - Returns a ``RedirectResponse`` to ``/auth/login`` when unauthenticated.
+
+    #307: paths in ``_TOKEN_BEARER_PATHS`` that present a ``?token=``
+    query param bypass cookie-auth and are forwarded straight to the
+    handler, which validates the token and returns 403 on any failure.
+    Token presence alone is the trigger — invalid tokens are still
+    rejected by the handler, not silently treated as anonymous.
     """
+    # #307: short-circuit signed-URL downloads before any cookie work
+    # so an unauthenticated caller with a valid token never hits the
+    # /auth/login redirect. The path is read from ``req.scope["path"]``
+    # rather than ``req.url.path`` because the existing
+    # test_auth_middleware fixtures stub ``req.url`` as a plain string;
+    # ``scope["path"]`` is the canonical ASGI path string and works for
+    # both real Starlette requests and those test mocks (the scope
+    # comes from the fixtures' ``req.scope = {}``).
+    path: str = ""
+    scope = req.scope if isinstance(req.scope, dict) else {}
+    raw_path = scope.get("path") if scope else None
+    if isinstance(raw_path, str):
+        path = raw_path
+    # Real key check, not substring — ``?notoken=1`` no longer matches.
+    # Parse with parse_qsl using ``latin-1`` because ASGI query strings are
+    # URL-encoded bytes (every byte is a valid latin-1 codepoint, so the
+    # round-trip is loss-free; parse_qsl still URL-decodes percent escapes).
+    query_string = scope.get("query_string") if scope else None
+    has_token_param = False
+    if isinstance(query_string, bytes) and query_string:
+        try:
+            params = parse_qsl(query_string.decode("latin-1"), keep_blank_values=True)
+            has_token_param = any(k == "token" for k, _ in params)
+        except (UnicodeDecodeError, ValueError):
+            has_token_param = False
+    if path and has_token_param:
+        for pattern in _TOKEN_BEARER_PATHS:
+            if re.fullmatch(pattern, path):
+                return None
+
     access_token: str | None = req.cookies.get("access_token")
     refresh_token: str | None = req.cookies.get("refresh_token")
 
