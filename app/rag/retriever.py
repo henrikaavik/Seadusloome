@@ -168,9 +168,11 @@ class Retriever:
             source_type: Optional shortcut for filtering to a single
                 source type (``'ontology'``, ``'draft'``, ``'law_text'``,
                 ``'court_decision'``). Kept for back-compat; prefer
-                ``filters={"source_type": ...}`` for new code. If both
-                are supplied, ``filters`` takes precedence and the
-                shortcut is ignored.
+                ``filters={"source_type": ...}`` for new code. The shortcut
+                is folded into the filter dict — so it ANDs cleanly with
+                other filter keys (e.g. ``entity_type``). If ``filters``
+                already contains a ``"source_type"`` key, the dict wins
+                on collision and the shortcut is ignored.
             org_id: Tenant scope. Public-corpus chunks (``org_id IS NULL``
                 in the DB) are always visible. If a non-``None`` value is
                 supplied, private chunks owned by that org are also
@@ -200,13 +202,14 @@ class Retriever:
         if not query.strip():
             return []
 
-        # Normalise: if a caller passed `filters`, ignore the legacy
-        # `source_type` shortcut so we don't AND two different predicates
-        # against the same column. If only the shortcut is supplied,
-        # translate it into the filter dict so the SQL builder is the
-        # single source of truth.
+        # Normalise: fold the legacy `source_type=` shortcut into the
+        # filter dict so the SQL builder is the single source of truth.
+        # The dict wins on collision (documented "filters wins" semantics);
+        # otherwise the shortcut is injected so callers can mix the two
+        # (e.g. `source_type="draft"` + `filters={"entity_type": "Provision"}`
+        # ANDs both predicates rather than silently dropping the shortcut).
         effective_filters: dict[str, Any] = dict(filters) if filters else {}
-        if not effective_filters and source_type:
+        if source_type is not None and "source_type" not in effective_filters:
             effective_filters["source_type"] = source_type
 
         # Validate / translate filters BEFORE we spend an embedding call,

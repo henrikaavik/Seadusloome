@@ -344,3 +344,102 @@ class TestRetrieveFilters:
         assert params[0] == params[-2]
         # Sanity: number of %s in SQL matches number of params.
         assert sql.count("%s") == len(params)
+
+
+class TestLegacySourceTypeMergeWithFilters:
+    """Regression tests for the P2 review fix: the legacy ``source_type=``
+    shortcut must be folded INTO the filter dict whenever the dict does
+    not already contain a ``source_type`` key. The old code dropped the
+    shortcut as soon as ``filters`` was non-empty, which silently widened
+    the result set to all source types.
+    """
+
+    @patch("app.rag.retriever.get_connection")
+    def test_legacy_kwarg_merges_with_non_colliding_filters(self, mock_get_conn: MagicMock):
+        """``source_type="draft"`` + ``filters={"entity_type": "Provision"}``
+        must AND both predicates — not silently drop the shortcut.
+        """
+        embedder = _make_stub_embedder()
+        retriever = Retriever(embedding_provider=embedder)
+        mock_conn = _make_mock_conn([])
+        mock_get_conn.return_value = mock_conn
+
+        asyncio.run(
+            retriever.retrieve(
+                "test",
+                source_type="draft",
+                filters={"entity_type": "Provision"},
+            )
+        )
+
+        sql, params = mock_conn.execute.call_args[0]
+        # BOTH predicates must be present in the SQL.
+        assert "source_type = %s" in sql
+        assert "metadata->>'entity_type' = %s" in sql
+        # BOTH bound values must reach the DB.
+        assert "draft" in params
+        assert "Provision" in params
+        # They must be AND'd, not OR'd, alongside the tenant guard.
+        assert " AND " in sql
+
+    @patch("app.rag.retriever.get_connection")
+    def test_filters_wins_on_source_type_collision(self, mock_get_conn: MagicMock):
+        """When ``filters`` already has ``source_type``, the dict value
+        wins and the legacy kwarg is ignored. (Unchanged collision case.)
+        """
+        embedder = _make_stub_embedder()
+        retriever = Retriever(embedding_provider=embedder)
+        mock_conn = _make_mock_conn([])
+        mock_get_conn.return_value = mock_conn
+
+        asyncio.run(
+            retriever.retrieve(
+                "test",
+                source_type="draft",
+                filters={"source_type": "law"},
+            )
+        )
+
+        sql, params = mock_conn.execute.call_args[0]
+        # Only one source_type predicate (no double-AND).
+        assert sql.count("source_type = %s") == 1
+        # The filter dict value wins.
+        assert "law" in params
+        assert "draft" not in params
+
+    @patch("app.rag.retriever.get_connection")
+    def test_legacy_source_type_only_unchanged(self, mock_get_conn: MagicMock):
+        """``source_type="draft"`` with no ``filters`` keeps the legacy
+        single-predicate behaviour intact.
+        """
+        embedder = _make_stub_embedder()
+        retriever = Retriever(embedding_provider=embedder)
+        mock_conn = _make_mock_conn([])
+        mock_get_conn.return_value = mock_conn
+
+        asyncio.run(retriever.retrieve("test", source_type="draft"))
+
+        sql, params = mock_conn.execute.call_args[0]
+        assert "source_type = %s" in sql
+        assert "draft" in params
+        # No JSONB filter clause leaked in.
+        assert "metadata->>" not in sql
+
+    @patch("app.rag.retriever.get_connection")
+    def test_filters_only_no_implicit_source_type(self, mock_get_conn: MagicMock):
+        """``filters={"entity_type": "X"}`` with no legacy kwarg must
+        emit ONLY the entity_type predicate — no source_type clause and
+        no source_type bound param.
+        """
+        embedder = _make_stub_embedder()
+        retriever = Retriever(embedding_provider=embedder)
+        mock_conn = _make_mock_conn([])
+        mock_get_conn.return_value = mock_conn
+
+        asyncio.run(retriever.retrieve("test", filters={"entity_type": "X"}))
+
+        sql, params = mock_conn.execute.call_args[0]
+        assert "metadata->>'entity_type' = %s" in sql
+        assert "X" in params
+        # No source_type predicate at all.
+        assert "source_type" not in sql
