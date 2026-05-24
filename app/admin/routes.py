@@ -36,9 +36,15 @@ from app.admin.audit import (
 )
 from app.admin.cost_dashboard import admin_cost_export, admin_cost_page
 from app.admin.dashboard import admin_dashboard_page
-from app.admin.health import health_check
-from app.admin.job_monitor import admin_job_retry, admin_jobs_page, admin_jobs_purge
+from app.admin.health import admin_health_page, health_check
+from app.admin.job_monitor import (
+    admin_job_detail,
+    admin_job_retry,
+    admin_jobs_page,
+    admin_jobs_purge,
+)
 from app.admin.performance import admin_performance_page
+from app.admin.sentry_panel import admin_sentry_page
 from app.admin.sync import admin_sync_history_page, sync_status_card, trigger_sync
 from app.auth.roles import require_role
 
@@ -73,3 +79,6 @@ def register_admin_routes(rt) -> None:  # type: ignore[no-untyped-def]
     rt("/admin/jobs/{id}/retry", methods=["POST"])(require_role("admin")(admin_job_retry))
     rt("/admin/jobs/purge", methods=["POST"])(require_role("admin")(admin_jobs_purge))
     rt("/api/health", methods=["GET"])(health_check)
+    rt("/admin/health/aggregator", methods=["GET"])(require_role("admin")(admin_health_page))
+    rt("/admin/sentry", methods=["GET"])(require_role("admin")(admin_sentry_page))
+    rt("/admin/jobs/{id}/detail", methods=["GET"])(require_role("admin")(admin_job_detail))

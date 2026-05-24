@@ -5,10 +5,16 @@ from __future__ import annotations
 from fasthtml.common import *  # noqa: F403
 from starlette.requests import Request
 
-from app.admin.health import _check_postgres, _health_card, jena_check_health
+from app.admin.health import (
+    _check_postgres,
+    _health_aggregator_card,
+    _health_card,
+    jena_check_health,
+)
 from app.admin.jobs import _job_queue_card
 from app.admin.llm_usage import _llm_usage_card
 from app.admin.rate_limits import _rate_limit_card
+from app.admin.sentry_panel import _sentry_panel_card
 from app.admin.sync import _get_sync_logs, _sync_card
 from app.admin.users import _get_user_stats, _quick_links_card, _user_stats_card
 from app.ui.layout import PageShell
@@ -70,10 +76,12 @@ def admin_dashboard_page(req: Request):
             dismissible=True,
         ),
         _health_card(jena_ok, pg_ok),
+        _health_aggregator_card(),
         _sync_card(sync_logs),
         _job_queue_card(),
         _llm_usage_card(),
         _rate_limit_card(),
+        _sentry_panel_card(),
         _user_stats_card(user_stats),
         _quick_links_card(),
         _version_footer(),
