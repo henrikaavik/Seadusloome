@@ -295,7 +295,7 @@ class TestNotifyDraftShared:
         mock_connect.return_value = _ConnectCM(conn)
 
         draft = _make_draft_with_org(user_id=_USER_A, org_id=_ORG_ID)
-        notify_draft_shared(draft)
+        notify_draft_shared(draft, uploader_id=_USER_A)
 
         # Two notifications: drafter + reviewer; uploader is NOT in the list.
         assert mock_notify.call_count == 2
@@ -316,7 +316,7 @@ class TestNotifyDraftShared:
         mock_connect.return_value = _ConnectCM(conn)
 
         draft = _make_draft_with_org(user_id=_USER_A, org_id=_ORG_ID)
-        notify_draft_shared(draft)
+        notify_draft_shared(draft, uploader_id=_USER_A)
 
         # Inspect the SQL + params passed to conn.execute.
         sql, params = conn.execute.call_args[0]
@@ -338,7 +338,7 @@ class TestNotifyDraftShared:
         mock_connect.return_value = _ConnectCM(conn)
 
         draft = _make_draft_with_org(user_id=_USER_A, org_id=_ORG_ID)
-        notify_draft_shared(draft)
+        notify_draft_shared(draft, uploader_id=_USER_A)
 
         mock_notify.assert_not_called()
 
@@ -362,7 +362,7 @@ class TestNotifyDraftShared:
         mock_connect.return_value = _ConnectCM(conn)
 
         draft = _make_draft_with_org(user_id=_USER_A, org_id=_ORG_ID)
-        notify_draft_shared(draft)
+        notify_draft_shared(draft, uploader_id=_USER_A)
 
         # Verify the uploader id was bound into the WHERE clause params.
         _, params = conn.execute.call_args[0]
@@ -380,7 +380,7 @@ class TestNotifyDraftShared:
         mock_connect.return_value = _ConnectCM(conn)
 
         draft = _make_draft_with_org(draft_id=_DRAFT_ID)
-        notify_draft_shared(draft)
+        notify_draft_shared(draft, uploader_id=_USER_A)
 
         call_kwargs = mock_notify.call_args[1]
         assert call_kwargs["link"] == f"/drafts/{_DRAFT_ID}"
@@ -401,7 +401,7 @@ class TestNotifyDraftShared:
 
         draft = _make_draft_with_org()
         # Must not raise.
-        notify_draft_shared(draft)
+        notify_draft_shared(draft, uploader_id=_USER_A)
 
         mock_notify.assert_not_called()
 
@@ -418,7 +418,74 @@ class TestNotifyDraftShared:
         draft.title = "x"
         draft.filename = "x.docx"
 
-        notify_draft_shared(draft)
+        notify_draft_shared(draft, uploader_id=_USER_A)
+
+        mock_connect.assert_not_called()
+        mock_notify.assert_not_called()
+
+    @patch("app.notifications.wire.notify")
+    @patch("app.db.get_connection")
+    def test_version_upload_excludes_acting_uploader_not_parent_owner(
+        self, mock_connect, mock_notify
+    ):
+        """Version uploads: ``handle_upload`` returns the PARENT draft
+        (whose ``user_id`` is the original drafter, NOT the colleague
+        who just uploaded v2). The wire helper must exclude the
+        explicit ``uploader_id`` (the acting caller from ``auth['id']``)
+        from fan-out, NOT ``draft.user_id`` — otherwise the original
+        drafter is silently dropped from the notification and the
+        actual uploader gets a notification about their own upload.
+        """
+        original_drafter_id = _USER_A
+        acting_uploader_id = uuid.uuid4()
+        other_reviewer_id = uuid.uuid4()
+
+        conn = MagicMock()
+        # Simulate the correct SQL filter: excludes acting_uploader_id,
+        # returns original_drafter (who should still be notified) and
+        # other_reviewer.
+        conn.execute.return_value.fetchall.return_value = [
+            (original_drafter_id,),
+            (other_reviewer_id,),
+        ]
+        mock_connect.return_value = _ConnectCM(conn)
+
+        # draft.user_id is the ORIGINAL drafter (parent owner) because
+        # handle_upload returns the parent for v2+ uploads.
+        draft = _make_draft_with_org(user_id=original_drafter_id, org_id=_ORG_ID)
+
+        notify_draft_shared(draft, uploader_id=acting_uploader_id)
+
+        # The SQL filter must bind the acting uploader, not the parent
+        # owner — that's the whole point of the explicit parameter.
+        _, params = conn.execute.call_args[0]
+        assert params == (str(_ORG_ID), str(acting_uploader_id))
+
+        # Both the original drafter AND the other reviewer get notified
+        # (the original drafter is NOT silently excluded just because
+        # they happen to own the parent draft).
+        assert mock_notify.call_count == 2
+        notified_ids = [call[1]["user_id"] for call in mock_notify.call_args_list]
+        assert original_drafter_id in notified_ids
+        assert other_reviewer_id in notified_ids
+        # The acting uploader never appears as a recipient.
+        assert acting_uploader_id not in notified_ids
+
+        # And the metadata records the actual uploader, not the parent owner.
+        for call in mock_notify.call_args_list:
+            assert call[1]["metadata"]["uploaded_by"] == str(acting_uploader_id)
+
+    @patch("app.notifications.wire.notify")
+    @patch("app.db.get_connection")
+    def test_missing_uploader_id_is_a_noop(self, mock_connect, mock_notify):
+        """A caller that forgot to pass ``uploader_id`` (or passed
+        ``None``) is treated as a no-op rather than fanning out to the
+        whole org. Belt-and-suspenders for routes that might fall
+        through a missing auth path.
+        """
+        draft = _make_draft_with_org(user_id=_USER_A, org_id=_ORG_ID)
+
+        notify_draft_shared(draft, uploader_id=None)
 
         mock_connect.assert_not_called()
         mock_notify.assert_not_called()

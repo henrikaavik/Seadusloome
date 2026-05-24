@@ -216,14 +216,14 @@ def notify_draft_archive_warning(draft: Any) -> None:
         )
 
 
-def notify_draft_shared(draft: Any) -> None:
+def notify_draft_shared(draft: Any, uploader_id: UUID | str) -> None:
     """Notify same-org drafters and reviewers when a new draft is uploaded (#299).
 
     Pre-publication drafts are visible to every same-org ``drafter`` and
     ``reviewer`` (see ``app/auth/policy.py``), so when one team member
     uploads a draft the rest of the team should see it in their inbox.
-    The uploader themselves is excluded — they obviously know about the
-    draft they just uploaded.
+    The acting uploader themselves is excluded — they obviously know
+    about the draft they just uploaded.
 
     System admins (``role = 'admin'``) and org admins (``role =
     'org_admin'``) are intentionally NOT notified: this is a
@@ -234,12 +234,18 @@ def notify_draft_shared(draft: Any) -> None:
         draft: A ``Draft`` dataclass (from ``app.docs.draft_model``)
             with ``id``, ``org_id``, ``user_id``, ``title`` and
             ``filename`` attributes.
+        uploader_id: The id of the user who actually performed the
+            upload. MUST be the acting caller's id, NOT
+            ``draft.user_id`` — for a v2+ upload ``handle_upload``
+            returns the PARENT draft's owner in ``draft.user_id``
+            (the audit-trail owner), so falling back to that would
+            both let the real uploader notify themselves and exclude
+            the original drafter from the fan-out.
     """
     try:
         from app.db import get_connection
 
         org_id = getattr(draft, "org_id", None)
-        uploader_id = getattr(draft, "user_id", None)
         if org_id is None or uploader_id is None:
             return
 

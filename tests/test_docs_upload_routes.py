@@ -293,6 +293,12 @@ class TestUploadHandlerNotifiesDraftShared:
         # The notify call carries the draft we returned from handle_upload.
         passed_draft = mock_notify_shared.call_args[0][0]
         assert passed_draft.filename == "eelnou.docx"
+        # And — critically for v2+ uploads — the route passes the acting
+        # caller's id explicitly so the fan-out excludes the right user.
+        # ``handle_upload`` returns the parent owner for v2+, so relying
+        # on ``draft.user_id`` would notify the wrong person.
+        passed_uploader = mock_notify_shared.call_args[1].get("uploader_id")
+        assert passed_uploader == _USER_ID or str(passed_uploader) == _USER_ID
 
     @patch("app.docs.routes._upload.log_draft_upload")
     @patch("app.docs.routes._upload.handle_upload")

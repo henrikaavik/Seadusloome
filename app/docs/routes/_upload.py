@@ -719,10 +719,14 @@ async def create_draft_handler(req: Request):
                 # #299: notify same-org drafters/reviewers that a new
                 # draft is available for collaboration. Fire-and-forget;
                 # never let a notification failure break the upload flow.
+                # NOTE: pass the acting caller's id explicitly — for v2+
+                # uploads ``draft.user_id`` is the parent draft's owner
+                # (audit-trail owner returned by ``handle_upload``), not
+                # the colleague who actually pressed Upload.
                 try:
                     from app.notifications.wire import notify_draft_shared
 
-                    notify_draft_shared(draft)
+                    notify_draft_shared(draft, uploader_id=auth.get("id"))
                 except Exception:
                     logger.debug(
                         "notify_draft_shared failed (non-critical)",
