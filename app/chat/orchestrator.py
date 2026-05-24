@@ -449,6 +449,25 @@ def _persist_partial_assistant(
     parent + one partial sibling).
     """
     if not full_content and not error_suffix:
+        # Tool turn whose placeholder was inserted up-front but the model
+        # produced no text (cancelled / socket-dropped / errored before
+        # the first delta). Delete the empty row so the conversation
+        # doesn't keep an empty assistant bubble forever. Non-tool turns
+        # (no placeholder) just return — nothing was inserted to begin
+        # with.
+        if placeholder_message_id is not None:
+            try:
+                with get_connection() as conn:
+                    conn.execute(
+                        "DELETE FROM messages WHERE id = %s",
+                        (str(placeholder_message_id),),
+                    )
+                    conn.commit()
+            except Exception:
+                logger.exception(
+                    "Failed to delete empty placeholder %s after interrupted tool turn",
+                    placeholder_message_id,
+                )
         return None
 
     text = full_content
@@ -1596,7 +1615,7 @@ class ChatOrchestrator:
                 _TURN_DEADLINE_SECONDS,
                 ctx.conversation_id,
             )
-            if ctx.full_content:
+            if ctx.full_content or ctx.assistant_msg_id is not None:
                 # #660: psycopg is sync; offload the partial-persist so
                 # a cancellation handler doesn't block the event loop.
                 # Post-review fix to #688: forward the per-turn token
@@ -1606,6 +1625,11 @@ class ChatOrchestrator:
                 # (tool turn that timed out after the parent INSERT but
                 # before the final UPDATE), UPDATE the placeholder
                 # rather than INSERTing a second assistant row.
+                # #315 review follow-up: keep calling the persist helper
+                # even when no content has been streamed yet, as long as
+                # a placeholder exists — that way the error_suffix lands
+                # on the placeholder row (or the placeholder gets deleted
+                # if the helper has nothing to write).
                 await asyncio.to_thread(
                     _persist_partial_assistant,
                     ctx.conversation_id,
@@ -1700,12 +1724,17 @@ class ChatOrchestrator:
         except Exception:
             logger.exception("LLM streaming failed for conversation %s", ctx.conversation_id)
             # M1: persist partial content with error suffix when streaming fails.
-            if ctx.full_content:
+            if ctx.full_content or ctx.assistant_msg_id is not None:
                 # #660: offload the sync persist so the
                 # cancellation/error path doesn't block the event loop.
                 # #315 review fix: forward the placeholder id so a tool
                 # turn that errored after the parent INSERT UPDATEs that
                 # row rather than inserting a sibling assistant row.
+                # #315 review follow-up: keep calling the persist helper
+                # even when no content has been streamed yet, as long as
+                # a placeholder exists — that way the error_suffix lands
+                # on the placeholder row (or the placeholder gets deleted
+                # if the helper has nothing to write).
                 await asyncio.to_thread(
                     _persist_partial_assistant,
                     ctx.conversation_id,

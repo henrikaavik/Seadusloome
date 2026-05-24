@@ -1158,3 +1158,95 @@ class TestPartialPersistUpdatesPlaceholder:
         mock_update_payload.assert_called_once()
         positional = mock_update_payload.call_args.args
         assert positional[1] == placeholder_id
+
+    @patch("app.chat.orchestrator._update_assistant_payload")
+    @patch("app.chat.orchestrator.create_message")
+    @patch("app.chat.orchestrator.get_connection")
+    def test_empty_content_with_placeholder_deletes_row(
+        self, mock_get_conn, mock_create_msg, mock_update_payload
+    ):
+        """Post-review regression: when a tool turn is interrupted
+        (CancelledError / WebSocketSendTimeout / Exception) BEFORE any
+        text has been streamed, ``_persist_partial_assistant`` used to
+        early-return at ``if not full_content and not error_suffix``,
+        leaving the up-front placeholder row as an empty assistant
+        bubble forever in conversation history.
+
+        The fix: when called with ``placeholder_message_id`` set but no
+        content and no error_suffix, the helper must DELETE the
+        placeholder row instead of returning silently. Non-tool turns
+        (no placeholder) still just return None — nothing was inserted
+        for them to begin with.
+        """
+        from app.chat.orchestrator import _persist_partial_assistant
+
+        conn = MagicMock()
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
+
+        placeholder_id = uuid.uuid4()
+
+        result = _persist_partial_assistant(
+            _CONV_ID,
+            "",  # No content streamed before the interrupt.
+            "fake-model",
+            None,
+            is_truncated=True,
+            error_suffix=None,
+            tokens_input=None,
+            tokens_output=None,
+            placeholder_message_id=placeholder_id,
+        )
+
+        assert result is None, "When there is nothing to persist the helper must still return None"
+        # No new INSERT and no UPDATE — nothing to write.
+        mock_create_msg.assert_not_called()
+        mock_update_payload.assert_not_called()
+        # Critical: the orphan placeholder row must be deleted so the
+        # conversation history doesn't keep an empty assistant bubble.
+        delete_calls = [
+            call
+            for call in conn.execute.call_args_list
+            if call.args and "DELETE FROM messages" in call.args[0]
+        ]
+        assert len(delete_calls) == 1, (
+            "The empty placeholder must be DELETEd exactly once. "
+            f"Got execute calls: {conn.execute.call_args_list}"
+        )
+        # The DELETE must target the placeholder id we passed in.
+        assert delete_calls[0].args[1] == (str(placeholder_id),)
+        conn.commit.assert_called_once()
+
+    @patch("app.chat.orchestrator._update_assistant_payload")
+    @patch("app.chat.orchestrator.create_message")
+    @patch("app.chat.orchestrator.get_connection")
+    def test_empty_content_without_placeholder_is_still_noop(
+        self, mock_get_conn, mock_create_msg, mock_update_payload
+    ):
+        """Backwards-compat partner to the DELETE regression above:
+        non-tool turns (no placeholder) with no content and no
+        error_suffix must remain a pure noop — no DB access at all.
+        """
+        from app.chat.orchestrator import _persist_partial_assistant
+
+        conn = MagicMock()
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
+
+        result = _persist_partial_assistant(
+            _CONV_ID,
+            "",
+            "fake-model",
+            None,
+            is_truncated=True,
+            error_suffix=None,
+            tokens_input=None,
+            tokens_output=None,
+            placeholder_message_id=None,
+        )
+
+        assert result is None
+        mock_create_msg.assert_not_called()
+        mock_update_payload.assert_not_called()
+        # No connection should have been opened — pure early return.
+        mock_get_conn.assert_not_called()
