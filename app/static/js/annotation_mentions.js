@@ -15,9 +15,16 @@
  *  - Backend: GET /api/annotations/mentions/search?q=<prefix>
  *    Returns {"results": [{id, label, full_name, email}, ...]}.
  *
- *  - On select, the ``@<query>`` substring is replaced with
- *    ``@<full_name> `` (trailing space) so ``parse_mentions`` on the
- *    server side picks it up by name match against the users table.
+ *  - On select, the ``@<query>`` substring is replaced with a
+ *    whitespace-free, resolvable token: ``@<email-local-part> ``
+ *    (the part before ``@`` in the user's email). ``parse_mentions``
+ *    server-side resolves it by matching against ``users.email``'s
+ *    local part. The readable display name still shows in the
+ *    typeahead UI; we only insert the stable token because the
+ *    server-side _MENTION_RE stops at whitespace and would otherwise
+ *    truncate ``@Andres Tamm`` to ``@Andres``. If the user has no
+ *    email we fall back to the full_name with spaces stripped, or
+ *    the user id as a last resort — all whitespace-free.
  *
  *  - Keyboard: Down/Up navigate, Enter/Tab select, Escape closes.
  *
@@ -52,6 +59,30 @@
   /** Remove every child of an element without using innerHTML. */
   function clearChildren(el) {
     while (el.firstChild) el.removeChild(el.firstChild);
+  }
+
+  /**
+   * Compute the whitespace-free token to insert after ``@`` for a
+   * suggestion. Prefer the email local-part (everything before ``@``),
+   * fall back to a space-stripped full_name, then the user id.
+   *
+   * Only emits chars that match the server-side _MENTION_RE
+   * (``[\w.\-]+`` — Unicode letters/digits, underscore, dot, hyphen);
+   * any other char in the source is stripped so the token round-trips
+   * cleanly through the parser.
+   */
+  function mentionToken(choice) {
+    const safe = (s) =>
+      String(s || "").replace(/[^\p{L}\p{N}_.\-]/gu, "");
+    const email = String(choice.email || "");
+    const atIdx = email.indexOf("@");
+    if (atIdx > 0) {
+      const local = safe(email.slice(0, atIdx));
+      if (local) return local;
+    }
+    const fromName = safe(choice.full_name || choice.label);
+    if (fromName) return fromName;
+    return safe(choice.id);
   }
 
   /**
@@ -263,13 +294,14 @@
       const value = textarea.value;
       const before = value.slice(0, state.tokenStart);
       const after = value.slice(textarea.selectionStart);
-      // Insert @<full_name> followed by a single space. parse_mentions
-      // server-side handles ``@Full Name`` (matches users.full_name
-      // verbatim) and tolerates underscores → spaces; either form works.
-      const label = (choice.label || choice.full_name || choice.email || "")
-        .replace(/\s+/g, " ")
-        .trim();
-      const insertion = `@${label} `;
+      // Insert a whitespace-free token so the server-side _MENTION_RE
+      // (which stops at whitespace) captures the full identifier.
+      // Preferred form: ``@<email-local-part>``; fall back to
+      // ``@<full_name-without-spaces>`` and finally ``@<id>`` so we
+      // always insert something the resolver can match. The readable
+      // display label only appears in the typeahead UI itself.
+      const token = mentionToken(choice);
+      const insertion = `@${token} `;
       const newValue = before + insertion + after;
       const newCaret = before.length + insertion.length;
 

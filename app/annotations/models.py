@@ -454,10 +454,16 @@ def parse_mentions(
     matches are silently dropped.  Duplicate mentions of the same user are
     deduplicated in the returned list.
 
-    The lookup checks both ``email`` and ``full_name`` columns so that
-    ``@peeter.pärn`` and ``@Peeter Pärn`` both resolve (space replaced by
-    ``_`` is a common convention in Estonian government systems, but both
-    the raw token and the underscore-replaced form are tried).
+    The token captured by ``_MENTION_RE`` is whitespace-free, matching the
+    token the typeahead widget inserts (``@<email-local-part>``).  The lookup
+    accepts four forms so both typed and typeahead-inserted mentions resolve:
+
+    1. Full email address (``@peeter@min.ee`` — typed form).
+    2. Email local-part prefix (``@peeter`` → matches ``peeter@…``).
+    3. Exact ``full_name`` (handles ``@Peeter`` for single-word names,
+       and any underscore-joined form like ``@Peeter_Pärn``).
+    4. Underscore-to-space variant (``@eesnimi_perenimi`` →
+       ``Eesnimi Perenimi``).
 
     Returns an empty list when *content* contains no ``@`` tokens, or when no
     tokens resolve to users in the given org.
@@ -472,6 +478,11 @@ def parse_mentions(
     for token in tokens:
         # Normalise: treat underscores as spaces so @eesnimi_perenimi works too.
         name_variant = token.replace("_", " ")
+        # Local-part prefix match: ``peeter`` should resolve ``peeter@min.ee``.
+        # Skip when the token already contains ``@`` (i.e. a literal email
+        # was typed) to avoid double-matching and to keep the LIKE pattern
+        # well-formed.
+        email_local_pattern = f"{token.lower()}@%" if "@" not in token else None
         try:
             row = conn.execute(
                 """
@@ -480,6 +491,7 @@ def parse_mentions(
                   AND (
                       email = %s
                       OR email = %s
+                      OR (%s IS NOT NULL AND lower(email) LIKE %s)
                       OR full_name ILIKE %s
                       OR full_name ILIKE %s
                   )
@@ -489,6 +501,8 @@ def parse_mentions(
                     str(org_id),
                     token,  # exact email match e.g. peeter@min.ee
                     token.lower(),  # case-insensitive email
+                    email_local_pattern,  # NULL when token has @
+                    email_local_pattern,  # local-part LIKE pattern
                     token,  # exact full_name
                     name_variant,  # space-variant full_name
                 ),

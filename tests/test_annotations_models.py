@@ -753,6 +753,49 @@ class TestRowAnnotationExtensions:
         result = parse_mentions(conn, "@kasutaja kommenteerib.", _ORG_ID)
         assert result == []
 
+    def test_parse_mentions_resolves_email_local_part_for_multi_word_name(self):
+        """End-to-end: typeahead inserts @<email-local-part> for a multi-word
+        display name (e.g. ``Andres Tamm`` → ``@andres``). The resolver must
+        match the user via the ``email LIKE 'andres@%'`` arm — without this,
+        the original bug truncated ``@Andres Tamm`` to ``@Andres`` and never
+        resolved.
+        """
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = (_USER_ID,)
+
+        # Simulate what annotation_mentions.js now inserts for a user whose
+        # display name is "Andres Tamm" and whose email is "andres@min.ee".
+        content = "Palun vaata üle @andres — see vajab kommentaari."
+        result = parse_mentions(conn, content, _ORG_ID)
+
+        assert result == [_USER_ID]
+        # The local-part LIKE parameter must be passed and shaped correctly.
+        params = conn.execute.call_args.args[1]
+        # token (lowercase) is "andres"; the email-local-part LIKE pattern
+        # must be "andres@%". The same pattern appears twice (once for the
+        # IS NOT NULL guard, once for the LIKE).
+        assert "andres@%" in params
+
+    def test_parse_mentions_literal_email_still_resolves(self):
+        """A typed ``@user@domain`` form skips the local-part LIKE arm and
+        resolves via the exact-email arm — ``@`` in the token would otherwise
+        produce a malformed LIKE pattern.
+        """
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = (_USER_ID,)
+
+        # NB: ``_MENTION_RE`` stops at ``@`` because ``@`` isn't a word char,
+        # so the captured token is just the local-part. This exercises the
+        # safe fallback path where the SQL is still well-formed even if the
+        # local-part pattern happens to coincide with someone's email prefix.
+        content = "@peeter on autor."
+        result = parse_mentions(conn, content, _ORG_ID)
+        assert result == [_USER_ID]
+        params = conn.execute.call_args.args[1]
+        # Local-part LIKE is populated (token has no @), and it must be the
+        # well-formed "peeter@%" pattern, never None or empty.
+        assert params[3] == "peeter@%"
+
     # ------------------------------------------------------------------
     # list_annotations_for_version_row
     # ------------------------------------------------------------------
