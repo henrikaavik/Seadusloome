@@ -14,18 +14,30 @@ is unavailable:
     3. Cross-org access returns the same "not found" placeholder as a
        missing draft (no existence leak).
     4. Anonymous callers get a 303 redirect to the login page.
-    5. The active stage carries the ``draft-stage-active`` class while
-       polling — the CSS keyframe spinner is attached to that class —
-       and the class is absent on terminal states (no false-positive
-       spinner on a finished pipeline).
+    5. The "spinner" — defined here as the live elapsed-time ticker
+       (``.draft-stage-elapsed`` + the window-level
+       ``__draftElapsedTimer`` setInterval, see ``_status_tracker.py``)
+       — is rendered while polling and absent on terminal states (no
+       counter that keeps incrementing forever on a finished pipeline).
+
+       Note on ``.draft-stage-active``: this class is NOT the spinner.
+       It's a static CSS color highlight (primary tint, see
+       ``ui.css`` — no ``@keyframes``, no ``animation`` property) that
+       marks the current stage row. On ``ready`` it legitimately
+       remains on the last ("Valmis") stage so the user sees a coloured
+       checkmark-style final row instead of a fully-grey tracker; on
+       ``failed`` it is dropped because every stage falls through to
+       ``draft-stage-idle``. The live ticker is what tells the user
+       "still working" — and that is what the terminal-state
+       assertions below pin to absent.
 
 These are intentionally narrow assertions: detailed behaviour (poll
 back-off, stale-pipeline alert, HX-Trigger draft-ready) is covered by
 ``tests/test_docs_routes.py::TestDraftStatusFragment`` and
 ``tests/test_docs_routes.py::TestDraftReadyTrigger``. The point of
-this file is the polling-fallback DoD: it stops on terminal, it keeps
-spinning while progressing, it 404-style refuses cross-org reads, and
-it never serves anonymous traffic.
+this file is the polling-fallback DoD: it stops on terminal, the live
+ticker stops while progressing remains animated, it 404-style refuses
+cross-org reads, and it never serves anonymous traffic.
 """
 
 from __future__ import annotations
@@ -317,6 +329,70 @@ class TestSpinnerVisibility:
         # presence relies on at least one ``.draft-stage-elapsed`` in
         # the children (see _status_tracker.py).
         assert "__draftElapsedTimer" not in resp.text
+
+    @patch("app.docs.routes._detail.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_active_class_remains_on_ready_final_stage(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+    ) -> None:
+        """``.draft-stage-active`` is a static color highlight, NOT the
+        spinner. On ``ready`` it must stay on the final ("Valmis")
+        stage row so the tracker shows a coloured final stage instead
+        of an all-grey tracker. The live ticker (the real spinner) is
+        already pinned absent by ``test_spinner_absent_on_terminal``.
+
+        Pinning this so a future "drop active on terminal" refactor
+        can't silently strip the final-row highlight without an
+        explicit DoD review.
+        """
+        mock_get_provider.return_value = _stub_provider()
+        mock_fetch.return_value = _make_draft(status="ready")
+
+        client = _authed_client()
+        resp = client.get(
+            f"/drafts/{_DRAFT_ID}/status",
+            headers={"HX-Request": "true"},
+        )
+
+        assert resp.status_code == 200
+        # The class is still on the "Valmis" row — see the
+        # ``elif is_active and draft.status == "ready"`` branch in
+        # ``_status_tracker.py``: it renders the frozen done-label
+        # span under a stage that is still marked ``draft-stage-active``.
+        assert "draft-stage-active" in resp.text
+        # Sanity: the frozen "Analüüsitud" label that goes with the
+        # final active row is present.
+        assert "draft-stage-done-label" in resp.text
+
+    @patch("app.docs.routes._detail.fetch_draft")
+    @patch("app.auth.middleware._get_provider")
+    def test_active_class_absent_on_failed(
+        self,
+        mock_get_provider: MagicMock,
+        mock_fetch: MagicMock,
+    ) -> None:
+        """``failed`` drafts dim every stage to ``draft-stage-idle``
+        (see the ``if draft.status == "failed"`` branch in
+        ``_status_tracker.py``). No row is marked active, so no row
+        gets the primary-colour highlight — the user reads the red
+        error banner as the dominant state cue instead.
+        """
+        mock_get_provider.return_value = _stub_provider()
+        mock_fetch.return_value = _make_draft(
+            status="failed",
+            error_message="Töötlemine ebaõnnestus",
+        )
+
+        client = _authed_client()
+        resp = client.get(
+            f"/drafts/{_DRAFT_ID}/status",
+            headers={"HX-Request": "true"},
+        )
+
+        assert resp.status_code == 200
+        assert "draft-stage-active" not in resp.text
 
 
 # ---------------------------------------------------------------------------
