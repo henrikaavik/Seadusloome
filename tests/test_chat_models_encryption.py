@@ -44,8 +44,9 @@ def _echo_row(conn_mock: MagicMock) -> list[Any]:
     """Capture the INSERT params and build a matching row for ``fetchone``.
 
     Migration 026 dropped the plaintext payload columns. Migration 036
-    (#315) added ``tool_use_id`` + ``parent_message_id``; the INSERT
-    now binds 12 positional params and ``_MESSAGE_COLUMNS`` is 16 wide.
+    (#315) added ``tool_use_id`` + ``parent_message_id``. Migration 037
+    (#352) added ``ontology_version``. The INSERT now binds 13
+    positional params and ``_MESSAGE_COLUMNS`` is 17 wide.
     """
     params = conn_mock.execute.call_args.args[1]
     (
@@ -61,6 +62,7 @@ def _echo_row(conn_mock: MagicMock) -> list[Any]:
         rag_context_ct,
         tool_use_id,
         parent_message_id,
+        ontology_version,
     ) = params
     now = datetime.now(UTC)
     return [
@@ -80,6 +82,7 @@ def _echo_row(conn_mock: MagicMock) -> list[Any]:
         False,  # is_truncated (v017)
         tool_use_id,
         parent_message_id,
+        ontology_version,
     ]
 
 

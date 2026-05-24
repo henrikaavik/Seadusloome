@@ -1,0 +1,43 @@
+-- =============================================================================
+-- Migration 037: messages.ontology_version (#352)
+-- =============================================================================
+--
+-- Issue #352 ("Chat cites outdated ontology warning"):
+--   When a chat assistant message cites ontology nodes (provisions, EU
+--   acts, court decisions, etc.) via the RAG retrieval or the SPARQL
+--   tools, we want to remember which snapshot of the ontology the
+--   message was grounded against. Then, on conversation view, we can
+--   detect "ontology has been updated since this answer was generated"
+--   and surface a banner inviting the user to re-ask.
+--
+--   This mirrors the pattern established by #345 + migration 032 for
+--   ``impact_reports.ontology_version`` — the value is the same
+--   ``<iso-timestamp>@<entity_count>`` snapshot tag produced by
+--   ``app/docs/analyze_handler.py::_get_current_ontology_version`` (and
+--   the chat module's local copy in ``app/chat/ontology_version.py``).
+--
+-- Column semantics:
+--   - ``ontology_version`` is TEXT NULL. NULL means "we don't know what
+--     snapshot this message used" — true for every assistant message
+--     persisted before this migration applied, and true for any message
+--     whose ontology lookup failed gracefully. NULL is treated as
+--     "cannot detect drift" by the conversation view (no banner shown).
+--   - Stamped only on role='assistant' rows by the orchestrator. Tool
+--     rows inherit the snapshot via their parent_message_id (added by
+--     migration 036 / #315) — there is no point storing the same
+--     snapshot tag on every tool row.
+--   - NOT FK'd anywhere — the value is a reproducibility tag derived
+--     from the live ``sync_log`` table at message-write time, not a
+--     persistent identifier.
+--
+-- Idempotency:
+--   - ADD COLUMN IF NOT EXISTS for the column.
+--   - No backfill: existing assistant rows stay NULL on purpose
+--     (their pre-#352 snapshot is unknowable).
+--
+-- ROLLBACK procedure (manual; requires app on pre-#352 code):
+--   ALTER TABLE messages DROP COLUMN IF EXISTS ontology_version;
+--   DELETE FROM schema_migrations WHERE version = '037_message_ontology_version';
+-- =============================================================================
+
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS ontology_version TEXT NULL;

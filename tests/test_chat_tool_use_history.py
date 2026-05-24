@@ -111,9 +111,10 @@ def _make_message_row(
 def _echo_row_for_create(conn_mock: MagicMock):
     """Replay a ``RETURNING`` row from the params bound to the INSERT.
 
-    The INSERT in :func:`create_message` binds 12 positional params
-    (post-#315). We zip them back into the 16-column row order so the
-    round-trip returns a faithful Message.
+    The INSERT in :func:`create_message` binds 13 positional params
+    (post-#352: #315's 12 + ``ontology_version``). We zip them back
+    into the 17-column row order so the round-trip returns a faithful
+    Message.
     """
 
     def _build_row():
@@ -131,6 +132,7 @@ def _echo_row_for_create(conn_mock: MagicMock):
             rag_context_ct,
             tool_use_id,
             parent_message_id,
+            ontology_version,
         ) = params
         return [
             uuid.uuid4(),
@@ -149,6 +151,7 @@ def _echo_row_for_create(conn_mock: MagicMock):
             False,
             tool_use_id,
             parent_message_id,
+            ontology_version,
         ]
 
     return _build_row
@@ -269,11 +272,15 @@ class TestCreateMessageToolUseFields:
         assert msg.parent_message_id == parent_id
 
         # Confirm the bound SQL params include the new fields.
+        # Bind order (post-#352): conv_id, role, tool_name, tokens_in,
+        # tokens_out, model, content_ct, tool_input_ct, tool_output_ct,
+        # rag_context_ct, tool_use_id (idx 10), parent_message_id (idx 11),
+        # ontology_version (idx 12).
         params = conn.execute.call_args.args[1]
-        # tool_use_id is the second-to-last positional bind.
-        assert params[-2] == "toolu_42"
-        # parent_message_id is the last positional bind, stringified.
-        assert params[-1] == str(parent_id)
+        assert params[10] == "toolu_42"
+        assert params[11] == str(parent_id)
+        # ontology_version is NULL for tool rows.
+        assert params[12] is None
 
     def test_persists_without_tool_fields_for_assistant_turn(self):
         """A non-tool message must not set the new fields."""
@@ -284,8 +291,10 @@ class TestCreateMessageToolUseFields:
         assert msg.tool_use_id is None
         assert msg.parent_message_id is None
         params = conn.execute.call_args.args[1]
-        assert params[-2] is None
-        assert params[-1] is None
+        # Bind indices: 10=tool_use_id, 11=parent_message_id, 12=ontology_version.
+        assert params[10] is None
+        assert params[11] is None
+        assert params[12] is None
 
 
 # ---------------------------------------------------------------------------

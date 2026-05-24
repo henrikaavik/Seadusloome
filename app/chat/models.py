@@ -83,6 +83,14 @@ class Message:
     # non-tool messages and for tool messages persisted before #315.
     tool_use_id: str | None = None
     parent_message_id: uuid.UUID | None = None
+    # Migration 037 (#352) — ontology snapshot tag captured when the
+    # assistant message was generated. Format is
+    # ``"<iso-timestamp>@<entity_count>"`` (see
+    # :mod:`app.chat.ontology_version`). Always NULL on user / tool /
+    # system rows; the tool turns inherit their parent assistant's
+    # snapshot via ``parent_message_id``. NULL on assistant rows
+    # persisted before #352 (so drift detection silently no-ops there).
+    ontology_version: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +146,7 @@ _MESSAGE_COLUMNS = (
     "tokens_input, tokens_output, model, created_at, "
     "content_encrypted, tool_input_encrypted, tool_output_encrypted, "
     "rag_context_encrypted, is_pinned, is_truncated, "
-    "tool_use_id, parent_message_id"
+    "tool_use_id, parent_message_id, ontology_version"
 )
 
 # Legacy SELECT list used when migration 017 has not yet applied (the
@@ -164,6 +172,18 @@ _MESSAGE_COLUMNS_PRE036 = (
     "rag_context_encrypted, is_pinned, is_truncated"
 )
 
+# Migration-037 fallback SELECT list — used when the schema is at v036
+# but pre-037 (the ``ontology_version`` column is absent). Same idea as
+# the v017 / v036 fallbacks: keep the conversation view functional in
+# the narrow window between image deploy and migration apply.
+_MESSAGE_COLUMNS_PRE037 = (
+    "id, conversation_id, role, tool_name, "
+    "tokens_input, tokens_output, model, created_at, "
+    "content_encrypted, tool_input_encrypted, tool_output_encrypted, "
+    "rag_context_encrypted, is_pinned, is_truncated, "
+    "tool_use_id, parent_message_id"
+)
+
 
 def _is_missing_v036_column_error(exc: BaseException) -> bool:
     """Return True when the exception names a migration-036 column.
@@ -176,6 +196,17 @@ def _is_missing_v036_column_error(exc: BaseException) -> bool:
     return "does not exist" in msg and any(
         col in msg for col in ("tool_use_id", "parent_message_id")
     )
+
+
+def _is_missing_v037_column_error(exc: BaseException) -> bool:
+    """Return True when the exception names the migration-037 column.
+
+    Used by the read / write paths to detect "schema is v036 but pre-037"
+    and fall back to the prior SQL. ``ontology_version`` is the new
+    column introduced by #352.
+    """
+    msg = str(exc).lower()
+    return "does not exist" in msg and "ontology_version" in msg
 
 
 def _decode_encrypted_text(ciphertext: bytes | memoryview | None) -> str | None:
@@ -286,6 +317,11 @@ def _row_to_message(row: tuple[Any, ...]) -> Message:
     parent_message_id: uuid.UUID | None = (
         coerce_uuid(parent_message_id_raw) if parent_message_id_raw else None
     )
+    # Migration 037 (#352) — ontology_version snapshot tag. Defensive
+    # indexing so pre-037 fixtures (16-tuple rows) and pre-037 SELECT
+    # fallbacks still load cleanly.
+    ontology_version_raw = row[16] if len(row) > 16 else None
+    ontology_version: str | None = str(ontology_version_raw) if ontology_version_raw else None
 
     if content_encrypted is None:
         raise ValueError(
@@ -323,6 +359,7 @@ def _row_to_message(row: tuple[Any, ...]) -> Message:
         is_truncated=is_truncated,
         tool_use_id=tool_use_id,
         parent_message_id=parent_message_id,
+        ontology_version=ontology_version,
     )
 
 
@@ -598,6 +635,7 @@ def create_message(
     model: str | None = None,
     tool_use_id: str | None = None,
     parent_message_id: uuid.UUID | str | None = None,
+    ontology_version: str | None = None,
 ) -> Message:
     """Insert a new ``messages`` row and return the created message.
 
@@ -609,6 +647,12 @@ def create_message(
     that requested the tool. Both are NULL for non-tool turns. The CHECK
     constraint defined in migration 036 rejects a non-NULL
     ``tool_use_id`` on any role other than 'tool'.
+
+    Migration 037 (#352) — ``ontology_version`` records the ontology
+    snapshot tag the orchestrator captured at the time this assistant
+    message was generated (see :mod:`app.chat.ontology_version`). Only
+    meaningful on role='assistant' rows; tool rows inherit it via
+    ``parent_message_id``.
     """
     if role not in VALID_ROLES:
         raise ValueError(f"Invalid message role: {role!r}")
@@ -646,8 +690,9 @@ def create_message(
             INSERT INTO messages
                 (conversation_id, role, tool_name, tokens_input, tokens_output, model,
                  content_encrypted, tool_input_encrypted, tool_output_encrypted,
-                 rag_context_encrypted, tool_use_id, parent_message_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 rag_context_encrypted, tool_use_id, parent_message_id,
+                 ontology_version)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING {_MESSAGE_COLUMNS}
             """,
             (
@@ -663,9 +708,65 @@ def create_message(
                 rag_context_ciphertext,
                 tool_use_id,
                 parent_message_id_str,
+                ontology_version,
             ),
         ).fetchone()
     except Exception as exc:
+        # Migration-037 fallback: the ``ontology_version`` column may be
+        # absent in a narrow deploy window where the new image hits a
+        # stale schema cache (psycopg raises ``UndefinedColumn`` from
+        # the server). Fall back to the pre-037 INSERT shape and silently
+        # drop the snapshot tag — losing the tag is strictly better than
+        # losing the assistant message altogether. This mirrors the
+        # pre-036 / pre-017 fallback patterns elsewhere in this module.
+        #
+        # Originally we gated this on ``ontology_version is None`` to
+        # avoid silently losing tags. But the orchestrator passes a
+        # non-None tag on every assistant turn, so the gate effectively
+        # broke INSERTs during the rollout window — see #833 review.
+        if _is_missing_v037_column_error(exc):
+            if ontology_version is not None:
+                logger.warning(
+                    "create_message: migration 037 column missing — "
+                    "dropping ontology_version=%r and falling back to "
+                    "pre-037 INSERT for conversation=%s",
+                    ontology_version,
+                    conversation_id,
+                )
+            else:
+                logger.warning(
+                    "create_message: migration 037 column missing — "
+                    "falling back to pre-037 INSERT for conversation=%s",
+                    conversation_id,
+                )
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            row = conn.execute(
+                f"""
+                INSERT INTO messages
+                    (conversation_id, role, tool_name, tokens_input, tokens_output, model,
+                     content_encrypted, tool_input_encrypted, tool_output_encrypted,
+                     rag_context_encrypted, tool_use_id, parent_message_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING {_MESSAGE_COLUMNS_PRE037}
+                """,
+                (
+                    str(conversation_id),
+                    role,
+                    tool_name,
+                    tokens_input,
+                    tokens_output,
+                    model,
+                    content_ciphertext,
+                    tool_input_ciphertext,
+                    tool_output_ciphertext,
+                    rag_context_ciphertext,
+                    tool_use_id,
+                    parent_message_id_str,
+                ),
+            ).fetchone()
         # Migration-036 fallback: the new ``tool_use_id`` /
         # ``parent_message_id`` columns might be absent in a deploy
         # window where the new image hits a stale schema cache (same
@@ -673,10 +774,11 @@ def create_message(
         # When that happens AND the caller didn't ask for either field,
         # transparently fall back to the prior INSERT shape; otherwise
         # the loss of tracking would be silent and confusing.
-        if (
+        elif (
             _is_missing_v036_column_error(exc)
             and tool_use_id is None
             and parent_message_id_str is None
+            and ontology_version is None
         ):
             logger.warning(
                 "create_message: migration 036 columns missing — "
@@ -742,9 +844,36 @@ def list_messages(
         ).fetchall()
     except Exception as exc:
         msg = str(exc).lower()
+        is_v037_missing = _is_missing_v037_column_error(exc)
         is_v036_missing = _is_missing_v036_column_error(exc)
         is_v017_missing = "is_pinned" in msg or "is_truncated" in msg
-        if is_v036_missing:
+        if is_v037_missing:
+            logger.warning(
+                "list_messages: migration 037 column missing — falling back"
+                " to pre-037 SELECT for conversation=%s",
+                conversation_id,
+            )
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            try:
+                rows = conn.execute(
+                    f"""
+                    SELECT {_MESSAGE_COLUMNS_PRE037}
+                    FROM messages
+                    WHERE conversation_id = %s
+                    ORDER BY created_at ASC
+                    """,
+                    (str(conversation_id),),
+                ).fetchall()
+            except Exception:
+                logger.exception(
+                    "Pre-037 fallback list_messages failed for conversation=%s",
+                    conversation_id,
+                )
+                return []
+        elif is_v036_missing:
             logger.warning(
                 "list_messages: migration 036 columns missing — falling back"
                 " to pre-036 SELECT for conversation=%s",
@@ -841,6 +970,41 @@ def update_message_truncated(
         "UPDATE messages SET is_truncated = %s WHERE id = %s",
         (bool(truncated), str(message_id)),
     )
+
+
+def update_message_ontology_version(
+    conn: Any,
+    message_id: uuid.UUID | str,
+    ontology_version: str | None,
+) -> None:
+    """Stamp the ontology snapshot tag on a (typically assistant) message.
+
+    Issue #352: in the multi-round tool-use path the assistant
+    placeholder row is INSERTed before the snapshot tag is known to the
+    caller (the orchestrator captures it once at turn start). Once
+    streaming completes, the terminal-events phase calls this helper to
+    record the snapshot. Pre-037 schemas swallow the UPDATE quietly so
+    the deploy window between image rollout and migration apply does
+    not break chat.
+    """
+    try:
+        conn.execute(
+            "UPDATE messages SET ontology_version = %s WHERE id = %s",
+            (ontology_version, str(message_id)),
+        )
+    except Exception as exc:
+        if _is_missing_v037_column_error(exc):
+            logger.warning(
+                "update_message_ontology_version: migration 037 column missing — "
+                "skipping for message=%s",
+                message_id,
+            )
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return
+        raise
 
 
 def list_pinned_messages(
@@ -1014,7 +1178,11 @@ def fork_conversation(
     # the fork reads in the same order as the source up to the boundary.
     # ``tool_use_id`` is preserved; ``parent_message_id`` is dropped
     # (NULL) because the parent assistant row lives in the source
-    # conversation — see docstring.
+    # conversation — see docstring. ``ontology_version`` (migration 037
+    # / #352) is preserved so the fork keeps drift detection on
+    # previously-cited stale ontology answers (otherwise reviewing a
+    # branched conversation would silently lose the "Ontoloogia on
+    # uuenenud" banner — see #833 review).
     try:
         conn.execute(
             """
@@ -1022,13 +1190,13 @@ def fork_conversation(
                 conversation_id, role, tool_name, tokens_input, tokens_output, model,
                 content_encrypted, tool_input_encrypted, tool_output_encrypted,
                 rag_context_encrypted, is_pinned, is_truncated, created_at,
-                tool_use_id
+                tool_use_id, ontology_version
             )
             SELECT
                 %s, role, tool_name, tokens_input, tokens_output, model,
                 content_encrypted, tool_input_encrypted, tool_output_encrypted,
                 rag_context_encrypted, is_pinned, is_truncated, created_at,
-                tool_use_id
+                tool_use_id, ontology_version
             FROM messages
             WHERE conversation_id = %s AND created_at <= %s
             ORDER BY created_at ASC
@@ -1036,35 +1204,98 @@ def fork_conversation(
             (str(new_conv.id), str(source_conv_id), boundary_created_at),
         )
     except Exception as exc:
-        # Migration-036 fallback for fork — if the new columns aren't
-        # present yet, fall back to the pre-036 INSERT shape so the
-        # rollout window doesn't break fork operations.
-        if not _is_missing_v036_column_error(exc):
-            raise
-        logger.warning(
-            "fork_conversation: migration 036 columns missing — falling back"
-            " to pre-036 copy for source=%s",
-            source_conv_id,
-        )
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        conn.execute(
-            """
-            INSERT INTO messages (
-                conversation_id, role, tool_name, tokens_input, tokens_output, model,
-                content_encrypted, tool_input_encrypted, tool_output_encrypted,
-                rag_context_encrypted, is_pinned, is_truncated, created_at
+        # Migration-037 fallback for fork — if the ``ontology_version``
+        # column isn't present yet, fall back to the pre-037 shape
+        # (still preserving ``tool_use_id``) so the rollout window
+        # doesn't break fork operations.
+        if _is_missing_v037_column_error(exc):
+            logger.warning(
+                "fork_conversation: migration 037 column missing — falling"
+                " back to pre-037 copy for source=%s",
+                source_conv_id,
             )
-            SELECT
-                %s, role, tool_name, tokens_input, tokens_output, model,
-                content_encrypted, tool_input_encrypted, tool_output_encrypted,
-                rag_context_encrypted, is_pinned, is_truncated, created_at
-            FROM messages
-            WHERE conversation_id = %s AND created_at <= %s
-            ORDER BY created_at ASC
-            """,
-            (str(new_conv.id), str(source_conv_id), boundary_created_at),
-        )
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO messages (
+                        conversation_id, role, tool_name, tokens_input, tokens_output, model,
+                        content_encrypted, tool_input_encrypted, tool_output_encrypted,
+                        rag_context_encrypted, is_pinned, is_truncated, created_at,
+                        tool_use_id
+                    )
+                    SELECT
+                        %s, role, tool_name, tokens_input, tokens_output, model,
+                        content_encrypted, tool_input_encrypted, tool_output_encrypted,
+                        rag_context_encrypted, is_pinned, is_truncated, created_at,
+                        tool_use_id
+                    FROM messages
+                    WHERE conversation_id = %s AND created_at <= %s
+                    ORDER BY created_at ASC
+                    """,
+                    (str(new_conv.id), str(source_conv_id), boundary_created_at),
+                )
+            except Exception as exc2:
+                # Cascading fallback — if v036 columns are also missing,
+                # drop ``tool_use_id`` too.
+                if not _is_missing_v036_column_error(exc2):
+                    raise
+                logger.warning(
+                    "fork_conversation: migration 036 columns missing — falling"
+                    " back to pre-036 copy for source=%s",
+                    source_conv_id,
+                )
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                conn.execute(
+                    """
+                    INSERT INTO messages (
+                        conversation_id, role, tool_name, tokens_input, tokens_output, model,
+                        content_encrypted, tool_input_encrypted, tool_output_encrypted,
+                        rag_context_encrypted, is_pinned, is_truncated, created_at
+                    )
+                    SELECT
+                        %s, role, tool_name, tokens_input, tokens_output, model,
+                        content_encrypted, tool_input_encrypted, tool_output_encrypted,
+                        rag_context_encrypted, is_pinned, is_truncated, created_at
+                    FROM messages
+                    WHERE conversation_id = %s AND created_at <= %s
+                    ORDER BY created_at ASC
+                    """,
+                    (str(new_conv.id), str(source_conv_id), boundary_created_at),
+                )
+        elif _is_missing_v036_column_error(exc):
+            logger.warning(
+                "fork_conversation: migration 036 columns missing — falling back"
+                " to pre-036 copy for source=%s",
+                source_conv_id,
+            )
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            conn.execute(
+                """
+                INSERT INTO messages (
+                    conversation_id, role, tool_name, tokens_input, tokens_output, model,
+                    content_encrypted, tool_input_encrypted, tool_output_encrypted,
+                    rag_context_encrypted, is_pinned, is_truncated, created_at
+                )
+                SELECT
+                    %s, role, tool_name, tokens_input, tokens_output, model,
+                    content_encrypted, tool_input_encrypted, tool_output_encrypted,
+                    rag_context_encrypted, is_pinned, is_truncated, created_at
+                FROM messages
+                WHERE conversation_id = %s AND created_at <= %s
+                ORDER BY created_at ASC
+                """,
+                (str(new_conv.id), str(source_conv_id), boundary_created_at),
+            )
+        else:
+            raise
     return new_conv
