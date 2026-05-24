@@ -61,8 +61,8 @@ class TestDashboardAuth:
 
 
 class TestHealthCheck:
-    @patch("app.templates.admin_dashboard.jena_check_health")
-    @patch("app.templates.admin_dashboard._check_postgres")
+    @patch("app.admin.health.jena_check_health")
+    @patch("app.admin.health._check_postgres")
     def test_health_returns_json(self, mock_pg: MagicMock, mock_jena: MagicMock):
         mock_pg.return_value = True
         mock_jena.return_value = True
@@ -77,8 +77,8 @@ class TestHealthCheck:
         assert data["jena"] is True
         assert data["postgres"] is True
 
-    @patch("app.templates.admin_dashboard.jena_check_health")
-    @patch("app.templates.admin_dashboard._check_postgres")
+    @patch("app.admin.health.jena_check_health")
+    @patch("app.admin.health._check_postgres")
     def test_health_degraded_when_service_down(self, mock_pg: MagicMock, mock_jena: MagicMock):
         mock_pg.return_value = True
         mock_jena.return_value = False
@@ -150,8 +150,8 @@ class TestAdminDashboard:
         assert response.status_code == 303
         assert response.headers["location"] == "/auth/login"
 
-    @patch("app.templates.admin_dashboard._insert_running_row", return_value=99)
-    @patch("app.templates.admin_dashboard._get_sync_logs")
+    @patch("app.admin.sync._insert_running_row", return_value=99)
+    @patch("app.admin.sync._get_sync_logs")
     @patch("threading.Thread")
     def test_admin_sync_triggers_thread(
         self,
@@ -164,13 +164,13 @@ class TestAdminDashboard:
         banner. Asserts the lock state is reset via the `finally`."""
         from starlette.requests import Request
 
-        from app.templates import admin_dashboard
-        from app.templates.admin_dashboard import trigger_sync
+        from app.admin import sync as admin_sync
+        from app.admin.sync import trigger_sync
 
         mock_logs.return_value = []
 
         # Ensure a clean lock state so the test is deterministic.
-        admin_dashboard._sync_in_progress = False
+        admin_sync._sync_in_progress = False
         mock_thread = MagicMock()
         mock_thread_cls.return_value = mock_thread
 
@@ -195,7 +195,7 @@ class TestAdminDashboard:
         mock_thread.start.assert_called_once()
 
         # Handler should have flipped the in-progress flag on entry.
-        assert admin_dashboard._sync_in_progress is True
+        assert admin_sync._sync_in_progress is True
 
         # Result is a FastTag we can convert to XML to look for the banner.
         from fasthtml.common import to_xml
@@ -204,7 +204,7 @@ class TestAdminDashboard:
         assert "sünkroniseerimine käivitati" in html.lower()
 
         # Clean up: simulate the thread finishing and clearing the flag.
-        admin_dashboard._sync_in_progress = False
+        admin_sync._sync_in_progress = False
 
 
 # ---------------------------------------------------------------------------
@@ -600,9 +600,9 @@ class TestBookmarkRemove:
 
 
 class TestSyncLogs:
-    @patch("app.templates.admin_dashboard._connect")
+    @patch("app.admin.sync._connect")
     def test_get_sync_logs_returns_list(self, mock_connect: MagicMock):
-        from app.templates.admin_dashboard import _get_sync_logs
+        from app.admin.sync import _get_sync_logs
 
         mock_conn = MagicMock()
         mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
@@ -618,9 +618,9 @@ class TestSyncLogs:
         # Migration 013 adds current_step — helper must surface it.
         assert "current_step" in result[0]
 
-    @patch("app.templates.admin_dashboard._connect")
+    @patch("app.admin.sync._connect")
     def test_get_sync_logs_returns_empty_on_error(self, mock_connect: MagicMock):
-        from app.templates.admin_dashboard import _get_sync_logs
+        from app.admin.sync import _get_sync_logs
 
         mock_connect.side_effect = Exception("DB unavailable")
         result = _get_sync_logs()
@@ -721,13 +721,13 @@ class TestSyncCardLiveProgress:
         # Reingesting is still pending
         assert "sync-step-pending" in html
 
-    @patch("app.templates.admin_dashboard._get_sync_logs")
+    @patch("app.admin.sync._get_sync_logs")
     def test_sync_status_endpoint_renders_card(self, mock_logs: MagicMock):
         """GET /admin/sync/status returns the same card fragment the
         polling loop expects to swap in-place."""
         from starlette.requests import Request
 
-        from app.templates.admin_dashboard import sync_status_card
+        from app.admin.sync import sync_status_card
 
         mock_logs.return_value = [self._running_log()]
 
@@ -752,8 +752,8 @@ class TestSyncCardLiveProgress:
         assert 'id="sync-card"' in html
         assert "every 3s" in html
 
-    @patch("app.templates.admin_dashboard._insert_running_row", return_value=99)
-    @patch("app.templates.admin_dashboard._get_sync_logs")
+    @patch("app.admin.sync._insert_running_row", return_value=99)
+    @patch("app.admin.sync._get_sync_logs")
     def test_post_sync_inserts_running_row_before_thread(
         self,
         mock_logs: MagicMock,
@@ -765,10 +765,10 @@ class TestSyncCardLiveProgress:
         hasn't landed when the main thread queries sync_log."""
         from starlette.requests import Request
 
-        from app.templates import admin_dashboard
-        from app.templates.admin_dashboard import trigger_sync
+        from app.admin import sync as admin_sync
+        from app.admin.sync import trigger_sync
 
-        admin_dashboard._sync_in_progress = False
+        admin_sync._sync_in_progress = False
         # Simulate the worker landing the INSERT: the log helper returns
         # the row we pretend was just inserted.
         mock_logs.return_value = [
@@ -817,10 +817,10 @@ class TestSyncCardLiveProgress:
         assert "/admin/sync/status" in html
         assert "every 3s" in html
 
-        admin_dashboard._sync_in_progress = False
+        admin_sync._sync_in_progress = False
 
-    @patch("app.templates.admin_dashboard._get_sync_logs")
-    @patch("app.templates.admin_dashboard.has_recent_running_row", return_value=True)
+    @patch("app.admin.sync._get_sync_logs")
+    @patch("app.admin.sync.has_recent_running_row", return_value=True)
     def test_post_sync_detects_running_via_db(
         self,
         mock_has_running: MagicMock,
@@ -830,11 +830,11 @@ class TestSyncCardLiveProgress:
         spawn a second thread and must show the 'already running' banner."""
         from starlette.requests import Request
 
-        from app.templates import admin_dashboard
-        from app.templates.admin_dashboard import trigger_sync
+        from app.admin import sync as admin_sync
+        from app.admin.sync import trigger_sync
 
         mock_logs.return_value = [self._running_log()]
-        admin_dashboard._sync_in_progress = False
+        admin_sync._sync_in_progress = False
 
         scope = {
             "type": "http",
@@ -855,13 +855,13 @@ class TestSyncCardLiveProgress:
 
         # In-memory flag must be released again so a real subsequent sync
         # (after the other one finishes) can proceed.
-        assert admin_dashboard._sync_in_progress is False
+        assert admin_sync._sync_in_progress is False
 
 
 class TestUserStats:
-    @patch("app.templates.admin_dashboard._connect")
+    @patch("app.admin.users._connect")
     def test_get_user_stats_returns_dict(self, mock_connect: MagicMock):
-        from app.templates.admin_dashboard import _get_user_stats
+        from app.admin.users import _get_user_stats
 
         mock_conn = MagicMock()
         mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
@@ -880,9 +880,9 @@ class TestUserStats:
         assert len(result["users_per_org"]) == 2
         assert result["active_sessions"] == 2
 
-    @patch("app.templates.admin_dashboard._connect")
+    @patch("app.admin.users._connect")
     def test_get_user_stats_returns_defaults_on_error(self, mock_connect: MagicMock):
-        from app.templates.admin_dashboard import _get_user_stats
+        from app.admin.users import _get_user_stats
 
         mock_connect.side_effect = Exception("DB unavailable")
         result = _get_user_stats()
