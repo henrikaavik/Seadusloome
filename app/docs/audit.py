@@ -42,6 +42,20 @@ def log_draft_view(user_id: str | None, draft_id: Any, **extra: Any) -> None:
     log_action(user_id, "draft.view", detail)
 
 
+def log_draft_reanalyze(user_id: str | None, draft_id: Any, **extra: Any) -> None:
+    """Record a ``draft.reanalyze`` event (issue #306).
+
+    Fired by the draft-detail "Analüüsi uuesti" button which resets the
+    draft to ``status='analyzing'`` and re-enqueues the ``analyze_impact``
+    job without touching the parse / extract stages.  Extra keyword
+    arguments (``job_id``, ``prior_status``, ...) are folded into the
+    audit ``detail`` blob so reviewers can answer "what state was the
+    draft in before the re-run?".
+    """
+    detail: dict[str, Any] = {"draft_id": str(draft_id), **extra}
+    log_action(user_id, "draft.reanalyze", detail)
+
+
 def log_review_outcome(
     user_id: str | None,
     draft_id: Any,
