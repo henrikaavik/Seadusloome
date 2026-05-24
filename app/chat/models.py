@@ -77,6 +77,12 @@ class Message:
     # flags. Defaulted for backward compatibility with pre-017 fixtures.
     is_pinned: bool = False
     is_truncated: bool = False
+    # Migration 036 (#315) — tool-use tracking. ``tool_use_id`` is
+    # Anthropic's ``toolu_...`` identifier; ``parent_message_id`` points
+    # at the assistant turn that requested the tool. Both are NULL for
+    # non-tool messages and for tool messages persisted before #315.
+    tool_use_id: str | None = None
+    parent_message_id: uuid.UUID | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -121,11 +127,18 @@ def _is_missing_v017_column_error(exc: BaseException) -> bool:
 # truth and is NOT NULL at the DB level. The ``_row_to_message`` reader
 # raises if it ever sees a NULL ciphertext so a future regression cannot
 # silently serve "no content".
+#
+# Migration 036 (#315) adds ``tool_use_id`` + ``parent_message_id`` at
+# the tail of the SELECT list so the row converter can pull them via
+# positional lookup with defensive ``len(row) > N`` guards (mirroring
+# the migration-017 pattern). Test fixtures that pre-date #315 still
+# load cleanly with the existing 14-tuple shape.
 _MESSAGE_COLUMNS = (
     "id, conversation_id, role, tool_name, "
     "tokens_input, tokens_output, model, created_at, "
     "content_encrypted, tool_input_encrypted, tool_output_encrypted, "
-    "rag_context_encrypted, is_pinned, is_truncated"
+    "rag_context_encrypted, is_pinned, is_truncated, "
+    "tool_use_id, parent_message_id"
 )
 
 # Legacy SELECT list used when migration 017 has not yet applied (the
@@ -138,6 +151,31 @@ _MESSAGE_COLUMNS_PRE017 = (
     "content_encrypted, tool_input_encrypted, tool_output_encrypted, "
     "rag_context_encrypted"
 )
+
+# Migration-036 fallback SELECT list — used when the schema is at v017
+# but pre-036 (the ``tool_use_id`` / ``parent_message_id`` columns are
+# absent). Same idea as the v017 fallback: keep the conversation view
+# functional in the narrow window between image deploy and migration
+# apply.
+_MESSAGE_COLUMNS_PRE036 = (
+    "id, conversation_id, role, tool_name, "
+    "tokens_input, tokens_output, model, created_at, "
+    "content_encrypted, tool_input_encrypted, tool_output_encrypted, "
+    "rag_context_encrypted, is_pinned, is_truncated"
+)
+
+
+def _is_missing_v036_column_error(exc: BaseException) -> bool:
+    """Return True when the exception names a migration-036 column.
+
+    Used by the read / write paths to detect "schema is v017 but pre-036"
+    and fall back to the prior SQL. ``tool_use_id`` and
+    ``parent_message_id`` are the new columns introduced by #315.
+    """
+    msg = str(exc).lower()
+    return "does not exist" in msg and any(
+        col in msg for col in ("tool_use_id", "parent_message_id")
+    )
 
 
 def _decode_encrypted_text(ciphertext: bytes | memoryview | None) -> str | None:
@@ -218,6 +256,11 @@ def _row_to_message(row: tuple[Any, ...]) -> Message:
     source of truth and is NOT NULL at the DB layer. We re-assert the
     invariant here so a regression that re-introduces a NULL write
     surfaces as a hard error instead of an empty message body.
+
+    Migration 036 (#315) adds two trailing columns — ``tool_use_id`` and
+    ``parent_message_id``. Indexing is defensive (``len(row) > N`` +
+    ``None`` fallback) so pre-036 fixtures and pre-036 SELECT fallbacks
+    still load cleanly.
     """
     msg_id = row[0]
     conversation_id = row[1]
@@ -235,6 +278,14 @@ def _row_to_message(row: tuple[Any, ...]) -> Message:
     # pre-017 SELECT fallback (12-tuple rows) still loads cleanly.
     is_pinned = bool(row[12]) if len(row) > 12 and row[12] is not None else False
     is_truncated = bool(row[13]) if len(row) > 13 and row[13] is not None else False
+    # Migration 036 (#315) — tool_use_id + parent_message_id. Defensive
+    # indexing so pre-036 fixtures (14-tuple rows) still load cleanly.
+    tool_use_id_raw = row[14] if len(row) > 14 else None
+    parent_message_id_raw = row[15] if len(row) > 15 else None
+    tool_use_id: str | None = str(tool_use_id_raw) if tool_use_id_raw else None
+    parent_message_id: uuid.UUID | None = (
+        coerce_uuid(parent_message_id_raw) if parent_message_id_raw else None
+    )
 
     if content_encrypted is None:
         raise ValueError(
@@ -270,6 +321,8 @@ def _row_to_message(row: tuple[Any, ...]) -> Message:
         created_at=created_at,
         is_pinned=is_pinned,
         is_truncated=is_truncated,
+        tool_use_id=tool_use_id,
+        parent_message_id=parent_message_id,
     )
 
 
@@ -543,10 +596,19 @@ def create_message(
     tokens_input: int | None = None,
     tokens_output: int | None = None,
     model: str | None = None,
+    tool_use_id: str | None = None,
+    parent_message_id: uuid.UUID | str | None = None,
 ) -> Message:
     """Insert a new ``messages`` row and return the created message.
 
     The caller is responsible for committing the transaction.
+
+    Migration 036 (#315) — ``tool_use_id`` records Claude's
+    ``toolu_...`` identifier from the streaming ``tool_use`` block;
+    ``parent_message_id`` links a role='tool' row to the assistant turn
+    that requested the tool. Both are NULL for non-tool turns. The CHECK
+    constraint defined in migration 036 rejects a non-NULL
+    ``tool_use_id`` on any role other than 'tool'.
     """
     if role not in VALID_ROLES:
         raise ValueError(f"Invalid message role: {role!r}")
@@ -574,28 +636,81 @@ def create_message(
         else None
     )
 
-    row = conn.execute(
-        f"""
-        INSERT INTO messages
-            (conversation_id, role, tool_name, tokens_input, tokens_output, model,
-             content_encrypted, tool_input_encrypted, tool_output_encrypted,
-             rag_context_encrypted)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        RETURNING {_MESSAGE_COLUMNS}
-        """,
-        (
-            str(conversation_id),
-            role,
-            tool_name,
-            tokens_input,
-            tokens_output,
-            model,
-            content_ciphertext,
-            tool_input_ciphertext,
-            tool_output_ciphertext,
-            rag_context_ciphertext,
-        ),
-    ).fetchone()
+    parent_message_id_str: str | None = (
+        str(parent_message_id) if parent_message_id is not None else None
+    )
+
+    try:
+        row = conn.execute(
+            f"""
+            INSERT INTO messages
+                (conversation_id, role, tool_name, tokens_input, tokens_output, model,
+                 content_encrypted, tool_input_encrypted, tool_output_encrypted,
+                 rag_context_encrypted, tool_use_id, parent_message_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING {_MESSAGE_COLUMNS}
+            """,
+            (
+                str(conversation_id),
+                role,
+                tool_name,
+                tokens_input,
+                tokens_output,
+                model,
+                content_ciphertext,
+                tool_input_ciphertext,
+                tool_output_ciphertext,
+                rag_context_ciphertext,
+                tool_use_id,
+                parent_message_id_str,
+            ),
+        ).fetchone()
+    except Exception as exc:
+        # Migration-036 fallback: the new ``tool_use_id`` /
+        # ``parent_message_id`` columns might be absent in a deploy
+        # window where the new image hits a stale schema cache (same
+        # pattern as the migration-017 fallback in ``list_messages``).
+        # When that happens AND the caller didn't ask for either field,
+        # transparently fall back to the prior INSERT shape; otherwise
+        # the loss of tracking would be silent and confusing.
+        if (
+            _is_missing_v036_column_error(exc)
+            and tool_use_id is None
+            and parent_message_id_str is None
+        ):
+            logger.warning(
+                "create_message: migration 036 columns missing — "
+                "falling back to pre-036 INSERT for conversation=%s",
+                conversation_id,
+            )
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            row = conn.execute(
+                f"""
+                INSERT INTO messages
+                    (conversation_id, role, tool_name, tokens_input, tokens_output, model,
+                     content_encrypted, tool_input_encrypted, tool_output_encrypted,
+                     rag_context_encrypted)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING {_MESSAGE_COLUMNS_PRE036}
+                """,
+                (
+                    str(conversation_id),
+                    role,
+                    tool_name,
+                    tokens_input,
+                    tokens_output,
+                    model,
+                    content_ciphertext,
+                    tool_input_ciphertext,
+                    tool_output_ciphertext,
+                    rag_context_ciphertext,
+                ),
+            ).fetchone()
+        else:
+            raise
     if row is None:
         raise RuntimeError("INSERT ... RETURNING messages produced no row")
     return _row_to_message(row)
@@ -607,12 +722,13 @@ def list_messages(
 ) -> list[Message]:
     """Return all messages in a conversation, ordered by ``created_at`` ASC.
 
-    Falls back to a SELECT without the migration-017 columns if those
-    columns do not yet exist on the target database. This keeps the
-    conversation view functional during a window where the app image
-    was deployed but migration 017 has not yet been applied — otherwise
-    users open a historical conversation and see the empty-state prompt
-    cards instead of their history (reported after #596 rolled out).
+    Falls back to a SELECT without the migration-036 columns (and then
+    the migration-017 columns) if those columns do not yet exist on the
+    target database. This keeps the conversation view functional during
+    a window where the app image was deployed but the relevant migration
+    has not yet been applied — otherwise users open a historical
+    conversation and see the empty-state prompt cards instead of their
+    history (reported after #596 rolled out).
     """
     try:
         rows = conn.execute(
@@ -625,12 +741,40 @@ def list_messages(
             (str(conversation_id),),
         ).fetchall()
     except Exception as exc:
-        # Psycopg raises ``UndefinedColumn`` (SQLSTATE 42703) when the
-        # new columns are missing. Matching by message text keeps us
-        # compatible with psycopg2 and psycopg3 without importing
-        # driver-specific exception classes.
         msg = str(exc).lower()
-        if "is_pinned" in msg or "is_truncated" in msg or "does not exist" in msg:
+        is_v036_missing = _is_missing_v036_column_error(exc)
+        is_v017_missing = "is_pinned" in msg or "is_truncated" in msg
+        if is_v036_missing:
+            logger.warning(
+                "list_messages: migration 036 columns missing — falling back"
+                " to pre-036 SELECT for conversation=%s",
+                conversation_id,
+            )
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            try:
+                rows = conn.execute(
+                    f"""
+                    SELECT {_MESSAGE_COLUMNS_PRE036}
+                    FROM messages
+                    WHERE conversation_id = %s
+                    ORDER BY created_at ASC
+                    """,
+                    (str(conversation_id),),
+                ).fetchall()
+            except Exception:
+                logger.exception(
+                    "Pre-036 fallback list_messages failed for conversation=%s",
+                    conversation_id,
+                )
+                return []
+        elif is_v017_missing or "does not exist" in msg:
+            # Psycopg raises ``UndefinedColumn`` (SQLSTATE 42703) when
+            # any new column is missing. Matching by message text keeps
+            # us compatible with psycopg2 and psycopg3 without importing
+            # driver-specific exception classes.
             logger.warning(
                 "list_messages: migration 017 columns missing — falling back"
                 " to pre-017 SELECT for conversation=%s",
@@ -817,6 +961,17 @@ def fork_conversation(
     The new conversation's title is ``"Jätk: <original title>"`` with
     ``title_is_custom=False`` so the auto-title job can still refine it.
 
+    Migration 036 (#315): ``tool_use_id`` is copied verbatim; the
+    ``parent_message_id`` is *not* — tool rows in the fork would
+    otherwise reference the parent assistant id in the source
+    conversation, which would fail the FK once that conversation is
+    deleted (and is semantically wrong anyway: the fork is an
+    independent thread). A follow-up improvement could remap the
+    parent ids to the freshly-inserted assistant rows; for now we drop
+    the parent link to avoid corruption, which means a forked
+    conversation's tool rows render flat (no grouping under the
+    assistant turn).
+
     The caller is responsible for committing the transaction.
     """
     # Look up the fork point so we can bound the message copy by
@@ -857,21 +1012,59 @@ def fork_conversation(
     # Copy messages byte-for-byte — only the encrypted BYTEA columns
     # carry payload after migration 026. ``created_at`` is preserved so
     # the fork reads in the same order as the source up to the boundary.
-    conn.execute(
-        """
-        INSERT INTO messages (
-            conversation_id, role, tool_name, tokens_input, tokens_output, model,
-            content_encrypted, tool_input_encrypted, tool_output_encrypted,
-            rag_context_encrypted, is_pinned, is_truncated, created_at
+    # ``tool_use_id`` is preserved; ``parent_message_id`` is dropped
+    # (NULL) because the parent assistant row lives in the source
+    # conversation — see docstring.
+    try:
+        conn.execute(
+            """
+            INSERT INTO messages (
+                conversation_id, role, tool_name, tokens_input, tokens_output, model,
+                content_encrypted, tool_input_encrypted, tool_output_encrypted,
+                rag_context_encrypted, is_pinned, is_truncated, created_at,
+                tool_use_id
+            )
+            SELECT
+                %s, role, tool_name, tokens_input, tokens_output, model,
+                content_encrypted, tool_input_encrypted, tool_output_encrypted,
+                rag_context_encrypted, is_pinned, is_truncated, created_at,
+                tool_use_id
+            FROM messages
+            WHERE conversation_id = %s AND created_at <= %s
+            ORDER BY created_at ASC
+            """,
+            (str(new_conv.id), str(source_conv_id), boundary_created_at),
         )
-        SELECT
-            %s, role, tool_name, tokens_input, tokens_output, model,
-            content_encrypted, tool_input_encrypted, tool_output_encrypted,
-            rag_context_encrypted, is_pinned, is_truncated, created_at
-        FROM messages
-        WHERE conversation_id = %s AND created_at <= %s
-        ORDER BY created_at ASC
-        """,
-        (str(new_conv.id), str(source_conv_id), boundary_created_at),
-    )
+    except Exception as exc:
+        # Migration-036 fallback for fork — if the new columns aren't
+        # present yet, fall back to the pre-036 INSERT shape so the
+        # rollout window doesn't break fork operations.
+        if not _is_missing_v036_column_error(exc):
+            raise
+        logger.warning(
+            "fork_conversation: migration 036 columns missing — falling back"
+            " to pre-036 copy for source=%s",
+            source_conv_id,
+        )
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        conn.execute(
+            """
+            INSERT INTO messages (
+                conversation_id, role, tool_name, tokens_input, tokens_output, model,
+                content_encrypted, tool_input_encrypted, tool_output_encrypted,
+                rag_context_encrypted, is_pinned, is_truncated, created_at
+            )
+            SELECT
+                %s, role, tool_name, tokens_input, tokens_output, model,
+                content_encrypted, tool_input_encrypted, tool_output_encrypted,
+                rag_context_encrypted, is_pinned, is_truncated, created_at
+            FROM messages
+            WHERE conversation_id = %s AND created_at <= %s
+            ORDER BY created_at ASC
+            """,
+            (str(new_conv.id), str(source_conv_id), boundary_created_at),
+        )
     return new_conv
