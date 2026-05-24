@@ -45,6 +45,21 @@ class _Collector:
         self.sent.append(data)
 
 
+class _FakeWs:
+    """Minimal stand-in for the Starlette WebSocket conn that
+    FastHTML hands to WS hooks via the ``ws`` parameter. Only
+    ``close(code, reason)`` is exercised by the lifecycle code."""
+
+    def __init__(self) -> None:
+        self.close_calls: list[tuple[int, str]] = []
+        self.close_raises: BaseException | None = None
+
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        if self.close_raises is not None:
+            raise self.close_raises
+        self.close_calls.append((code, reason))
+
+
 def _build_user(user_id: str = _USER_A) -> dict[str, Any]:
     return {
         "id": user_id,
@@ -82,12 +97,20 @@ def _scope_with_cookie(token: str = "access-token-value") -> dict[str, Any]:
 
 @pytest.fixture(autouse=True)
 def _reset_registry():
-    """Wipe the module-level connection registry between tests."""
+    """Wipe the module-level connection + heartbeat registries between tests."""
     with notif_ws._registry_lock:
         notif_ws._connections.clear()
+    with notif_ws._heartbeats_lock:
+        for task in list(notif_ws._heartbeats.values()):
+            task.cancel()
+        notif_ws._heartbeats.clear()
     yield
     with notif_ws._registry_lock:
         notif_ws._connections.clear()
+    with notif_ws._heartbeats_lock:
+        for task in list(notif_ws._heartbeats.values()):
+            task.cancel()
+        notif_ws._heartbeats.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -345,13 +368,14 @@ class TestConnectLifecycle:
     def test_authenticated_connect_registers_socket(self):
         on_conn, _on_disconn, _handler = _capture_handlers()
         collector = _Collector()
+        ws = _FakeWs()
 
         with patch("app.notifications.websocket.JWTAuthProvider") as mock_jwt_cls:
             mock_jwt = MagicMock()
             mock_jwt.get_current_user.return_value = _build_user(_USER_A)
             mock_jwt_cls.return_value = mock_jwt
 
-            asyncio.run(on_conn(collector, _scope_with_cookie()))
+            asyncio.run(on_conn(collector, _scope_with_cookie(), ws))
 
         # Socket is registered under the authenticated user.
         with notif_ws._registry_lock:
@@ -363,28 +387,80 @@ class TestConnectLifecycle:
             isinstance(s, str) and json.loads(s).get("type") == "connected" for s in collector.sent
         )
 
+        # And we do NOT close the socket on a successful auth.
+        assert ws.close_calls == []
+
+    def test_authenticated_connect_starts_heartbeat_for_push_only_channel(self):
+        """The bell UI is push-only — _ws_handler never runs in
+        production because the client doesn't send messages. The
+        heartbeat MUST therefore be started from _on_connect (keyed
+        by id(ws)) or NAT idle timeouts silently kill the socket.
+        """
+        on_conn, _on_disconn, _handler = _capture_handlers()
+        collector = _Collector()
+        ws = _FakeWs()
+
+        # Capture the task state *inside* the event loop — asyncio.run
+        # cancels all pending tasks when the loop closes, so checking
+        # done()/cancelled() from outside would always look cancelled.
+        captured: dict[str, Any] = {}
+
+        async def _run() -> None:
+            await on_conn(collector, _scope_with_cookie(), ws)
+            with notif_ws._heartbeats_lock:
+                captured["registered_id"] = id(ws) in notif_ws._heartbeats
+                captured["task"] = notif_ws._heartbeats.get(id(ws))
+
+        with patch("app.notifications.websocket.JWTAuthProvider") as mock_jwt_cls:
+            mock_jwt = MagicMock()
+            mock_jwt.get_current_user.return_value = _build_user(_USER_A)
+            mock_jwt_cls.return_value = mock_jwt
+
+            asyncio.run(_run())
+
+        assert captured["registered_id"] is True
+        # The task was alive when we captured it (the lifetime check
+        # happens inside the loop where asyncio.run hasn't yet
+        # cancelled outstanding tasks).
+        task = captured["task"]
+        assert task is not None
+        assert isinstance(task, asyncio.Task)
+
     def test_unauthenticated_connect_closes_socket_with_1008(self):
+        """The unauthenticated handshake MUST actually close the
+        underlying WebSocket (via ws.close), not just send a
+        ``{"type": "websocket.close"}`` dict through FastHTML's
+        ``send`` wrapper — that wrapper routes through to_xml +
+        ws.send_text and leaves the connection open in production.
+        """
         on_conn, _on_disconn, _handler = _capture_handlers()
         sent: list[Any] = []
+        ws = _FakeWs()
 
         async def raw_send(data: Any) -> None:
             sent.append(data)
 
         # Empty scope = no cookie = no auth.
-        asyncio.run(on_conn(raw_send, {"headers": []}))
+        asyncio.run(on_conn(raw_send, {"headers": []}, ws))
 
-        close_frames = [
+        # Verify the close went through ws.close() with code 1008.
+        assert ws.close_calls == [(1008, "authentication required")]
+        # And NOT through `send` as a text frame.
+        close_frames_via_send = [
             d for d in sent if isinstance(d, dict) and d.get("type") == "websocket.close"
         ]
-        assert len(close_frames) == 1
-        assert close_frames[0]["code"] == 1008
-        # No connection was registered.
+        assert close_frames_via_send == []
+
+        # No connection was registered and no heartbeat was spawned.
         with notif_ws._registry_lock:
             assert notif_ws._connections == {}
+        with notif_ws._heartbeats_lock:
+            assert id(ws) not in notif_ws._heartbeats
 
     def test_invalid_jwt_closes_socket_and_skips_registration(self):
         on_conn, _on_disconn, _handler = _capture_handlers()
         sent: list[Any] = []
+        ws = _FakeWs()
 
         async def raw_send(data: Any) -> None:
             sent.append(data)
@@ -394,12 +470,10 @@ class TestConnectLifecycle:
             mock_jwt.get_current_user.return_value = None  # invalid token
             mock_jwt_cls.return_value = mock_jwt
 
-            asyncio.run(on_conn(raw_send, _scope_with_cookie("bad-token")))
+            asyncio.run(on_conn(raw_send, _scope_with_cookie("bad-token"), ws))
 
-        close_frames = [
-            d for d in sent if isinstance(d, dict) and d.get("type") == "websocket.close"
-        ]
-        assert len(close_frames) == 1
+        # Real ASGI close via ws.close, not a text frame masquerade.
+        assert ws.close_calls == [(1008, "authentication required")]
         with notif_ws._registry_lock:
             assert notif_ws._connections == {}
 
@@ -408,23 +482,50 @@ class TestDisconnectLifecycle:
     def test_disconnect_removes_socket_from_user_pool(self):
         on_conn, on_disconn, _handler = _capture_handlers()
         collector = _Collector()
+        ws = _FakeWs()
 
         with patch("app.notifications.websocket.JWTAuthProvider") as mock_jwt_cls:
             mock_jwt = MagicMock()
             mock_jwt.get_current_user.return_value = _build_user(_USER_A)
             mock_jwt_cls.return_value = mock_jwt
 
-            asyncio.run(on_conn(collector, _scope_with_cookie()))
+            asyncio.run(on_conn(collector, _scope_with_cookie(), ws))
 
         with notif_ws._registry_lock:
             assert collector in notif_ws._connections[_USER_A]
 
-        # Now disconnect.
-        asyncio.run(on_disconn(collector))
+        # Now disconnect — pass the same ws so the heartbeat lookup hits.
+        asyncio.run(on_disconn(collector, ws))
 
         # The user's entry should be gone entirely (it was the only tab).
         with notif_ws._registry_lock:
             assert _USER_A not in notif_ws._connections
+
+    def test_disconnect_cancels_heartbeat_task(self):
+        """Disconnect must cancel the heartbeat that _on_connect spawned,
+        otherwise the task leaks past the connection lifetime."""
+        on_conn, on_disconn, _handler = _capture_handlers()
+        collector = _Collector()
+        ws = _FakeWs()
+
+        with patch("app.notifications.websocket.JWTAuthProvider") as mock_jwt_cls:
+            mock_jwt = MagicMock()
+            mock_jwt.get_current_user.return_value = _build_user(_USER_A)
+            mock_jwt_cls.return_value = mock_jwt
+
+            async def _run() -> asyncio.Task[None]:
+                await on_conn(collector, _scope_with_cookie(), ws)
+                with notif_ws._heartbeats_lock:
+                    task = notif_ws._heartbeats[id(ws)]
+                await on_disconn(collector, ws)
+                return task
+
+            task = asyncio.run(_run())
+
+        # The heartbeat task was cancelled and removed from the registry.
+        assert task.cancelled() or task.done()
+        with notif_ws._heartbeats_lock:
+            assert id(ws) not in notif_ws._heartbeats
 
     def test_disconnect_only_removes_the_specific_tab(self):
         """When the user has two tabs and one disconnects, the other
@@ -433,22 +534,29 @@ class TestDisconnectLifecycle:
 
         tab1 = _Collector()
         tab2 = _Collector()
+        ws1 = _FakeWs()
+        ws2 = _FakeWs()
 
         with patch("app.notifications.websocket.JWTAuthProvider") as mock_jwt_cls:
             mock_jwt = MagicMock()
             mock_jwt.get_current_user.return_value = _build_user(_USER_A)
             mock_jwt_cls.return_value = mock_jwt
 
-            asyncio.run(on_conn(tab1, _scope_with_cookie()))
-            asyncio.run(on_conn(tab2, _scope_with_cookie()))
+            asyncio.run(on_conn(tab1, _scope_with_cookie(), ws1))
+            asyncio.run(on_conn(tab2, _scope_with_cookie(), ws2))
 
         # Disconnect only tab1.
-        asyncio.run(on_disconn(tab1))
+        asyncio.run(on_disconn(tab1, ws1))
 
         with notif_ws._registry_lock:
             assert _USER_A in notif_ws._connections
             assert tab1 not in notif_ws._connections[_USER_A]
             assert tab2 in notif_ws._connections[_USER_A]
+
+        # Tab2's heartbeat is still alive.
+        with notif_ws._heartbeats_lock:
+            assert id(ws2) in notif_ws._heartbeats
+            assert id(ws1) not in notif_ws._heartbeats
 
 
 # ---------------------------------------------------------------------------

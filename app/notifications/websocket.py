@@ -248,15 +248,59 @@ def _extract_cookie_from_headers(headers: list[tuple[bytes, bytes]], name: str) 
     return None
 
 
-async def _ws_close(send: Any, code: int, reason: str) -> None:
-    """Best-effort WS close. Mirrors the chat module's helper."""
+async def _ws_close(ws: Any, code: int, reason: str) -> None:
+    """Best-effort WS close that actually closes the underlying ASGI socket.
+
+    FastHTML's ``send`` parameter exposed to WS hooks is
+    ``partial(_send_ws, conn)`` — i.e. the dict gets fed through
+    ``to_xml`` and ultimately ``ws.send_text``. Trying to close by
+    sending ``{"type": "websocket.close", ...}`` through ``send``
+    therefore produces a regular text frame and leaves the connection
+    open. We have to call ``ws.close()`` on the raw Starlette
+    WebSocket conn (exposed by FastHTML via the unannotated ``ws``
+    parameter on WS hooks).
+    """
+    if ws is None:
+        # Defensive: the caller forgot to pass the conn. Nothing we can
+        # do here other than log so a future regression is visible.
+        logger.debug("notifications WS close requested without ws conn")
+        return
     try:
-        await send({"type": "websocket.close", "code": code, "reason": reason})
+        await ws.close(code=code, reason=reason)
     except Exception:
-        try:
-            await send(json.dumps({"type": "error", "message": reason, "code": code}))
-        except Exception:
-            logger.debug("notifications WS close fallback failed", exc_info=True)
+        logger.debug("notifications WS close failed", exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# Per-connection heartbeat registry
+# ---------------------------------------------------------------------------
+# We key by ``id(ws)`` (the Starlette WebSocket conn) rather than
+# ``id(send)`` because FastHTML rebuilds the ``send`` partial on every
+# WS hook invocation (``partial(_send_ws, conn)`` inside ``_find_p``),
+# so ``id(send)`` differs between ``_on_connect`` and ``_on_disconnect``
+# even though the underlying physical connection is the same. The
+# ``ws`` (conn) IS the same object across all hooks for one socket
+# (see Starlette's ``WebSocketEndpoint.dispatch`` which forwards the
+# same ``WebSocket`` to ``on_connect``/``on_disconnect``/``on_receive``).
+
+_heartbeats: dict[int, asyncio.Task[None]] = {}
+_heartbeats_lock = threading.Lock()
+
+
+def _register_heartbeat(ws_id: int, task: asyncio.Task[None]) -> None:
+    with _heartbeats_lock:
+        # Cancel any pre-existing task under this key (defensive — a
+        # mis-ordered conn/disconn could leave a stale task).
+        old = _heartbeats.pop(ws_id, None)
+    if old is not None and not old.done():
+        old.cancel()
+    with _heartbeats_lock:
+        _heartbeats[ws_id] = task
+
+
+def _pop_heartbeat(ws_id: int) -> asyncio.Task[None] | None:
+    with _heartbeats_lock:
+        return _heartbeats.pop(ws_id, None)
 
 
 # ---------------------------------------------------------------------------
@@ -379,21 +423,30 @@ def register_notifications_ws_routes(app: Any) -> None:
 
         return user
 
-    # IMPORTANT: do NOT annotate ``send``. See #802 / chat module for
-    # the FastHTML ``_find_p`` trap that motivates the missing
-    # annotation on the WS lifecycle hooks.
-    async def _on_connect(send, scope=None) -> None:
-        """Register the socket in the per-user pool on handshake.
+    # IMPORTANT: do NOT annotate ``send``/``scope``/``ws``. See #802
+    # / chat module for the FastHTML ``_find_p`` trap — only the
+    # empty-annotation branch resolves these special WS parameter
+    # names. ``ws`` binds to the raw Starlette WebSocket conn (see
+    # ``fasthtml/core.py``: ``if arg.lower()=='ws' … return conn``).
+    async def _on_connect(send, scope=None, ws=None) -> None:
+        """Authenticate the handshake, register the socket, send the
+        greet event, and start the heartbeat.
 
-        The ``scope`` parameter is FastHTML-supplied; we pass it
-        through ``_auth_from_scope`` to identify the user. An
-        unauthenticated handshake is closed with code 1008 so the
-        client knows to redirect to login rather than silently
-        retrying.
+        Auth + heartbeat live HERE rather than in ``_ws_handler``
+        because this is a **push-only** channel: the top-bar bell
+        only opens the socket and listens for server-side
+        ``notification`` events, so ``_ws_handler`` (called on
+        inbound messages) never runs in production. If we deferred
+        auth or heartbeat to that path, neither would ever execute.
+
+        An unauthenticated handshake is closed with code 1008. The
+        close MUST go through ``ws.close()`` (not ``send`` — see
+        :func:`_ws_close` for why) so the underlying ASGI socket is
+        actually terminated rather than receiving a stray text frame.
         """
         user = _auth_from_scope(scope)
         if user is None or not user.get("id"):
-            await _ws_close(send, 1008, "authentication required")
+            await _ws_close(ws, 1008, "authentication required")
             return
 
         user_id = str(user["id"])
@@ -405,18 +458,37 @@ def register_notifications_ws_routes(app: Any) -> None:
             # socket so we don't leak it in the registry.
             _remove_connection(user_id, send)
             logger.debug("notifications WS greet send failed", exc_info=True)
+            return
 
-    async def _on_disconnect(send) -> None:
-        """Remove the socket from every user pool it might belong to.
+        # Heartbeat scoped to the WS lifetime. Push-only channel, so
+        # ``_ws_handler`` (the only place a per-message heartbeat
+        # could live) never runs — without spawning here the 25 s
+        # NAT-keepalive contract documented in the module header
+        # would silently never fire.
+        if ws is not None:
+            task = _start_heartbeat(send)
+            _register_heartbeat(id(ws), task)
 
-        We don't have direct access to the user_id at disconnect time
-        (FastHTML's disconnect hook only receives ``send``), so we
-        scan the registry for any entry containing this ``send``.
-        With at most a few hundred concurrent users this is
-        negligible; if the user count grows we can swap in a
-        reverse index (``send -> user_id``) without changing the
+    async def _on_disconnect(send, ws=None) -> None:
+        """Cancel the heartbeat and remove the socket from every
+        user pool it might belong to.
+
+        We don't have direct access to the user_id at disconnect
+        time (FastHTML's disconnect hook only receives ``send`` and
+        ``ws``), so we scan the registry for any entry containing
+        this ``send``. With at most a few hundred concurrent users
+        this is negligible; if the user count grows we can swap in
+        a reverse index (``send -> user_id``) without changing the
         wire protocol.
         """
+        if ws is not None:
+            task = _pop_heartbeat(id(ws))
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
         with _registry_lock:
             empty_users: list[str] = []
             for user_id, sends in _connections.items():
@@ -435,18 +507,12 @@ def register_notifications_ws_routes(app: Any) -> None:
     #     parsed payload (PEP-563 otherwise stringifies the
     #     annotation and breaks the check).
     async def _ws_handler(msg: dict, send, scope=None) -> None:
-        # Heartbeat scoped to one handler invocation, mirroring the
-        # chat/draft-status pattern (#684 review).
-        heartbeat = _start_heartbeat(send)
-        try:
-            msg_str = json.dumps(msg) if isinstance(msg, dict) else msg
-            await ws_notifications(msg_str, send, scope)
-        finally:
-            heartbeat.cancel()
-            try:
-                await heartbeat
-            except (asyncio.CancelledError, Exception):
-                pass
+        # NOTE: heartbeat lives in ``_on_connect`` for the lifetime
+        # of the WS, NOT here. This handler only runs when the
+        # client sends a message (e.g. a ``ping`` keepalive), which
+        # is the rare case for this push-only channel.
+        msg_str = json.dumps(msg) if isinstance(msg, dict) else msg
+        await ws_notifications(msg_str, send, scope)
 
     # See chat module: PEP-563 stringifies ``msg: dict`` at runtime;
     # FastHTML's ``_find_p`` does ``if anno is dict`` (identity), so
