@@ -216,7 +216,7 @@ def notify_draft_archive_warning(draft: Any) -> None:
         )
 
 
-def notify_draft_shared(draft: Any, uploader_id: UUID | str) -> None:
+def notify_draft_shared(draft: Any, uploader_id: UUID | str | None) -> None:
     """Notify same-org drafters and reviewers when a new draft is uploaded (#299).
 
     Pre-publication drafts are visible to every same-org ``drafter`` and
