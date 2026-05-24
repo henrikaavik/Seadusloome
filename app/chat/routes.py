@@ -22,6 +22,7 @@ Cross-org access returns 404 to avoid leaking conversation existence.
 from __future__ import annotations
 
 import html as _html
+import json
 import logging
 import uuid
 from datetime import datetime
@@ -1062,14 +1063,66 @@ def _render_message(msg: Any):
             data_message_id=msg_id,
         )
     elif role == "tool":
+        # #315: surface the tool call so the persisted tool turns are
+        # visible in the conversation history (the live stream already
+        # shows them via the WS ``tool_use`` / ``tool_result`` events,
+        # but a page reload would otherwise hide every previously-run
+        # tool — only the final assistant text remained). The tool input
+        # / output are JSON-formatted inside a ``<details>`` so the bubble
+        # stays compact and the structured payload is on-demand.
         tool_name = msg.tool_name or "tool"
+        tool_input = getattr(msg, "tool_input", None)
+        tool_output = getattr(msg, "tool_output", None)
+        try:
+            tool_input_text = (
+                json.dumps(tool_input, ensure_ascii=False, indent=2)
+                if tool_input is not None
+                else ""
+            )
+        except (TypeError, ValueError):
+            tool_input_text = ""
+        try:
+            tool_output_text = (
+                json.dumps(tool_output, ensure_ascii=False, indent=2)
+                if tool_output is not None
+                else (msg.content or "")
+            )
+        except (TypeError, ValueError):
+            tool_output_text = msg.content or ""
+
+        details_children: list = []
+        if tool_input_text:
+            details_children.append(
+                Div(  # noqa: F405
+                    Strong("Sisend:"),  # noqa: F405
+                    Pre(tool_input_text, cls="chat-tool-input"),  # noqa: F405
+                    cls="chat-tool-section",
+                )
+            )
+        if tool_output_text:
+            details_children.append(
+                Div(  # noqa: F405
+                    Strong("Tulemus:"),  # noqa: F405
+                    Pre(tool_output_text, cls="chat-tool-result"),  # noqa: F405
+                    cls="chat-tool-section",
+                )
+            )
+        # ``data-parent-message-id`` lets future CSS / JS group tool
+        # bubbles visually under their parent assistant turn.
+        parent_id = getattr(msg, "parent_message_id", None)
         return Div(  # noqa: F405
-            Div(  # noqa: F405
-                P(f"[{tool_name}]", cls="chat-tool-label"),  # noqa: F405
-                cls="chat-bubble chat-bubble-tool",
+            Details(  # noqa: F405
+                Summary(  # noqa: F405
+                    Span(f"[{tool_name}]", cls="chat-tool-label"),  # noqa: F405
+                    " ",
+                    Span("(tööriistakutse)", cls="chat-tool-hint"),  # noqa: F405
+                ),
+                *details_children,
+                cls="chat-tool-activity chat-tool-activity-done",
             ),
             cls="chat-message chat-message-tool",
             data_message_id=msg_id,
+            data_parent_message_id=str(parent_id) if parent_id else "",
         )
     # system messages are hidden
     return ""

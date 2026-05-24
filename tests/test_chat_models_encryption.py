@@ -43,9 +43,9 @@ _CONV_ID = uuid.UUID("33333333-3333-3333-3333-333333333333")
 def _echo_row(conn_mock: MagicMock) -> list[Any]:
     """Capture the INSERT params and build a matching row for ``fetchone``.
 
-    Migration 026 dropped the plaintext payload columns; the INSERT now
-    binds 10 positional params and ``_MESSAGE_COLUMNS`` is 14 wide
-    (no ``content``/``tool_input``/``tool_output``/``rag_context``).
+    Migration 026 dropped the plaintext payload columns. Migration 036
+    (#315) added ``tool_use_id`` + ``parent_message_id``; the INSERT
+    now binds 12 positional params and ``_MESSAGE_COLUMNS`` is 16 wide.
     """
     params = conn_mock.execute.call_args.args[1]
     (
@@ -59,6 +59,8 @@ def _echo_row(conn_mock: MagicMock) -> list[Any]:
         tool_input_ct,
         tool_output_ct,
         rag_context_ct,
+        tool_use_id,
+        parent_message_id,
     ) = params
     now = datetime.now(UTC)
     return [
@@ -74,6 +76,10 @@ def _echo_row(conn_mock: MagicMock) -> list[Any]:
         tool_input_ct,
         tool_output_ct,
         rag_context_ct,
+        False,  # is_pinned (v017)
+        False,  # is_truncated (v017)
+        tool_use_id,
+        parent_message_id,
     ]
 
 

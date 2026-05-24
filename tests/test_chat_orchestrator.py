@@ -1084,20 +1084,33 @@ class TestAssistantTokensPersistence:
         orchestrator = ChatOrchestrator(llm, FakeSparql())
         asyncio.run(orchestrator.handle_message(_CONV_ID, "Test", _auth(), collector))
 
-        assistant_calls = [
+        # #315: in the multi-round tool-use path, an assistant
+        # placeholder row is INSERTED via ``create_message`` BEFORE the
+        # tool runs (so the tool row can reference it via
+        # ``parent_message_id``). The final tokens land on that row via
+        # an ``UPDATE messages SET ... tokens_input = %s, tokens_output =
+        # %s ...`` issued by ``_update_assistant_payload`` — so the
+        # last-round-wins assertion now reads off the UPDATE bind
+        # params rather than the create_message kwargs.
+        assistant_creates = [
             c for c in mock_create_msg.call_args_list if c.args[2:3] == ("assistant",)
         ]
-        assert assistant_calls, "expected an assistant create_message call"
-        assistant_call = assistant_calls[-1]
-        # Last-round-wins: 180 (not 100+180=280) and 120 (not 50+120=170).
-        assert assistant_call.kwargs.get("tokens_input") == 180, (
-            f"expected last round's tokens_input=180, got "
-            f"{assistant_call.kwargs.get('tokens_input')}"
-        )
-        assert assistant_call.kwargs.get("tokens_output") == 120, (
-            f"expected last round's tokens_output=120, got "
-            f"{assistant_call.kwargs.get('tokens_output')}"
-        )
+        assert assistant_creates, "expected an assistant create_message placeholder"
+
+        update_calls = [
+            call
+            for call in conn.execute.call_args_list
+            if isinstance(call.args[0], str)
+            and "UPDATE messages" in call.args[0]
+            and "tokens_input" in call.args[0]
+        ]
+        assert update_calls, "expected an UPDATE messages SET tokens_input/tokens_output call"
+        update_call = update_calls[-1]
+        params = update_call.args[1]
+        # Bind order in _update_assistant_payload: content_ct, tokens_in,
+        # tokens_out, rag_context_ct, message_id.
+        assert params[1] == 180, f"expected last round's tokens_input=180, got {params[1]}"
+        assert params[2] == 120, f"expected last round's tokens_output=120, got {params[2]}"
 
 
 class TestStepDeadlineBudget:
@@ -1282,7 +1295,10 @@ class TestPartialPersistTokensCapture:
                 else:
                     raise asyncio.CancelledError()
 
-        with patch("app.chat.orchestrator.execute_tool", return_value={"results": []}):
+        with (
+            patch("app.chat.orchestrator.execute_tool", return_value={"results": []}),
+            patch("app.chat.orchestrator._update_assistant_payload") as mock_update,
+        ):
             llm = CancellingLLM()
             collector = _Collector()
             orchestrator = ChatOrchestrator(llm, FakeSparql())
@@ -1294,14 +1310,21 @@ class TestPartialPersistTokensCapture:
         # The orchestrator should have persisted a partial assistant row
         # via the CancelledError handler with the tokens captured from
         # round 1's stop event.
-        assistant_calls = [
-            c for c in mock_create_msg.call_args_list if c.args[2:3] == ("assistant",)
-        ]
-        assert assistant_calls, "CancelledError path must persist a partial assistant row"
-        # Last call is the partial-persist (round 1's stop set tokens=300/80).
-        assistant_call = assistant_calls[-1]
-        assert assistant_call.kwargs.get("tokens_input") == 300
-        assert assistant_call.kwargs.get("tokens_output") == 80
+        #
+        # #315 Fix 2: when the tool turn was already underway (placeholder
+        # assistant INSERTed before the tool ran), the cancel path now
+        # UPDATEs that placeholder in place rather than inserting a
+        # second assistant row. So the tokens land on the
+        # ``_update_assistant_payload`` call, not on a new
+        # ``create_message`` call. Pre-fix this test relied on the buggy
+        # double-insert; post-fix it verifies the UPDATE carries the
+        # tokens.
+        assert mock_update.called, (
+            "CancelledError path on a tool turn must UPDATE the assistant placeholder"
+        )
+        update_kwargs = mock_update.call_args.kwargs
+        assert update_kwargs.get("tokens_input") == 300
+        assert update_kwargs.get("tokens_output") == 80
 
 
 class TestOrchestratorPartialPersistence:

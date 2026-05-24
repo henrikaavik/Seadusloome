@@ -422,6 +422,7 @@ def _persist_partial_assistant(
     error_suffix: str | None = None,
     tokens_input: int | None = None,
     tokens_output: int | None = None,
+    placeholder_message_id: uuid.UUID | None = None,
 ) -> uuid.UUID | None:
     """Persist a partial / truncated assistant message.
 
@@ -436,14 +437,79 @@ def _persist_partial_assistant(
     persisted the partial assistant row with NULL tokens despite the
     LLM having produced billable output that ``_log_cost`` already
     recorded in the ``llm_usage`` table.
+
+    #315 review fix (double-insert): when ``placeholder_message_id`` is
+    set (a tool turn had already inserted the parent assistant row up
+    front so tool rows could link via ``parent_message_id``), UPDATE
+    that row in place with the partial content + tokens + rag_context
+    + ``is_truncated`` flag and bump ``created_at = NOW()`` so it sorts
+    after the tool rows. Without this, the timeout / cancel / error
+    paths inserted a SECOND assistant row alongside the placeholder,
+    leaving two assistant messages for one logical turn (one empty
+    parent + one partial sibling).
     """
     if not full_content and not error_suffix:
+        # Tool turn whose placeholder was inserted up-front but the model
+        # produced no text (cancelled / socket-dropped / errored before
+        # the first delta). Delete the empty row so the conversation
+        # doesn't keep an empty assistant bubble forever. Non-tool turns
+        # (no placeholder) just return — nothing was inserted to begin
+        # with.
+        if placeholder_message_id is not None:
+            try:
+                with get_connection() as conn:
+                    conn.execute(
+                        "DELETE FROM messages WHERE id = %s",
+                        (str(placeholder_message_id),),
+                    )
+                    conn.commit()
+            except Exception:
+                logger.exception(
+                    "Failed to delete empty placeholder %s after interrupted tool turn",
+                    placeholder_message_id,
+                )
         return None
 
     text = full_content
     if error_suffix:
         text = f"{text}{error_suffix}"
 
+    # Tool-turn path: a placeholder assistant row already exists. UPDATE
+    # in place instead of inserting a second row.
+    if placeholder_message_id is not None:
+        try:
+            with get_connection() as conn:
+                _update_assistant_payload(
+                    conn,
+                    placeholder_message_id,
+                    content=text,
+                    tokens_input=tokens_input if tokens_input else None,
+                    tokens_output=tokens_output if tokens_output else None,
+                    rag_context=rag_context_json,
+                )
+                if is_truncated:
+                    try:
+                        conn.execute(
+                            "UPDATE messages SET is_truncated = TRUE WHERE id = %s",
+                            (str(placeholder_message_id),),
+                        )
+                    except Exception:
+                        # Column may not exist yet (migration 017 not applied).
+                        logger.debug(
+                            "Could not set is_truncated on placeholder %s — column missing?",
+                            placeholder_message_id,
+                            exc_info=True,
+                        )
+                conn.commit()
+                return placeholder_message_id
+        except Exception:
+            logger.exception(
+                "Failed to update placeholder assistant message %s with partial content",
+                placeholder_message_id,
+            )
+            return None
+
+    # Non-tool turn: no placeholder, INSERT as before.
     try:
         with get_connection() as conn:
             msg = create_message(
@@ -554,6 +620,66 @@ def _persist_user_message(conversation_id: uuid.UUID, user_message: str) -> None
     with get_connection() as conn:
         create_message(conn, conversation_id, "user", user_message)
         conn.commit()
+
+
+def _update_assistant_payload(
+    conn: Any,
+    message_id: uuid.UUID,
+    *,
+    content: str,
+    tokens_input: int | None,
+    tokens_output: int | None,
+    rag_context: list[dict[str, Any]] | None,
+) -> None:
+    """Update an existing assistant ``messages`` row with the final payload.
+
+    #315: when a turn invokes tools, an assistant row is inserted
+    up-front so the tool rows can link via ``parent_message_id``. Once
+    streaming completes, this helper updates the placeholder with the
+    final ciphertext + token counts + RAG context instead of inserting
+    a second row.
+
+    ``content`` is re-encrypted with the storage Fernet — same primitive
+    used by :func:`app.chat.models.create_message` — so the on-disk
+    representation matches a fresh INSERT exactly. ``rag_context`` is
+    JSON-encoded then encrypted (NULL for None).
+
+    #315 review fix (ordering): also bumps ``created_at = NOW()`` so the
+    placeholder sorts AFTER the tool rows that were inserted between the
+    initial placeholder INSERT and this UPDATE. Without this, history
+    loaded by ``list_messages`` (``ORDER BY created_at ASC``) returns
+    ``[assistant_final, tool_call, tool_result, next_user]`` — the wrong
+    semantic order for replay to Claude, which requires
+    ``tool_call → tool_result → assistant_final``. Using the DB's
+    ``NOW()`` rather than Python's ``datetime.now()`` avoids clock-skew
+    issues between the app process and PostgreSQL.
+    """
+    from app.storage import encrypt_text
+
+    content_ciphertext = encrypt_text(content) if content else encrypt_text("")
+    rag_context_ciphertext: bytes | None = (
+        encrypt_text(json.dumps(rag_context, ensure_ascii=False))
+        if rag_context is not None
+        else None
+    )
+    conn.execute(
+        """
+        UPDATE messages
+        SET content_encrypted = %s,
+            tokens_input = %s,
+            tokens_output = %s,
+            rag_context_encrypted = %s,
+            created_at = NOW()
+        WHERE id = %s
+        """,
+        (
+            content_ciphertext,
+            tokens_input,
+            tokens_output,
+            rag_context_ciphertext,
+            str(message_id),
+        ),
+    )
 
 
 def _check_budget_in_own_tx(org_id: uuid.UUID | str) -> None:
@@ -1362,6 +1488,37 @@ class ChatOrchestrator:
                 # not tool fan-out.
                 tool_rounds += 1
                 tool_call_segments: list[str] = []
+
+                # #315: persist the assistant turn that requested the
+                # tools BEFORE running them, so each tool row can link
+                # back via ``parent_message_id``. We use whatever
+                # content has streamed so far (may be empty when the
+                # turn opens with a tool_use); the terminal-events
+                # phase UPDATEs this row with the final content + token
+                # counts. Skipped when an assistant row already exists
+                # for this turn (multi-round tool use: the same parent
+                # links every tool the turn requested).
+                if ctx.assistant_msg_id is None:
+                    try:
+                        with get_connection() as conn:
+                            assistant_msg = create_message(
+                                conn,
+                                ctx.conversation_id,
+                                "assistant",
+                                ctx.full_content,
+                                model=getattr(self.llm, "_model", None),
+                            )
+                            conn.commit()
+                            ctx.assistant_msg_id = assistant_msg.id
+                    except Exception:
+                        logger.exception(
+                            "Failed to persist parent assistant message for tool turn"
+                        )
+                        # Continue without a parent link rather than
+                        # losing the tool rows entirely; they will be
+                        # stored with parent_message_id=NULL and still
+                        # carry tool_use_id for replay.
+
                 for pending in pending_tools:
                     tool_name = pending["name"]
                     tool_input = pending["input"]
@@ -1384,6 +1541,13 @@ class ChatOrchestrator:
                     )
 
                     # Persist tool message.
+                    # #315: link to the parent assistant row via
+                    # ``parent_message_id`` and store Claude's
+                    # ``tool_use_id`` so the renderer can group the
+                    # tool under its parent and the replay path can
+                    # rebuild the ``tool_use → tool_result`` pairing
+                    # the Anthropic API requires for multi-turn tool
+                    # use.
                     try:
                         with get_connection() as conn:
                             create_message(
@@ -1394,6 +1558,8 @@ class ChatOrchestrator:
                                 tool_name=tool_name,
                                 tool_input=tool_input,
                                 tool_output=tool_result,
+                                tool_use_id=tool_use_id,
+                                parent_message_id=ctx.assistant_msg_id,
                             )
                             conn.commit()
                     except Exception:
@@ -1449,12 +1615,21 @@ class ChatOrchestrator:
                 _TURN_DEADLINE_SECONDS,
                 ctx.conversation_id,
             )
-            if ctx.full_content:
+            if ctx.full_content or ctx.assistant_msg_id is not None:
                 # #660: psycopg is sync; offload the partial-persist so
                 # a cancellation handler doesn't block the event loop.
                 # Post-review fix to #688: forward the per-turn token
                 # counts captured so far so the assistant message row
                 # records billable tokens even on the deadline path.
+                # #315 review fix: when a placeholder already exists
+                # (tool turn that timed out after the parent INSERT but
+                # before the final UPDATE), UPDATE the placeholder
+                # rather than INSERTing a second assistant row.
+                # #315 review follow-up: keep calling the persist helper
+                # even when no content has been streamed yet, as long as
+                # a placeholder exists — that way the error_suffix lands
+                # on the placeholder row (or the placeholder gets deleted
+                # if the helper has nothing to write).
                 await asyncio.to_thread(
                     _persist_partial_assistant,
                     ctx.conversation_id,
@@ -1465,6 +1640,7 @@ class ChatOrchestrator:
                     error_suffix=" [Viga: serveri vastus võttis liiga kaua aega]",
                     tokens_input=ctx.tokens_in,
                     tokens_output=ctx.tokens_out,
+                    placeholder_message_id=ctx.assistant_msg_id,
                 )
             try:
                 await _safe_send(
@@ -1486,6 +1662,9 @@ class ChatOrchestrator:
             # already chose to record the partial; let it complete. Also
             # offload to a thread so psycopg I/O doesn't block the event
             # loop during the cancellation path.
+            # #315 review fix: when a placeholder already exists (tool
+            # turn cancelled mid-flight), UPDATE it rather than INSERTing
+            # a second assistant row.
             ctx.assistant_msg_id = await asyncio.shield(
                 asyncio.to_thread(
                     _persist_partial_assistant,
@@ -1496,6 +1675,7 @@ class ChatOrchestrator:
                     is_truncated=True,
                     tokens_input=ctx.tokens_in,
                     tokens_output=ctx.tokens_out,
+                    placeholder_message_id=ctx.assistant_msg_id,
                 )
             )
             # #661: shield the stopped-event send from a second cancel
@@ -1526,6 +1706,9 @@ class ChatOrchestrator:
             # and bail without sending further events.
             # #660: offload the sync persist so the event loop is free
             # to drain other connections while we save the partial.
+            # #315 review fix: forward the placeholder id so a tool turn
+            # interrupted by an unresponsive socket UPDATEs the parent
+            # row rather than inserting a sibling.
             await asyncio.to_thread(
                 _persist_partial_assistant,
                 ctx.conversation_id,
@@ -1535,14 +1718,23 @@ class ChatOrchestrator:
                 is_truncated=True,
                 tokens_input=ctx.tokens_in,
                 tokens_output=ctx.tokens_out,
+                placeholder_message_id=ctx.assistant_msg_id,
             )
             return False
         except Exception:
             logger.exception("LLM streaming failed for conversation %s", ctx.conversation_id)
             # M1: persist partial content with error suffix when streaming fails.
-            if ctx.full_content:
+            if ctx.full_content or ctx.assistant_msg_id is not None:
                 # #660: offload the sync persist so the
                 # cancellation/error path doesn't block the event loop.
+                # #315 review fix: forward the placeholder id so a tool
+                # turn that errored after the parent INSERT UPDATEs that
+                # row rather than inserting a sibling assistant row.
+                # #315 review follow-up: keep calling the persist helper
+                # even when no content has been streamed yet, as long as
+                # a placeholder exists — that way the error_suffix lands
+                # on the placeholder row (or the placeholder gets deleted
+                # if the helper has nothing to write).
                 await asyncio.to_thread(
                     _persist_partial_assistant,
                     ctx.conversation_id,
@@ -1553,6 +1745,7 @@ class ChatOrchestrator:
                     error_suffix=" [Viga: vastus katkestati]",
                     tokens_input=ctx.tokens_in,
                     tokens_output=ctx.tokens_out,
+                    placeholder_message_id=ctx.assistant_msg_id,
                 )
             try:
                 await _safe_send(
@@ -1571,28 +1764,58 @@ class ChatOrchestrator:
         """
         # 7. Persist assistant message (only when streaming completed
         # successfully).
+        #
+        # #315: when the turn invoked tools, an assistant row was
+        # already inserted up-front so the tool rows could link to it
+        # via ``parent_message_id``. In that case we UPDATE the
+        # placeholder with the final content / tokens / rag_context
+        # rather than INSERTing a second row. Pure-text turns still
+        # hit the INSERT path below.
         if ctx.completed:
-            try:
-                with get_connection() as conn:
-                    assistant_msg = create_message(
-                        conn,
-                        ctx.conversation_id,
-                        "assistant",
-                        ctx.full_content,
-                        tokens_input=ctx.tokens_in if ctx.tokens_in else None,
-                        tokens_output=ctx.tokens_out if ctx.tokens_out else None,
-                        model=getattr(self.llm, "_model", None),
-                        rag_context=ctx.rag_context_json,
+            if ctx.assistant_msg_id is not None:
+                try:
+                    with get_connection() as conn:
+                        _update_assistant_payload(
+                            conn,
+                            ctx.assistant_msg_id,
+                            content=ctx.full_content,
+                            tokens_input=ctx.tokens_in if ctx.tokens_in else None,
+                            tokens_output=ctx.tokens_out if ctx.tokens_out else None,
+                            rag_context=ctx.rag_context_json,
+                        )
+                        # Also bump conversation updated_at.
+                        conn.execute(
+                            "UPDATE conversations SET updated_at = now() WHERE id = %s",
+                            (str(ctx.conversation_id),),
+                        )
+                        conn.commit()
+                except Exception:
+                    logger.exception(
+                        "Failed to update placeholder assistant message %s",
+                        ctx.assistant_msg_id,
                     )
-                    # Also bump conversation updated_at.
-                    conn.execute(
-                        "UPDATE conversations SET updated_at = now() WHERE id = %s",
-                        (str(ctx.conversation_id),),
-                    )
-                    conn.commit()
-                    ctx.assistant_msg_id = assistant_msg.id
-            except Exception:
-                logger.exception("Failed to persist assistant message")
+            else:
+                try:
+                    with get_connection() as conn:
+                        assistant_msg = create_message(
+                            conn,
+                            ctx.conversation_id,
+                            "assistant",
+                            ctx.full_content,
+                            tokens_input=ctx.tokens_in if ctx.tokens_in else None,
+                            tokens_output=ctx.tokens_out if ctx.tokens_out else None,
+                            model=getattr(self.llm, "_model", None),
+                            rag_context=ctx.rag_context_json,
+                        )
+                        # Also bump conversation updated_at.
+                        conn.execute(
+                            "UPDATE conversations SET updated_at = now() WHERE id = %s",
+                            (str(ctx.conversation_id),),
+                        )
+                        conn.commit()
+                        ctx.assistant_msg_id = assistant_msg.id
+                except Exception:
+                    logger.exception("Failed to persist assistant message")
 
         # 8. Emit done, then sources, then (optionally) follow_ups.
         try:
@@ -1741,6 +1964,16 @@ def _build_llm_messages(
 
     History is capped to the most recent ``_MAX_HISTORY_MESSAGES``
     entries to prevent context window overflow for long conversations.
+
+    #315: ``tool`` rows in history are rendered with their
+    ``tool_use_id`` + ``tool_name`` + ``tool_input`` so the LLM can
+    reconstruct what it asked for and what it got back. The textual
+    shape mirrors the live tool-call segments emitted inside
+    :meth:`ChatOrchestrator._phase_stream_llm` so the model sees a
+    consistent transcript whether the tool ran in this turn or a
+    previous one. Without this, history-replayed conversations dropped
+    every persisted tool turn from the prompt and Claude lost the
+    grounding for the answer it gave originally.
     """
     # M2: cap history to most recent N messages
     if len(history) > _MAX_HISTORY_MESSAGES:
@@ -1751,7 +1984,28 @@ def _build_llm_messages(
     parts: list[str] = []
     for msg in capped_history:
         role_label = msg.role.upper()
-        parts.append(f"[{role_label}]: {msg.content}")
+        if msg.role == "tool":
+            # Render a persisted tool turn so it can replay through the
+            # same prompt shape the live tool loop uses. We include the
+            # ``tool_use_id`` (Anthropic's ``toolu_...``) when present so
+            # any future shift to a structured messages array carries
+            # the pairing intact; today the flat-string prompt only
+            # needs a stable textual representation.
+            tool_use_id = getattr(msg, "tool_use_id", None) or ""
+            tool_name = getattr(msg, "tool_name", None) or "tool"
+            tool_input = getattr(msg, "tool_input", None) or {}
+            try:
+                tool_input_json = json.dumps(tool_input)
+            except (TypeError, ValueError):
+                tool_input_json = "{}"
+            tool_output = msg.content or ""
+            id_marker = f" id={tool_use_id}" if tool_use_id else ""
+            parts.append(
+                f"[TOOL_CALL{id_marker} name={tool_name}]({tool_input_json})\n"
+                f"[TOOL_RESULT{id_marker}]({tool_output})"
+            )
+        else:
+            parts.append(f"[{role_label}]: {msg.content}")
     parts.append(f"[USER]: {user_message}")
     return parts
 
