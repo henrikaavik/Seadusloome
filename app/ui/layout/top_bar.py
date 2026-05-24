@@ -24,6 +24,70 @@ from app.auth.provider import UserDict
 from app.ui.components.global_search import GlobalSearchBar, GlobalSearchMobileButton
 from app.ui.forms.app_form import AppForm
 
+# Inline JS for the notification bell. Extracted to a module-level
+# constant so the FT component stays readable. The script runs once on
+# DOM ready and opens a WebSocket to ``/ws/notifications`` for
+# real-time badge updates (#180); the existing 30 s polling endpoint is
+# kept as a fallback. The dropdown toggle is handled here too because
+# it depends on the same DOM subtree.
+_NOTIFICATION_BELL_JS = """
+document.addEventListener('click', function (e) {
+    var bell = document.querySelector('.notification-bell');
+    var dropdown = document.getElementById('notification-dropdown');
+    if (dropdown && bell && !bell.contains(e.target)) {
+        dropdown.replaceChildren();
+        dropdown.classList.remove('notification-dropdown--open');
+    }
+    if (dropdown && bell && bell.contains(e.target)) {
+        dropdown.classList.toggle('notification-dropdown--open');
+    }
+});
+
+(function () {
+    if (typeof window === 'undefined' || !('WebSocket' in window)) return;
+    var reconnectDelay = 5000;
+    var ws = null;
+    function bumpBadge() {
+        var badge = document.getElementById('bell-badge');
+        if (!badge) return;
+        var current = parseInt(badge.textContent || '0', 10);
+        if (isNaN(current)) current = 0;
+        var next = current + 1;
+        badge.textContent = next < 100 ? String(next) : '99+';
+        badge.classList.remove('bell-badge--hidden');
+    }
+    function connect() {
+        var proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        try {
+            ws = new WebSocket(proto + '//' + window.location.host + '/ws/notifications');
+        } catch (e) {
+            setTimeout(connect, reconnectDelay);
+            return;
+        }
+        ws.addEventListener('message', function (ev) {
+            var data;
+            try { data = JSON.parse(ev.data); } catch (e) { return; }
+            if (!data || data.type !== 'notification') return;
+            bumpBadge();
+            var poll = document.getElementById('bell-poll');
+            if (poll && window.htmx) { window.htmx.trigger(poll, 'refresh'); }
+        });
+        ws.addEventListener('close', function () {
+            ws = null;
+            setTimeout(connect, reconnectDelay);
+        });
+        ws.addEventListener('error', function () {
+            try { if (ws) ws.close(); } catch (e) {}
+        });
+    }
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', connect);
+    } else {
+        connect();
+    }
+})();
+"""
+
 
 def UserMenu(user: UserDict | None):  # noqa: ANN201
     """User dropdown menu in the topbar."""
@@ -67,7 +131,9 @@ def _bell_badge(unread_count: int):  # noqa: ANN201
 def NotificationBell(unread_count: int = 0):  # noqa: ANN201
     """Bell icon with unread count badge and HTMX-powered dropdown.
 
-    - Polls ``/api/notifications/unread-count`` every 30s to update the badge.
+    - Opens ``/ws/notifications`` for real-time badge updates (#180).
+    - Polls ``/api/notifications/unread-count`` every 30s as a fallback
+      so a dropped WS does not leave the badge stale.
     - Click toggles a dropdown loaded via ``hx_get="/api/notifications?limit=5"``.
     """
     return Div(  # noqa: F405
@@ -84,31 +150,19 @@ def NotificationBell(unread_count: int = 0):  # noqa: ANN201
             hx_trigger="click",
         ),
         Div(id="notification-dropdown", cls="notification-dropdown"),  # noqa: F405
-        # Badge poll: swap just the badge span every 30 seconds.
+        # Badge poll: swap just the badge span every 30 seconds. Kept
+        # as a fallback so a dropped or proxied-down WebSocket does
+        # not leave the badge stale (#180).
         Span(  # noqa: F405
             hx_get="/api/notifications/unread-count",
-            hx_trigger="load, every 30s",
+            hx_trigger="load, every 30s, refresh",
             hx_swap="none",
             # The endpoint returns an OOB-swapped badge span that
             # replaces #bell-badge in-place regardless of hx_swap.
             id="bell-poll",
             cls="hidden",
         ),
-        Script(  # noqa: F405
-            """
-            document.addEventListener('click', function(e) {
-                var bell = document.querySelector('.notification-bell');
-                var dropdown = document.getElementById('notification-dropdown');
-                if (dropdown && bell && !bell.contains(e.target)) {
-                    dropdown.innerHTML = '';
-                    dropdown.classList.remove('notification-dropdown--open');
-                }
-                if (dropdown && bell && bell.contains(e.target)) {
-                    dropdown.classList.toggle('notification-dropdown--open');
-                }
-            });
-            """
-        ),
+        Script(_NOTIFICATION_BELL_JS),  # noqa: F405
         cls="notification-bell",
     )
 

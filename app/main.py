@@ -28,6 +28,7 @@ from app.explorer.pages import register_explorer_pages
 from app.explorer.routes import register_explorer_routes
 from app.explorer.websocket import register_ws_routes
 from app.notifications.routes import register_notification_routes
+from app.notifications.websocket import register_notifications_ws_routes
 from app.sync.webhook import register_webhook_routes
 from app.templates.dashboard import register_dashboard_routes
 from app.ui.components.search_routes import register_search_routes
@@ -104,6 +105,21 @@ async def lifespan(_app):  # type: ignore[no-untyped-def]
     except Exception:
         logger.debug(
             "Failed to register event loop for draft status events",
+            exc_info=True,
+        )
+
+    # #180 — capture the running loop so notify() can push WS events
+    # from background threads (job worker etc.) via
+    # ``asyncio.run_coroutine_threadsafe``.
+    try:
+        import asyncio as _asyncio
+
+        from app.notifications import websocket as _notif_ws
+
+        _notif_ws.register_event_loop(_asyncio.get_running_loop())
+    except Exception:
+        logger.debug(
+            "Failed to register event loop for notifications WS",
             exc_info=True,
         )
 
@@ -258,6 +274,7 @@ register_draft_ws_routes(app)
 register_export_progress_ws_routes(app)
 register_annotation_routes(rt)
 register_notification_routes(rt)
+register_notifications_ws_routes(app)
 register_search_routes(rt)
 
 
