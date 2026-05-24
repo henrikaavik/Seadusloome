@@ -518,6 +518,17 @@ uv run scripts/sync.py
 uv run app/main.py
 ```
 
+### Background worker modes
+
+By default the background job worker runs as a daemon thread inside the
+FastHTML app container (`WORKER_MODE=inproc`). For scaled production
+deployments you can run it in a separate container by setting
+`WORKER_MODE=standalone` and launching `scripts/run_worker.py` (or the
+`seadusloome-worker` console script) in a second Coolify resource. The
+commented-out `worker:` service in `docker/docker-compose.yml` shows the
+shape locally. Full details in
+[`docs/operations/worker-modes.md`](docs/operations/worker-modes.md).
+
 ## Data Sources
 
 - **Ontology:** [github.com/henrikaavik/estonian-legal-ontology](https://github.com/henrikaavik/estonian-legal-ontology)

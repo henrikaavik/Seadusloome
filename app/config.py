@@ -55,3 +55,42 @@ def is_chat_auto_title_enabled() -> bool:
     if raw is None:
         return True
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+# ---------------------------------------------------------------------------
+# Worker mode (#348)
+# ---------------------------------------------------------------------------
+#
+# The background job worker can run in two modes:
+#
+#   ``inproc`` (default) — workers spawn as a daemon thread inside the
+#       FastHTML app process via the ASGI lifespan hook. Simplest for
+#       local dev and single-container production deployments.
+#
+#   ``standalone`` — workers run in a separate process (typically a
+#       second Coolify container) launched via ``scripts/run_worker.py``.
+#       The web container's lifespan SKIPS its inproc worker. Use when
+#       worker load grows beyond what one container can handle, or when
+#       you want to scale web and worker capacity independently.
+#
+# Both modes share the same handler registry (``app.jobs.registry``)
+# and read/write the same ``background_jobs`` Postgres table. You can
+# mix-and-match (one inproc + N standalone) without any other change.
+
+_VALID_WORKER_MODES = frozenset({"inproc", "standalone"})
+
+
+def get_worker_mode() -> str:
+    """Return the configured worker mode (``"inproc"`` | ``"standalone"``).
+
+    Defaults to ``"inproc"`` to preserve the historical single-container
+    behaviour. Unknown values raise ``ValueError`` so a typo in Coolify
+    env vars surfaces loudly at startup instead of silently disabling
+    the worker.
+    """
+    raw = os.environ.get("WORKER_MODE", "inproc").strip().lower()
+    if raw not in _VALID_WORKER_MODES:
+        raise ValueError(
+            f"WORKER_MODE={raw!r} is invalid; expected one of {sorted(_VALID_WORKER_MODES)}"
+        )
+    return raw
