@@ -20,7 +20,7 @@ from typing import Any
 
 from fasthtml.common import *  # noqa: F403
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import JSONResponse, Response
 
 from app.annotations.audit import (
     log_annotation_create,
@@ -52,7 +52,7 @@ from app.auth.helpers import require_auth as _require_auth
 from app.auth.provider import UserDict
 from app.auth.users import get_user
 from app.db import get_connection as _connect
-from app.notifications.wire import notify_annotation_reply
+from app.notifications.wire import notify_annotation_mention, notify_annotation_reply
 from app.ui.primitives.badge import Badge
 from app.ui.primitives.button import Button as UiButton
 from app.ui.surfaces.alert import Alert
@@ -220,11 +220,13 @@ def _annotation_item(
     reply_form = Form(  # noqa: F405
         Textarea(  # noqa: F405
             name="content",
-            placeholder="Kirjutage vastus...",
+            placeholder="Kirjutage vastus... Kasuta @nimi mainimiseks.",
             rows="2",
             cls="annotation-reply-input",
             # #813: HTML4 string form survives FastHTML's HTTP renderer.
             required="required",
+            # #176: hook for the @mention typeahead JS widget.
+            data_annotation_textarea="1",
         ),
         Button(  # noqa: F405
             "Vasta",
@@ -279,6 +281,87 @@ def _annotation_list_fragment(
         annotations=items,
         auth=auth,
     )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/annotations/mentions/search — #176 @mention typeahead backend
+# ---------------------------------------------------------------------------
+#
+# Returns up to 10 org-scoped users whose ``full_name`` OR ``email`` matches
+# the prefix ``q``.  Empty / whitespace-only queries return an empty list
+# (so the JS widget can clear gracefully); the result is always wrapped in
+# ``{"results": [...]}`` so future fields (e.g. has_more) can extend without
+# breaking clients.
+#
+# Security: results are filtered by ``org_id = auth['org_id']`` so a caller
+# cannot probe for users in other organisations.
+# ---------------------------------------------------------------------------
+
+
+def mentions_search_handler(req: Request):
+    """GET /api/annotations/mentions/search?q=<prefix> — typeahead candidates."""
+    auth_or_redirect = _require_auth(req)
+    if isinstance(auth_or_redirect, Response):
+        return auth_or_redirect
+    auth = auth_or_redirect
+
+    org_id = auth.get("org_id")
+    if not org_id:
+        return JSONResponse({"results": []}, status_code=200)
+
+    raw_q = req.query_params.get("q", "")
+    q = raw_q.strip()
+    if not q:
+        return JSONResponse({"results": []}, status_code=200)
+
+    # ``LIKE`` pattern: prefix match on the front of the field plus
+    # substring match anywhere — matches both "And…" and "…and…" so the
+    # typeahead surfaces partial-name candidates from the start.
+    pattern = f"%{q}%"
+
+    try:
+        with _connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, full_name, email
+                FROM users
+                WHERE org_id = %s
+                  AND is_active = TRUE
+                  AND (
+                      lower(full_name) LIKE lower(%s)
+                      OR lower(email)  LIKE lower(%s)
+                  )
+                ORDER BY full_name
+                LIMIT 10
+                """,
+                (str(org_id), pattern, pattern),
+            ).fetchall()
+    except Exception:
+        logger.exception("mentions_search_handler: DB error q=%r", q)
+        # Never 500: a typeahead failure must degrade gracefully on the
+        # client, not surface a stack-trace popup.
+        return JSONResponse({"results": []}, status_code=200)
+
+    results = []
+    for row in rows:
+        user_id = row[0]
+        full_name = row[1] or ""
+        email = row[2] or ""
+        # ``label`` is what the JS widget injects into the textarea after
+        # the ``@`` prefix; ``parse_mentions`` strips a leading ``@`` and
+        # looks the label up against ``full_name`` / ``email``, so either
+        # works as a round-trip key. Prefer full_name for readability.
+        label = full_name or email
+        results.append(
+            {
+                "id": str(user_id),
+                "label": label,
+                "full_name": full_name,
+                "email": email,
+            }
+        )
+
+    return JSONResponse({"results": results}, status_code=200)
 
 
 # ---------------------------------------------------------------------------
@@ -858,6 +941,10 @@ def _row_panel_fragment(
             # #813: HTML4 string form survives FastHTML's HTTP renderer.
             required="required",
             disabled="disabled" if is_resolved else None,
+            # #176: hook for the @mention typeahead JS widget. Only bind
+            # when the thread is editable — a disabled textarea can't
+            # produce mentions anyway and binding would be wasted work.
+            data_annotation_textarea=None if is_resolved else "1",
         ),
         UiButton(
             "Saada",
@@ -1037,6 +1124,16 @@ async def post_row_message_handler(
     else:
         log_row_annotation_message(auth["id"], annotation.id, version_uuid, row_kind, row_key)
 
+    # #176: fan out "you were mentioned" notifications to every in-org
+    # user resolved from the ``@token`` syntax in the message body. The
+    # author is excluded so self-mentions don't ping yourself.
+    if annotation.mentions:
+        notify_annotation_mention(
+            annotation=annotation,
+            mentioned_user_ids=annotation.mentions,
+            mentioner_user_id=auth["id"],
+        )
+
     # Reload the thread so the fragment shows the message we just inserted
     # plus everything that was already there.
     messages = _load_panel_messages(version_uuid, row_kind, row_key)
@@ -1153,6 +1250,11 @@ def post_row_reopen_handler(
 
 def register_annotation_routes(rt) -> None:  # type: ignore[no-untyped-def]
     """Mount annotation API routes on the FastHTML route decorator *rt*."""
+    # #176: typeahead must be registered BEFORE ``/api/annotations`` so the
+    # static ``/mentions/search`` segment is matched ahead of any greedier
+    # sibling. Both are unambiguous on path, but keeping fixed-prefix
+    # routes above parameterised ones matches the rest of the codebase.
+    rt("/api/annotations/mentions/search", methods=["GET"])(mentions_search_handler)
     rt("/api/annotations", methods=["GET"])(list_annotations_handler)
     rt("/api/annotations", methods=["POST"])(create_annotation_handler)
     rt("/api/annotations/{id}/reply", methods=["POST"])(reply_annotation_handler)

@@ -86,6 +86,52 @@ def notify_annotation_reply(annotation: Any, reply: Any) -> None:
         )
 
 
+def notify_annotation_mention(
+    annotation: Any,
+    mentioned_user_ids: list[UUID] | list[str],
+    mentioner_user_id: UUID | str,
+) -> None:
+    """Notify every user mentioned in an annotation body (#176).
+
+    The annotation must already have its ``mentions`` array resolved
+    (see :func:`app.annotations.models.parse_mentions`). Self-mentions
+    are silently skipped so an author writing ``@iseennast`` doesn't
+    ping their own inbox.
+
+    Args:
+        annotation: The freshly-created ``Annotation`` row.
+        mentioned_user_ids: The resolved in-org user UUIDs to notify.
+        mentioner_user_id: The author of the message (excluded from fan-out).
+    """
+    try:
+        mentioner_str = str(mentioner_user_id)
+        body_preview = annotation.content[:200] if getattr(annotation, "content", None) else None
+        link = _annotation_target_link(annotation)
+        for target_id in mentioned_user_ids:
+            if str(target_id) == mentioner_str:
+                # Self-mention: nothing to notify.
+                continue
+            notify(
+                user_id=target_id,
+                type="annotation_mention",
+                title="Sind mainiti märkuses",
+                body=body_preview,
+                link=link,
+                metadata={
+                    "annotation_id": str(getattr(annotation, "id", "")),
+                    "mentioner_user_id": mentioner_str,
+                    "target_type": getattr(annotation, "target_type", None),
+                    "target_id": getattr(annotation, "target_id", None),
+                },
+            )
+    except Exception:
+        logger.warning(
+            "Failed to send annotation_mention notifications for annotation=%s",
+            getattr(annotation, "id", "?"),
+            exc_info=True,
+        )
+
+
 def notify_analysis_done(draft: Any) -> None:
     """Notify the draft owner when impact analysis completes.
 
