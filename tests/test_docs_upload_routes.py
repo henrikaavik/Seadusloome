@@ -225,3 +225,117 @@ class TestDraftsListSizeFromConfig:
 
         assert resp.status_code == 200
         assert "Maksimaalne failisuurus on 200 MB" in resp.text
+
+
+# ---------------------------------------------------------------------------
+# POST /drafts — notify_draft_shared fan-out (#299)
+# ---------------------------------------------------------------------------
+
+
+def _fake_draft() -> MagicMock:
+    """Build a fake :class:`app.docs.draft_model.Draft` for upload-success mocks."""
+    import uuid as _uuid
+
+    d = MagicMock()
+    d.id = _uuid.UUID(_USER_ID)  # any uuid will do for assertions
+    d.user_id = _uuid.UUID(_USER_ID)
+    d.org_id = _uuid.UUID(_ORG_ID)
+    d.title = "Test eelnõu"
+    d.filename = "eelnou.docx"
+    d.content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    d.file_size = 20
+    return d
+
+
+class TestUploadHandlerNotifiesDraftShared:
+    """The POST /drafts success path must invoke ``notify_draft_shared``
+    so same-org drafters/reviewers see the upload in their inbox (#299).
+    """
+
+    @patch("app.docs.routes._upload.log_draft_upload")
+    @patch("app.docs.routes._upload.handle_upload")
+    @patch("app.auth.middleware._get_provider")
+    def test_post_drafts_calls_notify_draft_shared(
+        self,
+        mock_get_provider: MagicMock,
+        mock_handle_upload: MagicMock,
+        mock_log_upload: MagicMock,
+    ):
+        mock_get_provider.return_value = _stub_provider()
+
+        # ``handle_upload`` is the async hop that does Tika + DB inserts.
+        # Stub it with an AsyncMock-equivalent so the handler short-circuits
+        # straight into the audit + notify branch.
+        async def _fake_handle_upload(*_args: Any, **_kwargs: Any) -> Any:
+            return _fake_draft()
+
+        mock_handle_upload.side_effect = _fake_handle_upload
+
+        with patch("app.notifications.wire.notify_draft_shared") as mock_notify_shared:
+            client = _authed_client()
+            resp = client.post(
+                "/drafts",
+                data={"title": "Test eelnõu"},
+                files={
+                    "file": (
+                        "eelnou.docx",
+                        b"test bytes",
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    )
+                },
+            )
+
+        # 303 → /drafts/{id} on the success path.
+        assert resp.status_code == 303, resp.text[:200]
+        # Both audit and notify must fire on the success path.
+        mock_log_upload.assert_called_once()
+        mock_notify_shared.assert_called_once()
+        # The notify call carries the draft we returned from handle_upload.
+        passed_draft = mock_notify_shared.call_args[0][0]
+        assert passed_draft.filename == "eelnou.docx"
+        # And — critically for v2+ uploads — the route passes the acting
+        # caller's id explicitly so the fan-out excludes the right user.
+        # ``handle_upload`` returns the parent owner for v2+, so relying
+        # on ``draft.user_id`` would notify the wrong person.
+        passed_uploader = mock_notify_shared.call_args[1].get("uploader_id")
+        assert passed_uploader == _USER_ID or str(passed_uploader) == _USER_ID
+
+    @patch("app.docs.routes._upload.log_draft_upload")
+    @patch("app.docs.routes._upload.handle_upload")
+    @patch("app.auth.middleware._get_provider")
+    def test_notify_failure_does_not_break_upload(
+        self,
+        mock_get_provider: MagicMock,
+        mock_handle_upload: MagicMock,
+        mock_log_upload: MagicMock,
+    ):
+        """A notify_draft_shared exception must be swallowed — the upload
+        is already committed by the time we get here.
+        """
+        mock_get_provider.return_value = _stub_provider()
+
+        async def _fake_handle_upload(*_args: Any, **_kwargs: Any) -> Any:
+            return _fake_draft()
+
+        mock_handle_upload.side_effect = _fake_handle_upload
+
+        with patch(
+            "app.notifications.wire.notify_draft_shared",
+            side_effect=RuntimeError("boom"),
+        ):
+            client = _authed_client()
+            resp = client.post(
+                "/drafts",
+                data={"title": "Test eelnõu"},
+                files={
+                    "file": (
+                        "eelnou.docx",
+                        b"test bytes",
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    )
+                },
+            )
+
+        # Upload still redirects to /drafts/{id} even though notify blew up.
+        assert resp.status_code == 303, resp.text[:200]
+        mock_log_upload.assert_called_once()

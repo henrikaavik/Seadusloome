@@ -716,6 +716,22 @@ async def create_draft_handler(req: Request):
                     content_type=draft.content_type,
                     file_size=draft.file_size,
                 )
+                # #299: notify same-org drafters/reviewers that a new
+                # draft is available for collaboration. Fire-and-forget;
+                # never let a notification failure break the upload flow.
+                # NOTE: pass the acting caller's id explicitly — for v2+
+                # uploads ``draft.user_id`` is the parent draft's owner
+                # (audit-trail owner returned by ``handle_upload``), not
+                # the colleague who actually pressed Upload.
+                try:
+                    from app.notifications.wire import notify_draft_shared
+
+                    notify_draft_shared(draft, uploader_id=auth.get("id"))
+                except Exception:
+                    logger.debug(
+                        "notify_draft_shared failed (non-critical)",
+                        exc_info=True,
+                    )
                 # #598: queue a success toast for the detail page.
                 # The Estonian copy differs slightly between the
                 # "new draft" and "new version" branches so users see
