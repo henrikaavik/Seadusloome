@@ -198,6 +198,72 @@ class TestWorkerDispatch:
         queue_instance.mark_running.assert_not_called()
         queue_instance.mark_success.assert_not_called()
 
+    @patch("app.jobs.worker.record_metric")
+    @patch("app.jobs.worker.JobQueue")
+    def test_worker_records_job_execution_metric_on_success(
+        self, mock_queue_cls: MagicMock, mock_record: MagicMock
+    ):
+        """Successful jobs must emit a job_execution_ms metric with status=ok (#195)."""
+        queue_instance = MagicMock()
+        mock_queue_cls.return_value = queue_instance
+        job = _make_job(job_type="_metric_ok")
+
+        @register_handler("_metric_ok")
+        def handler(payload: dict, **kwargs) -> dict:
+            return {"ok": True}
+
+        stop = threading.Event()
+
+        def claim_side_effect(*_a, **_kw):
+            if queue_instance.claim_next.call_count == 1:
+                return job
+            stop.set()
+            return None
+
+        queue_instance.claim_next.side_effect = claim_side_effect
+        JobWorker(worker_id="test-worker", poll_interval=0.01).run_forever(stop)
+
+        metric_calls = [c for c in mock_record.call_args_list if c.args[0] == "job_execution_ms"]
+        assert len(metric_calls) == 1
+        name, value, labels = metric_calls[0].args
+        assert name == "job_execution_ms"
+        assert isinstance(value, float)
+        assert value >= 0
+        assert labels == {"handler": "_metric_ok", "status": "ok"}
+
+    @patch("app.jobs.worker.record_metric")
+    @patch("app.jobs.worker.JobQueue")
+    def test_worker_records_job_execution_metric_on_failure(
+        self, mock_queue_cls: MagicMock, mock_record: MagicMock
+    ):
+        """Failed jobs must still emit a job_execution_ms metric with status=failed (#195)."""
+        queue_instance = MagicMock()
+        mock_queue_cls.return_value = queue_instance
+        job = _make_job(job_type="_metric_fail")
+
+        @register_handler("_metric_fail")
+        def handler(payload: dict, **kwargs) -> dict:
+            raise RuntimeError("boom")
+
+        stop = threading.Event()
+
+        def claim_side_effect(*_a, **_kw):
+            if queue_instance.claim_next.call_count == 1:
+                return job
+            stop.set()
+            return None
+
+        queue_instance.claim_next.side_effect = claim_side_effect
+        JobWorker(worker_id="test-worker", poll_interval=0.01).run_forever(stop)
+
+        metric_calls = [c for c in mock_record.call_args_list if c.args[0] == "job_execution_ms"]
+        assert len(metric_calls) == 1
+        name, value, labels = metric_calls[0].args
+        assert name == "job_execution_ms"
+        assert isinstance(value, float)
+        assert value >= 0
+        assert labels == {"handler": "_metric_fail", "status": "failed"}
+
     @patch("app.jobs.worker.JobQueue")
     def test_worker_truncates_long_error_messages(self, mock_queue_cls: MagicMock):
         """Handler errors longer than 500 chars must be truncated."""

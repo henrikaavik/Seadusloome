@@ -21,11 +21,14 @@ from app.sync.orchestrator import (
     has_recent_running_row,
 )
 from app.ui.data.data_table import Column, DataTable
+from app.ui.data.pagination import Pagination
 from app.ui.forms.app_form import AppForm
+from app.ui.layout import PageShell
 from app.ui.primitives.badge import StatusBadge
 from app.ui.primitives.button import Button  # noqa: F401, F811  -- shadow guard
 from app.ui.surfaces.card import Card, CardBody, CardHeader
 from app.ui.surfaces.info_box import InfoBox
+from app.ui.theme import get_theme_from_request
 from app.ui.time import format_tallinn
 
 # Module-level lock — keeps rapid double-clicks on the "Sync now" button
@@ -89,6 +92,45 @@ def _get_sync_logs(limit: int = 5) -> list[dict]:  # type: ignore[type-arg]
     except Exception:
         logger.exception("Failed to fetch sync logs")
         return []
+
+
+def _get_sync_log_page(page: int = 1, per_page: int = 20) -> tuple[list[dict], int]:  # type: ignore[type-arg]
+    """Return a page of sync_log rows and the total row count.
+
+    Used by the /admin/sync/history page; keeps the lightweight
+    ``_get_sync_logs`` helper used by the dashboard card unchanged.
+    Returns ``([], 0)`` on any DB error so the page renders a clean
+    empty state instead of a 500.
+    """
+    entries: list[dict] = []  # type: ignore[type-arg]
+    total = 0
+    try:
+        with _connect() as conn:
+            count_row = conn.execute("SELECT COUNT(*) FROM sync_log").fetchone()
+            total = count_row[0] if count_row else 0
+
+            offset = (page - 1) * per_page
+            rows = conn.execute(
+                "SELECT id, started_at, finished_at, status, entity_count, "
+                "error_message, current_step "
+                "FROM sync_log ORDER BY started_at DESC LIMIT %s OFFSET %s",
+                (per_page, offset),
+            ).fetchall()
+            entries = [
+                {
+                    "id": r[0],
+                    "started_at": r[1],
+                    "finished_at": r[2],
+                    "status": r[3],
+                    "entity_count": r[4],
+                    "error_message": r[5],
+                    "current_step": r[6] if len(r) > 6 else None,
+                }
+                for r in rows
+            ]
+    except Exception:
+        logger.exception("Failed to fetch sync log page %d", page)
+    return entries, total
 
 
 # ---------------------------------------------------------------------------
@@ -446,10 +488,18 @@ def _sync_card(
 
     return Card(
         CardHeader(
-            H3(  # noqa: F405
-                "S\u00fcnkroniseerimise staatus",
-                _tooltip("GitHub \u2192 RDF \u2192 Jena s\u00fcnkroniseerimise ajalugu"),
-                cls="card-title",
+            Div(  # noqa: F405
+                H3(  # noqa: F405
+                    "S\u00fcnkroniseerimise staatus",
+                    _tooltip("GitHub \u2192 RDF \u2192 Jena s\u00fcnkroniseerimise ajalugu"),
+                    cls="card-title",
+                ),
+                A(  # noqa: F405
+                    "Vaata ajalugu \u2192",
+                    href="/admin/sync/history",
+                    cls="sync-history-link",
+                ),
+                cls="card-header-row",
             )
         ),
         CardBody(*body_nodes),
@@ -551,3 +601,158 @@ def sync_status_card(req: Request):
     """
     sync_logs = _get_sync_logs()
     return _sync_card(sync_logs)
+
+
+# ---------------------------------------------------------------------------
+# Sync history page (#322)
+# ---------------------------------------------------------------------------
+
+
+_HISTORY_PER_PAGE = 20
+
+# Estonian labels for each pipeline phase, used by the history table's
+# ``Samm`` column. Keeps the column readable instead of leaking raw enum
+# tokens like ``converting`` into the admin UI.
+_PHASE_LABELS: dict[str, str] = dict(_PROGRESS_PHASES)
+
+
+def _format_duration(started_at: datetime | None, finished_at: datetime | None) -> str:
+    """Return ``M:SS`` for a completed sync or a live elapsed string."""
+    if started_at is None:
+        return "—"
+    if finished_at is None:
+        # Still running — show live elapsed.
+        return _format_elapsed(_elapsed_seconds(started_at))
+    started = started_at
+    finished = finished_at
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=UTC)
+    if finished.tzinfo is None:
+        finished = finished.replace(tzinfo=UTC)
+    delta = finished - started
+    return _format_elapsed(max(0, int(delta.total_seconds())))
+
+
+def _format_step(entry: dict) -> str:  # type: ignore[type-arg]
+    """Render the step cell — Estonian phase label, em-dash for unknown."""
+    step = entry.get("current_step")
+    if not step:
+        return "—"
+    step_str = str(step)
+    return _PHASE_LABELS.get(step_str, step_str)
+
+
+def admin_sync_history_page(req: Request):
+    """GET /admin/sync/history -- paginated sync log viewer.
+
+    Lists every sync_log row ordered by ``started_at DESC`` with 20 rows
+    per page. Provides the operational context the compact dashboard card
+    can't (which only shows the last 5). Empty state and DB errors both
+    render a calm muted message instead of a stack trace.
+
+    Helpers are imported as locals inside the function body so the page
+    works correctly when the function is rebound by the admin_dashboard
+    shim (matches the pattern in ``admin_audit_page``).
+    """
+    auth = req.scope.get("auth")
+    theme = get_theme_from_request(req)
+    try:
+        from app.admin.sync import (
+            _format_duration,
+            _format_step,
+            _get_sync_log_page,
+            _sync_error_cell,
+            _sync_status_badge,
+        )
+
+        page_str = req.query_params.get("page", "1")
+        try:
+            page = max(1, int(page_str))
+        except ValueError:
+            page = 1
+
+        per_page = _HISTORY_PER_PAGE
+        entries, total = _get_sync_log_page(page, per_page)
+        total_pages = max(1, (total + per_page - 1) // per_page)
+
+        if not entries:
+            body: object = P(  # noqa: F405
+                "Sünkroniseerimisi ei leitud.", cls="muted-text"
+            )
+        else:
+            columns = [
+                Column(key="started", label="Algusaeg", sortable=False),
+                Column(
+                    key="status",
+                    label="Staatus",
+                    sortable=False,
+                    render=lambda r: _sync_status_badge(r["status_raw"]),
+                ),
+                Column(key="duration", label="Kestus", sortable=False),
+                Column(key="step", label="Samm", sortable=False),
+                Column(
+                    key="error_message",
+                    label="Veateade",
+                    sortable=False,
+                    render=_sync_error_cell,
+                ),
+            ]
+            rows = []
+            for entry in entries:
+                rows.append(
+                    {
+                        "started": format_tallinn(entry["started_at"]),
+                        "status_raw": entry["status"],
+                        "status": entry["status"],
+                        "duration": _format_duration(entry["started_at"], entry["finished_at"]),
+                        "step": _format_step(entry),
+                        "error_message": entry["error_message"] or "—",
+                    }
+                )
+            body = DataTable(columns=columns, rows=rows)
+
+        pagination = Pagination(
+            current_page=page,
+            total_pages=total_pages,
+            base_url="/admin/sync/history",
+            page_size=per_page,
+            total=total,
+        )
+
+        content = (
+            H1(  # noqa: F405
+                "Sünkroniseerimise ajalugu", cls="page-title"
+            ),
+            P(  # noqa: F405
+                A(  # noqa: F405
+                    "← Tagasi adminipaneelile", href="/admin"
+                ),
+                cls="back-link",
+            ),
+            Card(
+                CardHeader(
+                    H3(  # noqa: F405
+                        "Kõik sünkroniseerimised",
+                        _tooltip(
+                            "Iga GitHub → RDF → Jena sünkroniseerimise "
+                            "ajalooline kirje, uusim eespool."
+                        ),
+                        cls="card-title",
+                    ),
+                ),
+                CardBody(body, pagination),
+            ),
+        )
+
+        return PageShell(
+            *content,
+            title="Sünkroniseerimise ajalugu",
+            user=auth,
+            theme=theme,
+            active_nav="/admin",
+        )
+    except Exception:
+        logger.exception("Failed to render admin sync history page")
+        from app.admin._shared import _render_admin_error_page
+
+        return _render_admin_error_page(title="Sünkroniseerimise ajalugu", user=auth, theme=theme)

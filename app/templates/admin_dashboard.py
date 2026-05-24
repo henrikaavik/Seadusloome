@@ -108,6 +108,9 @@ from app.admin.rate_limits import (
     _rate_limit_card,  # noqa: F401
 )
 from app.admin.sync import (
+    _get_sync_log_page as _get_sync_log_page_impl,
+)
+from app.admin.sync import (
     _get_sync_logs as _get_sync_logs_impl,
 )
 from app.admin.sync import (
@@ -117,6 +120,9 @@ from app.admin.sync import (
     _sync_card,  # noqa: F401
     _sync_status_badge,  # noqa: F401
     _sync_trigger_form,  # noqa: F401
+)
+from app.admin.sync import (
+    admin_sync_history_page as _admin_sync_history_page_impl,
 )
 from app.admin.sync import (
     sync_status_card as _sync_status_card_impl,
@@ -197,6 +203,7 @@ def _rebind(fn):
 
 _check_postgres = _rebind(_check_postgres_impl)
 _get_sync_logs = _rebind(_get_sync_logs_impl)
+_get_sync_log_page = _rebind(_get_sync_log_page_impl)
 _get_user_stats = _rebind(_get_user_stats_impl)
 _get_audit_log_page = _rebind(_get_audit_log_page_impl)
 health_check = _rebind(_health_check_impl)
@@ -208,6 +215,7 @@ health_check = _rebind(_health_check_impl)
 _run_sync_and_clear_flag = _rebind(_run_sync_and_clear_flag_impl)
 trigger_sync = _rebind(_trigger_sync_impl)
 sync_status_card = _rebind(_sync_status_card_impl)
+admin_sync_history_page = _rebind(_admin_sync_history_page_impl)
 
 # admin_dashboard_page calls _check_postgres, jena_check_health,
 # _get_sync_logs, _get_user_stats — all patchable names.  Rebind it so
@@ -236,6 +244,7 @@ _EXPECTED_PAGE_HANDLERS = {
     "admin_job_retry",
     "admin_jobs_purge",
     "admin_performance_page",
+    "admin_sync_history_page",
     "health_check",
     "trigger_sync",
     "sync_status_card",
@@ -267,6 +276,7 @@ _admin_audit = require_role("admin")(admin_audit_page)
 _admin_audit_export = require_role("admin")(admin_audit_export)
 _admin_sync = require_role("admin")(trigger_sync)
 _admin_sync_status = require_role("admin")(sync_status_card)
+_admin_sync_history = require_role("admin")(admin_sync_history_page)
 _admin_analytics = require_role("admin")(admin_analytics_page)
 _admin_costs = require_role("admin")(admin_cost_page)
 _admin_jobs = require_role("admin")(admin_jobs_page)
@@ -283,6 +293,7 @@ def register_admin_routes(rt) -> None:  # type: ignore[no-untyped-def]
     rt("/admin/performance", methods=["GET"])(_admin_performance)
     rt("/admin/sync", methods=["POST"])(_admin_sync)
     rt("/admin/sync/status", methods=["GET"])(_admin_sync_status)
+    rt("/admin/sync/history", methods=["GET"])(_admin_sync_history)
     rt("/admin/analytics", methods=["GET"])(_admin_analytics)
     rt("/admin/costs", methods=["GET"])(_admin_costs)
     rt("/admin/jobs", methods=["GET"])(_admin_jobs)

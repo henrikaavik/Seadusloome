@@ -142,9 +142,11 @@ class FakeRetriever:
         k: int = 10,
         source_type: str | None = None,
         org_id: str | None = None,
+        feature: str = "unknown",
     ) -> list[FakeChunk]:
         self.call_count += 1
         self.last_org_id = org_id
+        self.last_feature = feature
         return self.chunks
 
 
@@ -157,6 +159,7 @@ class ErrorRetriever:
         k: int = 10,
         source_type: str | None = None,
         org_id: str | None = None,
+        feature: str = "unknown",
     ) -> list:
         raise RuntimeError("Embedding service unavailable")
 
