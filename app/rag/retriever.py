@@ -222,6 +222,13 @@ class Retriever:
             # bugs like typo'd filter keys).
             raise
 
+        # Short-circuit: if any filter produced a contradictory predicate
+        # (empty-list value -> "FALSE"), the SQL is guaranteed to return
+        # zero rows. Skip the embedding call so we don't burn Voyage AI
+        # quota on a query that can't match anything.
+        if any(clause == "FALSE" for clause in extra_clauses):
+            return []
+
         # 1. Embed the query
         embeddings = await self.embedder.embed([query])
         if not embeddings:

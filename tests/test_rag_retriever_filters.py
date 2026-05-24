@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -27,6 +27,16 @@ def _make_stub_embedder():
         return [[0.1] * 1024 for _ in texts]
 
     embedder.embed = fake_embed
+    embedder.dimensions = 1024
+    return embedder
+
+
+def _make_assertable_embedder():
+    """Like ``_make_stub_embedder`` but the ``embed`` method is an
+    :class:`AsyncMock`, so tests can assert call counts / call args.
+    """
+    embedder = MagicMock()
+    embedder.embed = AsyncMock(return_value=[[0.1] * 1024])
     embedder.dimensions = 1024
     return embedder
 
@@ -443,3 +453,43 @@ class TestLegacySourceTypeMergeWithFilters:
         assert "X" in params
         # No source_type predicate at all.
         assert "source_type" not in sql
+
+
+class TestEmptyListShortCircuit:
+    """Regression tests for the P3 review fix: an empty-list filter value
+    must short-circuit BEFORE the embedding call, so we don't burn Voyage
+    AI quota on a query whose SQL is guaranteed to return zero rows.
+    """
+
+    @patch("app.rag.retriever.get_connection")
+    def test_empty_list_filter_skips_embed(self, mock_get_conn: MagicMock):
+        """``filters={"source_type": []}`` returns ``[]`` without
+        invoking the embedder OR touching the DB."""
+        embedder = _make_assertable_embedder()
+        retriever = Retriever(embedding_provider=embedder)
+        mock_conn = _make_mock_conn([])
+        mock_get_conn.return_value = mock_conn
+
+        results = asyncio.run(retriever.retrieve("test", filters={"source_type": []}))
+
+        assert results == []
+        # The whole point of the fix: no embedding API call.
+        embedder.embed.assert_not_called()
+        # And no DB call either — we returned before building the SQL.
+        mock_conn.execute.assert_not_called()
+
+    @patch("app.rag.retriever.get_connection")
+    def test_scalar_filter_still_calls_embed_once(self, mock_get_conn: MagicMock):
+        """Sanity: the happy path (single-value filter) still embeds the
+        query exactly once. Guards against an over-eager short-circuit
+        regression.
+        """
+        embedder = _make_assertable_embedder()
+        retriever = Retriever(embedding_provider=embedder)
+        mock_conn = _make_mock_conn([])
+        mock_get_conn.return_value = mock_conn
+
+        asyncio.run(retriever.retrieve("test", filters={"source_type": "draft"}))
+
+        embedder.embed.assert_called_once_with(["test"])
+        mock_conn.execute.assert_called_once()
