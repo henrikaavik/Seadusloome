@@ -56,6 +56,11 @@ _LINK_VTK_TRIGGER_ID = "link-vtk-trigger"
 _LINK_VTK_FORM_ID = "link-vtk-form"
 _DRAFT_METADATA_ID = "draft-metadata"
 
+# #306: identifiers for the "Analüüsi uuesti" confirm modal + its hidden form.
+_REANALYZE_MODAL_ID = "reanalyze-draft-modal"
+_REANALYZE_TRIGGER_ID = "reanalyze-draft-trigger"
+_REANALYZE_FORM_ID = "reanalyze-draft-form"
+
 
 # ---------------------------------------------------------------------------
 # Inline JS payloads
@@ -102,6 +107,32 @@ _DELETE_MODAL_SCRIPT = (
     "  });\n"
     "  confirmBtn.addEventListener('click', function () {\n"
     f"    window.Modal.close('{_DELETE_MODAL_ID}');\n"
+    "    if (window.htmx && typeof window.htmx.trigger === 'function') {\n"
+    "      window.htmx.trigger(form, 'submit');\n"
+    "    } else {\n"
+    "      form.submit();\n"
+    "    }\n"
+    "  });\n"
+    "})();\n"
+)
+
+# #306: same shape as ``_DELETE_MODAL_SCRIPT`` — the "Analüüsi uuesti"
+# trigger opens the confirm modal, the modal's confirm button fires the
+# hidden HTMX form's submit. Kept as a separate script so the IDs are
+# scoped per-action and the two flows can co-exist on the same page
+# without colliding event listeners.
+_REANALYZE_MODAL_SCRIPT = (
+    "(function () {\n"
+    f"  var trigger = document.getElementById('{_REANALYZE_TRIGGER_ID}');\n"
+    f"  var confirmBtn = document.getElementById('{_REANALYZE_MODAL_ID}-confirm');\n"
+    f"  var form = document.getElementById('{_REANALYZE_FORM_ID}');\n"
+    "  if (!trigger || !confirmBtn || !form || !window.Modal) return;\n"
+    "  trigger.addEventListener('click', function (evt) {\n"
+    "    evt.preventDefault();\n"
+    f"    window.Modal.open('{_REANALYZE_MODAL_ID}');\n"
+    "  });\n"
+    "  confirmBtn.addEventListener('click', function () {\n"
+    f"    window.Modal.close('{_REANALYZE_MODAL_ID}');\n"
     "    if (window.htmx && typeof window.htmx.trigger === 'function') {\n"
     "      window.htmx.trigger(form, 'submit');\n"
     "    } else {\n"

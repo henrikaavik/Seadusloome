@@ -13,6 +13,7 @@ Route map:
     POST /drafts/{draft_id}/link-vtk — set or clear ``parent_vtk_id`` (#640)
     GET  /drafts/{draft_id}/diff     — side-by-side version diff (#618 PR-C)
     POST /drafts/{draft_id}/retry    — retry a failed draft's pipeline (#656)
+    POST /drafts/{draft_id}/reanalyze — re-run impact analysis on a finished draft (#306)
     POST /drafts/{draft_id}/review-outcome — reviewer outcome (#817)
 
 All routes require authentication (they are **not** in ``SKIP_PATHS``).
@@ -109,7 +110,11 @@ from app.docs.routes._detail_versions import (
     _version_timeline_section,
     draft_diff_page,
 )
-from app.docs.routes._lifecycle import delete_draft_handler, keep_draft_handler
+from app.docs.routes._lifecycle import (
+    delete_draft_handler,
+    keep_draft_handler,
+    reanalyze_draft_handler,
+)
 from app.docs.routes._list import (
     _DOC_TYPE_BADGE,
     _DOC_TYPE_CHOICES,
@@ -216,6 +221,7 @@ __all__ = [
     # _lifecycle.py (re-exported for symmetry; #703 already moved these)
     "delete_draft_handler",
     "keep_draft_handler",
+    "reanalyze_draft_handler",
     # _detail_modals.py constants (#704 PR-E)
     "_DELETE_FORM_ID",
     "_DELETE_MODAL_ID",
@@ -280,6 +286,9 @@ def register_draft_routes(rt) -> None:  # type: ignore[no-untyped-def]
     rt("/drafts/{draft_id}/actions", methods=["GET"])(draft_actions_fragment)
     rt("/drafts/{draft_id}/keep", methods=["POST"])(keep_draft_handler)
     rt("/drafts/{draft_id}/delete", methods=["POST"])(delete_draft_handler)
+    # #306: re-run analysis on a finished draft (ready/failed) — distinct
+    # from the report-page ontology-drift reanalyze + the parse-from-top retry.
+    rt("/drafts/{draft_id}/reanalyze", methods=["POST"])(reanalyze_draft_handler)
     rt("/drafts/{draft_id}/link-vtk", methods=["POST"])(link_vtk_handler)
     # #817: reviewer-only outcome submission.
     rt("/drafts/{draft_id}/review-outcome", methods=["POST"])(submit_review_outcome_handler)

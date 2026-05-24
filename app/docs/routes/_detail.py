@@ -87,6 +87,10 @@ from app.docs.routes._detail_modals import (
     _DRAFT_METADATA_ID,
     _LINK_VTK_MODAL_ID,
     _LINK_VTK_TRIGGER_ID,
+    _REANALYZE_FORM_ID,
+    _REANALYZE_MODAL_ID,
+    _REANALYZE_MODAL_SCRIPT,
+    _REANALYZE_TRIGGER_ID,
     _link_vtk_modal,
 )
 from app.docs.routes._detail_versions import (
@@ -579,6 +583,65 @@ def _draft_detail_body(
                 title="Ava selle eelnõu mõjuahel Analüüsikeskuses.",
             )
         )
+
+    # #306: "Analüüsi uuesti" — re-run impact analysis on a finished
+    # draft. Visible only when the pipeline has reached a terminal
+    # state (``ready`` / ``failed``) so the button can't race an
+    # in-flight run; the server-side handler in ``_lifecycle.py``
+    # revalidates the same condition. Same-org viewers see the button
+    # because the detail page itself is org-scoped via
+    # :func:`can_view_draft`; the handler re-checks org scope for
+    # defence-in-depth.
+    #
+    # Uses the shared ConfirmModal primitive (matching the delete flow
+    # per #601) so the confirm prompt is keyboard-accessible, focus-
+    # trapped, and free of the native ``confirm()`` artefacts that
+    # ``hx-confirm`` would otherwise inject.
+    if draft.status in ("ready", "failed"):
+        actions.append(
+            Button(
+                "Analüüsi uuesti",
+                type="button",
+                variant="secondary",
+                size="md",
+                id=_REANALYZE_TRIGGER_ID,
+                aria_haspopup="dialog",
+                aria_controls=_REANALYZE_MODAL_ID,
+            )
+        )
+        actions.append(
+            Form(  # noqa: F405
+                # Hidden HTMX form fired by the modal's confirm button
+                # via ``window.htmx.trigger(form, 'submit')`` — mirrors
+                # the delete flow exactly. The native ``action`` is
+                # the no-JS fallback; without JS the user cannot open
+                # the modal anyway, but if something else POSTs the
+                # form they still hit the right endpoint.
+                id=_REANALYZE_FORM_ID,
+                method="post",
+                action=f"/drafts/{draft.id}/reanalyze",
+                enctype="application/x-www-form-urlencoded",
+                hx_post=f"/drafts/{draft.id}/reanalyze",
+                hx_target="body",
+                hx_swap="outerHTML",
+                cls="inline-form draft-reanalyze-form",
+                hidden="hidden",
+            )
+        )
+        actions.append(
+            ConfirmModal(
+                "Käivita analüüs uuesti",
+                "Soovid eelnõu mõjuanalüüsi uuesti käivitada? "
+                "Olemasolev aruanne säilib ajaloos ja uus aruanne "
+                "lisatakse selle kõrvale.",
+                id=_REANALYZE_MODAL_ID,
+                confirm_label="Käivita",
+                cancel_label="Tühista",
+                confirm_variant="primary",
+            )
+        )
+        actions.append(ModalScript())
+        actions.append(Script(_REANALYZE_MODAL_SCRIPT))  # noqa: F405
 
     # #572: stale drafts (not accessed for 90+ days) get a "Hoia alles"
     # button so the owner can reset the archive clock. The owner-only

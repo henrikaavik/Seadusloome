@@ -9,12 +9,17 @@ package's ``__init__.py`` and will move in follow-up PRs.
 
 Routes registered:
 
-    POST /drafts/{draft_id}/delete   — delete_draft_handler
-    POST /drafts/{draft_id}/keep     — keep_draft_handler
+    POST /drafts/{draft_id}/delete     — delete_draft_handler
+    POST /drafts/{draft_id}/keep       — keep_draft_handler
+    POST /drafts/{draft_id}/reanalyze  — reanalyze_draft_handler (#306)
 
-Both routes are owner-only per ``app.auth.policy.can_delete_draft``;
-cross-org or non-owner callers receive 404 (never 403) so existence
-is not leaked.
+The delete/keep routes are owner-only per
+``app.auth.policy.can_delete_draft``; the reanalyze route is
+**org-scoped** (any same-org viewer per ``can_view_draft``) since
+re-running analysis is a read-like governance action and the existing
+``POST /drafts/{id}/report/reanalyze`` ontology-drift route already
+uses the same scoping. Cross-org callers receive 404 (never 403) so
+existence is not leaked.
 """
 
 from __future__ import annotations
@@ -26,21 +31,31 @@ from starlette.responses import RedirectResponse, Response
 
 from app.auth.audit import log_action
 from app.auth.helpers import require_auth as _require_auth
-from app.auth.policy import can_delete_draft
+from app.auth.policy import can_delete_draft, can_view_draft
 from app.db import get_connection as _connect
 from app.docs._helpers import _not_found_page, _parse_uuid
-from app.docs.audit import log_draft_delete
+from app.docs.audit import log_draft_delete, log_draft_reanalyze
 from app.docs.draft_model import (
     delete_draft,
     fetch_draft,
     get_draft_artifact_paths,
     touch_draft_access,
 )
+from app.docs.status import update_draft_status
 from app.jobs.queue import JobQueue
 from app.rag.retriever import delete_chunks_for_draft
 from app.ui.feedback.flash import push_flash
 
 logger = logging.getLogger(__name__)
+
+# #306: a draft can only be re-analyzed when its pipeline has reached a
+# terminal state.  Allowing re-analyze mid-pipeline (``parsing`` /
+# ``extracting`` / ``analyzing``) would either race the in-flight job
+# (double-enqueue) or stomp on partial work.  ``uploaded`` is excluded
+# because the natural pipeline will pick it up on its own — re-analyze
+# is for *re-running* a completed (or permanently failed) analysis, not
+# for kicking off a fresh one.
+_REANALYZABLE_STATUSES: frozenset[str] = frozenset({"ready", "failed"})
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +264,175 @@ def keep_draft_handler(req: Request, draft_id: str):
 
     # HTMX-driven submits get an HX-Redirect so the browser performs a
     # real navigation rather than swapping a partial into <body>.
+    if req.headers.get("HX-Request") == "true":
+        return Response(
+            status_code=204,
+            headers={"HX-Redirect": f"/drafts/{parsed}"},
+        )
+    return RedirectResponse(url=f"/drafts/{parsed}", status_code=303)
+
+
+# ---------------------------------------------------------------------------
+# POST /drafts/{draft_id}/reanalyze — re-run impact analysis (#306)
+# ---------------------------------------------------------------------------
+
+
+def reanalyze_draft_handler(req: Request, draft_id: str):
+    """POST /drafts/{draft_id}/reanalyze — re-enqueue the analyze stage.
+
+    Distinct from ``POST /drafts/{id}/retry`` (which restarts the WHOLE
+    pipeline from ``parse_draft`` for a *failed* draft) and from
+    ``POST /drafts/{id}/report/reanalyze`` (which targets only the
+    ontology-drift banner on the report page). This route is the
+    user-facing "re-run analysis on a finished draft" action and is
+    wired to the "Analüüsi uuesti" button on the draft detail page.
+
+    Behaviour:
+
+    * Authorization is **org-scoped** via :func:`can_view_draft` —
+      matches the existing report-level reanalyze handler so a same-org
+      reviewer can refresh the analysis without bouncing through the
+      owner. Cross-org callers resolve to 404 (never 403) so we never
+      leak the draft's existence.
+    * Re-runnable only from terminal states (``ready`` or ``failed``).
+      Any other status returns a 303 redirect to the detail page so a
+      stale tab can't double-enqueue against an in-flight pipeline.
+    * The DB mutation flips the draft to ``status='analyzing'`` and
+      clears ``error_message`` / ``error_debug`` / ``processing_completed_at``
+      via the SSOT :func:`update_draft_status` helper. The prior
+      ``impact_reports`` row is left untouched — the new analyze job
+      INSERTs a fresh row so older reports remain queryable as history
+      (the report page already orders ``generated_at DESC LIMIT 1`` so
+      the latest is surfaced automatically).
+    * Stale ``pending`` / ``claimed`` / ``running`` jobs referencing
+      this draft are purged in the same transaction so a previously
+      stuck analyze can't race the fresh one.
+    """
+    auth_or_redirect = _require_auth(req)
+    if isinstance(auth_or_redirect, Response):
+        return auth_or_redirect
+    auth = auth_or_redirect
+
+    parsed = _parse_uuid(draft_id)
+    if parsed is None:
+        return _not_found_page(req)
+
+    draft = fetch_draft(parsed)
+    if draft is None:
+        return _not_found_page(req)
+    # 404 (not 403) on cross-org access so we never leak existence
+    # (matches delete_draft_handler + retry_draft_handler).
+    if not can_view_draft(auth, draft):
+        return _not_found_page(req)
+
+    # Revalidate state server-side. A duplicate POST from a stale tab
+    # after the pipeline already restarted must be a no-op — not a
+    # second concurrent run that fights the first.
+    if draft.status not in _REANALYZABLE_STATUSES:
+        logger.info(
+            "reanalyze_draft_handler: draft=%s status=%s not re-analyzable — ignoring",
+            parsed,
+            draft.status,
+        )
+        if req.headers.get("HX-Request") == "true":
+            return Response(
+                status_code=204,
+                headers={"HX-Redirect": f"/drafts/{parsed}"},
+            )
+        return RedirectResponse(url=f"/drafts/{parsed}", status_code=303)
+
+    prior_status = draft.status
+
+    # Flip the row to ``analyzing`` and clear any stale error / completion
+    # timestamps in a single transaction via the SSOT helper. The
+    # ``expected_status=prior_status`` predicate is the optimistic-
+    # concurrency guard that makes this safe under concurrent POSTs
+    # (two open tabs, a double-click, a retried request): the underlying
+    # ``UPDATE drafts SET status='analyzing' WHERE id=? AND status=?``
+    # matches at most one writer. The loser sees ``updated=False`` and
+    # short-circuits below WITHOUT enqueuing a duplicate analyze job or
+    # purging the winner's freshly-enqueued queue entry. Without this
+    # predicate, both callers would see ``updated=True`` (both flip a
+    # ``ready`` row to ``analyzing`` idempotently) and both would enqueue
+    # — defeating the state-machine guard above. Same transaction also
+    # purges any in-flight queue entries left over from a previous
+    # stuck analyze, so the fresh job can't race them.
+    try:
+        with _connect() as conn:
+            updated = update_draft_status(
+                conn,
+                parsed,
+                "analyzing",
+                expected_status=prior_status,
+            )
+            if updated:
+                conn.execute(
+                    """
+                    delete from background_jobs
+                    where payload ->> 'draft_id' = %s
+                      and status in ('pending', 'claimed', 'running')
+                    """,
+                    (str(parsed),),
+                )
+            conn.commit()
+    except Exception:
+        logger.exception("Failed to flip draft=%s to analyzing for reanalyze", parsed)
+        return _not_found_page(req)
+
+    if not updated:
+        # Either the row vanished mid-flight or a parallel writer beat
+        # us to the status flip (concurrent reanalyze POSTs from two
+        # tabs / a double-click — the ``expected_status`` predicate
+        # above lets exactly one of them win). Treat as a no-op and
+        # bounce back to the detail page where the user will see the
+        # actual state. NO job is enqueued and NO queue entry is purged.
+        logger.info(
+            "reanalyze_draft_handler: draft=%s update_draft_status matched 0 rows (race)",
+            parsed,
+        )
+        if req.headers.get("HX-Request") == "true":
+            return Response(
+                status_code=204,
+                headers={"HX-Redirect": f"/drafts/{parsed}"},
+            )
+        return RedirectResponse(url=f"/drafts/{parsed}", status_code=303)
+
+    # Enqueue the analyze stage. We skip parse + extract because the
+    # encrypted file is already parsed and the entity rows already
+    # exist; only the analyzer needs to re-run against the (possibly
+    # updated) ontology snapshot.
+    try:
+        job_id = JobQueue().enqueue(
+            "analyze_impact",
+            {"draft_id": str(parsed)},
+            priority=5,
+        )
+    except Exception:
+        logger.exception("Failed to enqueue analyze_impact reanalyze for draft=%s", parsed)
+        # The row is already back in ``analyzing`` state. The operator
+        # can trigger another retry. We avoid flipping it to ``failed``
+        # because there was no actual failure — just an enqueue glitch.
+        return _not_found_page(req)
+
+    log_draft_reanalyze(
+        auth.get("id"),
+        parsed,
+        job_id=job_id,
+        prior_status=prior_status,
+    )
+    logger.info(
+        "Reanalyze enqueued draft=%s job_id=%s prior_status=%s user=%s",
+        parsed,
+        job_id,
+        prior_status,
+        auth.get("id"),
+    )
+
+    # HTMX form on the detail page targets ``#draft-status-{id}`` so we
+    # could return just the refreshed tracker, but the status flip touches
+    # the metadata block, the actions row, and the failed-banner so it's
+    # simpler (and avoids stale partial DOM) to redirect the browser back
+    # to the detail page. HTMX gets an HX-Redirect; non-HTMX gets a 303.
     if req.headers.get("HX-Request") == "true":
         return Response(
             status_code=204,

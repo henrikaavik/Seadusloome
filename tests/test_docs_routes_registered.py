@@ -36,6 +36,10 @@ def test_draft_route_surface_is_stable() -> None:
         ("/drafts/{draft_id}/actions", ("GET", "HEAD")),
         ("/drafts/{draft_id}/keep", ("POST",)),
         ("/drafts/{draft_id}/delete", ("POST",)),
+        # #306: re-run impact analysis on a finished draft (ready/failed).
+        # Distinct from /retry (restarts from parse) and from the
+        # report-page ontology-drift /report/reanalyze below.
+        ("/drafts/{draft_id}/reanalyze", ("POST",)),
         ("/drafts/{draft_id}/link-vtk", ("POST",)),
         ("/drafts/{draft_id}/retry", ("POST",)),
         # #817: reviewer outcome submission.
