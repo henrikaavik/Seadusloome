@@ -16,15 +16,17 @@
  *    Returns {"results": [{id, label, full_name, email}, ...]}.
  *
  *  - On select, the ``@<query>`` substring is replaced with a
- *    whitespace-free, resolvable token: ``@<email-local-part> ``
- *    (the part before ``@`` in the user's email). ``parse_mentions``
- *    server-side resolves it by matching against ``users.email``'s
- *    local part. The readable display name still shows in the
- *    typeahead UI; we only insert the stable token because the
- *    server-side _MENTION_RE stops at whitespace and would otherwise
- *    truncate ``@Andres Tamm`` to ``@Andres``. If the user has no
- *    email we fall back to the full_name with spaces stripped, or
- *    the user id as a last resort — all whitespace-free.
+ *    whitespace-free, resolvable token: ``@<full-email> `` (e.g.
+ *    ``@andres@min.ee ``). The full email is globally unique in
+ *    ``users.email``, so ``parse_mentions`` server-side resolves it
+ *    unambiguously even when two orgs share the same local-part
+ *    (``andres@min.ee`` vs ``andres@agency.ee``). The readable display
+ *    name still shows in the typeahead UI; we only insert the stable
+ *    token because the server-side _MENTION_RE stops at whitespace and
+ *    would otherwise truncate ``@Andres Tamm`` to ``@Andres``. If the
+ *    user has no email we fall back to the email local-part, then the
+ *    full_name with spaces stripped, then the user id — all
+ *    whitespace-free.
  *
  *  - Keyboard: Down/Up navigate, Enter/Tab select, Escape closes.
  *
@@ -45,12 +47,17 @@
   // Debounce delay between the user typing and the fetch firing.
   const DEBOUNCE_MS = 150;
 
-  // Word-char regex for what counts as part of an @token. Matches the
-  // server-side _MENTION_RE in app/annotations/models.py:
-  //     re.compile(r"@([\w.\-]+)")
+  // Word-char regex for what counts as part of an *in-flight* @token (the
+  // chars the user is currently typing before they accept a suggestion).
+  // Mirrors the local-part character class of the server-side _MENTION_RE
+  // in app/annotations/models.py:
+  //     re.compile(r"@([\w.\-]+(?:@[\w.\-]+)?)")
   // \w in Python without re.ASCII includes Unicode letters (Estonian
   // diacritics). JS \w is ASCII-only by default, so we use Unicode
-  // property escapes for letters + digits.
+  // property escapes for letters + digits. We deliberately do NOT include
+  // ``@`` here: the user types ``@andres``, and on accept we *replace*
+  // that span with the full ``@andres@min.ee`` token — the typeahead
+  // never has to detect a literal ``@`` inside an in-flight token.
   const WORD_CHAR_RE = /[\p{L}\p{N}_.\-]/u;
 
   // Track widget instances by textarea so we don't double-bind.
@@ -63,26 +70,47 @@
 
   /**
    * Compute the whitespace-free token to insert after ``@`` for a
-   * suggestion. Prefer the email local-part (everything before ``@``),
-   * fall back to a space-stripped full_name, then the user id.
+   * suggestion. Prefer the full email address (e.g. ``andres@min.ee``)
+   * so the server-side resolver matches the exact user — even when two
+   * users in different orgs share the same email local-part. Fall back
+   * to the email local-part, then a space-stripped full_name, then the
+   * user id, so we always emit *something* the parser can match.
    *
-   * Only emits chars that match the server-side _MENTION_RE
-   * (``[\w.\-]+`` — Unicode letters/digits, underscore, dot, hyphen);
-   * any other char in the source is stripped so the token round-trips
-   * cleanly through the parser.
+   * The full-email path emits chars that match the expanded server-side
+   * _MENTION_RE (``[\w.\-]+(?:@[\w.\-]+)?`` — Unicode letters/digits,
+   * underscore, dot, hyphen, plus an optional ``@domain`` suffix). The
+   * fallback paths emit only ``[\w.\-]+`` chars. Any other char in the
+   * source is stripped so the token round-trips cleanly through the
+   * parser.
    */
   function mentionToken(choice) {
-    const safe = (s) =>
+    // Strict local-part safe (no ``@`` allowed).
+    const safeLocal = (s) =>
       String(s || "").replace(/[^\p{L}\p{N}_.\-]/gu, "");
+    // Full-email safe — keeps a single ``@`` between local-part and domain
+    // and strips any other ``@`` chars so the token always matches the
+    // server regex's optional ``@domain`` suffix exactly once.
+    const safeEmail = (s) => {
+      const cleaned = String(s || "").replace(/[^\p{L}\p{N}_.\-@]/gu, "");
+      const at = cleaned.indexOf("@");
+      if (at < 0) return cleaned;
+      const local = cleaned.slice(0, at).replace(/@/g, "");
+      const domain = cleaned.slice(at + 1).replace(/@/g, "");
+      if (!local || !domain) return local;
+      return `${local}@${domain}`;
+    };
     const email = String(choice.email || "");
-    const atIdx = email.indexOf("@");
-    if (atIdx > 0) {
-      const local = safe(email.slice(0, atIdx));
+    if (email.includes("@")) {
+      const fullEmail = safeEmail(email);
+      // Only accept when both local + domain survived sanitisation; this
+      // disambiguates two users who share a local-part in different orgs.
+      if (fullEmail.includes("@")) return fullEmail;
+      const local = safeLocal(email.split("@")[0]);
       if (local) return local;
     }
-    const fromName = safe(choice.full_name || choice.label);
+    const fromName = safeLocal(choice.full_name || choice.label);
     if (fromName) return fromName;
-    return safe(choice.id);
+    return safeLocal(choice.id);
   }
 
   /**
@@ -296,10 +324,12 @@
       const after = value.slice(textarea.selectionStart);
       // Insert a whitespace-free token so the server-side _MENTION_RE
       // (which stops at whitespace) captures the full identifier.
-      // Preferred form: ``@<email-local-part>``; fall back to
-      // ``@<full_name-without-spaces>`` and finally ``@<id>`` so we
-      // always insert something the resolver can match. The readable
-      // display label only appears in the typeahead UI itself.
+      // Preferred form: ``@<full-email>`` (globally unique, immune to
+      // local-part collisions across orgs); fall back to
+      // ``@<email-local-part>``, then ``@<full_name-without-spaces>``,
+      // then ``@<id>`` so we always insert something the resolver can
+      // match. The readable display label only appears in the typeahead
+      // UI itself.
       const token = mentionToken(choice);
       const insertion = `@${token} `;
       const newValue = before + insertion + after;

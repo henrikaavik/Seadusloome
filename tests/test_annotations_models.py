@@ -772,22 +772,24 @@ class TestRowAnnotationExtensions:
         # The local-part LIKE parameter must be passed and shaped correctly.
         params = conn.execute.call_args.args[1]
         # token (lowercase) is "andres"; the email-local-part LIKE pattern
-        # must be "andres@%". The same pattern appears twice (once for the
-        # IS NOT NULL guard, once for the LIKE).
+        # must be "andres@%". This is back-compat for users who manually type
+        # ``@andres`` — the typeahead now inserts the full email instead so
+        # the cross-org LIMIT 1 ambiguity is avoided when accepting a
+        # suggestion (#825 P2 follow-up).
         assert "andres@%" in params
 
     def test_parse_mentions_literal_email_still_resolves(self):
-        """A typed ``@user@domain`` form skips the local-part LIKE arm and
-        resolves via the exact-email arm — ``@`` in the token would otherwise
-        produce a malformed LIKE pattern.
+        """A bare ``@local-part`` form (no ``@domain`` suffix) is captured by
+        ``_MENTION_RE`` as just the local-part. The bare-token branch must
+        produce a well-formed ``local@%`` LIKE pattern at index 3, never
+        None or empty.
         """
         conn = MagicMock()
         conn.execute.return_value.fetchone.return_value = (_USER_ID,)
 
-        # NB: ``_MENTION_RE`` stops at ``@`` because ``@`` isn't a word char,
-        # so the captured token is just the local-part. This exercises the
-        # safe fallback path where the SQL is still well-formed even if the
-        # local-part pattern happens to coincide with someone's email prefix.
+        # NB: this input has NO ``@domain`` suffix, so the captured token is
+        # just the local-part. Exercises the bare-token branch and asserts
+        # the LIKE param is well-formed.
         content = "@peeter on autor."
         result = parse_mentions(conn, content, _ORG_ID)
         assert result == [_USER_ID]
@@ -795,6 +797,134 @@ class TestRowAnnotationExtensions:
         # Local-part LIKE is populated (token has no @), and it must be the
         # well-formed "peeter@%" pattern, never None or empty.
         assert params[3] == "peeter@%"
+
+    # ------------------------------------------------------------------
+    # parse_mentions — full-email disambiguation (#825 P2 follow-up)
+    # ------------------------------------------------------------------
+
+    def test_parse_mentions_full_email_is_captured_as_one_token(self):
+        """``_MENTION_RE`` must capture ``andres@min.ee`` as a single token
+        (local-part + ``@domain``) so the resolver can do an exact-email
+        match instead of a cross-org-ambiguous local-part LIKE.
+        """
+        from app.annotations.models import _MENTION_RE
+
+        tokens = _MENTION_RE.findall("Tere @andres@min.ee, palun vaata.")
+        assert tokens == ["andres@min.ee"]
+
+    def test_parse_mentions_full_email_uses_exact_arm_only(self):
+        """A token with ``@`` (full email) must hit the 2-arm exact-email SQL
+        path and NOT pass a local-part LIKE pattern that could collide with
+        another user in a different org sharing the same local-part.
+        """
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = (_USER_ID,)
+
+        content = "Palun vaata @andres@min.ee — see vajab kommentaari."
+        result = parse_mentions(conn, content, _ORG_ID)
+
+        assert result == [_USER_ID]
+        sql, params = conn.execute.call_args.args
+        # The full-email SQL is the 2-arm variant: only org_id + 2 emails.
+        assert "lower(email) LIKE" not in sql
+        assert "full_name ILIKE" not in sql
+        # Params: (org_id, exact-email, lowercase-email) — exactly 3 entries.
+        assert params == (str(_ORG_ID), "andres@min.ee", "andres@min.ee")
+
+    def test_parse_mentions_full_email_with_uppercase_domain(self):
+        """Case-insensitive resolution: ``@Andres@MIN.ee`` lowercased in the
+        second exact-email param so DB rows stored lower still match.
+        """
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = (_USER_ID,)
+
+        content = "@Andres@MIN.ee siin."
+        result = parse_mentions(conn, content, _ORG_ID)
+
+        assert result == [_USER_ID]
+        params = conn.execute.call_args.args[1]
+        # exact arm uses the raw token; case-insensitive arm uses .lower().
+        assert params[1] == "Andres@MIN.ee"
+        assert params[2] == "andres@min.ee"
+
+    def test_parse_mentions_full_email_disambiguates_cross_org_collision(self):
+        """Collision case: two users named ``andres`` exist in different orgs
+        (``andres@min.ee`` in org A, ``andres@agency.ee`` in org B). When
+        a mention by full email is parsed for org A, only the org-A row is
+        returned even though the local-part is shared.
+
+        The org_id WHERE filter does the heavy lifting; the test asserts
+        that the typeahead-inserted full-email token round-trips correctly
+        for *each* org independently.
+        """
+        org_a = uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+        org_b = uuid.UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+        user_a = uuid.UUID("aaaa1111-aaaa-1111-aaaa-aaaa11111111")
+        user_b = uuid.UUID("bbbb2222-bbbb-2222-bbbb-bbbb22222222")
+
+        # Org A lookup: DB returns user_a's row.
+        conn_a = MagicMock()
+        conn_a.execute.return_value.fetchone.return_value = (user_a,)
+        result_a = parse_mentions(conn_a, "@andres@min.ee", org_a)
+        assert result_a == [user_a]
+        params_a = conn_a.execute.call_args.args[1]
+        assert params_a[0] == str(org_a)
+        assert params_a[1] == "andres@min.ee"
+
+        # Org B lookup: same local-part, different domain → different user.
+        conn_b = MagicMock()
+        conn_b.execute.return_value.fetchone.return_value = (user_b,)
+        result_b = parse_mentions(conn_b, "@andres@agency.ee", org_b)
+        assert result_b == [user_b]
+        params_b = conn_b.execute.call_args.args[1]
+        assert params_b[0] == str(org_b)
+        assert params_b[1] == "andres@agency.ee"
+
+    def test_parse_mentions_mixed_full_email_and_bare_local(self):
+        """A single content string may contain both a full-email mention and
+        a bare-local mention; both must resolve via their respective SQL
+        branches without one branch's params bleeding into the other.
+        """
+        conn = MagicMock()
+        # Two execute() calls → return distinct users in order.
+        user2 = uuid.UUID("c0c0c0c0-c0c0-c0c0-c0c0-c0c0c0c0c0c0")
+        conn.execute.return_value.fetchone.side_effect = [(_USER_ID,), (user2,)]
+
+        # NB: trailing whitespace + punctuation (NOT . / -) so the bare
+        # token is captured cleanly as "peeter" — both . and - are word
+        # chars in _MENTION_RE's [\w.\-] class.
+        content = "Tere @andres@min.ee ja @peeter aitäh"
+        result = parse_mentions(conn, content, _ORG_ID)
+
+        assert result == [_USER_ID, user2]
+        assert conn.execute.call_count == 2
+
+        # First call (full email) → 2-arm SQL, 3 params.
+        first_sql, first_params = conn.execute.call_args_list[0].args
+        assert "full_name ILIKE" not in first_sql
+        assert len(first_params) == 3
+        assert first_params[1] == "andres@min.ee"
+
+        # Second call (bare local-part) → 5-arm SQL with the LIKE pattern.
+        second_sql, second_params = conn.execute.call_args_list[1].args
+        assert "full_name ILIKE" in second_sql
+        assert second_params[3] == "peeter@%"
+
+    def test_parse_mentions_full_email_with_dotted_local_part(self):
+        """Dotted local-parts (``@john.doe@min.ee``) survive ``_MENTION_RE``
+        as one token and resolve via exact-email.
+        """
+        from app.annotations.models import _MENTION_RE
+
+        tokens = _MENTION_RE.findall("cc @john.doe@min.ee siin")
+        assert tokens == ["john.doe@min.ee"]
+
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = (_USER_ID,)
+        result = parse_mentions(conn, "@john.doe@min.ee", _ORG_ID)
+        assert result == [_USER_ID]
+        params = conn.execute.call_args.args[1]
+        assert params[1] == "john.doe@min.ee"
 
     # ------------------------------------------------------------------
     # list_annotations_for_version_row
