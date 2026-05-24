@@ -112,6 +112,61 @@ class TestStandaloneImportIsolation:
         # standalone worker.
         assert "app.main" not in sys.modules
 
+    def test_register_all_handlers_does_not_load_route_modules(self):
+        """Standalone worker startup must NOT import any ``app.docs`` route module.
+
+        The standalone worker calls
+        :func:`app.jobs.registry.register_all_handlers` to populate the
+        ``@register_handler`` dispatch table. That call imports
+        ``app.docs`` (the package) so the handler modules' module-level
+        decorator side effects fire — but it must NOT pull in the
+        route-registration modules (``app.docs.routes`` /
+        ``app.docs.report_routes`` / submodules of ``app.docs.routes``).
+        Route modules drag in the entire FastHTML route surface; the
+        whole point of standalone mode is to keep the worker container
+        framework-free at startup.
+
+        Regression guard for the #348 PR review finding: previously
+        ``app/docs/__init__.py`` re-exported ``register_draft_routes`` /
+        ``register_report_routes`` from their submodules, so any worker
+        startup that imported ``app.docs`` transitively pulled in
+        ``app.docs.routes`` (and everything below it) as a side effect.
+        """
+        # Force a clean import so the assertion reflects what a fresh
+        # standalone-worker process would do. The route submodules may
+        # have been imported by a sibling test that exercises web
+        # routes, so we drop every plausible entry first.
+        prefixes_to_drop = (
+            "app.docs",
+            "app.main",
+            "app.jobs.registry",
+            "scripts.run_worker",
+        )
+        for key in list(sys.modules.keys()):
+            if any(key == p or key.startswith(p + ".") for p in prefixes_to_drop):
+                del sys.modules[key]
+
+        from app.jobs.registry import register_all_handlers
+
+        register_all_handlers()
+
+        # Route-registration modules must NOT be loaded.
+        leaked_route_modules = sorted(
+            mod
+            for mod in sys.modules
+            if mod == "app.docs.routes"
+            or mod.startswith("app.docs.routes.")
+            or mod == "app.docs.report_routes"
+            or mod == "app.docs.websocket"
+            or mod == "app.docs.ws_export_progress"
+        )
+        assert not leaked_route_modules, (
+            "register_all_handlers() must not transitively import any "
+            f"app.docs route module, but these leaked into sys.modules: "
+            f"{leaked_route_modules}. The standalone worker container "
+            "should stay framework-free at startup."
+        )
+
 
 # ---------------------------------------------------------------------------
 # main.py lifespan honours WORKER_MODE
@@ -122,7 +177,17 @@ class TestLifespanRespectsWorkerMode:
     """The ASGI lifespan must gate worker startup on ``WORKER_MODE``."""
 
     def test_lifespan_skips_worker_when_standalone(self):
-        """``WORKER_MODE=standalone`` must NOT spawn the worker thread."""
+        """``WORKER_MODE=standalone`` must NOT spawn the worker thread.
+
+        The archive-warning scheduler MUST still start in the web
+        lifespan even when the worker runs standalone, because the web
+        process is the canonical singleton host for the daily scan
+        (``scripts/run_worker.py`` deliberately does not start it — see
+        the "Why not also start the archive-warning scheduler here?"
+        docstring there). Skipping the scheduler in standalone mode
+        would silently drop the 90-day draft auto-archive compliance
+        feature on split-process deployments.
+        """
         import asyncio
 
         from app import main as app_main
@@ -140,6 +205,7 @@ class TestLifespanRespectsWorkerMode:
                 "app.jobs.archive_warning.start_archive_warning_scheduler"
             ) as mock_start_scheduler,
         ):
+            mock_start_scheduler.return_value = MagicMock()
 
             async def _drive() -> None:
                 gen = app_main.lifespan(MagicMock())
@@ -150,8 +216,10 @@ class TestLifespanRespectsWorkerMode:
 
             asyncio.run(_drive())
 
+            # Worker thread must NOT start (standalone container owns it).
             mock_start_worker.assert_not_called()
-            mock_start_scheduler.assert_not_called()
+            # Scheduler MUST start (web process is its canonical host).
+            mock_start_scheduler.assert_called_once()
 
     def test_lifespan_starts_worker_when_inproc(self):
         """``WORKER_MODE=inproc`` (default) must spawn the worker thread."""

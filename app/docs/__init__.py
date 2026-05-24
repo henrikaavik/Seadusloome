@@ -1,14 +1,25 @@
 """Document Upload subsystem for Phase 2.
 
-Exposes the ``drafts`` CRUD helpers, the ``handle_upload`` pipeline, and
-the FastHTML route registration. The package is named ``docs`` (not
-``drafts``) because it will grow to host the impact-report and export
-handlers alongside the upload flow in later Phase 2 batches.
+Exposes the ``drafts`` CRUD helpers and the ``handle_upload`` pipeline.
+The package is named ``docs`` (not ``drafts``) because it hosts the
+impact-report and export handlers alongside the upload flow.
+
+Importing this package must NOT pull in any FastHTML / Starlette
+route module. The standalone worker (``scripts/run_worker.py``, #348)
+imports ``app.docs`` via :func:`app.jobs.registry.register_all_handlers`
+to trigger the ``@register_handler`` side effects of each handler
+module, and the whole point of the standalone container is that it
+stays framework-free. Route registration helpers (``register_draft_routes``,
+``register_report_routes``, ``register_draft_ws_routes``,
+``register_export_progress_ws_routes``) therefore live ONLY in their
+submodules — callers must import them from
+:mod:`app.docs.routes`/:mod:`app.docs.report_routes` directly. The
+canonical importer is ``app/main.py``.
 """
 
 # Import handlers for side effects — they register themselves via
-# @register_handler on import. The worker imports ``app.docs`` at
-# startup (see app/main.py), so by the time the worker claims any
+# @register_handler on import. ``app.jobs.registry.register_all_handlers``
+# imports ``app.docs`` at startup so by the time the worker claims any
 # job, the real handlers have overridden the fallback stubs in
 # app/jobs/worker.py.
 from app.docs import analyze_handler as _analyze_handler  # noqa: F401,E402
@@ -25,8 +36,6 @@ from app.docs.draft_model import (
     list_drafts_for_org,
     update_draft_status,
 )
-from app.docs.report_routes import register_report_routes
-from app.docs.routes import register_draft_routes
 from app.docs.upload import DraftUploadError, handle_upload
 
 __all__ = [
@@ -38,7 +47,5 @@ __all__ = [
     "get_draft",
     "handle_upload",
     "list_drafts_for_org",
-    "register_draft_routes",
-    "register_report_routes",
     "update_draft_status",
 ]

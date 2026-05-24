@@ -112,12 +112,27 @@ async def lifespan(_app):  # type: ignore[no-untyped-def]
         yield
         return
 
+    # Draft archive-warning scheduler (issue #572): a daily background
+    # scan that emits notifications for drafts older than 90 days. This
+    # MUST run regardless of WORKER_MODE because the web process is the
+    # canonical singleton host for it — ``scripts/run_worker.py`` does
+    # NOT start the scheduler (see the "Why not also start the
+    # archive-warning scheduler here?" docstring there: a single daily
+    # scan must not run on multiple worker processes at once). So the
+    # scheduler starts before the WORKER_MODE gate, otherwise a
+    # web+standalone split deployment would silently lose the 90-day
+    # auto-archive warning — a compliance feature for draft sensitivity
+    # (see CLAUDE.md "Draft sensitivity"). (#348 review fix.)
+    from app.jobs.archive_warning import start_archive_warning_scheduler
+
+    _stop_archive_scheduler.clear()
+    _archive_thread = start_archive_warning_scheduler(_stop_archive_scheduler)
+    logger.info("Draft archive-warning scheduler started")
+
     # WORKER_MODE gate (#348): in 'standalone' mode the worker runs in
     # a separate Coolify container launched via ``scripts/run_worker.py``,
     # so the web container's lifespan must NOT spawn its own worker
     # thread (otherwise jobs get double-claimed at low priority load).
-    # The archive-warning scheduler is co-located with whichever
-    # process is acting as the worker, so it follows the same gate.
     from app.config import get_worker_mode
 
     worker_mode = get_worker_mode()
@@ -126,12 +141,18 @@ async def lifespan(_app):  # type: ignore[no-untyped-def]
             "WORKER_MODE=standalone — skipping in-process worker startup; "
             "expecting a separate worker process (scripts/run_worker.py)"
         )
-        yield
+        try:
+            yield
+        finally:
+            logger.info("Stopping draft archive-warning scheduler...")
+            _stop_archive_scheduler.set()
+            if _archive_thread is not None:
+                _archive_thread.join(timeout=5.0)
+                _archive_thread = None
         return
 
     # Local import so tests that patch app.jobs.worker see the module
     # freshly re-imported if they reload after setting env vars.
-    from app.jobs.archive_warning import start_archive_warning_scheduler
     from app.jobs.registry import register_all_handlers
     from app.jobs.worker import start_worker_thread
 
@@ -146,10 +167,6 @@ async def lifespan(_app):  # type: ignore[no-untyped-def]
     _stop_worker.clear()
     _worker_thread = start_worker_thread(_stop_worker)
     logger.info("Background worker started (WORKER_MODE=inproc)")
-
-    _stop_archive_scheduler.clear()
-    _archive_thread = start_archive_warning_scheduler(_stop_archive_scheduler)
-    logger.info("Draft archive-warning scheduler started")
 
     try:
         yield
