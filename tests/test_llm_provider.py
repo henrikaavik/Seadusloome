@@ -255,7 +255,7 @@ class TestClaudeRealMode:
         assert isinstance(result, dict)
         assert result == {"error": "failed to parse"}
 
-    @patch("app.llm.claude.time.sleep")
+    @patch("app.llm.retry.time.sleep")
     @patch("app.llm.claude.ClaudeProvider._log_cost")
     def test_complete_rate_limit_retries(
         self,
@@ -263,7 +263,7 @@ class TestClaudeRealMode:
         mock_sleep: MagicMock,
         monkeypatch: pytest.MonkeyPatch,
     ):
-        """RateLimitError triggers a 10s sleep + retry."""
+        """RateLimitError triggers the retry helper (#354) and succeeds."""
         import anthropic
 
         provider = self._make_provider(monkeypatch)
@@ -283,7 +283,8 @@ class TestClaudeRealMode:
         result = provider.complete("test prompt")
 
         assert result == "Success after retry"
-        mock_sleep.assert_called_once_with(10)
+        # First retry sleeps for 1s (the first slot of _BACKOFF).
+        mock_sleep.assert_called_once_with(1.0)
         assert mock_client.messages.create.call_count == 2
 
     @patch("app.llm.claude.ClaudeProvider._log_cost")
