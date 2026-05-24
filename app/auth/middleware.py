@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from typing import TYPE_CHECKING, Any
+from urllib.parse import parse_qsl
 
 from starlette.requests import Request
 from starlette.responses import RedirectResponse, Response
@@ -213,10 +214,18 @@ def auth_before(req: Request) -> Response | None:
     raw_path = scope.get("path") if scope else None
     if isinstance(raw_path, str):
         path = raw_path
+    # Real key check, not substring — ``?notoken=1`` no longer matches.
+    # Parse with parse_qsl using ``latin-1`` because ASGI query strings are
+    # URL-encoded bytes (every byte is a valid latin-1 codepoint, so the
+    # round-trip is loss-free; parse_qsl still URL-decodes percent escapes).
     query_string = scope.get("query_string") if scope else None
     has_token_param = False
-    if isinstance(query_string, bytes) and b"token=" in query_string:
-        has_token_param = True
+    if isinstance(query_string, bytes) and query_string:
+        try:
+            params = parse_qsl(query_string.decode("latin-1"), keep_blank_values=True)
+            has_token_param = any(k == "token" for k, _ in params)
+        except (UnicodeDecodeError, ValueError):
+            has_token_param = False
     if path and has_token_param:
         for pattern in _TOKEN_BEARER_PATHS:
             if re.fullmatch(pattern, path):
