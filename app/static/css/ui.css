@@ -2796,6 +2796,57 @@ details.sync-error pre {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
 }
 
+/* ===========================================================================
+   Admin audit filter form (#187)
+   ---------------------------------------------------------------------------
+   Layout for the filter chips/dropdowns at the top of /admin/audit.  Keeps
+   labels stacked over inputs and wraps the row at narrow viewports.
+   =========================================================================== */
+.audit-filter-form .filter-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+.audit-filter-form .filter-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+.audit-filter-form .filter-field label {
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+  font-weight: var(--font-medium);
+}
+.audit-filter-form .filter-field select,
+.audit-filter-form .filter-field input {
+  width: 100%;
+}
+.audit-filter-form .filter-actions {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+}
+.audit-filter-form .filter-hint {
+  font-size: var(--text-xs);
+  margin: 0;
+}
+.card-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-3);
+}
+.card-header-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+.audit-result-summary {
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
 /* Sync explainer: contextual help shown above the "Sync now" button. */
 .sync-explainer {
   margin: 0.75rem 0;
