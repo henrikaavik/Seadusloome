@@ -438,8 +438,11 @@ def list_replies(
 
 # Regex for @mention tokens.  Estonian usernames / display names may contain
 # dots and hyphens; we stop at whitespace and punctuation that cannot be part
-# of an identifier.
-_MENTION_RE = re.compile(r"@([\w.\-]+)")
+# of an identifier.  The optional ``@<domain>`` suffix is what lets the
+# typeahead widget round-trip a full email address (e.g. ``@andres@min.ee``)
+# as a single token so the server resolves it unambiguously even when two
+# users in different orgs share the same email local-part.
+_MENTION_RE = re.compile(r"@([\w.\-]+(?:@[\w.\-]+)?)")
 
 
 def parse_mentions(
@@ -454,10 +457,26 @@ def parse_mentions(
     matches are silently dropped.  Duplicate mentions of the same user are
     deduplicated in the returned list.
 
-    The lookup checks both ``email`` and ``full_name`` columns so that
-    ``@peeter.pärn`` and ``@Peeter Pärn`` both resolve (space replaced by
-    ``_`` is a common convention in Estonian government systems, but both
-    the raw token and the underscore-replaced form are tried).
+    The token captured by ``_MENTION_RE`` is whitespace-free and may include
+    a single ``@<domain>`` suffix; the typeahead widget inserts the full email
+    (``@andres@min.ee``) so we resolve the exact user even when two orgs
+    share an email local-part (``andres@min.ee`` vs ``andres@agency.ee``).
+    The lookup accepts four forms so typed, typeahead-inserted, and legacy
+    mentions all resolve:
+
+    1. Full email address (``@andres@min.ee`` — preferred, typeahead form).
+       Globally unique via the ``users.email`` UNIQUE constraint, so this is
+       the *only* arm used when the token contains ``@`` — the local-part
+       LIKE fallback is suppressed to avoid the cross-org ambiguity that
+       motivated this disambiguation.
+    2. Email local-part prefix (``@andres`` → matches ``andres@…``). Best-
+       effort fallback for users who type ``@andres`` by hand; LIMIT 1 means
+       any local-part collision across orgs is non-deterministic, but the
+       ``org_id = %s`` filter still scopes it inside the user's own org.
+    3. Exact ``full_name`` (handles ``@Peeter`` for single-word names,
+       and any underscore-joined form like ``@Peeter_Pärn``).
+    4. Underscore-to-space variant (``@eesnimi_perenimi`` →
+       ``Eesnimi Perenimi``).
 
     Returns an empty list when *content* contains no ``@`` tokens, or when no
     tokens resolve to users in the given org.
@@ -470,32 +489,67 @@ def parse_mentions(
     result: list[uuid.UUID] = []
 
     for token in tokens:
+        # Tokens that contain ``@`` are treated as a full email address: the
+        # ``users.email`` UNIQUE constraint disambiguates across orgs, so we
+        # skip every name / local-part fallback to avoid resolving the wrong
+        # user (#825 review follow-up). For bare tokens we keep the legacy
+        # name + local-part arms for back-compat.
+        token_has_at = "@" in token
         # Normalise: treat underscores as spaces so @eesnimi_perenimi works too.
-        name_variant = token.replace("_", " ")
-        try:
-            row = conn.execute(
-                """
-                SELECT id FROM users
-                WHERE org_id = %s
-                  AND (
-                      email = %s
-                      OR email = %s
-                      OR full_name ILIKE %s
-                      OR full_name ILIKE %s
-                  )
-                LIMIT 1
-                """,
-                (
-                    str(org_id),
-                    token,  # exact email match e.g. peeter@min.ee
-                    token.lower(),  # case-insensitive email
-                    token,  # exact full_name
-                    name_variant,  # space-variant full_name
-                ),
-            ).fetchone()
-        except Exception:
-            logger.exception("parse_mentions: DB error resolving token %r", token)
-            continue
+        # Only relevant for bare tokens — emails never contain spaces.
+        name_variant = None if token_has_at else token.replace("_", " ")
+        # Local-part prefix match: ``andres`` should resolve ``andres@min.ee``.
+        # Suppressed when the token already contains ``@`` so the well-formed
+        # exact-email arm wins unambiguously.
+        email_local_pattern = None if token_has_at else f"{token.lower()}@%"
+        # Bare tokens use the legacy multi-arm OR; full-email tokens go through
+        # the single exact-email arm so a local-part collision in another row
+        # cannot win the LIMIT 1.
+        if token_has_at:
+            try:
+                row = conn.execute(
+                    """
+                    SELECT id FROM users
+                    WHERE org_id = %s
+                      AND (email = %s OR email = %s)
+                    LIMIT 1
+                    """,
+                    (
+                        str(org_id),
+                        token,  # exact email match e.g. andres@min.ee
+                        token.lower(),  # case-insensitive email
+                    ),
+                ).fetchone()
+            except Exception:
+                logger.exception("parse_mentions: DB error resolving token %r", token)
+                continue
+        else:
+            try:
+                row = conn.execute(
+                    """
+                    SELECT id FROM users
+                    WHERE org_id = %s
+                      AND (
+                          email = %s
+                          OR email = %s
+                          OR lower(email) LIKE %s
+                          OR full_name ILIKE %s
+                          OR full_name ILIKE %s
+                      )
+                    LIMIT 1
+                    """,
+                    (
+                        str(org_id),
+                        token,  # exact email (rare for bare tokens, kept for parity)
+                        token.lower(),
+                        email_local_pattern,  # local-part LIKE pattern
+                        token,  # exact full_name
+                        name_variant,  # space-variant full_name
+                    ),
+                ).fetchone()
+            except Exception:
+                logger.exception("parse_mentions: DB error resolving token %r", token)
+                continue
 
         if row is None:
             continue

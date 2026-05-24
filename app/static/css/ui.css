@@ -2720,6 +2720,48 @@
   box-shadow: 0 0 0 2px var(--color-primary-alpha);
 }
 
+/* ---- #176 @mention typeahead popup ---- */
+.mention-typeahead {
+  list-style: none;
+  margin: 0;
+  padding: var(--space-1);
+  background: var(--color-surface-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.mention-typeahead[hidden] {
+  display: none;
+}
+
+.mention-typeahead-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-2);
+  border-radius: var(--radius-xs, 4px);
+  cursor: pointer;
+  font-size: var(--text-sm);
+  color: var(--color-text);
+}
+
+.mention-typeahead-item:hover,
+.mention-typeahead-item--active {
+  background: var(--color-primary-alpha);
+}
+
+.mention-typeahead-name {
+  font-weight: 500;
+}
+
+.mention-typeahead-email {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+}
+
 /* ===========================================================================
    Disclosure cells in admin / dashboard tables
    ---------------------------------------------------------------------------

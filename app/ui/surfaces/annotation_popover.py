@@ -71,11 +71,13 @@ def AnnotationPopover(
         Input(type="hidden", name="target_id", value=target_id),  # noqa: F405
         Textarea(  # noqa: F405
             name="content",
-            placeholder="Lisa markus...",
+            placeholder="Lisa markus... Kasuta @nimi mainimiseks.",
             rows="3",
             cls="annotation-form-input",
             # #813: HTML4 string form survives FastHTML's HTTP renderer.
             required="required",
+            # #176: hook for the @mention typeahead JS widget.
+            data_annotation_textarea="1",
         ),
         Button(  # noqa: F405
             "Lisa markus",

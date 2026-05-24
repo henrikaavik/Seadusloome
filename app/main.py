@@ -178,6 +178,11 @@ _HDRS = (
     # bar renders on every PageShell page. Defer so it doesn't block first paint;
     # the script binds on DOMContentLoaded.
     Script(src="/static/js/global_search.js", defer=True),
+    # #176 annotation @mention typeahead — loaded globally because the
+    # annotation popover is injected via HTMX swap at runtime, so we
+    # cannot scope the script to a single page. The widget binds itself
+    # on DOMContentLoaded and re-binds on every ``htmx:afterSwap``.
+    Script(src="/static/js/annotation_mentions.js", defer=True),
 )
 
 # Initialize Sentry before the ASGI app is created so that the Starlette
