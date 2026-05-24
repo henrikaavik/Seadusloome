@@ -139,10 +139,16 @@ class VoyageProvider(EmbeddingProvider):
             return results
 
         client = self._get_client()
-        response = await client.embed(
-            texts,
-            model=self._model,
-        )
+
+        # #354: retry transient errors (429/5xx/network) with bounded backoff.
+        # Voyage AI uses httpx underneath and raises status-code-bearing errors,
+        # so the same retry policy applies.
+        from app.llm.retry import retry_async
+
+        async def _call() -> Any:
+            return await client.embed(texts, model=self._model)
+
+        response = await retry_async(_call, context="voyage-embed")
 
         # Log cost (Voyage charges per token)
         total_tokens = getattr(response, "total_tokens", 0)

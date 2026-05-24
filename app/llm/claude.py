@@ -22,7 +22,9 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from app.llm.provider import LLMProvider, StreamEvent
+from app.llm.retry import retry_async, retry_sync
 from app.llm.scrubber import scrub_messages, scrub_prompt
+from app.metrics import record_metric
 
 logger = logging.getLogger(__name__)
 
@@ -128,8 +130,6 @@ class ClaudeProvider(LLMProvider):
         if self._stubbed:
             return f"[STUB Claude] {prompt[:40]}..."
 
-        import anthropic as _anthropic
-
         client = self._get_client()
 
         scrubbed_prompt = scrub_prompt(prompt, allow_raw=allow_raw)
@@ -147,41 +147,32 @@ class ClaudeProvider(LLMProvider):
         if scrubbed_system:
             create_kwargs["system"] = scrubbed_system
 
+        # #196: instrument per-call latency. We can't use ``track_duration``
+        # here because labels captured at context entry can't reflect the
+        # ``status`` outcome — fall back to manual timing + record_metric.
+        # #354: retry transient errors (429/5xx/network) with bounded backoff.
+        status = "ok"
+        _start = time.perf_counter()
         try:
-            response = client.messages.create(**create_kwargs)
-        except _anthropic.RateLimitError:
-            logger.warning(
-                "Anthropic rate limit hit (prompt length=%d). Retrying in 10s...",
-                len(prompt),
+            response = retry_sync(
+                lambda: client.messages.create(**create_kwargs),
+                context="complete",
             )
-            time.sleep(10)
-            try:
-                response = client.messages.create(**create_kwargs)
-            except Exception:
-                logger.exception(
-                    "Anthropic retry failed after rate limit (prompt length=%d)",
-                    len(prompt),
-                )
-                raise
-        except _anthropic.APITimeoutError:
-            logger.warning(
-                "Anthropic timeout (prompt length=%d). Retrying...",
-                len(prompt),
-            )
-            try:
-                response = client.messages.create(**create_kwargs)
-            except Exception:
-                logger.exception(
-                    "Anthropic retry failed after timeout (prompt length=%d)",
-                    len(prompt),
-                )
-                raise
-        except _anthropic.APIError:
-            logger.exception(
-                "Anthropic API error (prompt length=%d)",
-                len(prompt),
-            )
+        except Exception:
+            status = "error"
             raise
+        finally:
+            _duration_ms = (time.perf_counter() - _start) * 1000
+            record_metric(
+                "llm_call_ms",
+                round(_duration_ms, 2),
+                {
+                    "feature": feature,
+                    "model": self._model,
+                    "operation": "complete",
+                    "status": status,
+                },
+            )
 
         content = response.content[0].text if response.content else ""
 
@@ -260,7 +251,26 @@ class ClaudeProvider(LLMProvider):
         client = self._get_client()
         count_fn = getattr(client, "count_tokens", None)
         if callable(count_fn):  # pragma: no cover
-            result: Any = count_fn(text)
+            # #196: instrument per-call latency.
+            status = "ok"
+            _start = time.perf_counter()
+            try:
+                result: Any = count_fn(text)
+            except Exception:
+                status = "error"
+                raise
+            finally:
+                _duration_ms = (time.perf_counter() - _start) * 1000
+                record_metric(
+                    "llm_call_ms",
+                    round(_duration_ms, 2),
+                    {
+                        "feature": "count_tokens",
+                        "model": self._model,
+                        "operation": "count_tokens",
+                        "status": status,
+                    },
+                )
             return int(result)
         return len(text) // 4
 
@@ -307,8 +317,6 @@ class ClaudeProvider(LLMProvider):
         if self._stubbed:
             return f"[STUB Claude async] {prompt[:40]}..."
 
-        import anthropic as _anthropic
-
         client = self._get_async_client()
 
         scrubbed_prompt = scrub_prompt(prompt, allow_raw=allow_raw)
@@ -326,40 +334,31 @@ class ClaudeProvider(LLMProvider):
         if scrubbed_system:
             create_kwargs["system"] = scrubbed_system
 
+        # #196: instrument per-call latency (see ``complete`` for rationale).
+        # #354: retry transient errors (429/5xx/network) with bounded backoff.
+        status = "ok"
+        _start = time.perf_counter()
+
+        async def _call() -> Any:
+            return await client.messages.create(**create_kwargs)
+
         try:
-            response = await client.messages.create(**create_kwargs)
-        except _anthropic.RateLimitError:
-            logger.warning(
-                "Anthropic async rate limit hit (prompt length=%d). Retrying...",
-                len(prompt),
-            )
-            try:
-                response = await client.messages.create(**create_kwargs)
-            except Exception:
-                logger.exception(
-                    "Anthropic async retry failed after rate limit (prompt length=%d)",
-                    len(prompt),
-                )
-                raise
-        except _anthropic.APITimeoutError:
-            logger.warning(
-                "Anthropic async timeout (prompt length=%d). Retrying...",
-                len(prompt),
-            )
-            try:
-                response = await client.messages.create(**create_kwargs)
-            except Exception:
-                logger.exception(
-                    "Anthropic async retry failed after timeout (prompt length=%d)",
-                    len(prompt),
-                )
-                raise
-        except _anthropic.APIError:
-            logger.exception(
-                "Anthropic async API error (prompt length=%d)",
-                len(prompt),
-            )
+            response = await retry_async(_call, context="acomplete")
+        except Exception:
+            status = "error"
             raise
+        finally:
+            _duration_ms = (time.perf_counter() - _start) * 1000
+            record_metric(
+                "llm_call_ms",
+                round(_duration_ms, 2),
+                {
+                    "feature": feature,
+                    "model": self._model,
+                    "operation": "acomplete",
+                    "status": status,
+                },
+            )
 
         content = response.content[0].text if response.content else ""
 
@@ -440,73 +439,113 @@ class ClaudeProvider(LLMProvider):
         # key by the event ``index`` so interleaved blocks don't collide.
         tool_blocks: dict[int, dict[str, Any]] = {}
 
-        async with client.messages.stream(**create_kwargs) as stream:
-            async for event in stream:
-                event_type = getattr(event, "type", None)
-                if event_type is None:
-                    continue
+        # #196: instrument per-call latency. We measure wall-time spent in
+        # the streaming context (open → final event consumed). The metric is
+        # recorded once per call, regardless of consumer cancel timing.
+        # #354: retry only the *open* call. Mid-stream failures aren't
+        # retried because we'd duplicate already-emitted deltas.
+        stream_status = "ok"
+        _stream_start = time.perf_counter()
 
-                if event_type == "content_block_start":
-                    content_block = getattr(event, "content_block", None)
-                    if content_block is None:
+        async def _open_stream() -> Any:
+            # ``messages.stream(...)`` returns a context manager; we enter
+            # it manually so the retry helper can re-run the open while we
+            # keep the resulting stream object for iteration below.
+            ctx = client.messages.stream(**create_kwargs)
+            stream_obj = await ctx.__aenter__()
+            # Stash the ctx on the stream so we can call __aexit__ later.
+            stream_obj.__stream_ctx__ = ctx  # type: ignore[attr-defined]
+            return stream_obj
+
+        try:
+            stream = await retry_async(_open_stream, context="astream-open")
+            ctx = stream.__stream_ctx__  # type: ignore[attr-defined]
+            try:
+                async for event in stream:
+                    event_type = getattr(event, "type", None)
+                    if event_type is None:
                         continue
-                    if getattr(content_block, "type", None) == "tool_use":
-                        idx = getattr(event, "index", len(tool_blocks))
-                        tool_blocks[idx] = {
-                            "id": getattr(content_block, "id", ""),
-                            "name": getattr(content_block, "name", ""),
-                            "json_buf": "",
-                        }
-                elif event_type == "content_block_delta":
-                    delta_obj = getattr(event, "delta", None)
-                    if delta_obj is None:
-                        continue
-                    delta_type = getattr(delta_obj, "type", None)
-                    if delta_type == "input_json_delta":
+
+                    if event_type == "content_block_start":
+                        content_block = getattr(event, "content_block", None)
+                        if content_block is None:
+                            continue
+                        if getattr(content_block, "type", None) == "tool_use":
+                            idx = getattr(event, "index", len(tool_blocks))
+                            tool_blocks[idx] = {
+                                "id": getattr(content_block, "id", ""),
+                                "name": getattr(content_block, "name", ""),
+                                "json_buf": "",
+                            }
+                    elif event_type == "content_block_delta":
+                        delta_obj = getattr(event, "delta", None)
+                        if delta_obj is None:
+                            continue
+                        delta_type = getattr(delta_obj, "type", None)
+                        if delta_type == "input_json_delta":
+                            idx = getattr(event, "index", None)
+                            block = tool_blocks.get(idx) if idx is not None else None
+                            if block is not None:
+                                block["json_buf"] += getattr(delta_obj, "partial_json", "") or ""
+                        elif hasattr(delta_obj, "text"):
+                            # Plain text delta (text_delta for SSE, or legacy
+                            # shape where .text is set directly).
+                            text = delta_obj.text
+                            if text:
+                                yield StreamEvent(type="content", delta=text)
+                    elif event_type == "content_block_stop":
                         idx = getattr(event, "index", None)
-                        block = tool_blocks.get(idx) if idx is not None else None
-                        if block is not None:
-                            block["json_buf"] += getattr(delta_obj, "partial_json", "") or ""
-                    elif hasattr(delta_obj, "text"):
-                        # Plain text delta (text_delta for SSE, or legacy
-                        # shape where .text is set directly).
-                        text = delta_obj.text
-                        if text:
-                            yield StreamEvent(type="content", delta=text)
-                elif event_type == "content_block_stop":
-                    idx = getattr(event, "index", None)
-                    block = tool_blocks.pop(idx, None) if idx is not None else None
-                    if block is None:
-                        continue
-                    buf = block["json_buf"]
-                    try:
-                        parsed_input: dict = json.loads(buf) if buf else {}
-                    except json.JSONDecodeError:
-                        logger.warning(
-                            "ClaudeProvider.astream: failed to parse tool_use "
-                            "input JSON for tool=%s (buf length=%d); emitting empty dict",
-                            block["name"],
-                            len(buf),
+                        block = tool_blocks.pop(idx, None) if idx is not None else None
+                        if block is None:
+                            continue
+                        buf = block["json_buf"]
+                        try:
+                            parsed_input: dict = json.loads(buf) if buf else {}
+                        except json.JSONDecodeError:
+                            logger.warning(
+                                "ClaudeProvider.astream: failed to parse tool_use "
+                                "input JSON for tool=%s (buf length=%d); emitting empty dict",
+                                block["name"],
+                                len(buf),
+                            )
+                            parsed_input = {}
+                        if not isinstance(parsed_input, dict):
+                            parsed_input = {}
+                        yield StreamEvent(
+                            type="tool_use",
+                            tool_name=block["name"],
+                            tool_input=parsed_input,
+                            tool_use_id=block["id"] or None,
                         )
-                        parsed_input = {}
-                    if not isinstance(parsed_input, dict):
-                        parsed_input = {}
-                    yield StreamEvent(
-                        type="tool_use",
-                        tool_name=block["name"],
-                        tool_input=parsed_input,
-                        tool_use_id=block["id"] or None,
-                    )
-                elif event_type == "message_delta":
-                    usage = getattr(event, "usage", None)
-                    if usage:
-                        tokens_output = getattr(usage, "output_tokens", 0)
-                elif event_type == "message_start":
-                    msg = getattr(event, "message", None)
-                    if msg:
-                        usage = getattr(msg, "usage", None)
+                    elif event_type == "message_delta":
+                        usage = getattr(event, "usage", None)
                         if usage:
-                            tokens_input = getattr(usage, "input_tokens", 0)
+                            tokens_output = getattr(usage, "output_tokens", 0)
+                    elif event_type == "message_start":
+                        msg = getattr(event, "message", None)
+                        if msg:
+                            usage = getattr(msg, "usage", None)
+                            if usage:
+                                tokens_input = getattr(usage, "input_tokens", 0)
+            finally:
+                # Close the context we manually entered above so the
+                # underlying httpx stream is released even on errors.
+                await ctx.__aexit__(None, None, None)
+        except Exception:
+            stream_status = "error"
+            raise
+        finally:
+            _stream_duration_ms = (time.perf_counter() - _stream_start) * 1000
+            record_metric(
+                "llm_call_ms",
+                round(_stream_duration_ms, 2),
+                {
+                    "feature": feature,
+                    "model": self._model,
+                    "operation": "astream",
+                    "status": stream_status,
+                },
+            )
 
         # #662 / post-review fix: yield the stop event FIRST so the
         # orchestrator can read the per-turn tokens off it and persist
