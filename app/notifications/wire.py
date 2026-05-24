@@ -216,6 +216,72 @@ def notify_draft_archive_warning(draft: Any) -> None:
         )
 
 
+def notify_draft_shared(draft: Any) -> None:
+    """Notify same-org drafters and reviewers when a new draft is uploaded (#299).
+
+    Pre-publication drafts are visible to every same-org ``drafter`` and
+    ``reviewer`` (see ``app/auth/policy.py``), so when one team member
+    uploads a draft the rest of the team should see it in their inbox.
+    The uploader themselves is excluded — they obviously know about the
+    draft they just uploaded.
+
+    System admins (``role = 'admin'``) and org admins (``role =
+    'org_admin'``) are intentionally NOT notified: this is a
+    collaboration-team event, not an audit event. Inactive users
+    (``is_active = FALSE``) are skipped — they have no inbox to read.
+
+    Args:
+        draft: A ``Draft`` dataclass (from ``app.docs.draft_model``)
+            with ``id``, ``org_id``, ``user_id``, ``title`` and
+            ``filename`` attributes.
+    """
+    try:
+        from app.db import get_connection
+
+        org_id = getattr(draft, "org_id", None)
+        uploader_id = getattr(draft, "user_id", None)
+        if org_id is None or uploader_id is None:
+            return
+
+        with get_connection() as conn:
+            rows = conn.execute(
+                "SELECT id FROM users "
+                "WHERE org_id = %s "
+                "AND role IN ('drafter', 'reviewer') "
+                "AND id != %s "
+                "AND is_active = TRUE",
+                (str(org_id), str(uploader_id)),
+            ).fetchall()
+
+        draft_id = getattr(draft, "id", None)
+        title = getattr(draft, "title", None) or getattr(draft, "filename", "") or ""
+        body = (
+            f'Kolleeg laadis üles uue eelnõu: "{title}".'
+            if title
+            else "Kolleeg laadis üles uue eelnõu."
+        )
+        for row in rows:
+            recipient_id = row[0]
+            notify(
+                user_id=recipient_id,
+                type="draft_shared",
+                title="Uus eelnõu jagatud",
+                body=body,
+                link=f"/drafts/{draft_id}",
+                metadata={
+                    "draft_id": str(draft_id),
+                    "uploaded_by": str(uploader_id),
+                    "org_id": str(org_id),
+                },
+            )
+    except Exception:
+        logger.warning(
+            "Failed to send draft_shared notifications for draft=%s",
+            getattr(draft, "id", "?"),
+            exc_info=True,
+        )
+
+
 def notify_cost_alert(
     org_id: UUID | str,
     current_cost: float,

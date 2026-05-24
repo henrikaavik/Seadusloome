@@ -15,6 +15,7 @@ from app.notifications.wire import (
     notify_analysis_done,
     notify_annotation_reply,
     notify_cost_alert,
+    notify_draft_shared,
     notify_drafter_complete,
     notify_sync_failed,
 )
@@ -251,3 +252,173 @@ class TestNotifyCostAlert:
         assert call_kwargs["user_id"] == admin1
         assert call_kwargs["type"] == "cost_alert"
         assert "84%" in call_kwargs["title"]
+
+
+# ---------------------------------------------------------------------------
+# Tests: notify_draft_shared (#299)
+# ---------------------------------------------------------------------------
+
+
+def _make_draft_with_org(
+    user_id: uuid.UUID = _USER_A,
+    org_id: uuid.UUID = _ORG_ID,
+    draft_id: uuid.UUID = _DRAFT_ID,
+    title: str = "Test eelnou",
+    filename: str = "test.docx",
+) -> MagicMock:
+    draft = MagicMock()
+    draft.id = draft_id
+    draft.user_id = user_id
+    draft.org_id = org_id
+    draft.title = title
+    draft.filename = filename
+    return draft
+
+
+class TestNotifyDraftShared:
+    @patch("app.notifications.wire.notify")
+    @patch("app.db.get_connection")
+    def test_notifies_drafters_and_reviewers_excluding_uploader(self, mock_connect, mock_notify):
+        """Org has 3 members (uploader, drafter, reviewer); uploader is
+        excluded by the SQL ``id != %s`` filter, so notify() is called
+        exactly twice — once per remaining team member.
+        """
+        drafter_id = uuid.uuid4()
+        reviewer_id = uuid.uuid4()
+        conn = MagicMock()
+        # The SQL filters out the uploader, so the rowset only contains
+        # the two other team members.
+        conn.execute.return_value.fetchall.return_value = [
+            (drafter_id,),
+            (reviewer_id,),
+        ]
+        mock_connect.return_value = _ConnectCM(conn)
+
+        draft = _make_draft_with_org(user_id=_USER_A, org_id=_ORG_ID)
+        notify_draft_shared(draft)
+
+        # Two notifications: drafter + reviewer; uploader is NOT in the list.
+        assert mock_notify.call_count == 2
+        user_ids = [call[1]["user_id"] for call in mock_notify.call_args_list]
+        assert drafter_id in user_ids
+        assert reviewer_id in user_ids
+        assert _USER_A not in user_ids
+
+    @patch("app.notifications.wire.notify")
+    @patch("app.db.get_connection")
+    def test_sql_filters_uploader_role_and_status(self, mock_connect, mock_notify):
+        """The SQL must filter on org_id + role IN (drafter, reviewer)
+        + id != uploader + is_active = TRUE. Verify the actual query
+        and parameters passed to the DB.
+        """
+        conn = MagicMock()
+        conn.execute.return_value.fetchall.return_value = []
+        mock_connect.return_value = _ConnectCM(conn)
+
+        draft = _make_draft_with_org(user_id=_USER_A, org_id=_ORG_ID)
+        notify_draft_shared(draft)
+
+        # Inspect the SQL + params passed to conn.execute.
+        sql, params = conn.execute.call_args[0]
+        assert "org_id = %s" in sql
+        assert "drafter" in sql and "reviewer" in sql
+        assert "id != %s" in sql
+        assert "is_active = TRUE" in sql
+        # Params: org_id first, then uploader id.
+        assert params == (str(_ORG_ID), str(_USER_A))
+
+    @patch("app.notifications.wire.notify")
+    @patch("app.db.get_connection")
+    def test_no_eligible_recipients_no_notifications(self, mock_connect, mock_notify):
+        """An org with no drafters/reviewers (only the uploader, or only
+        admins) yields zero notifications.
+        """
+        conn = MagicMock()
+        conn.execute.return_value.fetchall.return_value = []
+        mock_connect.return_value = _ConnectCM(conn)
+
+        draft = _make_draft_with_org(user_id=_USER_A, org_id=_ORG_ID)
+        notify_draft_shared(draft)
+
+        mock_notify.assert_not_called()
+
+    @patch("app.notifications.wire.notify")
+    @patch("app.db.get_connection")
+    def test_uploader_excluded_regardless_of_role(self, mock_connect, mock_notify):
+        """The uploader's own role doesn't matter — they are excluded
+        by ``id != %s`` even if they happen to also be a drafter or
+        reviewer. We assert that the uploader id never appears in any
+        notify() call's ``user_id``.
+        """
+        # The DB layer already enforces exclusion via SQL; this test
+        # belt-and-suspenders the contract by passing back the uploader
+        # as if the SQL filter had failed. Because the SQL params
+        # include the uploader id, a correctly-built query CANNOT return
+        # the uploader. We still verify by asserting the uploader id is
+        # not in the params-driven recipient list (which we drive here).
+        other_drafter = uuid.uuid4()
+        conn = MagicMock()
+        conn.execute.return_value.fetchall.return_value = [(other_drafter,)]
+        mock_connect.return_value = _ConnectCM(conn)
+
+        draft = _make_draft_with_org(user_id=_USER_A, org_id=_ORG_ID)
+        notify_draft_shared(draft)
+
+        # Verify the uploader id was bound into the WHERE clause params.
+        _, params = conn.execute.call_args[0]
+        assert str(_USER_A) in params
+        # And the only notification went to the other drafter.
+        mock_notify.assert_called_once()
+        assert mock_notify.call_args[1]["user_id"] == other_drafter
+
+    @patch("app.notifications.wire.notify")
+    @patch("app.db.get_connection")
+    def test_link_points_at_draft_detail_page(self, mock_connect, mock_notify):
+        recipient = uuid.uuid4()
+        conn = MagicMock()
+        conn.execute.return_value.fetchall.return_value = [(recipient,)]
+        mock_connect.return_value = _ConnectCM(conn)
+
+        draft = _make_draft_with_org(draft_id=_DRAFT_ID)
+        notify_draft_shared(draft)
+
+        call_kwargs = mock_notify.call_args[1]
+        assert call_kwargs["link"] == f"/drafts/{_DRAFT_ID}"
+        assert call_kwargs["type"] == "draft_shared"
+        # Metadata carries the draft_id and uploader id for downstream
+        # consumers (notification list, future filters).
+        meta = call_kwargs["metadata"]
+        assert meta["draft_id"] == str(_DRAFT_ID)
+        assert meta["uploaded_by"] == str(_USER_A)
+
+    @patch("app.notifications.wire.notify")
+    @patch("app.db.get_connection")
+    def test_swallows_db_errors(self, mock_connect, mock_notify):
+        """A DB failure must never propagate out of the wire helper —
+        the upload flow has already succeeded by the time we get here.
+        """
+        mock_connect.side_effect = RuntimeError("db down")
+
+        draft = _make_draft_with_org()
+        # Must not raise.
+        notify_draft_shared(draft)
+
+        mock_notify.assert_not_called()
+
+    @patch("app.notifications.wire.notify")
+    @patch("app.db.get_connection")
+    def test_missing_org_id_is_a_noop(self, mock_connect, mock_notify):
+        """A draft without org_id (defensive) yields no DB hit and no
+        notifications, rather than crashing.
+        """
+        draft = MagicMock()
+        draft.id = _DRAFT_ID
+        draft.user_id = _USER_A
+        draft.org_id = None
+        draft.title = "x"
+        draft.filename = "x.docx"
+
+        notify_draft_shared(draft)
+
+        mock_connect.assert_not_called()
+        mock_notify.assert_not_called()
