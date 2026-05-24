@@ -47,6 +47,7 @@ from app.chat.models import (
     list_conversations_for_user,
     list_messages,
 )
+from app.chat.ontology_version import get_current_ontology_version
 from app.chat.pending_seed import (
     consume_pending_seed,
     create_pending_seed,
@@ -984,6 +985,133 @@ def _rag_sources_block(rag_context: list[dict] | None):
     )
 
 
+# ---------------------------------------------------------------------------
+# #352 — outdated-ontology drift banner
+# ---------------------------------------------------------------------------
+
+
+# Chat tool names that reference ontology nodes. When a stored
+# assistant turn has children of these tool kinds, OR carries
+# ``rag_context`` (RAG chunks are sourced from the ontology), we consider
+# it "ontology-grounded" and worth checking for drift. Other tool names
+# (e.g. future non-ontology tools) would not. Mirrors the executor map
+# in :mod:`app.chat.tools` so it stays in sync when tools are added.
+_ONTOLOGY_TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        "query_ontology",
+        "search_provisions",
+        "get_draft_impact",
+        "get_provision_details",
+        "get_court_decisions_for_provision",
+        "get_eu_transposition_for_provision",
+        "get_provision_amendments",
+        "get_related_concepts",
+    }
+)
+
+
+def _conversation_has_outdated_ontology_citations(
+    messages: list[Any],
+    current_version: str,
+) -> bool:
+    """Return True when at least one assistant message in *messages*
+    was generated against an older ontology snapshot than *current_version*
+    AND that message actually grounded its answer on ontology nodes
+    (either via RAG chunks or a tool-use turn referencing ontology).
+
+    "Older" is a literal string-inequality check on the snapshot tags
+    (``<iso-timestamp>@<entity_count>`` — see
+    :mod:`app.chat.ontology_version`). NULL / "unknown" on either side
+    is treated as "cannot detect drift" and skipped silently, so the
+    banner never fires on pre-#352 rows (those still carry NULL).
+
+    We pair each assistant row with its tool children (linked via
+    ``parent_message_id`` from migration 036 / #315) so we can tell
+    whether the answer was grounded on the ontology at all — a turn
+    that asked the model a generic question with no RAG chunks and no
+    SPARQL tool use does not deserve a drift banner.
+    """
+    if not current_version or current_version == "unknown":
+        return False
+
+    # Group tool messages by parent so we can ask "did this assistant
+    # turn use an ontology tool?" in O(1).
+    tools_by_parent: dict[Any, list[Any]] = {}
+    for msg in messages:
+        if getattr(msg, "role", None) != "tool":
+            continue
+        parent = getattr(msg, "parent_message_id", None)
+        if parent is None:
+            continue
+        tools_by_parent.setdefault(parent, []).append(msg)
+
+    for msg in messages:
+        if getattr(msg, "role", None) != "assistant":
+            continue
+        msg_version = getattr(msg, "ontology_version", None)
+        if not msg_version or msg_version == "unknown":
+            # Pre-#352 row or lookup-failed row — cannot detect drift.
+            continue
+        if msg_version == current_version:
+            continue
+
+        # Drift candidate — confirm the turn was ontology-grounded.
+        rag_context = getattr(msg, "rag_context", None)
+        if rag_context:
+            return True
+        children = tools_by_parent.get(getattr(msg, "id", None), [])
+        if any((c.tool_name or "") in _ONTOLOGY_TOOL_NAMES for c in children):
+            return True
+
+    return False
+
+
+def _render_outdated_ontology_banner(conv_id: uuid.UUID):
+    """Render the warning banner shown when at least one assistant turn
+    in this conversation was generated against an older ontology
+    snapshot than the live one.
+
+    The "Küsi uuesti" action navigates to ``/chat/{conv_id}`` with the
+    ``?reask=1`` flag — the GET handler resolves the most recent
+    persisted user message and pre-fills the textarea with it
+    (mirroring the #724 seed mechanism, but without burning a token).
+    The user then chooses whether to send. This is intentionally
+    simpler than wiring a one-click "regenerate the last turn"
+    affordance: the user retains full control over what gets re-asked.
+    """
+    return Alert(
+        Div(  # noqa: F405
+            P(  # noqa: F405
+                "Mõned viidatud allikad võivad olla aegunud. "
+                "Ontoloogia on uuenenud pärast nende vastuste "
+                "genereerimist.",
+                cls="chat-outdated-ontology-text",
+            ),
+            A(  # noqa: F405
+                "Küsi uuesti",
+                href=f"/chat/{conv_id}?reask=1",
+                cls="chat-outdated-ontology-reask",
+                title="Eeltäida sisestusväli sinu viimase küsimusega.",
+            ),
+            cls="chat-outdated-ontology-banner",
+        ),
+        variant="warning",
+        title="Ontoloogia on uuenenud",
+        cls="chat-outdated-ontology-alert",
+        data_outdated_ontology="1",
+    )
+
+
+def _resolve_last_user_message_text(messages: list[Any]) -> str:
+    """Return the content of the most recent ``role='user'`` message,
+    or the empty string when no user turn exists. Used by the
+    ``?reask=1`` re-ask flow to pre-fill the textarea."""
+    for msg in reversed(messages):
+        if getattr(msg, "role", None) == "user":
+            return (getattr(msg, "content", None) or "")[:4000]
+    return ""
+
+
 def _render_message(msg: Any):
     """Render a single message as a chat bubble."""
     role = msg.role
@@ -1245,6 +1373,17 @@ def conversation_view_page(req: Request, conv_id: str):
     visible_messages = [m for m in messages if m.role != "system"]
     message_bubbles = [_render_message(m) for m in visible_messages]
 
+    # #352: detect ontology drift across the conversation. We render a
+    # single conversation-level banner (rather than per-message badges)
+    # to keep the chat surface uncluttered — the user is mostly going to
+    # re-ask their question anyway, and the banner makes that the
+    # obvious action.
+    current_ontology_version = get_current_ontology_version()
+    show_outdated_banner = _conversation_has_outdated_ontology_citations(
+        messages, current_ontology_version
+    )
+    outdated_banner = _render_outdated_ontology_banner(parsed) if show_outdated_banner else ""
+
     # #724: a ?seed=<token> means we arrived here from a "Küsi nõustajalt
     # selle leiu kohta" affordance — consume the single-use token and
     # pre-fill the input textarea with the stashed finding/question. The
@@ -1263,6 +1402,15 @@ def conversation_view_page(req: Request, conv_id: str):
             consumed = None
         if consumed is not None:
             prefill_text = consumed[0] or ""
+
+    # #352: ``?reask=1`` is the "Küsi uuesti" affordance on the
+    # outdated-ontology banner. When present (and no seed token took
+    # precedence above), pre-fill the textarea with the most recent
+    # persisted user message so the user can re-send it against the
+    # fresh ontology. A reload without ``?reask=1`` shows an empty
+    # textarea, matching the seed-token UX.
+    if not prefill_text and req.query_params.get("reask") == "1":
+        prefill_text = _resolve_last_user_message_text(messages)
 
     # Empty-state — only shown on the initial render with no user/assistant turns.
     prompts = _DRAFT_EXAMPLE_PROMPTS if conversation.context_draft_id else _DEFAULT_EXAMPLE_PROMPTS
@@ -1405,6 +1553,13 @@ def conversation_view_page(req: Request, conv_id: str):
     content_parts: list = []
     if draft_header:
         content_parts.append(draft_header)
+    # #352: drift banner sits between the draft header and the chat
+    # container so it is the first thing the user sees inside the
+    # conversation surface but does not displace the existing
+    # draft-context header. Rendered as empty string when no drift is
+    # detected, so the layout is unchanged in the happy path.
+    if outdated_banner:
+        content_parts.append(outdated_banner)
     content_parts.append(chat_container)
 
     # Vendor libs for markdown rendering on the client side. The URLs pin

@@ -64,6 +64,7 @@ from app.chat.models import (
     list_messages,
     update_conversation_title,
 )
+from app.chat.ontology_version import get_current_ontology_version
 from app.chat.rate_limiter import (
     CostBudgetExceededError,
     RateLimitExceededError,
@@ -423,6 +424,7 @@ def _persist_partial_assistant(
     tokens_input: int | None = None,
     tokens_output: int | None = None,
     placeholder_message_id: uuid.UUID | None = None,
+    ontology_version: str | None = None,
 ) -> uuid.UUID | None:
     """Persist a partial / truncated assistant message.
 
@@ -446,7 +448,14 @@ def _persist_partial_assistant(
     after the tool rows. Without this, the timeout / cancel / error
     paths inserted a SECOND assistant row alongside the placeholder,
     leaving two assistant messages for one logical turn (one empty
-    parent + one partial sibling).
+    parent + one partial sibling). The placeholder row already carries
+    the turn's ``ontology_version`` from its initial INSERT, so the
+    UPDATE branch does not re-stamp it.
+
+    ``ontology_version`` (#352) is the snapshot tag the orchestrator
+    captured at turn start; on the INSERT branch (non-tool turns), it
+    is stamped on the new partial row so drift detection works when
+    the user re-opens a cancelled / timed-out conversation.
     """
     if not full_content and not error_suffix:
         # Tool turn whose placeholder was inserted up-front but the model
@@ -521,6 +530,7 @@ def _persist_partial_assistant(
                 rag_context=rag_context_json,
                 tokens_input=tokens_input if tokens_input else None,
                 tokens_output=tokens_output if tokens_output else None,
+                ontology_version=ontology_version,
             )
             if is_truncated:
                 try:
@@ -772,6 +782,15 @@ class _TurnContext:
     completed: bool = False
     cancelled: bool = False
     assistant_msg_id: uuid.UUID | None = None
+
+    # Issue #352 — ontology snapshot tag captured once per turn and
+    # stamped on the persisted assistant row. Resolved lazily in
+    # :meth:`ChatOrchestrator._phase_build_system_prompt` so the
+    # ``sync_log`` lookup runs after auth + history loads (so a stalled
+    # ontology DB doesn't block the cheap pre-stream checks). NULL when
+    # the sync_log is empty or the lookup fails — the conversation view
+    # treats NULL as "snapshot unknown, no drift banner".
+    ontology_version: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1247,6 +1266,32 @@ class ChatOrchestrator:
             impact_summary=impact_summary,
         )
 
+        # Issue #352: capture the live ontology snapshot tag exactly once
+        # per turn. We do this even when no RAG / tool grounding ends up
+        # being used — the snapshot describes "what the assistant could
+        # see when it spoke", not "what it actually consulted". Stamped
+        # onto the assistant row in the persist step below. Fail-open:
+        # any error inside the helper resolves to ``"unknown"``.
+        try:
+            ctx.ontology_version = await asyncio.wait_for(
+                asyncio.to_thread(get_current_ontology_version),
+                timeout=_step_deadline(ctx.pre_stream_start),
+            )
+        except TimeoutError:
+            logger.warning(
+                "Ontology snapshot lookup timed out after %.1fs of "
+                "pre-stream budget for conv=%s; stamping NULL",
+                time.monotonic() - ctx.pre_stream_start,
+                ctx.conversation_id,
+            )
+            ctx.ontology_version = None
+        except Exception:
+            logger.exception(
+                "Ontology snapshot lookup failed for conv=%s; stamping NULL",
+                ctx.conversation_id,
+            )
+            ctx.ontology_version = None
+
     # ------------------------------------------------------------------
     # RAG + streaming + terminal phase methods
     # ------------------------------------------------------------------
@@ -1507,6 +1552,11 @@ class ChatOrchestrator:
                                 "assistant",
                                 ctx.full_content,
                                 model=getattr(self.llm, "_model", None),
+                                # #352: stamp the snapshot tag on the
+                                # placeholder so the assistant row carries
+                                # it even if a later UPDATE never runs
+                                # (turn timeout, cancel, etc.).
+                                ontology_version=ctx.ontology_version,
                             )
                             conn.commit()
                             ctx.assistant_msg_id = assistant_msg.id
@@ -1641,6 +1691,7 @@ class ChatOrchestrator:
                     tokens_input=ctx.tokens_in,
                     tokens_output=ctx.tokens_out,
                     placeholder_message_id=ctx.assistant_msg_id,
+                    ontology_version=ctx.ontology_version,
                 )
             try:
                 await _safe_send(
@@ -1676,6 +1727,7 @@ class ChatOrchestrator:
                     tokens_input=ctx.tokens_in,
                     tokens_output=ctx.tokens_out,
                     placeholder_message_id=ctx.assistant_msg_id,
+                    ontology_version=ctx.ontology_version,
                 )
             )
             # #661: shield the stopped-event send from a second cancel
@@ -1719,6 +1771,7 @@ class ChatOrchestrator:
                 tokens_input=ctx.tokens_in,
                 tokens_output=ctx.tokens_out,
                 placeholder_message_id=ctx.assistant_msg_id,
+                ontology_version=ctx.ontology_version,
             )
             return False
         except Exception:
@@ -1746,6 +1799,7 @@ class ChatOrchestrator:
                     tokens_input=ctx.tokens_in,
                     tokens_output=ctx.tokens_out,
                     placeholder_message_id=ctx.assistant_msg_id,
+                    ontology_version=ctx.ontology_version,
                 )
             try:
                 await _safe_send(
@@ -1806,6 +1860,11 @@ class ChatOrchestrator:
                             tokens_output=ctx.tokens_out if ctx.tokens_out else None,
                             model=getattr(self.llm, "_model", None),
                             rag_context=ctx.rag_context_json,
+                            # #352: stamp the ontology snapshot tag so
+                            # the conversation view can later detect
+                            # drift relative to the live sync_log
+                            # snapshot. NULL when the lookup failed.
+                            ontology_version=ctx.ontology_version,
                         )
                         # Also bump conversation updated_at.
                         conn.execute(
