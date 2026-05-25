@@ -282,7 +282,7 @@ def _get_monthly_trend(months: int = 6, org_id: str | None = None) -> list[dict]
                 "COALESCE(SUM(tokens_output), 0), "
                 "COALESCE(SUM(cost_usd), 0) "
                 "FROM llm_usage "
-                "WHERE created_at >= date_trunc('month', now()) - interval '%s months'"
+                "WHERE created_at >= date_trunc('month', now()) - make_interval(months => %s)"
                 + where_extra
                 + " GROUP BY date_trunc('month', created_at) "
                 "ORDER BY month DESC",

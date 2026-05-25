@@ -99,7 +99,7 @@ def _get_series_summary(name: str, window: str = _DEFAULT_WINDOW) -> dict[str, f
                 "  COUNT(*) "
                 "FROM metrics "
                 "WHERE name = %s "
-                "  AND recorded_at >= now() - interval %s",
+                "  AND recorded_at >= now() - %s::interval",
                 (name, interval),
             ).fetchone()
             if row:
@@ -135,7 +135,7 @@ def _get_series_breakdown(
                 "  COUNT(*) AS row_count "
                 "FROM metrics "
                 "WHERE name = %s "
-                "  AND recorded_at >= now() - interval %s "
+                "  AND recorded_at >= now() - %s::interval "
                 "GROUP BY bucket "
                 "ORDER BY p95 DESC "
                 "LIMIT %s",
@@ -178,7 +178,7 @@ def _get_latency_percentiles(window: str = _DEFAULT_WINDOW) -> dict[str, float]:
                 "  COALESCE(percentile_cont(0.99) WITHIN GROUP (ORDER BY value), 0) "
                 "FROM metrics "
                 "WHERE name = 'http_request_duration_ms' "
-                "  AND recorded_at >= now() - interval %s",
+                "  AND recorded_at >= now() - %s::interval",
                 (interval,),
             ).fetchone()
             if row:
@@ -205,7 +205,7 @@ def _get_slowest_routes(
                 "  ROUND(MAX(value)::numeric, 2) AS max_ms "
                 "FROM metrics "
                 "WHERE name = 'http_request_duration_ms' "
-                "  AND recorded_at >= now() - interval %s "
+                "  AND recorded_at >= now() - %s::interval "
                 "GROUP BY labels->>'path', labels->>'method' "
                 "ORDER BY AVG(value) DESC "
                 "LIMIT %s",
@@ -242,7 +242,7 @@ def _get_job_durations(
                 "  ROUND(MAX(value)::numeric, 2) AS max_ms "
                 "FROM metrics "
                 "WHERE name IN ('job_execution_ms', 'job_duration_ms') "
-                "  AND recorded_at >= now() - interval %s "
+                "  AND recorded_at >= now() - %s::interval "
                 "GROUP BY COALESCE(labels->>'handler', labels->>'job_type', name) "
                 "ORDER BY AVG(value) DESC "
                 "LIMIT %s",
@@ -278,7 +278,7 @@ def _get_llm_latencies(
                 "  ROUND(MAX(value)::numeric, 2) AS max_ms "
                 "FROM metrics "
                 "WHERE name IN ('llm_call_ms', 'llm_call_duration_ms') "
-                "  AND recorded_at >= now() - interval %s "
+                "  AND recorded_at >= now() - %s::interval "
                 "GROUP BY COALESCE(labels->>'feature', 'unknown') "
                 "ORDER BY AVG(value) DESC "
                 "LIMIT %s",
