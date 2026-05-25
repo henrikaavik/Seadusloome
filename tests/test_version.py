@@ -129,17 +129,17 @@ class TestHealthEndpointIncludesVersion:
     def test_health_payload_has_version_block(self):
         # Using importlib avoids shadowing the ``app`` package name with
         # the ASGI ``app`` object. We import the main module first (which
-        # registers admin routes and transitively imports the shim), then
-        # pull out the ASGI callable by attribute access.
+        # registers admin routes), then pull out the ASGI callable by
+        # attribute access.
         import importlib
 
         main_mod = importlib.import_module("app.main")
-        importlib.import_module("app.templates.admin_dashboard")
+        importlib.import_module("app.admin.health")
         asgi_app = main_mod.app
 
         with (
-            patch("app.templates.admin_dashboard.jena_check_health", return_value=True),
-            patch("app.templates.admin_dashboard._check_postgres", return_value=True),
+            patch("app.admin.health.jena_check_health", return_value=True),
+            patch("app.admin.health._check_postgres", return_value=True),
         ):
             client = TestClient(asgi_app)
             response = client.get("/api/health")
