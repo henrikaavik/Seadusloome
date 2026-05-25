@@ -258,13 +258,22 @@ def _get_cost_by_model(window: str = _DEFAULT_WINDOW, org_id: str | None = None)
     return rows_out
 
 
-def _get_monthly_trend(months: int = 6) -> list[dict]:  # type: ignore[type-arg]
+def _get_monthly_trend(months: int = 6, org_id: str | None = None) -> list[dict]:  # type: ignore[type-arg]
     """Return monthly cost totals for the last *months* months.
+
+    When *org_id* is set, restricts the aggregation to that org so the
+    long-range trend lines up with the org-filtered cards above it on
+    the dashboard. When ``None``, sums across all orgs (system-admin view).
 
     Kept here for the dashboard's long-range view and for backward
     compatibility with existing tests/imports.
     """
     rows_out: list[dict] = []  # type: ignore[type-arg]
+    where_extra = ""
+    params: list = [months]
+    if org_id:
+        where_extra = " AND org_id = %s"
+        params.append(org_id)
     try:
         with _connect() as conn:
             rows = conn.execute(
@@ -273,10 +282,11 @@ def _get_monthly_trend(months: int = 6) -> list[dict]:  # type: ignore[type-arg]
                 "COALESCE(SUM(tokens_output), 0), "
                 "COALESCE(SUM(cost_usd), 0) "
                 "FROM llm_usage "
-                "WHERE created_at >= date_trunc('month', now()) - interval '%s months' "
-                "GROUP BY date_trunc('month', created_at) "
+                "WHERE created_at >= date_trunc('month', now()) - interval '%s months'"
+                + where_extra
+                + " GROUP BY date_trunc('month', created_at) "
                 "ORDER BY month DESC",
-                (months,),
+                tuple(params),
             ).fetchall()
             rows_out = [
                 {
@@ -571,7 +581,7 @@ def admin_cost_page(req: Request):
         model_costs = _get_cost_by_model(window, effective_org_id)
         top_users = _get_top_users(window, effective_org_id, limit=10)
         daily = _get_daily_trend(window, effective_org_id)
-        monthly = _get_monthly_trend()
+        monthly = _get_monthly_trend(org_id=effective_org_id)
 
         # ---- Toolbar (window tabs + org filter + CSV export) ----
         toolbar_children: list = [_window_tabs(window, effective_org_id)]

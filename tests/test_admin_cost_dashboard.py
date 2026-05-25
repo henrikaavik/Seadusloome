@@ -208,6 +208,39 @@ class TestGetMonthlyTrend:
         result = _get_monthly_trend()
         assert result == []
 
+    @patch("app.admin.cost_dashboard._connect")
+    def test_org_id_appended_to_where_and_params(self, mock_connect: MagicMock):
+        """When org_id is set, the SQL gains an ``AND org_id = %s`` predicate
+        and the value is bound. Without this, the dashboard would show
+        org-filtered cards next to a global monthly trend."""
+        from app.admin.cost_dashboard import _get_monthly_trend
+
+        mock_conn = MagicMock()
+        mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+        mock_conn.execute.return_value.fetchall.return_value = []
+
+        _get_monthly_trend(months=6, org_id="org-42")
+
+        sql, params = mock_conn.execute.call_args[0]
+        assert "AND org_id = %s" in sql
+        assert "org-42" in params
+
+    @patch("app.admin.cost_dashboard._connect")
+    def test_no_org_predicate_when_org_id_is_none(self, mock_connect: MagicMock):
+        from app.admin.cost_dashboard import _get_monthly_trend
+
+        mock_conn = MagicMock()
+        mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+        mock_conn.execute.return_value.fetchall.return_value = []
+
+        _get_monthly_trend(months=6, org_id=None)
+
+        sql, params = mock_conn.execute.call_args[0]
+        assert "org_id" not in sql
+        assert params == (6,)
+
 
 # ---------------------------------------------------------------------------
 # _get_daily_trend (new)
@@ -710,6 +743,50 @@ class TestOrgScoping:
         req = _make_request("/admin/costs", "org=picked-org", role="admin")
         admin_cost_page(req)
         assert mock_feat.call_args[0][1] == "picked-org"
+
+    @patch("app.admin.cost_dashboard._get_orgs_for_filter")
+    @patch("app.admin.cost_dashboard._get_monthly_trend")
+    @patch("app.admin.cost_dashboard._get_daily_trend")
+    @patch("app.admin.cost_dashboard._get_top_users")
+    @patch("app.admin.cost_dashboard._get_cost_by_model")
+    @patch("app.admin.cost_dashboard._get_cost_by_feature")
+    @patch("app.admin.cost_dashboard._get_cost_by_org")
+    def test_effective_org_id_reaches_monthly_trend(
+        self,
+        mock_org: MagicMock,
+        mock_feat: MagicMock,
+        mock_model: MagicMock,
+        mock_top: MagicMock,
+        mock_daily: MagicMock,
+        mock_trend: MagicMock,
+        mock_orgs_filter: MagicMock,
+    ):
+        """Regression: the long-range monthly trend must respect the same
+        org filter as the rest of the page. Otherwise an org-admin sees
+        org-scoped cards next to a global trend line."""
+        for m in (
+            mock_org,
+            mock_feat,
+            mock_model,
+            mock_top,
+            mock_daily,
+            mock_trend,
+            mock_orgs_filter,
+        ):
+            m.return_value = []
+
+        from app.admin.cost_dashboard import admin_cost_page
+
+        req = _make_request(
+            "/admin/costs",
+            "org=other-org",
+            role="org_admin",
+            org_id="own-org",
+        )
+        admin_cost_page(req)
+        # Org-admin gets pinned to own-org regardless of ?org= — and that
+        # pin must reach _get_monthly_trend too.
+        assert mock_trend.call_args.kwargs.get("org_id") == "own-org"
 
 
 # ---------------------------------------------------------------------------

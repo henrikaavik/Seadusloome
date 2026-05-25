@@ -62,7 +62,7 @@ def _write_normal_legal_text() -> Path:
         "32016R0679 (isikuandmete kaitse üldmäärus) põhimõtteid."
     )
     out = _HERE / "normal_legal_text.docx"
-    doc.save(out)
+    doc.save(str(out))
     return out
 
 
@@ -71,7 +71,7 @@ def _write_very_short() -> Path:
     doc = _new_doc("Test eelnõu 2 — väga lühike")
     doc.add_paragraph("See on lühike eelnõu ilma viideteta.")
     out = _HERE / "very_short.docx"
-    doc.save(out)
+    doc.save(str(out))
     return out
 
 
@@ -104,7 +104,7 @@ def _write_many_references() -> Path:
     )
 
     out = _HERE / "many_references.docx"
-    doc.save(out)
+    doc.save(str(out))
     return out
 
 
@@ -112,7 +112,7 @@ def _write_empty_body() -> Path:
     """Title only — no body paragraphs."""
     doc = _new_doc("Test eelnõu 4 — tühi sisu")
     out = _HERE / "empty_body.docx"
-    doc.save(out)
+    doc.save(str(out))
     return out
 
 
@@ -127,7 +127,7 @@ def _write_malformed_refs() -> Path:
         "Lisaks on pooleli jäänud lahendi number 3-2-1- ja korralik § 5 (mis peaks õnnestuma)."
     )
     out = _HERE / "malformed_refs.docx"
-    doc.save(out)
+    doc.save(str(out))
     return out
 
 

@@ -486,7 +486,7 @@ class TestAnalyticsExportHandler:
         assert response.media_type == "text/csv"
         assert "kasutusandmed_30d.csv" in response.headers["content-disposition"]
 
-        body = response.body.decode("utf-8")
+        body = bytes(response.body).decode("utf-8")
         lines = [line for line in body.splitlines() if line]
         # 1 header + 2 data rows
         assert len(lines) == 3
@@ -502,7 +502,7 @@ class TestAnalyticsExportHandler:
 
         req = Request(_scope(query="window=7d"))
         response = admin_analytics_export(req)
-        body = response.body.decode("utf-8")
+        body = bytes(response.body).decode("utf-8")
         lines = [line for line in body.splitlines() if line]
         assert len(lines) == 1  # header only
         assert "kasutusandmed_7d.csv" in response.headers["content-disposition"]
@@ -514,7 +514,7 @@ class TestAnalyticsExportHandler:
         req = Request(_scope())
         response = admin_analytics_export(req)
         assert response.status_code == 500
-        assert "ebaõnnestus" in response.body.decode("utf-8")
+        assert "ebaõnnestus" in bytes(response.body).decode("utf-8")
 
 
 # ---------------------------------------------------------------------------
