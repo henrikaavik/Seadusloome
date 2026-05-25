@@ -252,7 +252,11 @@ def _get_handler_stats_24h() -> list[dict]:  # type: ignore[type-arg]
     24 hours and aggregates them per ``labels->>'handler'``:
 
     * ``count`` — total samples
-    * ``success_rate`` — fraction (0–1) where ``labels->>'status' = 'success'``
+    * ``success_rate`` — fraction (0–1) where ``labels->>'status' IN ('ok',
+      'success')``. The metric collector emits ``'success'`` post-#835
+      (2026-05-25); we still accept the historical ``'ok'`` label so older
+      rows in the ``metrics`` table count toward the same success bucket
+      instead of being silently treated as failures.
     * ``p95_ms`` — 95th-percentile duration via ``percentile_cont``
 
     Returns ``[]`` on any error or when the collector has not yet
@@ -265,7 +269,8 @@ def _get_handler_stats_24h() -> list[dict]:  # type: ignore[type-arg]
             rows = conn.execute(
                 "SELECT labels->>'handler' AS handler, "
                 "       COUNT(*)::int AS samples, "
-                "       AVG(CASE WHEN labels->>'status' = 'success' THEN 1.0 ELSE 0.0 END) "
+                "       AVG(CASE WHEN labels->>'status' IN ('ok', 'success') "
+                "                THEN 1.0 ELSE 0.0 END) "
                 "         AS success_rate, "
                 "       percentile_cont(0.95) WITHIN GROUP (ORDER BY value) AS p95_ms "
                 "FROM metrics "

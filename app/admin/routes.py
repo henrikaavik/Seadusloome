@@ -70,9 +70,7 @@ def register_admin_routes(rt) -> None:  # type: ignore[no-untyped-def]
     rt("/admin/analytics/refresh", methods=["POST"])(
         require_role("admin")(admin_analytics_refresh)
     )
-    rt("/admin/analytics/export", methods=["GET"])(
-        require_role("admin")(admin_analytics_export)
-    )
+    rt("/admin/analytics/export", methods=["GET"])(require_role("admin")(admin_analytics_export))
     rt("/admin/costs", methods=["GET"])(require_role("admin")(admin_cost_page))
     rt("/admin/costs/export", methods=["GET"])(require_role("admin")(admin_cost_export))
     rt("/admin/jobs", methods=["GET"])(require_role("admin")(admin_jobs_page))

@@ -432,6 +432,11 @@ class TestGetHandlerStats24h:
         assert "FROM metrics" in sql
         assert "name = 'job_execution_ms'" in sql
         assert "percentile_cont(0.95)" in sql
+        # Backward compat: success_rate must accept BOTH the current
+        # ``'success'`` label (emitted post-#835) and the historical
+        # ``'ok'`` label (pre-2026-05-25 rows in production). Otherwise
+        # historical successful jobs would appear as failures.
+        assert "'ok'" in sql and "'success'" in sql
 
     @patch("app.admin.job_monitor._connect")
     def test_returns_empty_when_no_rows(self, mock_connect: MagicMock):
