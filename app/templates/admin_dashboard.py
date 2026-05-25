@@ -30,15 +30,26 @@ from starlette.responses import JSONResponse, Response  # noqa: F401
 
 from app.admin._shared import _tooltip  # noqa: F401
 from app.admin.analytics import (
+    _get_last_refresh,  # noqa: F401
+    _get_usage_by_org,  # noqa: F401
     _get_usage_data,  # noqa: F401
     _refresh_usage_daily,  # noqa: F401
     _usage_summary,  # noqa: F401
 )
 from app.admin.analytics import (
+    admin_analytics_export as _admin_analytics_export_impl,
+)
+from app.admin.analytics import (
     admin_analytics_page as _admin_analytics_page_impl,
+)
+from app.admin.analytics import (
+    admin_analytics_refresh as _admin_analytics_refresh_impl,
 )
 from app.admin.audit import (
     _get_audit_log_page as _get_audit_log_page_impl,
+)
+from app.admin.audit import (
+    admin_audit_detail as _admin_audit_detail_impl,
 )
 from app.admin.audit import (
     admin_audit_export as _admin_audit_export_impl,
@@ -50,7 +61,12 @@ from app.admin.cost_dashboard import (
     _get_cost_by_feature,  # noqa: F401
     _get_cost_by_model,  # noqa: F401
     _get_cost_by_org,  # noqa: F401
+    _get_daily_trend,  # noqa: F401
     _get_monthly_trend,  # noqa: F401
+    _get_top_users,  # noqa: F401
+)
+from app.admin.cost_dashboard import (
+    admin_cost_export as _admin_cost_export_impl,
 )
 from app.admin.cost_dashboard import (
     admin_cost_page as _admin_cost_page_impl,
@@ -223,8 +239,12 @@ admin_sync_history_page = _rebind(_admin_sync_history_page_impl)
 admin_dashboard_page = _rebind(_admin_dashboard_page_impl)
 admin_audit_page = _rebind(_admin_audit_page_impl)
 admin_audit_export = _rebind(_admin_audit_export_impl)
+admin_audit_detail = _rebind(_admin_audit_detail_impl)
 admin_analytics_page = _rebind(_admin_analytics_page_impl)
+admin_analytics_refresh = _rebind(_admin_analytics_refresh_impl)
+admin_analytics_export = _rebind(_admin_analytics_export_impl)
 admin_cost_page = _rebind(_admin_cost_page_impl)
+admin_cost_export = _rebind(_admin_cost_export_impl)
 admin_jobs_page = _rebind(_admin_jobs_page_impl)
 admin_job_retry = _rebind(_admin_job_retry_impl)
 admin_jobs_purge = _rebind(_admin_jobs_purge_impl)
@@ -238,8 +258,12 @@ _EXPECTED_PAGE_HANDLERS = {
     "admin_dashboard_page",
     "admin_audit_page",
     "admin_audit_export",
+    "admin_audit_detail",
     "admin_analytics_page",
+    "admin_analytics_refresh",
+    "admin_analytics_export",
     "admin_cost_page",
+    "admin_cost_export",
     "admin_jobs_page",
     "admin_job_retry",
     "admin_jobs_purge",
@@ -274,11 +298,15 @@ if _missing:
 _admin_dashboard = require_role("admin")(admin_dashboard_page)
 _admin_audit = require_role("admin")(admin_audit_page)
 _admin_audit_export = require_role("admin")(admin_audit_export)
+_admin_audit_detail = require_role("admin")(admin_audit_detail)
 _admin_sync = require_role("admin")(trigger_sync)
 _admin_sync_status = require_role("admin")(sync_status_card)
 _admin_sync_history = require_role("admin")(admin_sync_history_page)
 _admin_analytics = require_role("admin")(admin_analytics_page)
+_admin_analytics_refresh = require_role("admin")(admin_analytics_refresh)
+_admin_analytics_export = require_role("admin")(admin_analytics_export)
 _admin_costs = require_role("admin")(admin_cost_page)
+_admin_costs_export = require_role("admin")(admin_cost_export)
 _admin_jobs = require_role("admin")(admin_jobs_page)
 _admin_job_retry = require_role("admin")(admin_job_retry)
 _admin_jobs_purge = require_role("admin")(admin_jobs_purge)
@@ -290,12 +318,16 @@ def register_admin_routes(rt) -> None:  # type: ignore[no-untyped-def]
     rt("/admin", methods=["GET"])(_admin_dashboard)
     rt("/admin/audit", methods=["GET"])(_admin_audit)
     rt("/admin/audit/export", methods=["GET"])(_admin_audit_export)
+    rt("/admin/audit/detail/{id}", methods=["GET"])(_admin_audit_detail)
     rt("/admin/performance", methods=["GET"])(_admin_performance)
     rt("/admin/sync", methods=["POST"])(_admin_sync)
     rt("/admin/sync/status", methods=["GET"])(_admin_sync_status)
     rt("/admin/sync/history", methods=["GET"])(_admin_sync_history)
     rt("/admin/analytics", methods=["GET"])(_admin_analytics)
+    rt("/admin/analytics/refresh", methods=["POST"])(_admin_analytics_refresh)
+    rt("/admin/analytics/export", methods=["GET"])(_admin_analytics_export)
     rt("/admin/costs", methods=["GET"])(_admin_costs)
+    rt("/admin/costs/export", methods=["GET"])(_admin_costs_export)
     rt("/admin/jobs", methods=["GET"])(_admin_jobs)
     rt("/admin/jobs/{id}/retry", methods=["POST"])(_admin_job_retry)
     rt("/admin/jobs/purge", methods=["POST"])(_admin_jobs_purge)
