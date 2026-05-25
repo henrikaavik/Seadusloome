@@ -203,7 +203,12 @@ class TestWorkerDispatch:
     def test_worker_records_job_execution_metric_on_success(
         self, mock_queue_cls: MagicMock, mock_record: MagicMock
     ):
-        """Successful jobs must emit a job_execution_ms metric with status=ok (#195)."""
+        """Successful jobs must emit a job_execution_ms metric with status="success" (#195).
+
+        The label vocabulary matches ``background_jobs.status`` so admin
+        queries can join both surfaces without translation (#837/#838
+        review caught the earlier "ok"/"success" mismatch).
+        """
         queue_instance = MagicMock()
         mock_queue_cls.return_value = queue_instance
         job = _make_job(job_type="_metric_ok")
@@ -229,7 +234,7 @@ class TestWorkerDispatch:
         assert name == "job_execution_ms"
         assert isinstance(value, float)
         assert value >= 0
-        assert labels == {"handler": "_metric_ok", "status": "ok"}
+        assert labels == {"handler": "_metric_ok", "status": "success"}
 
     @patch("app.jobs.worker.record_metric")
     @patch("app.jobs.worker.JobQueue")

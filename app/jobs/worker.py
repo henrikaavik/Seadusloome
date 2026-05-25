@@ -165,12 +165,16 @@ class JobWorker:
         attempt_number = (job.attempts or 0) + 1
         # Track per-handler execution latency (#195). Labels are kept
         # low-cardinality on purpose: only the job_type and a coarse
-        # success/failure status. Job id, error message, and worker id
-        # would explode the metrics table without aiding aggregation.
+        # ``success`` / ``failed`` status. The status vocabulary matches
+        # the ``background_jobs.status`` enum so admin queries can join
+        # both surfaces on the same string ("success" / "failed") without
+        # a translation layer (#837/#838 review caught this).
+        # Job id, error message, and worker id would explode the metrics
+        # table without aiding aggregation.
         # We can't use ``track_duration`` here because the ``status``
         # label is only known after the handler returns or raises;
         # ``track_duration`` snapshots labels at context entry.
-        status = "ok"
+        status = "success"
         start = time.perf_counter()
         try:
             try:
