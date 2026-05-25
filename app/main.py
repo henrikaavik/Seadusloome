@@ -163,7 +163,7 @@ async def lifespan(_app):  # type: ignore[no-untyped-def]
             logger.info("Stopping draft archive-warning scheduler...")
             _stop_archive_scheduler.set()
             if _archive_thread is not None:
-                _archive_thread.join(timeout=5.0)
+                _archive_thread.join(timeout=30.0)
                 _archive_thread = None
         return
 
@@ -190,13 +190,13 @@ async def lifespan(_app):  # type: ignore[no-untyped-def]
         logger.info("Stopping background worker...")
         _stop_worker.set()
         if _worker_thread is not None:
-            _worker_thread.join(timeout=5.0)
+            _worker_thread.join(timeout=30.0)
             _worker_thread = None
 
         logger.info("Stopping draft archive-warning scheduler...")
         _stop_archive_scheduler.set()
         if _archive_thread is not None:
-            _archive_thread.join(timeout=5.0)
+            _archive_thread.join(timeout=30.0)
             _archive_thread = None
 
 

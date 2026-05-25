@@ -6,11 +6,13 @@
 
 ## Now → Next → After
 
+> **Status as of 2026-05-25 PM:** Sprints 1, 2, 3 all merged to main (PRs #835/#837/#838). All major roadmap §A/§D work is shipped. Remaining work is small follow-ups (#836, #309 finish) + the deferred VCR session, then the Phase 5A decision.
+
 | When | What | Where | Stop and ask if |
 |---|---|---|---|
-| **NOW** | (1) Rebase `feat/sprint1-collectors` onto `origin/main`, run touched-module tests + ruff + pyright, push, open PR with the body explaining #196-bundled-with-#354. (2) Re-audit **#304** by reading `app/main.py:60–141` — close with evidence link if the 5 s join is acceptable, or open a 1-line follow-up to bump 5 s → 30 s. | `feat/sprint1-collectors` → PR; #304 evidence comment on the issue. | Rebase conflict involves >50 changed lines in one hunk OR breaks a public API contract (signature change in `Retriever.retrieve` or `SparqlClient.query`). |
-| **NEXT** | Start **Sprint 2** on a fresh `feat/sprint2-admin-panels` branch off `origin/main`. First commit: **#198 Performance tab** in `app/admin/performance.py` — query the `metrics` table for the four collector series + the existing `http_request_duration_ms`, render p50/p95/p99 via the existing `DataTable` + `Card` primitives. | `app/admin/performance.py` + `tests/test_admin_performance.py`. | The performance tab needs a schema change nobody approved (it shouldn't — `metrics` already has `(name, value, labels)`). |
-| **AFTER** | Sprint 2 items 2–5, then Sprint 3 (test hardening + #182 shim refactor + #183/#188/#324). Then **Phase 5A gate** check before any API work. | See Sprints section. | — |
+| **NOW** | (1) Implement **#836** — bump worker + archive-scheduler join timeout 5s → 30s in `app/main.py:134` + `:140` per the original #304 DoD. 2-line code change. (2) **Finish #309** — extend `tests/test_phase2_edge_cases.py` from 9 tests to comprehensive `extract_handler` + `analyze_handler` coverage using the existing `tests/fixtures/drafts/` fixtures. Open one combined PR (`feat/sprint4-followups`). | `app/main.py` + `tests/test_phase2_edge_cases.py`. | The 30s timeout breaks the test suite (it shouldn't — `DISABLE_BACKGROUND_WORKER=1` skips the threads in tests). |
+| **NEXT** | **VCR cassette recording session** for #102 / #316 / #317 — needs `ANTHROPIC_API_KEY` + `VOYAGE_API_KEY` in env. Agent can scaffold vcrpy fixtures + write test shells offline, but the actual cassette content requires live API hits from the user. | `tests/cassettes/` + `tests/test_*_vcr.py`. | The user has not authorized burning live LLM tokens for cassette recording. |
+| **AFTER** | **Phase 5A decision point.** The doc's gating rules are encoded in §E below; starting Phase 5A is a multi-week, multi-sprint commitment touching ~60 issues. Worth a fresh planning conversation before launch. | See §E. | Always — Phase 5A start is a stop-and-ask threshold, even though the gating-order rule is satisfied. |
 
 ---
 
@@ -30,50 +32,52 @@ These rules let any session pick up and execute. Override only when the user exp
   - Destructive git ops on shared state (force-push to main, `git reset --hard` on a pushed branch, dropping a branch with unmerged commits).
   - Migration changes, schema drops, anything touching prod data.
   - Plan changes that drop a whole sprint or reverse the gating order (e.g., starting Phase 5A before Sprint 3).
+  - **Phase 5A launch** — even with the gating-order rule satisfied (Sprint 3 in review/merged), starting Phase 5A is a multi-week commitment touching ~60 issues. Always get explicit go-ahead.
   - Anything outside the scope encoded in **Now → Next → After**.
 
 ---
 
 ## Sprints
 
-### Sprint 1 — Admin data + visible admin win — **DONE pending rebase + PR**
+### Sprint 1 — Admin data + visible admin win — ✅ **MERGED** via PR #835 (commit `fec5340`, 2026-05-25)
 
-| Item | Status |
-|---|---|
-| **#182** estimate → DEFER to Sprint 3 | Done. Shim is load-bearing test infrastructure (`_rebind()` rewires `__globals__` so `@patch("app.templates.admin_dashboard.X")` reaches call-time; 14 sites in `tests/test_dashboard.py` depend on it). Not package cleanup. |
-| **#195** job execution time (`app/jobs/worker.py`) | Done on `feat/sprint1-collectors` — `record_metric("job_execution_ms", …)` with `{handler, status}`. |
-| **#196** LLM call latency (`app/llm/claude.py`) | ✅ Shipped to origin/main via **PR #831** (bundled into the #354 retry refactor — the metric wraps the retry-wrapped call cleanly). |
-| **#197** SPARQL duration (`app/ontology/sparql_client.py`) | Done on `feat/sprint1-collectors` — `_execute` is the single instrumented choke-point; `ask()` refactored to route through it. |
-| **#323** RAG retrieval latency (`app/rag/retriever.py`) | Done on `feat/sprint1-collectors` — `feature` kwarg + `record_metric` wrap; 3 callers updated to tag retrievals. |
-| **#322** sync-status polish + history view (`app/admin/sync.py`) | Done on `feat/sprint1-collectors` — `/admin/sync/history` paginated page + shim integration + 7 new tests. |
-| Stub-mode smoke test (`tests/test_import_safety.py`) | Done on `feat/sprint1-collectors` — subprocess test blocks `anthropic`+`voyageai` at `builtins.__import__`, asserts `app.main` imports clean and both SDK singletons stay `None`. |
+- **#195** job_execution_ms collector in `app/jobs/worker.py` (records `{handler, status}` with `status="success"|"failed"` post-review fix).
+- **#196** llm_call_ms collector — shipped earlier via PR #831 (bundled into #354 retry refactor).
+- **#197** sparql_query_ms collector in `app/ontology/sparql_client.py` (`_execute` choke-point).
+- **#323** rag_retrieval_ms collector in `app/rag/retriever.py` (with `feature` kwarg + 3 callers updated).
+- **#322** `/admin/sync/history` paginated page.
+- **Stub-mode smoke test** in `tests/test_import_safety.py` — locks down the lazy-init SDK contract.
 
-Branch state: `feat/sprint1-collectors` = 2 ahead / 11 behind `origin/main`. `git merge-tree` shows no conflict markers. Per execution policy → rebase, push, open PR. Then on to **NEXT**.
+### Sprint 2 — Admin panels on real data + test fixtures — ✅ **MERGED** via PR #837 (commit `8db03ff`, 2026-05-25)
 
-### Sprint 2 — Admin panels on real data + test fixtures
+- **#198** Performance tab — all 5 metric series surfaced with p50/p95/p99 + breakdowns + window selector.
+- **#186** LLM cost dashboard polish — window + org filter + top-10 spenders + sparkline + CSV export.
+- **#185** Usage analytics page — window + per-org + refresh button + CSV export + sparklines.
+- **#187** Audit log enhancements — multi-select filters + JSONB detail expander + filter-aware CSV.
+- **#308 + #680 + #309-start** — draft fixtures + migration 021 SQL-execution test + 9 Phase 2 edge-case tests.
+- **Review fixes**: pyright (8 sites), interval `%s` SQL bug (7 sites), monthly trend org filter.
 
-First commit: **#198 Performance tab** in `app/admin/performance.py`. The route is already registered (`/admin/performance`, see `app/templates/admin_dashboard.py:283`); fill in the page to query the `metrics` table for the four Sprint-1 series + the existing `http_request_duration_ms`. Render p50/p95/p99 via existing `DataTable` + `Card` primitives. Add `tests/test_admin_performance.py` with at least one happy-path + empty-state test.
+### Sprint 3 — Shim refactor + remaining admin — ✅ **MERGED** via PR #838 (commit `90d11b8`, 2026-05-25)
 
-Then:
-2. **#186** LLM cost dashboard polish — `llm_usage` aggregates by feature/user/org. Data + route already exist; flesh out the panel.
-3. **#185** Usage analytics page — `usage_daily` view already exists; build the page.
-4. **#187** Enhanced audit log viewer — filtering + export. Current route minimal.
-5. **#308** draft fixtures (`tests/fixtures/drafts/`) + **#680** migration 021 SQL-execution test (quick win) + start **#309** Phase 2 edge-case tests on top of #308.
+- **#182** admin shim refactor — `app/templates/admin_dashboard.py` 291 → 37 lines; `register_admin_routes` lives in `app/admin/routes.py` as the single source of truth; `_rebind()` machinery + `_EXPECTED_PAGE_HANDLERS` invariant deleted; 14 test patch sites migrated to real modules.
+- **#183** system health aggregator card + `/admin/health/aggregator` page.
+- **#188** job monitor polish — filtering, per-handler 24h stats, HTMX detail expand at `/admin/jobs/{id}/detail`.
+- **#324** Sentry errors link panel — env-gated, three render modes, no new dependency.
+- **Review fixes**: 5 cross-sprint routes preserved (`/admin/sync/history`, `/admin/audit/detail/{id}`, `/admin/analytics/refresh`, `/admin/analytics/export`, `/admin/costs/export`); job monitor `IN ('ok', 'success')` for backward compat with pre-2026-05-25 metric rows.
 
-### Sprint 3 — Test hardening + remaining admin
+### Sprint 4 follow-ups — IN FLIGHT on `feat/sprint4-followups`
 
-First commit: **#309** Phase 2 edge-case tests (parser / extractor / analyzer) on top of #308 fixtures.
+- **#836** — bump worker + archive-scheduler lifespan join timeout 5s → 30s (the #304 follow-up).
+- **#309 finish** — extend Phase 2 edge-case tests to full `extract_handler` + `analyze_handler` coverage (now unblocked since `tests/fixtures/drafts/` landed via Sprint 2).
+- **Doc refresh** (this commit).
 
-Then:
-2. **#102, #316, #317** VCR coverage (LLM extraction, chat, drafter). Cassettes narrow + secrets redacted aggressively.
-3. **#182** admin shim refactor — focused move + test-import update of 14 sites in `tests/test_dashboard.py`.
-4. **#183** health aggregator, **#188** job monitor polish, **#324** Sentry errors link panel.
+### Phase 5A gate — open per execution policy, but NEEDS USER GO-AHEAD before launch
 
-### Phase 5A gate — DO NOT START until Sprint 3 is in review
+Sprint 3 is merged, so the technical gate is open. But Phase 5A is a multi-week / ~60-issue commitment, so per Stop-and-ask thresholds above it warrants a fresh planning conversation before any agent dispatch.
 
-Foundation/governance slice only: **#202, #214, #215–#219, #220–#229, #230, #291, #333**. **Land #221 (auth middleware) and #285 (API auth tests) in the same slice** — middleware without tests is a regression waiting.
+Foundation/governance slice scope (unchanged from prior versions): **#202, #214, #215–#219, #220–#229, #230, #291, #333**. **Land #221 (auth middleware) and #285 (API auth tests) in the same slice.**
 
-5B endpoint groups have per-group gating (see §E for the why):
+5B endpoint groups gating (unchanged):
 - **Ontology** — hold raw SPARQL (#234) until #357 + #358 hardening land.
 - **Drafts** — only with #334 + #360 ownership enforcement.
 - **Webhooks** — only with #336 secret encryption (NFR §6) + #335 rotation + #359 stale-payload guard.
@@ -83,13 +87,13 @@ Foundation/governance slice only: **#202, #214, #215–#219, #220–#229, #230, 
 
 ## Backlog (the 160 open issues organised by area)
 
-### A. Bugs / quality — DONE except #304
+### A. Bugs / quality — DONE except #836 (follow-up)
 
-Shipped 2026-05-24 PM via PRs **#823–#833**: #176 #180 #299 #306 #307 #311 #315 #347 #348 #352 #354 (the last also bundled the **#196** metric collector).
+Shipped 2026-05-24 PM via PRs **#823–#833**: #176 #180 #299 #306 #307 #311 #315 #347 #348 #352 #354 (the last also bundled the **#196** metric collector). **#304** re-audited 2026-05-25 and closed-with-evidence pointing at `app/main.py:60–141`.
 
 | # | Status |
 |---|---|
-| **#304** | OPEN — re-audit. `app/main.py:60–141` already wires worker + archive-scheduler lifespan with `_stop_*` events + 5 s join. Original DoD asked for 30 s. Per execution policy: verify, then close-with-evidence or open 1-line follow-up. |
+| **#836** | OPEN — the 2-line follow-up from the #304 audit. Bumps worker + archive-scheduler lifespan join timeout 5s → 30s. Being shipped in Sprint 4 follow-ups (see Sprints section). |
 
 ### B. Test coverage hardening — pulled into Sprints 2-3
 
