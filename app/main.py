@@ -1,6 +1,7 @@
 import logging
 import os
 import threading
+import time
 from pathlib import Path
 
 from fasthtml.common import *
@@ -187,16 +188,35 @@ async def lifespan(_app):  # type: ignore[no-untyped-def]
     try:
         yield
     finally:
-        logger.info("Stopping background worker...")
+        # #836 / #839 review fix: signal BOTH stop events first so the
+        # worker and the archive scheduler wind down in parallel, then
+        # join against a shared 30-second deadline. The earlier code
+        # joined sequentially (worker for 30s, THEN scheduler for 30s)
+        # which could exceed the #304 DoD's single-30s window and let
+        # the scheduler keep ticking while the worker was still shutting
+        # down. With a shared deadline, total shutdown is bounded at
+        # 30s; whichever thread finishes first leaves its remaining
+        # budget for the other.
+        #
+        # NOTE: This 30s only matters if the container's SIGTERM-to-SIGKILL
+        # grace is also ≥30s. The default Docker grace is 10s, and
+        # ``docker/entrypoint.sh`` starts uvicorn without an explicit
+        # ``--timeout-graceful-shutdown`` flag, so the platform may
+        # truncate this window. If you care about the full 30s in prod,
+        # set Coolify's stop-grace to ≥30s (or add ``STOPSIGNAL`` +
+        # ``--stop-timeout`` in the Dockerfile).
+        logger.info("Stopping background threads (30s shared deadline)...")
         _stop_worker.set()
-        if _worker_thread is not None:
-            _worker_thread.join(timeout=30.0)
-            _worker_thread = None
-
-        logger.info("Stopping draft archive-warning scheduler...")
         _stop_archive_scheduler.set()
+
+        deadline = time.monotonic() + 30.0
+        if _worker_thread is not None:
+            remaining = max(0.0, deadline - time.monotonic())
+            _worker_thread.join(timeout=remaining)
+            _worker_thread = None
         if _archive_thread is not None:
-            _archive_thread.join(timeout=30.0)
+            remaining = max(0.0, deadline - time.monotonic())
+            _archive_thread.join(timeout=remaining)
             _archive_thread = None
 
 

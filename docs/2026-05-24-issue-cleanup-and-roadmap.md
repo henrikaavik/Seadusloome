@@ -6,11 +6,11 @@
 
 ## Now → Next → After
 
-> **Status as of 2026-05-25 PM:** Sprints 1, 2, 3 all merged to main (PRs #835/#837/#838). All major roadmap §A/§D work is shipped. Remaining work is small follow-ups (#836, #309 finish) + the deferred VCR session, then the Phase 5A decision.
+> **Status as of 2026-05-25 PM:** Sprints 1–4 all merged to main (PRs #835/#837/#838 + #839). All major roadmap §A/§D work is shipped. Remaining work is the deferred VCR session or the Phase 5A decision — both are user-gated.
 
 | When | What | Where | Stop and ask if |
 |---|---|---|---|
-| **NOW** | (1) Implement **#836** — bump worker + archive-scheduler join timeout 5s → 30s in `app/main.py:134` + `:140` per the original #304 DoD. 2-line code change. (2) **Finish #309** — extend `tests/test_phase2_edge_cases.py` from 9 tests to comprehensive `extract_handler` + `analyze_handler` coverage using the existing `tests/fixtures/drafts/` fixtures. Open one combined PR (`feat/sprint4-followups`). | `app/main.py` + `tests/test_phase2_edge_cases.py`. | The 30s timeout breaks the test suite (it shouldn't — `DISABLE_BACKGROUND_WORKER=1` skips the threads in tests). |
+| **NOW** | **User decision point.** All in-flight code is on main. The next move is either (a) the VCR cassette recording session for #102 / #316 / #317 (NEXT row below) or (b) launching Phase 5A (AFTER row below). Both require explicit go-ahead. There is no autonomous "NOW" work left in this roadmap. | — | Always — the next step is a choice between two user-driven tracks. |
 | **NEXT** | **VCR cassette recording session** for #102 / #316 / #317 — needs `ANTHROPIC_API_KEY` + `VOYAGE_API_KEY` in env. Agent can scaffold vcrpy fixtures + write test shells offline, but the actual cassette content requires live API hits from the user. | `tests/cassettes/` + `tests/test_*_vcr.py`. | The user has not authorized burning live LLM tokens for cassette recording. |
 | **AFTER** | **Phase 5A decision point.** The doc's gating rules are encoded in §E below; starting Phase 5A is a multi-week, multi-sprint commitment touching ~60 issues. Worth a fresh planning conversation before launch. | See §E. | Always — Phase 5A start is a stop-and-ask threshold, even though the gating-order rule is satisfied. |
 
@@ -65,11 +65,11 @@ These rules let any session pick up and execute. Override only when the user exp
 - **#324** Sentry errors link panel — env-gated, three render modes, no new dependency.
 - **Review fixes**: 5 cross-sprint routes preserved (`/admin/sync/history`, `/admin/audit/detail/{id}`, `/admin/analytics/refresh`, `/admin/analytics/export`, `/admin/costs/export`); job monitor `IN ('ok', 'success')` for backward compat with pre-2026-05-25 metric rows.
 
-### Sprint 4 follow-ups — IN FLIGHT on `feat/sprint4-followups`
+### Sprint 4 follow-ups — ✅ **MERGED** via PR #839 (2026-05-25)
 
-- **#836** — bump worker + archive-scheduler lifespan join timeout 5s → 30s (the #304 follow-up).
-- **#309 finish** — extend Phase 2 edge-case tests to full `extract_handler` + `analyze_handler` coverage (now unblocked since `tests/fixtures/drafts/` landed via Sprint 2).
-- **Doc refresh** (this commit).
+- **#836** — worker + archive-scheduler shutdown now uses a single shared 30s deadline (parallel signal + bounded join), not sequential 30s+30s. Documents Docker grace caveat in the lifespan comment block.
+- **#309 finish** — `tests/test_phase2_edge_cases.py` grew 9 → 47 tests; full `extract_handler` + `analyze_handler` edge-case coverage. Four contracts captured in the commit message (extractor swallows all chunk failures; dedupe key is `(ref_text, ref_type)`; score formula; `_row_to_resolved_ref` rules).
+- **Roadmap refresh** — Now → Next → After updated to reflect post-merge state (this section).
 
 ### Phase 5A gate — open per execution policy, but NEEDS USER GO-AHEAD before launch
 
@@ -87,13 +87,11 @@ Foundation/governance slice scope (unchanged from prior versions): **#202, #214,
 
 ## Backlog (the 160 open issues organised by area)
 
-### A. Bugs / quality — DONE except #836 (follow-up)
+### A. Bugs / quality — ✅ DONE
 
-Shipped 2026-05-24 PM via PRs **#823–#833**: #176 #180 #299 #306 #307 #311 #315 #347 #348 #352 #354 (the last also bundled the **#196** metric collector). **#304** re-audited 2026-05-25 and closed-with-evidence pointing at `app/main.py:60–141`.
+Shipped 2026-05-24 PM via PRs **#823–#833**: #176 #180 #299 #306 #307 #311 #315 #347 #348 #352 #354 (the last also bundled the **#196** metric collector). **#304** re-audited 2026-05-25 and closed-with-evidence pointing at `app/main.py:60–141`. **#836** (the 30s shutdown bump + parallel-signal/shared-deadline pattern) merged 2026-05-25 PM via PR #839.
 
-| # | Status |
-|---|---|
-| **#836** | OPEN — the 2-line follow-up from the #304 audit. Bumps worker + archive-scheduler lifespan join timeout 5s → 30s. Being shipped in Sprint 4 follow-ups (see Sprints section). |
+No open §A issues remain.
 
 ### B. Test coverage hardening — pulled into Sprints 2-3
 
