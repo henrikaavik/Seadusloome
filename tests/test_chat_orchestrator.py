@@ -1466,6 +1466,7 @@ class _FakeRetriever:
         k: int = 10,
         source_type: str | None = None,
         org_id: str | None = None,
+        feature: str = "unknown",
     ) -> list[_FakeChunk]:
         return self.chunks
 
@@ -1978,6 +1979,7 @@ class TestStopGenerationCancel:
                 k: int = 10,
                 source_type: str | None = None,
                 org_id: str | None = None,
+                feature: str = "unknown",
             ) -> list[Any]:
                 started.set()
                 await asyncio.sleep(60)
@@ -2240,6 +2242,7 @@ class _HangingRetriever:
         k: int = 10,
         source_type: str | None = None,
         org_id: str | None = None,
+        feature: str = "unknown",
     ) -> list[Any]:
         if self._on_start is not None:
             self.retrieve_started_at = self._on_start()
@@ -2271,6 +2274,7 @@ class _RaisingRetriever:
         k: int = 10,
         source_type: str | None = None,
         org_id: str | None = None,
+        feature: str = "unknown",
     ) -> list[Any]:
         if self._on_start is not None:
             self.retrieve_started_at = self._on_start()

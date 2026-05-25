@@ -42,12 +42,14 @@ from __future__ import annotations
 import logging
 import socket
 import threading
+import time
 import traceback
 import uuid
 from collections.abc import Callable
 from typing import Any
 
 from app.jobs.queue import JobQueue
+from app.metrics import record_metric
 
 logger = logging.getLogger(__name__)
 
@@ -161,25 +163,47 @@ class JobWorker:
         # ``attempts`` column is incremented inside ``mark_failed``,
         # so the value here is the in-flight attempt index (1-based).
         attempt_number = (job.attempts or 0) + 1
+        # Track per-handler execution latency (#195). Labels are kept
+        # low-cardinality on purpose: only the job_type and a coarse
+        # ``success`` / ``failed`` status. The status vocabulary matches
+        # the ``background_jobs.status`` enum so admin queries can join
+        # both surfaces on the same string ("success" / "failed") without
+        # a translation layer (#837/#838 review caught this).
+        # Job id, error message, and worker id would explode the metrics
+        # table without aiding aggregation.
+        # We can't use ``track_duration`` here because the ``status``
+        # label is only known after the handler returns or raises;
+        # ``track_duration`` snapshots labels at context entry.
+        status = "success"
+        start = time.perf_counter()
         try:
-            result = handler(
-                job.payload,
-                attempt=attempt_number,
-                max_attempts=job.max_attempts,
-                job_id=job.id,
+            try:
+                result = handler(
+                    job.payload,
+                    attempt=attempt_number,
+                    max_attempts=job.max_attempts,
+                    job_id=job.id,
+                )
+            except Exception as exc:  # noqa: BLE001 — handler errors flip job to failed
+                status = "failed"
+                tb = traceback.format_exc()
+                logger.error(
+                    "Handler for job id=%d type=%s raised: %s\n%s",
+                    job.id,
+                    job.job_type,
+                    exc,
+                    tb,
+                )
+                # error_message column is VARCHAR(500); truncate defensively.
+                queue.mark_failed(job.id, str(exc)[:500])
+                return
+        finally:
+            duration_ms = (time.perf_counter() - start) * 1000
+            record_metric(
+                "job_execution_ms",
+                round(duration_ms, 2),
+                {"handler": job.job_type, "status": status},
             )
-        except Exception as exc:  # noqa: BLE001 — handler errors flip job to failed
-            tb = traceback.format_exc()
-            logger.error(
-                "Handler for job id=%d type=%s raised: %s\n%s",
-                job.id,
-                job.job_type,
-                exc,
-                tb,
-            )
-            # error_message column is VARCHAR(500); truncate defensively.
-            queue.mark_failed(job.id, str(exc)[:500])
-            return
 
         queue.mark_success(job.id, result)
         logger.info("Job id=%d type=%s completed successfully", job.id, job.job_type)

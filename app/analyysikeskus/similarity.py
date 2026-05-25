@@ -457,6 +457,7 @@ def find_embedding_similar(
             k=k,
             source_type="ontology",
             org_id=None,
+            feature="analyysikeskus_similarity",
         )
 
     try:

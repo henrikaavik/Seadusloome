@@ -1567,6 +1567,7 @@ def _rag_candidates(sisend: str, org_id: str | None) -> list[dict[str, str]]:
                 sisend,
                 k=_MAX_RAG_CANDIDATES,
                 org_id=org_id,
+                feature="analyysikeskus_normi_mojuahel",
             )
 
         try:

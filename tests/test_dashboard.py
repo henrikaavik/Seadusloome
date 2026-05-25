@@ -988,3 +988,223 @@ class TestBookmarkRoute:
         resp = remove_bookmark(self._req(auth=self._AUTH, xhr=True), "bm-1")
         assert resp.status_code == 200
         assert _json.loads(bytes(resp.body)) == {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# /admin/sync/history — paginated sync log viewer (#322)
+# ---------------------------------------------------------------------------
+
+
+def _make_sync_history_request(query_string: bytes = b""):
+    """Build a minimal admin Request for the sync history handler."""
+    from starlette.requests import Request
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/admin/sync/history",
+        "headers": [],
+        "query_string": query_string,
+        "scheme": "http",
+        "server": ("testserver", 80),
+        "client": ("127.0.0.1", 12345),
+        "auth": {
+            "role": "admin",
+            "id": "admin-test",
+            "email": "a@b.ee",
+            "full_name": "Admin",
+        },
+    }
+    return Request(scope)
+
+
+class TestSyncHistoryCardLink:
+    """The dashboard sync card must link out to the new history page."""
+
+    def test_card_renders_history_link(self):
+        from fasthtml.common import to_xml
+
+        from app.admin.sync import _sync_card
+
+        html = to_xml(_sync_card([]))
+        assert "/admin/sync/history" in html
+        assert "Vaata ajalugu" in html
+
+
+class TestAdminSyncHistoryPage:
+    """The history page renders pagination, columns, and Estonian copy."""
+
+    def _entry(
+        self,
+        *,
+        sid: int = 1,
+        status: str = "success",
+        error: str | None = None,
+        step: str | None = None,
+        finished: bool = True,
+    ) -> dict:
+        from datetime import UTC, datetime, timedelta
+
+        started = datetime(2026, 5, 24, 9, 0, tzinfo=UTC) + timedelta(minutes=sid)
+        return {
+            "id": sid,
+            "started_at": started,
+            "finished_at": started + timedelta(minutes=3) if finished else None,
+            "status": status,
+            "entity_count": 5000 if status == "success" else None,
+            "error_message": error,
+            "current_step": step,
+        }
+
+    @patch("app.admin.sync._get_sync_log_page")
+    def test_renders_empty_state(self, mock_page: MagicMock):
+        from fasthtml.common import to_xml
+
+        from app.admin.sync import admin_sync_history_page
+
+        mock_page.return_value = ([], 0)
+
+        result = admin_sync_history_page(_make_sync_history_request())
+        html = to_xml(result)
+
+        assert "Sünkroniseerimise ajalugu" in html
+        assert "Sünkroniseerimisi ei leitud." in html
+        # Pagination still renders (0 entries info line)
+        assert "0 kirjet" in html
+        # Back link to admin dashboard
+        assert "Tagasi adminipaneelile" in html
+
+    @patch("app.admin.sync._get_sync_log_page")
+    def test_renders_rows_with_columns(self, mock_page: MagicMock):
+        from fasthtml.common import to_xml
+
+        from app.admin.sync import admin_sync_history_page
+
+        mock_page.return_value = (
+            [
+                self._entry(sid=1, status="success", step="reingesting"),
+                self._entry(
+                    sid=2,
+                    status="failed",
+                    error="Connection refused",
+                    step="validating",
+                ),
+            ],
+            2,
+        )
+
+        result = admin_sync_history_page(_make_sync_history_request())
+        html = to_xml(result)
+
+        # Estonian column headers
+        for header in ("Algusaeg", "Staatus", "Kestus", "Samm", "Veateade"):
+            assert header in html, header
+        # Phase labels translated to Estonian
+        assert "Taasindekseerimine" in html
+        assert "Valideerimine" in html
+        # Status badges rendered via _sync_status_badge → StatusBadge
+        # (success → key "ok" → label "OK"; failed → "Ebaõnnestus").
+        assert "status-ok" in html
+        assert "status-failed" in html
+        assert "Ebaõnnestus" in html
+        # Error message present
+        assert "Connection refused" in html
+
+    @patch("app.admin.sync._get_sync_log_page")
+    def test_pagination_passes_correct_page_and_clamps(self, mock_page: MagicMock):
+        from fasthtml.common import to_xml
+
+        from app.admin.sync import admin_sync_history_page
+
+        # 45 rows → 3 pages of 20.
+        mock_page.return_value = (
+            [self._entry(sid=i) for i in range(20)],
+            45,
+        )
+
+        result = admin_sync_history_page(_make_sync_history_request(query_string=b"page=2"))
+        html = to_xml(result)
+
+        # Handler must have asked for page 2 with the default per-page.
+        mock_page.assert_called_once_with(2, 20)
+        # Pagination renders the info line for the active page.
+        assert "21 kuni 40 kokku 45" in html
+        # Current page link marked with aria-current
+        assert 'aria-current="page"' in html
+
+    @patch("app.admin.sync._get_sync_log_page")
+    def test_invalid_page_falls_back_to_one(self, mock_page: MagicMock):
+        from app.admin.sync import admin_sync_history_page
+
+        mock_page.return_value = ([], 0)
+
+        admin_sync_history_page(_make_sync_history_request(query_string=b"page=not-a-number"))
+        mock_page.assert_called_once_with(1, 20)
+
+    @patch("app.admin.sync._get_sync_log_page")
+    def test_long_error_message_truncated_via_details(self, mock_page: MagicMock):
+        """Failed rows with long SHACL reports must use the disclosure
+        pattern instead of dumping the full text inline (#322)."""
+        from fasthtml.common import to_xml
+
+        from app.admin.sync import admin_sync_history_page
+
+        long_error = "SHACL validation: " + ("warning text " * 50)
+        mock_page.return_value = (
+            [self._entry(sid=1, status="failed", error=long_error)],
+            1,
+        )
+
+        result = admin_sync_history_page(_make_sync_history_request())
+        html = to_xml(result)
+
+        assert "<details" in html
+        assert "sync-error" in html
+
+
+class TestGetSyncLogPage:
+    """``_get_sync_log_page`` slices sync_log with LIMIT/OFFSET."""
+
+    @patch("app.admin.sync._connect")
+    def test_returns_entries_and_total(self, mock_connect: MagicMock):
+        from app.admin.sync import _get_sync_log_page
+
+        mock_conn = MagicMock()
+        mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+        # First call: COUNT(*); second call: paginated rows
+        count_cursor = MagicMock()
+        count_cursor.fetchone.return_value = (42,)
+        rows_cursor = MagicMock()
+        rows_cursor.fetchall.return_value = [
+            (1, "2026-05-24 09:00", "2026-05-24 09:03", "success", 5000, None, None),
+        ]
+        mock_conn.execute.side_effect = [count_cursor, rows_cursor]
+
+        entries, total = _get_sync_log_page(page=2, per_page=20)
+        assert total == 42
+        assert len(entries) == 1
+        # OFFSET = (2-1) * 20 = 20
+        rows_call = mock_conn.execute.call_args_list[1]
+        assert rows_call.args[1] == (20, 20)
+
+    @patch("app.admin.sync._connect")
+    def test_returns_empty_on_db_error(self, mock_connect: MagicMock):
+        from app.admin.sync import _get_sync_log_page
+
+        mock_connect.side_effect = Exception("DB unavailable")
+        entries, total = _get_sync_log_page()
+        assert entries == []
+        assert total == 0
+
+
+class TestAdminSyncHistoryRoute:
+    """Route is registered and admin-gated."""
+
+    def test_history_route_requires_auth(self):
+        from app.main import app
+
+        client = TestClient(app, follow_redirects=False)
+        response = client.get("/admin/sync/history")
+        assert response.status_code == 303
+        assert response.headers["location"] == "/auth/login"

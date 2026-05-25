@@ -1325,6 +1325,7 @@ class ChatOrchestrator:
                         ctx.user_message,
                         k=10,
                         org_id=str(ctx.org_id) if ctx.org_id else None,
+                        feature="chat",
                     ),
                     timeout=_RAG_RETRIEVE_TIMEOUT_SECONDS,
                 )

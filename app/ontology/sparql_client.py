@@ -5,8 +5,11 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 
 import httpx
+
+from app.metrics import record_metric
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +87,13 @@ class SparqlClient:
         """SPARQL query endpoint URL."""
         return f"{self.jena_url}/{self.dataset}/sparql"
 
-    def _execute(self, sparql: str, *, on_error: str = "swallow") -> dict:  # type: ignore[type-arg]
+    def _execute(
+        self,
+        sparql: str,
+        *,
+        on_error: str = "swallow",
+        operation: str = "query",
+    ) -> dict:  # type: ignore[type-arg]
         """Send a SPARQL query and return the raw JSON response dict.
 
         Parameters
@@ -107,7 +116,14 @@ class SparqlClient:
               caches the result and must avoid poisoning the cache on
               transient outages (e.g. the resolver's abbreviation-map
               warm-up — see ``app/docs/reference_resolver.py``).
+        operation:
+            Label recorded on the ``sparql_query_ms`` metric to attribute
+            the call to ``"query"``, ``"ask"``, or ``"count"``.  Kept
+            deliberately low-cardinality — the SPARQL text and URI
+            parameters are never recorded.
         """
+        start = time.perf_counter()
+        status = "error"
         try:
             response = httpx.post(
                 self.endpoint,
@@ -116,7 +132,9 @@ class SparqlClient:
                 timeout=self.timeout,
             )
             response.raise_for_status()
-            return response.json()  # type: ignore[no-any-return]
+            result: dict = response.json()  # type: ignore[type-arg]
+            status = "ok"
+            return result
         except httpx.ConnectError:
             logger.exception("Cannot connect to Jena Fuseki at %s", self.endpoint)
             if on_error == "raise":
@@ -137,6 +155,13 @@ class SparqlClient:
             if on_error == "raise":
                 raise
             return {"results": {"bindings": []}}
+        finally:
+            duration_ms = (time.perf_counter() - start) * 1000
+            record_metric(
+                "sparql_query_ms",
+                round(duration_ms, 2),
+                {"operation": operation, "status": status},
+            )
 
     def _inject_bindings(self, sparql: str, bindings: dict[str, str]) -> str:
         """Inject variable bindings using a SPARQL VALUES clause.
@@ -198,6 +223,7 @@ class SparqlClient:
         uri_bindings: dict[str, str] | None = None,
         *,
         on_error: str = "swallow",
+        operation: str = "query",
     ) -> list[dict[str, str]]:
         """Execute a SPARQL SELECT query and return a list of result dicts.
 
@@ -221,36 +247,34 @@ class SparqlClient:
             should pass ``on_error="raise"`` so a transient failure
             does not permanently poison the cache. See
             :func:`_execute` for the full semantics.
+        operation:
+            Forwarded to :meth:`_execute` for metric labelling.  Defaults
+            to ``"query"``; :meth:`count` overrides it to ``"count"``.
         """
         if bindings:
             sparql = self._inject_bindings(sparql, bindings)
         if uri_bindings:
             sparql = self._inject_uri_bindings(sparql, uri_bindings)
-        raw = self._execute(sparql, on_error=on_error)
+        raw = self._execute(sparql, on_error=on_error, operation=operation)
         return _extract_bindings(raw)
 
     def ask(self, sparql: str) -> bool:
-        """Execute a SPARQL ASK query and return the boolean result."""
-        try:
-            response = httpx.post(
-                self.endpoint,
-                data={"query": sparql},
-                headers={"Accept": "application/sparql-results+json"},
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-            data = response.json()
-            return bool(data.get("boolean", False))
-        except httpx.HTTPError:
-            logger.exception("SPARQL ASK query failed")
-            return False
+        """Execute a SPARQL ASK query and return the boolean result.
+
+        Routed through :meth:`_execute` so the call is counted in the
+        ``sparql_query_ms`` metric with ``operation="ask"``.  Network
+        failures are swallowed (logged + ``False``) to preserve the
+        legacy contract.
+        """
+        data = self._execute(sparql, on_error="swallow", operation="ask")
+        return bool(data.get("boolean", False))
 
     def count(self, sparql: str) -> int:
         """Execute a SPARQL SELECT query that returns a single count value.
 
         Expects the query to project a ``?count`` variable.
         """
-        rows = self.query(sparql)
+        rows = self.query(sparql, operation="count")
         if rows and "count" in rows[0]:
             try:
                 return int(rows[0]["count"])

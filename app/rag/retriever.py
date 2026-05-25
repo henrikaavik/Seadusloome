@@ -17,10 +17,12 @@ Usage:
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any, LiteralString, cast
 
 from app.db import get_connection
+from app.metrics import record_metric
 from app.rag.embedding import EmbeddingProvider, get_default_embedding_provider
 
 logger = logging.getLogger(__name__)
@@ -159,6 +161,7 @@ class Retriever:
         source_type: str | None = None,
         org_id: str | None = None,
         filters: dict[str, Any] | None = None,
+        feature: str = "unknown",
     ) -> list[RetrievedChunk]:
         """Retrieve the top-k most similar chunks to *query*.
 
@@ -186,6 +189,11 @@ class Retriever:
                 or ``None`` (``IS NULL``). Unknown keys raise
                 ``ValueError``. Combines additively with the tenant
                 predicate — filters NEVER bypass org scoping. (#311)
+            feature: Caller-supplied label used as the ``feature`` tag on
+                the ``rag_retrieval_ms`` metric (e.g. ``"chat"``,
+                ``"drafter"``, ``"analyysikeskus_similarity"``). Defaults
+                to ``"unknown"`` so legacy callers still record metrics;
+                new callers should always pass an explicit label. (#323)
 
         Returns:
             List of :class:`RetrievedChunk` ordered by descending
@@ -199,6 +207,45 @@ class Retriever:
         # corpus (NULL) visible to everyone and gates private chunks on
         # the caller's org. See migration 016 and issue #576.
 
+        # #323: instrument the full retrieve() body — embed + ANN search
+        # + result parsing — and tag every emission with the caller's
+        # ``feature`` label plus an ``ok`` / ``error`` ``status``. We use
+        # ``record_metric`` directly rather than ``track_duration`` so the
+        # status label reflects the *outcome*, not a snapshot taken at
+        # context-manager entry time. Exceptions are re-raised so callers
+        # see the failure; only the metric write is wrapped.
+        start = time.perf_counter()
+        status = "ok"
+        try:
+            return await self._retrieve_inner(
+                query,
+                k=k,
+                source_type=source_type,
+                org_id=org_id,
+                filters=filters,
+            )
+        except Exception:
+            status = "error"
+            raise
+        finally:
+            duration_ms = (time.perf_counter() - start) * 1000
+            record_metric(
+                "rag_retrieval_ms",
+                round(duration_ms, 2),
+                {"feature": feature, "status": status},
+            )
+
+    async def _retrieve_inner(
+        self,
+        query: str,
+        *,
+        k: int,
+        source_type: str | None,
+        org_id: str | None,
+        filters: dict[str, Any] | None,
+    ) -> list[RetrievedChunk]:
+        """Body of :meth:`retrieve`, kept separate so the metric wrapper
+        is the only place that needs the try/except scaffolding."""
         if not query.strip():
             return []
 
