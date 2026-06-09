@@ -38,13 +38,13 @@ import json
 import logging
 import uuid
 from typing import Any
-from urllib.parse import quote as url_quote
 
 from fasthtml.common import *  # noqa: F403
 
 from app.auth.provider import UserDict
 from app.db import get_connection as _connect
 from app.docs.report_routes import explorer_focus_url
+from app.drafter.citations import coerce_citation, unverified_label
 from app.drafter.session_model import DraftingSession
 from app.drafter.state_machine import STEP_LABELS_ET, Step
 from app.ontology.relations import legal_phrase
@@ -784,16 +784,25 @@ def _render_clause_card(
     citations = clause.get("citations", [])
     notes = clause.get("notes", "")
 
+    # #842: clause citations are enriched dicts (or legacy raw strings).
+    # Render verified ones as in-app same-origin /explorer?focus= links;
+    # mark unverified ones (incl. legacy strings) as "kontrollimata viide"
+    # non-links so fabricated citations never become clickable dead links.
     citation_links: list[Any] = []
     for cit in citations:
-        citation_links.append(
-            A(
-                cit,
-                href=f"/explorer?search={url_quote(cit)}",
-                cls="citation-link",
-                target="_blank",
-            )  # noqa: F405
-        )
+        c = coerce_citation(cit)
+        if c["verified"] and c["explorer_url"]:
+            citation_links.append(
+                A(  # noqa: F405
+                    c["label"],
+                    href=c["explorer_url"],
+                    cls="citation-link",
+                )
+            )
+        else:
+            citation_links.append(
+                Span(unverified_label(c["text"]), cls="citation-unverified")  # noqa: F405
+            )
 
     return Div(  # noqa: F405
         H4(f"{para} {title}", cls="clause-heading"),  # noqa: F405

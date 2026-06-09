@@ -16,6 +16,14 @@ from app.drafter.prompts import (
     VTK_STRUCTURE,
 )
 
+# Every prompt template that can instruct the model to emit citations.
+_ALL_CITATION_PROMPTS = {
+    "CLARIFY_PROMPT": CLARIFY_PROMPT,
+    "STRUCTURE_PROMPT": STRUCTURE_PROMPT,
+    "DRAFT_PROMPT": DRAFT_PROMPT,
+    **{f"VTK[{title}]": prompt for title, prompt in VTK_SECTION_PROMPTS.items()},
+}
+
 
 class TestClarifyPrompt:
     def test_has_intent_placeholder(self):
@@ -110,3 +118,70 @@ class TestVtkSectionPrompts:
                 # Some prompts might not have {clarifications}, that's OK
                 if "clarifications" not in str(e):
                     raise
+
+
+class TestCitationGuidanceIsHumanReadable:
+    """Guard against regressing to fabricated estleg: pseudo-URI citations (#842).
+
+    The drafter must instruct the model to cite provisions human-readably
+    (law name + section / CELEX / case number), never to construct estleg:
+    identifiers. Downstream (``app/drafter/citations.py``) resolves these
+    human-readable strings against the ontology.
+    """
+
+    def test_no_estleg_pseudo_uri_in_any_prompt(self):
+        """No prompt may demonstrate or instruct the bracketed estleg: form."""
+        for name, prompt in _ALL_CITATION_PROMPTS.items():
+            assert "[estleg:" not in prompt, (
+                f"{name} still contains a fabricated '[estleg:...]' citation example"
+            )
+
+    def test_no_par_slash_path_in_any_prompt(self):
+        """The old ``/par/N`` pseudo-path must not appear anywhere."""
+        for name, prompt in _ALL_CITATION_PROMPTS.items():
+            assert "/par/" not in prompt, f"{name} still contains a '/par/' pseudo-URI path"
+
+    def test_draft_prompt_uses_human_readable_citations(self):
+        """DRAFT_PROMPT cites by law name + section symbol, not a pseudo-URI."""
+        assert "[estleg:" not in DRAFT_PROMPT
+        assert "/par/" not in DRAFT_PROMPT
+        # Human-readable guidance: section symbol + a named example law.
+        assert "§" in DRAFT_PROMPT
+        assert "Halduskoostoo seadus § 13" in DRAFT_PROMPT
+        # CELEX / case-number guidance is present (the literal phrase may be
+        # line-wrapped, so assert on stable single tokens).
+        assert "CELEX" in DRAFT_PROMPT
+        assert "court decisions by case" in DRAFT_PROMPT
+
+    def test_draft_prompt_forbids_inventing_identifiers(self):
+        """The 'never invent identifiers' instruction must be present."""
+        assert "NEVER construct, guess, or invent estleg: identifiers" in DRAFT_PROMPT
+
+    def test_draft_prompt_example_citations_are_human_readable(self):
+        """The JSON ``citations`` example shows resolvable human-readable strings."""
+        # The exact example values written into the prompt.
+        assert '"citations": ["Halduskoostoo seadus § 13", "32016R0679"]' in DRAFT_PROMPT
+        # Sanity: neither legacy scheme prefix appears in the example line.
+        assert "estleg:ActName" not in DRAFT_PROMPT
+        assert "eu:DirectiveNumber" not in DRAFT_PROMPT
+
+    def test_every_vtk_prompt_carries_citation_guardrail(self):
+        """Each VTK section prompt must carry the same human-readable citation
+        guardrail as DRAFT_PROMPT (#843): VTK generation uses these prompts, so
+        they must instruct the model to cite human-readably and never invent
+        ``estleg:`` identifiers.
+        """
+        for title, prompt in VTK_SECTION_PROMPTS.items():
+            # The 'never invent identifiers' instruction is present.
+            assert "NEVER construct, guess, or invent estleg:" in prompt, (
+                f"VTK prompt for '{title}' is missing the citation guardrail"
+            )
+            # Human-readable section symbol is shown.
+            assert "§" in prompt, f"VTK prompt for '{title}' is missing the '§' symbol"
+            # Neither fabricated pseudo-URI form may appear.
+            assert "[estleg:" not in prompt, (
+                f"VTK prompt for '{title}' contains a fabricated '[estleg:...]' citation"
+            )
+            assert "/par/" not in prompt, (
+                f"VTK prompt for '{title}' contains a '/par/' pseudo-URI path"
+            )
