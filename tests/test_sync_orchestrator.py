@@ -28,12 +28,14 @@ import pytest
 from rdflib import Graph
 
 from app.sync.orchestrator import (
+    ONTOLOGY_REPO,
     PHASE_CLONING,
     PHASE_CONVERTING,
     PHASE_REINGESTING,
     PHASE_UPLOADING,
     PHASE_VALIDATING,
     _parse_violation_count,
+    clone_or_pull,
     run_sync,
 )
 
@@ -51,6 +53,69 @@ class TestParseViolationCount:
     def test_zero_on_unparseable(self):
         # pyshacl will never emit Results (abc), but handle it gracefully
         assert _parse_violation_count("Results (abc)") == 0
+
+
+# ---------------------------------------------------------------------------
+# clone_or_pull + Git LFS materialisation
+#
+# Since the 2026-05-27 corpus refresh the ontology repo stores its large
+# JSON-LD files via Git LFS. clone_or_pull must materialise that content
+# (``git lfs pull``) on both the clone and pull paths, and must degrade
+# gracefully — never raise — when git-lfs is absent from the environment.
+# ---------------------------------------------------------------------------
+
+
+def _argv_of(call) -> list[str]:
+    """Return the argv list that a ``subprocess.run`` call was invoked with.
+
+    ``subprocess.run`` is always called positionally with the argv list as
+    the first argument in this module, so ``call.args[0]`` is the command.
+    """
+    return list(call.args[0])
+
+
+class TestCloneOrPullLfs:
+    @patch("app.sync.orchestrator.subprocess.run")
+    def test_clone_path_clones_then_fetches_lfs(self, mock_run: MagicMock, tmp_path: Path):
+        """On a path with no .git, clone_or_pull must run ``git clone
+        --depth 1 <repo> <dir>`` AND then ``git lfs pull``."""
+        # git-lfs probe (``git lfs version``) succeeds by default.
+        clone_or_pull(tmp_path)
+
+        argvs = [_argv_of(call) for call in mock_run.call_args_list]
+        assert ["git", "clone", "--depth", "1", ONTOLOGY_REPO, str(tmp_path)] in argvs
+        assert ["git", "lfs", "pull"] in argvs
+
+    @patch("app.sync.orchestrator.subprocess.run")
+    def test_pull_path_pulls_then_fetches_lfs(self, mock_run: MagicMock, tmp_path: Path):
+        """On an existing clone (a .git dir present), clone_or_pull must run
+        ``git pull --ff-only`` AND then ``git lfs pull``."""
+        (tmp_path / ".git").mkdir()
+
+        clone_or_pull(tmp_path)
+
+        argvs = [_argv_of(call) for call in mock_run.call_args_list]
+        assert ["git", "pull", "--ff-only"] in argvs
+        assert ["git", "lfs", "pull"] in argvs
+
+    @patch("app.sync.orchestrator.subprocess.run")
+    def test_skips_lfs_pull_when_git_lfs_unavailable(self, mock_run: MagicMock, tmp_path: Path):
+        """When git-lfs is missing, clone_or_pull must NOT raise and must NOT
+        attempt ``git lfs pull`` — the converter handles the leftover pointer
+        files with a file-named error instead."""
+
+        def _side_effect(argv, *args, **kwargs):
+            if list(argv) == ["git", "lfs", "version"]:
+                raise FileNotFoundError("git-lfs not installed")
+            return MagicMock()
+
+        mock_run.side_effect = _side_effect
+
+        # Must not propagate the FileNotFoundError from the probe.
+        clone_or_pull(tmp_path)
+
+        argvs = [_argv_of(call) for call in mock_run.call_args_list]
+        assert ["git", "lfs", "pull"] not in argvs
 
 
 # ---------------------------------------------------------------------------

@@ -267,7 +267,7 @@ def has_recent_running_row(max_age_minutes: int = 30) -> bool:
 
 
 def clone_or_pull(target_dir: Path) -> None:
-    """Clone or pull the ontology repo."""
+    """Clone or pull the ontology repo, then materialise Git LFS objects."""
     if (target_dir / ".git").exists():
         logger.info("Pulling latest changes...")
         subprocess.run(
@@ -283,6 +283,48 @@ def clone_or_pull(target_dir: Path) -> None:
             check=True,
             capture_output=True,
         )
+    # Since the 2026-05-27 corpus refresh the big JSON-LD files are stored
+    # via Git LFS. Materialise them on both the clone and pull paths so the
+    # converter sees real content rather than 130-byte pointer stubs.
+    _fetch_lfs_objects(target_dir)
+
+
+def _git_lfs_available() -> bool:
+    """Return True if the ``git lfs`` subcommand is usable in this environment."""
+    try:
+        subprocess.run(["git", "lfs", "version"], check=True, capture_output=True)
+        return True
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return False
+
+
+def _fetch_lfs_objects(target_dir: Path) -> None:
+    """Materialise Git LFS objects for the freshly cloned/pulled repo.
+
+    Since the 2026-05-27 corpus refresh the ontology repo stores its large
+    JSON-LD files (``combined_ontology.jsonld`` ~179 MB, plus the curia/eurlex
+    combined graphs) via Git LFS. A plain ``git clone`` in an environment
+    without git-lfs leaves 130-byte pointer files on disk, which rdflib then
+    fails to parse ("unexpected character: line 1 column 1 (char 0)"). The
+    runtime image installs git-lfs (docker/Dockerfile); we still fetch
+    explicitly here so the GIT_LFS_SKIP_SMUDGE / pull-existing-clone paths
+    also materialise content.
+
+    If git-lfs is unavailable we log an actionable error but do NOT raise —
+    the converter detects the leftover pointer files and fails with a message
+    that names the offending file. A genuine fetch failure (network, LFS
+    bandwidth quota) raises so the sync aborts at a clearly-named step.
+    """
+    if not _git_lfs_available():
+        logger.error(
+            "git-lfs is not available in this environment; LFS-tracked "
+            "ontology files will remain as pointers and conversion will fail. "
+            "Install git-lfs in the runtime image."
+        )
+        return
+    logger.info("Fetching Git LFS objects...")
+    subprocess.run(["git", "lfs", "pull"], cwd=target_dir, check=True, capture_output=True)
+    logger.info("Git LFS objects fetched")
 
 
 def run_sync(

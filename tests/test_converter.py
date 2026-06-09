@@ -3,7 +3,11 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from app.sync.converter import (
+    UnresolvedLfsPointerError,
+    _assert_not_lfs_pointer,
     load_index,
     parse_jsonld_file,
     serialize_to_turtle,
@@ -15,6 +19,29 @@ FIXTURES = Path(__file__).parent / "fixtures"
 def test_parse_jsonld_file():
     g = parse_jsonld_file(FIXTURES / "sample_peep.json")
     assert len(g) > 0
+
+
+def test_parse_jsonld_real_fixture_passes_lfs_check():
+    # The pointer check is a no-op for real content; parsing still works.
+    g = parse_jsonld_file(FIXTURES / "sample_peep.json")
+    assert len(g) > 0
+
+
+def test_parse_jsonld_lfs_pointer_raises(tmp_path: Path):
+    pointer = tmp_path / "combined_ontology.jsonld"
+    pointer.write_bytes(
+        b"version https://git-lfs.github.com/spec/v1\noid sha256:abc123\nsize 187819360\n"
+    )
+    with pytest.raises(UnresolvedLfsPointerError, match="Git LFS pointer") as exc_info:
+        parse_jsonld_file(pointer)
+    assert "combined_ontology.jsonld" in str(exc_info.value)
+
+
+def test_assert_not_lfs_pointer_allows_normal_json(tmp_path: Path):
+    normal = tmp_path / "real.jsonld"
+    normal.write_text('{"@context": {}, "@graph": []}', encoding="utf-8")
+    # Should not raise for a normal JSON document starting with '{'.
+    _assert_not_lfs_pointer(normal)
 
 
 def test_parse_jsonld_contains_expected_subjects():
