@@ -26,6 +26,7 @@ from uuid import UUID
 
 from app.chat.rate_limiter import check_org_cost_budget
 from app.db import get_connection
+from app.drafter.citations import resolve_citations
 from app.drafter.prompts import (
     CLARIFY_PROMPT,
     DRAFT_PROMPT,
@@ -910,7 +911,10 @@ def drafter_draft(
                         "paragraph": section.get("paragraph", ""),
                         "title": section_title,
                         "text": result.get("text", ""),
-                        "citations": result.get("citations", []),
+                        # #842: resolve LLM citations against the ontology so
+                        # only verified ones are later shown as authoritative;
+                        # fabricated/unresolved ones are marked "kontrollimata".
+                        "citations": resolve_citations(result.get("citations", [])),
                         "notes": result.get("notes", ""),
                     }
                 )
@@ -1027,7 +1031,10 @@ def drafter_regenerate_clause(
             org_id=session.org_id,
         )
         clause["text"] = result.get("text", clause.get("text", ""))
-        clause["citations"] = result.get("citations", clause.get("citations", []))
+        # #842: resolve citations through the ontology (see drafter_draft).
+        clause["citations"] = resolve_citations(
+            result.get("citations", clause.get("citations", []))
+        )
         clause["notes"] = result.get("notes", clause.get("notes", ""))
     except Exception as exc:
         if attempt >= max_attempts:

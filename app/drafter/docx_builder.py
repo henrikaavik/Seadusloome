@@ -30,6 +30,7 @@ from docx import Document
 from docx.enum.section import WD_SECTION
 from docx.shared import Pt
 
+from app.drafter.citations import coerce_citation, unverified_label
 from app.ui.time import format_tallinn
 
 logger = logging.getLogger(__name__)
@@ -152,17 +153,29 @@ def build_drafter_docx(
     else:
         _build_law_doc(doc, title, structure, clause_map)
 
-    # Appendix A: Citation index
-    all_citations: list[str] = []
+    # Appendix A: Citation index.
+    # Stored citations may be NEW enriched dicts or LEGACY raw strings;
+    # coerce_citation() normalises both (legacy strings -> unverified).
+    # A verified citation renders as authoritative (resolver label, plus the
+    # confirmed provision reference); an unverified one is explicitly marked
+    # "kontrollimata viide: ..." so it is never presented as authoritative.
+    coerced: dict[str, dict[str, Any]] = {}
     for clause in clauses:
-        all_citations.extend(clause.get("citations", []))
+        for raw in clause.get("citations", []):
+            cit = coerce_citation(raw)
+            coerced.setdefault(cit["text"], cit)
 
-    if all_citations:
+    if coerced:
         doc.add_section(WD_SECTION.NEW_PAGE)
         doc.add_heading("Lisa A: Viidete register", level=1)
-        unique_citations = sorted(set(all_citations))
-        for i, cit in enumerate(unique_citations, 1):
-            doc.add_paragraph(f"{i}. {cit}")
+        for i, text in enumerate(sorted(coerced), 1):
+            cit = coerced[text]
+            if cit["verified"]:
+                label = cit.get("label") or text
+                line = label if label == text else f"{label} ({text})"
+            else:
+                line = unverified_label(text)
+            doc.add_paragraph(f"{i}. {line}")
 
     # Appendix B: Impact summary (if available)
     if impact_summary:

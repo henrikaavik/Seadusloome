@@ -121,8 +121,12 @@ Research findings relevant to this section:
 Requirements:
 - Write in formal Estonian legislative style
 - Follow Oigustehnika reeglid (Estonian legislative drafting rules)
-- Cite specific existing provisions being amended or referenced using the
-  format [estleg:ActName/par/X] (e.g., [estleg:TsiviilS/par/3])
+- Cite existing provisions by law name and section — e.g. "Halduskoostoo seadus
+  § 13" or "HKTS § 13" — EU acts by CELEX number, and court decisions by case
+  number.
+- NEVER construct, guess, or invent estleg: identifiers or URIs. Cite only what
+  you can name in human-readable form; an invented identifier produces a broken,
+  non-existent reference to a provision that does not exist.
 - If transposing an EU directive, cite the specific article
 - Use clear, unambiguous language appropriate for legislation
 - Paragraphs should be numbered with (1), (2), etc. within the section
@@ -131,7 +135,7 @@ Requirements:
 Return a JSON object:
 {{
   "text": "The full section text in Estonian legislative style",
-  "citations": ["estleg:ActName/par/X", "eu:DirectiveNumber/art/Y"],
+  "citations": ["Halduskoostoo seadus § 13", "32016R0679"],
   "notes": "Optional drafting notes about choices made, in Estonian"
 }}
 """
