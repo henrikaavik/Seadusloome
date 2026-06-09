@@ -106,6 +106,11 @@ def convert_ontology(repo_path: Path) -> Graph:
                 g = parse_jsonld_file(peep_file)
                 merged += g
                 total += len(g)
+            except UnresolvedLfsPointerError:
+                # An unresolved LFS pointer is an environment failure (git-lfs
+                # didn't materialise the file), not a single-file data problem.
+                # Abort rather than silently publishing a partial graph.
+                raise
             except Exception:
                 logger.exception("Failed to parse %s", peep_file.name)
         entity_counts["enacted_laws"] = total
@@ -129,6 +134,10 @@ def convert_ontology(repo_path: Path) -> Graph:
                 g = parse_jsonld_file(path)
                 merged += g
                 domain_count += len(g)
+            except UnresolvedLfsPointerError:
+                # See note above: an unresolved LFS pointer must abort the
+                # whole sync, not silently drop this domain's data.
+                raise
             except Exception:
                 logger.exception("Failed to parse %s/%s", domain_dir, path.name)
 

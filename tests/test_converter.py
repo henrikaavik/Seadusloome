@@ -8,6 +8,7 @@ import pytest
 from app.sync.converter import (
     UnresolvedLfsPointerError,
     _assert_not_lfs_pointer,
+    convert_ontology,
     load_index,
     parse_jsonld_file,
     serialize_to_turtle,
@@ -35,6 +36,32 @@ def test_parse_jsonld_lfs_pointer_raises(tmp_path: Path):
     with pytest.raises(UnresolvedLfsPointerError, match="Git LFS pointer") as exc_info:
         parse_jsonld_file(pointer)
     assert "combined_ontology.jsonld" in str(exc_info.value)
+
+
+def test_convert_ontology_aborts_on_lfs_pointer_domain_file(tmp_path: Path):
+    # Regression (PR #840): a domain subdirectory file that is an unresolved LFS
+    # pointer must abort the whole sync, not be swallowed by the guarded loop's
+    # broad `except Exception`. Otherwise a partial graph (combined only, no
+    # curia/eurlex) could still be published.
+    krr = tmp_path / "krr_outputs"
+    krr.mkdir()
+
+    # Valid combined file (reuse the real JSON-LD fixture) so the unguarded
+    # combined parse succeeds and contributes triples *before* the domain loop.
+    (krr / "combined_ontology.jsonld").write_bytes((FIXTURES / "sample_peep.json").read_bytes())
+
+    # curia domain file is an unresolved Git LFS pointer.
+    curia = krr / "curia"
+    curia.mkdir()
+    (curia / "curia_combined.jsonld").write_bytes(
+        b"version https://git-lfs.github.com/spec/v1\noid sha256:abc123\nsize 27756872\n"
+    )
+
+    with pytest.raises(UnresolvedLfsPointerError, match="Git LFS pointer") as exc_info:
+        convert_ontology(tmp_path)
+    # Aborted on the domain pointer (after the valid combined file parsed) —
+    # confirms no partial publish path was taken.
+    assert "curia_combined.jsonld" in str(exc_info.value)
 
 
 def test_assert_not_lfs_pointer_allows_normal_json(tmp_path: Path):

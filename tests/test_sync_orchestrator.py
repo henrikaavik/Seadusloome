@@ -21,6 +21,7 @@ never touch the network, the DB, or Jena.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -34,6 +35,7 @@ from app.sync.orchestrator import (
     PHASE_REINGESTING,
     PHASE_UPLOADING,
     PHASE_VALIDATING,
+    GitCommandError,
     _parse_violation_count,
     clone_or_pull,
     run_sync,
@@ -116,6 +118,61 @@ class TestCloneOrPullLfs:
 
         argvs = [_argv_of(call) for call in mock_run.call_args_list]
         assert ["git", "lfs", "pull"] not in argvs
+
+    @patch("app.sync.orchestrator.subprocess.run")
+    def test_lfs_pull_failure_surfaces_stderr(self, mock_run: MagicMock, tmp_path: Path):
+        """A failing ``git lfs pull`` (e.g. LFS bandwidth quota) must raise
+        GitCommandError whose message carries the real git stderr, not the
+        useless "returned non-zero exit status N" that CalledProcessError emits.
+
+        No .git dir exists here, so clone_or_pull takes the clone path and then
+        reaches the LFS pull.
+        """
+
+        def _side_effect(argv, *args, **kwargs):
+            argv = list(argv)
+            if argv == ["git", "lfs", "version"]:
+                # Probe succeeds so _git_lfs_available() is True and we reach
+                # the actual ``git lfs pull``.
+                return MagicMock()
+            if argv == ["git", "lfs", "pull"]:
+                raise subprocess.CalledProcessError(
+                    returncode=2,
+                    cmd=argv,
+                    stderr=b"batch response: This repository is over its data quota.",
+                )
+            # The clone itself succeeds.
+            return MagicMock()
+
+        mock_run.side_effect = _side_effect
+
+        with pytest.raises(GitCommandError, match="data quota") as excinfo:
+            clone_or_pull(tmp_path)
+
+        # The argv of the failing command is echoed so operators can tell
+        # which git invocation blew up.
+        assert "git lfs pull" in str(excinfo.value)
+
+    @patch("app.sync.orchestrator.subprocess.run")
+    def test_clone_failure_surfaces_stderr(self, mock_run: MagicMock, tmp_path: Path):
+        """A failing ``git clone`` must raise GitCommandError containing the
+        real git stderr — LFS smudge can fail during the clone itself when
+        git-lfs is installed system-wide (prod)."""
+
+        def _side_effect(argv, *args, **kwargs):
+            argv = list(argv)
+            if argv[:2] == ["git", "clone"]:
+                raise subprocess.CalledProcessError(
+                    returncode=128,
+                    cmd=argv,
+                    stderr=b"fatal: could not read from remote",
+                )
+            return MagicMock()
+
+        mock_run.side_effect = _side_effect
+
+        with pytest.raises(GitCommandError, match="could not read from remote"):
+            clone_or_pull(tmp_path)
 
 
 # ---------------------------------------------------------------------------

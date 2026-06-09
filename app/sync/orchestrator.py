@@ -266,23 +266,37 @@ def has_recent_running_row(max_age_minutes: int = 30) -> bool:
         return False
 
 
+class GitCommandError(RuntimeError):
+    """A git/git-lfs subprocess failed. The message includes decoded stderr.
+
+    ``subprocess.CalledProcessError.__str__`` reports only the exit status and
+    drops the captured stderr, so the sync's outer handler would otherwise
+    record a useless "returned non-zero exit status N" for Git-LFS bandwidth /
+    auth / network failures. This wrapper surfaces the actual git output.
+    """
+
+
+def _run_git(args: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess:
+    """Run a git command, raising GitCommandError with decoded output on failure."""
+    try:
+        return subprocess.run(args, cwd=cwd, check=True, capture_output=True)
+    except FileNotFoundError as e:
+        raise GitCommandError(f"`{' '.join(args)}` failed: {e}") from e
+    except subprocess.CalledProcessError as e:
+        stderr = (e.stderr or b"").decode("utf-8", errors="replace").strip()
+        stdout = (e.stdout or b"").decode("utf-8", errors="replace").strip()
+        detail = stderr or stdout or "(no output)"
+        raise GitCommandError(f"`{' '.join(args)}` failed (exit {e.returncode}): {detail}") from e
+
+
 def clone_or_pull(target_dir: Path) -> None:
     """Clone or pull the ontology repo, then materialise Git LFS objects."""
     if (target_dir / ".git").exists():
         logger.info("Pulling latest changes...")
-        subprocess.run(
-            ["git", "pull", "--ff-only"],
-            cwd=target_dir,
-            check=True,
-            capture_output=True,
-        )
+        _run_git(["git", "pull", "--ff-only"], cwd=target_dir)
     else:
         logger.info("Cloning ontology repo...")
-        subprocess.run(
-            ["git", "clone", "--depth", "1", ONTOLOGY_REPO, str(target_dir)],
-            check=True,
-            capture_output=True,
-        )
+        _run_git(["git", "clone", "--depth", "1", ONTOLOGY_REPO, str(target_dir)])
     # Since the 2026-05-27 corpus refresh the big JSON-LD files are stored
     # via Git LFS. Materialise them on both the clone and pull paths so the
     # converter sees real content rather than 130-byte pointer stubs.
@@ -323,7 +337,7 @@ def _fetch_lfs_objects(target_dir: Path) -> None:
         )
         return
     logger.info("Fetching Git LFS objects...")
-    subprocess.run(["git", "lfs", "pull"], cwd=target_dir, check=True, capture_output=True)
+    _run_git(["git", "lfs", "pull"], cwd=target_dir)
     logger.info("Git LFS objects fetched")
 
 
