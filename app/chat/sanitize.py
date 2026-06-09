@@ -104,6 +104,15 @@ _CITATION_PATTERNS: tuple[re.Pattern[str], ...] = (
 # inside code / pre blocks).
 _SKIP_CITATION_PARENTS: frozenset[str] = frozenset({"a", "code", "pre"})
 
+# estleg: ontology URIs are identifiers, NOT live web pages -- the
+# ``data.riik.ee`` host is the ontology namespace, not a hosted resolver.
+# When the LLM emits one (e.g. a fabricated ``…/estleg#HKTS_Par_13``),
+# markdown/bleach auto-linkify turns it into a dead external link. We
+# rewrite any such anchor to an in-app ``/explorer?focus=<uri>`` deep link
+# so it resolves against our own data (or shows the explorer's graceful
+# "not found") instead of sending the user to a broken external page.
+_ESTLEG_URI_RE = re.compile(r"^https?://data\.riik\.ee/ontology/estleg#\S+$")
+
 
 # ---------------------------------------------------------------------------
 # Markdown renderer
@@ -217,11 +226,33 @@ def _wrap_citations_in_text(soup: BeautifulSoup) -> None:
             anchor_point = node
 
 
+def _rewrite_ontology_uris(soup: BeautifulSoup) -> None:
+    """Rewrite bare estleg: namespace links to internal explorer focus links.
+
+    ``data.riik.ee`` is the ontology namespace, not a hosted resolver, so a
+    linkified ``estleg#…`` URI is a dead external link even for a real
+    provision (and a fabricated one is doubly broken). Point it at
+    ``/explorer?focus=<uri>`` instead -- an in-app link that resolves the
+    entity, or shows the explorer's graceful "not found" -- and drop the
+    external ``target``/``rel`` attrs since it is now a same-origin link.
+    """
+    for anchor in soup.find_all("a", href=True):
+        href = str(anchor["href"])
+        if not _ESTLEG_URI_RE.match(href):
+            continue
+        anchor["href"] = f"/explorer?focus={quote_plus(href)}"
+        anchor["class"] = ["citation-link"]  # type: ignore[assignment]
+        for attr in ("target", "rel"):
+            if anchor.has_attr(attr):
+                del anchor[attr]
+
+
 def _apply_citation_links(html_fragment: str) -> str:
     """Post-process HTML to wrap Estonian/EU legal citations in anchors."""
     if not html_fragment:
         return html_fragment
     soup = BeautifulSoup(html_fragment, "html.parser")
+    _rewrite_ontology_uris(soup)
     _wrap_citations_in_text(soup)
     return str(soup)
 
