@@ -8,6 +8,19 @@ from rdflib import Graph
 
 logger = logging.getLogger(__name__)
 
+# Git LFS pointer files begin with this magic line. When the ontology repo's
+# LFS-tracked files (combined_ontology.jsonld and the curia/eurlex combined
+# graphs, LFS since 2026-05-27) are cloned without git-lfs, these ~130-byte
+# pointer stubs land on disk instead of real content. Parsing one as JSON-LD
+# yields the cryptic orjson error "unexpected character: line 1 column 1
+# (char 0)"; detecting it here lets us raise an actionable message instead.
+_LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1"
+
+
+class UnresolvedLfsPointerError(RuntimeError):
+    """Raised when an ontology file on disk is an unresolved Git LFS pointer."""
+
+
 DOMAINS = {
     "riigiteataja": "Enacted laws (Riigi Teataja)",
     "eelnoud": "Draft legislation (eelnõud)",
@@ -27,8 +40,31 @@ def load_index(repo_path: Path) -> list[dict]:  # type: ignore[type-arg]
     return data.get("laws", [])  # type: ignore[no-any-return]
 
 
+def _assert_not_lfs_pointer(path: Path) -> None:
+    """Raise :class:`UnresolvedLfsPointerError` if *path* is a Git LFS pointer.
+
+    Pointer files are tiny text stubs beginning with the LFS magic prefix; we
+    read only the first bytes so a real multi-hundred-MB JSON-LD file is never
+    slurped into memory by this check.
+    """
+    try:
+        with open(path, "rb") as f:
+            head = f.read(len(_LFS_POINTER_PREFIX))
+    except OSError:
+        # Unreadable here -> let the normal parse path surface the error.
+        return
+    if head == _LFS_POINTER_PREFIX:
+        raise UnresolvedLfsPointerError(
+            f"{path.name} is an unresolved Git LFS pointer — git-lfs is not "
+            f"installed or 'git lfs pull' did not run in the sync environment. "
+            f"The ontology repo stores this file via Git LFS; install git-lfs "
+            f"so the clone materialises real content (see docker/Dockerfile)."
+        )
+
+
 def parse_jsonld_file(path: Path) -> Graph:
     """Parse a single JSON-LD file into an rdflib Graph."""
+    _assert_not_lfs_pointer(path)
     g = Graph()
     g.parse(str(path), format="json-ld")
     return g
@@ -70,6 +106,11 @@ def convert_ontology(repo_path: Path) -> Graph:
                 g = parse_jsonld_file(peep_file)
                 merged += g
                 total += len(g)
+            except UnresolvedLfsPointerError:
+                # An unresolved LFS pointer is an environment failure (git-lfs
+                # didn't materialise the file), not a single-file data problem.
+                # Abort rather than silently publishing a partial graph.
+                raise
             except Exception:
                 logger.exception("Failed to parse %s", peep_file.name)
         entity_counts["enacted_laws"] = total
@@ -93,6 +134,10 @@ def convert_ontology(repo_path: Path) -> Graph:
                 g = parse_jsonld_file(path)
                 merged += g
                 domain_count += len(g)
+            except UnresolvedLfsPointerError:
+                # See note above: an unresolved LFS pointer must abort the
+                # whole sync, not silently drop this domain's data.
+                raise
             except Exception:
                 logger.exception("Failed to parse %s/%s", domain_dir, path.name)
 

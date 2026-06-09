@@ -43,15 +43,27 @@ RUN printf '{"app": "0.1.0", "sha": "%s", "built_at": "%s"}\n' \
 # Runtime stage
 FROM python:3.13-slim
 
-# Install curl for HEALTHCHECK and git for the sync pipeline.
+# Install curl for HEALTHCHECK, git for the sync pipeline, and git-lfs for
+# large ontology files.
 # curl: used by the /api/ping HEALTHCHECK below.
 # git: app/sync/orchestrator.py clones/pulls the Estonian Legal Ontology repo
 #      via subprocess. Without git the sync silently fails and Jena stays
 #      empty, which is how we debugged the "Jena has no data" issue at the
 #      end of Phase 1.5.
+# git-lfs: as of the 2026-05-27 corpus refresh, the ontology repo stores its
+#      large JSON-LD files (combined_ontology.jsonld ~179 MB, plus curia/eurlex
+#      combined graphs) via Git LFS. Without git-lfs, `git clone` writes
+#      130-byte LFS pointer files to disk instead of real content, and the
+#      JSON-LD parser crashes with "unexpected character: line 1 column 1".
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl git && \
+    apt-get install -y --no-install-recommends curl git git-lfs && \
     rm -rf /var/lib/apt/lists/*
+
+# Register the LFS smudge filter system-wide so that every subsequent
+# `git clone` or `git lfs pull` in the container (including the ones
+# called by app/sync/orchestrator.py) materialises LFS content
+# automatically. Must run as root, before the USER appuser switch below.
+RUN git lfs install --system
 
 # §4.3 LibreOffice base image (Eelnõud sprint plan 2026-05-02).
 # Installed here so the deploy risk is validated independently before any
