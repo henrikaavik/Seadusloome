@@ -208,3 +208,46 @@ class TestPlaintextSafe:
     def test_ampersand_is_escaped(self):
         out = render_plaintext_safe("a & b")
         assert "&amp;" in out
+
+
+# ---------------------------------------------------------------------------
+# estleg: ontology URI rewriting (#chat-citation-uri-hallucination)
+# ---------------------------------------------------------------------------
+
+
+class TestOntologyUriRewrite:
+    """A bare estleg: URI must become an in-app /explorer?focus= link, never
+    a dead external link to the data.riik.ee namespace."""
+
+    _URI = "https://data.riik.ee/ontology/estleg#HKTS_Par_13"
+
+    def test_estleg_uri_rewritten_to_explorer_focus(self):
+        out = render_markdown_safe(f"Vaata {self._URI} lahemalt.")
+        # rewritten to an internal explorer deep link...
+        assert "/explorer?focus=" in out
+        assert "HKTS_Par_13" in out
+        # ...and NOT left as a clickable external data.riik.ee link.
+        assert 'href="https://data.riik.ee' not in out
+
+    def test_estleg_uri_link_is_same_origin(self):
+        # Internal link must drop the external target/rel attrs.
+        out = render_markdown_safe(self._URI)
+        assert 'target="_blank"' not in out
+        assert "citation-link" in out
+
+    def test_markdown_estleg_link_is_rewritten(self):
+        out = render_markdown_safe(f"[HKTS § 13]({self._URI})")
+        assert "/explorer?focus=" in out
+        assert 'href="https://data.riik.ee' not in out
+
+    def test_normal_external_url_still_linkified_externally(self):
+        # Regression: non-estleg URLs keep their normal external linkify.
+        out = render_markdown_safe("See https://example.com for info.")
+        assert 'href="https://example.com"' in out
+        assert 'target="_blank"' in out
+
+    def test_estleg_uri_inside_code_is_not_rewritten(self):
+        # Code spans are never linkified, so nothing to rewrite.
+        out = render_markdown_safe(f"`{self._URI}`")
+        assert "/explorer?focus=" not in out
+        assert "HKTS_Par_13" in out

@@ -103,6 +103,13 @@
   // Tags whose TEXT content must NOT be relinked
   const SKIP_CITATION_TAGS = new Set(['a', 'code', 'pre', 'script', 'style']);
 
+  // estleg: ontology URIs are identifiers, NOT live web pages — the
+  // data.riik.ee host is the ontology namespace, not a hosted resolver.
+  // marked's GFM autolink turns a bare estleg URI into a dead external
+  // link, so rewrite it to an in-app /explorer?focus= deep link.
+  // Mirrors the server-side _rewrite_ontology_uris() in app/chat/sanitize.py.
+  const ESTLEG_URI_RE = /^https?:\/\/data\.riik\.ee\/ontology\/estleg#\S+$/;
+
   // --------------------------------------------------------------------------
   // State
   // --------------------------------------------------------------------------
@@ -506,7 +513,28 @@
     if (!textEl) return;
     const html = DOMPurify.sanitize(marked.parse(text), PURIFY_CONFIG);
     textEl.innerHTML = html;
+    rewriteOntologyUris(textEl);
     linkifyCitations(textEl);
+  }
+
+  /**
+   * Rewrite bare estleg: namespace links (created by marked's autolinker
+   * from a raw URI in the reply) into in-app /explorer?focus=<uri> deep
+   * links. data.riik.ee is the ontology namespace, not a hosted page, so
+   * the autolinked href is a dead external link — point it at our own
+   * explorer instead and drop the external target/rel attrs. Mirrors the
+   * server-side _rewrite_ontology_uris() in app/chat/sanitize.py.
+   */
+  function rewriteOntologyUris(root) {
+    const anchors = root.querySelectorAll('a[href]');
+    for (const anchor of anchors) {
+      const href = anchor.getAttribute('href');
+      if (!href || !ESTLEG_URI_RE.test(href)) continue;
+      anchor.setAttribute('href', '/explorer?focus=' + encodeURIComponent(href));
+      anchor.className = 'citation-link';
+      anchor.removeAttribute('target');
+      anchor.removeAttribute('rel');
+    }
   }
 
   // --------------------------------------------------------------------------
