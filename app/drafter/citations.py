@@ -26,13 +26,26 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any
+from typing import Any, Protocol
 
 from app.docs.entity_extractor import ExtractedRef
 from app.docs.reference_resolver import ReferenceResolver
 from app.docs.report_routes import explorer_focus_url
 
 logger = logging.getLogger(__name__)
+
+
+class _ResolverLike(Protocol):
+    """Structural type for the resolver dependency.
+
+    The real :class:`ReferenceResolver` satisfies this, and so does any test
+    double — ``resolve_citations`` only needs a ``resolve(refs)`` method, so
+    typing the parameter structurally keeps it injectable without coupling
+    callers (or tests) to the concrete class.
+    """
+
+    def resolve(self, refs: list[ExtractedRef]) -> list[Any]: ...
+
 
 # Legacy pseudo-URI forms the OLD drafter prompt asked the model to emit,
 # e.g. "[estleg:TsiviilS/par/3]" and "[eu:2016-679/art/6]". The resolver's
@@ -135,7 +148,7 @@ def coerce_citation(item: Any) -> dict[str, Any]:
 def resolve_citations(
     raw_citations: list[Any] | None,
     *,
-    resolver: ReferenceResolver | None = None,
+    resolver: _ResolverLike | None = None,
 ) -> list[dict[str, Any]]:
     """Resolve raw drafter citation strings into enriched citation dicts.
 
