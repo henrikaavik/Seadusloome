@@ -163,7 +163,12 @@ def build_drafter_docx(
     for clause in clauses:
         for raw in clause.get("citations", []):
             cit = coerce_citation(raw)
-            coerced.setdefault(cit["text"], cit)
+            existing = coerced.get(cit["text"])
+            # Prefer a verified entry when the same citation text appears
+            # more than once (e.g. a legacy/unverified copy before a
+            # verified one) so we never downgrade a confirmed citation.
+            if existing is None or (cit["verified"] and not existing["verified"]):
+                coerced[cit["text"]] = cit
 
     if coerced:
         doc.add_section(WD_SECTION.NEW_PAGE)

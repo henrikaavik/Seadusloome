@@ -194,6 +194,14 @@ VTK_STRUCTURE = {
     ],
 }
 
+_VTK_CITATION_GUIDANCE = (
+    "When citing existing law, cite human-readably by law name and section "
+    '(e.g. "Halduskoostoo seadus § 13" or "HKTS § 13"), EU acts by CELEX '
+    "number, and court decisions by case number. NEVER construct, guess, or "
+    "invent estleg: identifiers or URIs — an invented identifier is a broken "
+    "reference to a provision that does not exist.\n\n"
+)
+
 VTK_SECTION_PROMPTS: dict[str, str] = {
     "Probleemi olemus": _PROMPT_INJECTION_PREAMBLE
     + """\
@@ -395,4 +403,14 @@ Describe:
 
 Return JSON: {{"text": "...", "citations": [...], "notes": "..."}}
 """,
+}
+
+# Inject the citation guardrail into every VTK section prompt immediately
+# before its ``Return JSON:`` line. Each prompt contains exactly one
+# ``Return JSON:`` substring, so ``str.replace`` hits each one once. The
+# guidance text contains no ``{`` / ``}`` characters, so the ``{intent}`` /
+# ``{relevant_research}`` / ``{{...}}`` format placeholders are untouched.
+VTK_SECTION_PROMPTS = {
+    name: prompt.replace("Return JSON:", _VTK_CITATION_GUIDANCE + "Return JSON:")
+    for name, prompt in VTK_SECTION_PROMPTS.items()
 }

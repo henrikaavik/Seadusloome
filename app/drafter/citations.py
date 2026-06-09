@@ -29,7 +29,7 @@ import re
 from typing import Any, Protocol
 
 from app.docs.entity_extractor import ExtractedRef
-from app.docs.reference_resolver import ReferenceResolver
+from app.docs.reference_resolver import get_default_resolver
 from app.docs.report_routes import explorer_focus_url
 
 logger = logging.getLogger(__name__)
@@ -106,15 +106,39 @@ def _classify(raw: str) -> tuple[str, str]:
     return "law", text
 
 
+def _is_ontology_uri(uri: object) -> bool:
+    """True only for a real http(s) ontology URI.
+
+    Guards the ``verified`` flag and the rendered href against pseudo-URIs or
+    hostile values (``javascript:…``, ``estleg:Fake``): only a genuine
+    http(s) URI returned by the resolver counts as a verified citation.
+    """
+    return isinstance(uri, str) and uri.startswith(("http://", "https://"))
+
+
 def _enriched(text: str, *, resolved_uri: str | None, label: str | None) -> dict[str, Any]:
-    """Build the canonical enriched-citation dict."""
-    verified = bool(resolved_uri)
+    """Build the canonical enriched-citation dict.
+
+    A citation is *verified* only when ``resolved_uri`` is a real http(s)
+    ontology URI. ``explorer_url`` is ALWAYS recomputed from it via
+    ``explorer_focus_url`` (URL-encoded) — never taken from caller input — so
+    a hostile stored ``explorer_url`` can never reach a rendered href.
+    """
+    uri = resolved_uri if _is_ontology_uri(resolved_uri) else None
+    if uri is None:
+        return {
+            "text": text,
+            "resolved_uri": None,
+            "label": text,
+            "verified": False,
+            "explorer_url": None,
+        }
     return {
         "text": text,
-        "resolved_uri": resolved_uri if verified else None,
-        "label": (label or text) if verified else text,
-        "verified": verified,
-        "explorer_url": explorer_focus_url(resolved_uri) if verified else None,
+        "resolved_uri": uri,
+        "label": label or text,
+        "verified": True,
+        "explorer_url": explorer_focus_url(uri),
     }
 
 
@@ -123,26 +147,32 @@ def coerce_citation(item: Any) -> dict[str, Any]:
     canonical enriched shape WITHOUT re-resolving against Jena.
 
     Render paths use this so they read old sessions (``list[str]``) and new
-    ones (``list[dict]``) uniformly. A legacy string is surfaced as
-    *unverified* — never authoritative — per #842.
+    ones (``list[dict]``) uniformly. It **never trusts** a stored ``verified``
+    or ``explorer_url`` — both are recomputed from ``resolved_uri`` (which
+    must be a real http(s) ontology URI to count as verified). A legacy
+    string is always unverified. So a hostile persisted citation (a fake
+    ``verified=True`` or a ``javascript:`` ``explorer_url``) can never be
+    surfaced as authoritative or as a live link.
     """
     if isinstance(item, dict):
         text = str(item.get("text") or item.get("label") or "")
-        resolved_uri = item.get("resolved_uri") or None
-        verified = bool(item.get("verified")) and resolved_uri is not None
-        return {
-            "text": text,
-            "resolved_uri": resolved_uri if verified else None,
-            "label": str(item.get("label") or text) if verified else text,
-            "verified": verified,
-            "explorer_url": (
-                item.get("explorer_url")
-                or (explorer_focus_url(resolved_uri) if resolved_uri else None)
-            )
-            if verified
-            else None,
-        }
+        raw_label = item.get("label")
+        label = str(raw_label) if raw_label else None
+        return _enriched(text, resolved_uri=item.get("resolved_uri"), label=label)
     return _enriched(str(item), resolved_uri=None, label=None)
+
+
+def _raw_text(item: Any) -> str:
+    """Extract the human-readable citation text from a raw LLM citation.
+
+    The model is asked for plain strings, but a response could contain dicts.
+    We use ONLY the ``text``/``label`` and ignore any caller-supplied
+    verification fields — those are (re)computed by resolution, never trusted
+    from input.
+    """
+    if isinstance(item, dict):
+        return str(item.get("text") or item.get("label") or "")
+    return str(item)
 
 
 def resolve_citations(
@@ -150,56 +180,47 @@ def resolve_citations(
     *,
     resolver: _ResolverLike | None = None,
 ) -> list[dict[str, Any]]:
-    """Resolve raw drafter citation strings into enriched citation dicts.
+    """Resolve raw drafter citations into enriched citation dicts.
 
-    Each raw string is classified, converted to an :class:`ExtractedRef`,
-    and resolved in one batch via :class:`ReferenceResolver`. Verified
-    entries carry the ontology URI + an ``/explorer?focus=`` link; the rest
-    come back unverified so callers can mark them "kontrollimata".
+    Every entry is treated as UNTRUSTED model output: only its text is used
+    (via :func:`_raw_text`), then classified, converted to an
+    :class:`ExtractedRef`, and resolved in one batch via the shared
+    :func:`~app.docs.reference_resolver.get_default_resolver` (a process-wide
+    singleton — the abbreviation map is warmed once, not per clause). A
+    citation is marked ``verified`` only when the ontology returns a real
+    http(s) URI, so a model **cannot** persist a fake "verified" citation by
+    returning a dict with ``verified=True``.
 
     Fails open: any resolver error (e.g. Jena down) downgrades *every*
     citation to unverified rather than raising — drafting and export must
-    never crash on a citation lookup. Already-enriched dicts pass through
-    :func:`coerce_citation` unchanged, so re-running is idempotent.
+    never crash on a citation lookup.
     """
     if not raw_citations:
         return []
 
-    # Collect the raw strings that still need resolution (preserve order).
-    texts = [str(c) for c in raw_citations if not isinstance(c, dict)]
+    texts = [_raw_text(c) for c in raw_citations]
+    refs = [
+        ExtractedRef(ref_text=ref_text, ref_type=ref_type, confidence=1.0)
+        for ref_type, ref_text in (_classify(t) for t in texts)
+    ]
+    runner = resolver if resolver is not None else get_default_resolver()
+    try:
+        results = runner.resolve(refs)
+    except Exception:
+        logger.warning(
+            "drafter citation resolution failed; marking all unverified",
+            exc_info=True,
+        )
+        results = []
 
-    resolved_by_text: dict[str, dict[str, Any]] = {}
-    if texts:
-        refs = [
-            ExtractedRef(ref_text=ref_text, ref_type=ref_type, confidence=1.0)
-            for ref_type, ref_text in (_classify(t) for t in texts)
-        ]
-        runner = resolver if resolver is not None else ReferenceResolver()
-        try:
-            results = runner.resolve(refs)
-        except Exception:
-            logger.warning(
-                "drafter citation resolution failed; marking all unverified",
-                exc_info=True,
-            )
-            results = []
-        for raw_text, res in zip(texts, results):
-            resolved_by_text[raw_text] = _enriched(
-                raw_text,
+    out: list[dict[str, Any]] = []
+    for i, text in enumerate(texts):
+        res = results[i] if i < len(results) else None
+        out.append(
+            _enriched(
+                text,
                 resolved_uri=getattr(res, "entity_uri", None),
                 label=getattr(res, "matched_label", None),
             )
-        # Any text the resolver didn't return (failure / length mismatch).
-        for raw_text in texts:
-            resolved_by_text.setdefault(
-                raw_text, _enriched(raw_text, resolved_uri=None, label=None)
-            )
-
-    # Reassemble in original order, preserving already-enriched dicts.
-    out: list[dict[str, Any]] = []
-    for c in raw_citations:
-        if isinstance(c, dict):
-            out.append(coerce_citation(c))
-        else:
-            out.append(resolved_by_text[str(c)])
+        )
     return out

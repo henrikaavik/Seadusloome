@@ -118,25 +118,61 @@ class TestResolveCitations:
         assert all(c["explorer_url"] is None for c in out)
 
     def test_order_preserved_across_mixed_results(self):
-        resolver = _FakeResolver({"A § 1": "uri:a", "B § 2": None, "C § 3": "uri:c"})
+        ua = "https://data.riik.ee/ontology/estleg#A_Par_1"
+        uc = "https://data.riik.ee/ontology/estleg#C_Par_3"
+        resolver = _FakeResolver({"A § 1": ua, "B § 2": None, "C § 3": uc})
         out = resolve_citations(["A § 1", "B § 2", "C § 3"], resolver=resolver)
         assert [c["text"] for c in out] == ["A § 1", "B § 2", "C § 3"]
         assert [c["verified"] for c in out] == [True, False, True]
 
-    def test_already_enriched_dict_passes_through(self):
-        enriched = {
-            "text": "X § 1",
-            "resolved_uri": "uri:x",
-            "label": "X paragrahv 1",
+    def test_defaults_to_shared_resolver_singleton(self, monkeypatch):
+        # P2a: no resolver passed -> uses the process-wide
+        # get_default_resolver (warms the abbreviation map once), NOT a fresh
+        # ReferenceResolver per clause.
+        calls = []
+        sentinel = _FakeResolver({"HKTS § 13": "https://data.riik.ee/ontology/estleg#HKTS_Par_13"})
+
+        def fake_default():
+            calls.append(1)
+            return sentinel
+
+        monkeypatch.setattr("app.drafter.citations.get_default_resolver", fake_default)
+        out = resolve_citations(["HKTS § 13"])
+        assert calls == [1]
+        assert out[0]["verified"] is True
+
+    def test_dict_input_is_reresolved_from_text_not_trusted(self):
+        # P1 (security): a model could return a dict claiming verified=True
+        # with a hostile href. resolve_citations IGNORES those fields and
+        # re-resolves from the text; here the resolver doesn't know it, so it
+        # stays unverified and the javascript: href is gone.
+        evil = {
+            "text": "Made up § 1",
             "verified": True,
-            "explorer_url": "/explorer?focus=uri%3Ax",
+            "resolved_uri": "estleg:Fake",
+            "label": "Totally Real § 1",
+            "explorer_url": "javascript:alert(1)",
         }
         resolver = _FakeResolver({})
-        out = resolve_citations([enriched], resolver=resolver)
-        assert out[0]["verified"] is True
-        assert out[0]["resolved_uri"] == "uri:x"
-        # Resolver was never asked about an already-enriched dict.
-        assert resolver.seen == []
+        out = resolve_citations([evil], resolver=resolver)
+        assert resolver.seen == [("provision", "Made up § 1")]
+        c = out[0]
+        assert c["verified"] is False
+        assert c["resolved_uri"] is None
+        assert c["explorer_url"] is None
+        assert c["label"] == "Made up § 1"
+
+    def test_dict_input_resolved_when_text_is_real(self):
+        # The same untrusted dict, but its TEXT genuinely resolves -> verified
+        # via the ontology, with a recomputed link (never the input's href).
+        uri = "https://data.riik.ee/ontology/estleg#HKTS_Par_13"
+        evil = {"text": "HKTS § 13", "verified": False, "explorer_url": "javascript:x"}
+        resolver = _FakeResolver({"HKTS § 13": uri})
+        c = resolve_citations([evil], resolver=resolver)[0]
+        assert c["verified"] is True
+        assert c["resolved_uri"] == uri
+        assert (c["explorer_url"] or "").startswith("/explorer?focus=")
+        assert "javascript" not in (c["explorer_url"] or "")
 
 
 # --------------------------------------------------------------------------
@@ -145,16 +181,41 @@ class TestResolveCitations:
 
 
 class TestCoerceCitation:
+    _X_URI = "https://data.riik.ee/ontology/estleg#X_Par_1"
+    _X_FOCUS = "/explorer?focus=https%3A%2F%2Fdata.riik.ee%2Fontology%2Festleg%23X_Par_1"
+
     def test_legacy_string_is_unverified(self):
         c = coerce_citation("estleg:Foo/par/1")
         assert c["verified"] is False
         assert c["text"] == "estleg:Foo/par/1"
         assert c["explorer_url"] is None
 
-    def test_enriched_dict_preserved(self):
-        c = coerce_citation({"text": "X § 1", "resolved_uri": "uri:x", "verified": True})
+    def test_enriched_dict_with_real_uri_is_verified(self):
+        c = coerce_citation({"text": "X § 1", "resolved_uri": self._X_URI, "verified": True})
         assert c["verified"] is True
-        assert c["explorer_url"] == "/explorer?focus=uri%3Ax"
+        assert c["explorer_url"] == self._X_FOCUS
+
+    def test_coerce_ignores_stored_explorer_url_and_recomputes(self):
+        # P1 (security): a hostile stored explorer_url is never used — it is
+        # recomputed from the (validated) resolved_uri.
+        c = coerce_citation(
+            {
+                "text": "X § 1",
+                "resolved_uri": self._X_URI,
+                "verified": True,
+                "explorer_url": "javascript:alert(1)",
+            }
+        )
+        assert c["explorer_url"] == self._X_FOCUS
+        assert "javascript" not in c["explorer_url"]
+
+    def test_coerce_rejects_non_http_uri_as_unverified(self):
+        # P1: a fake "verified" dict whose resolved_uri is not a real http(s)
+        # URI (pseudo-URI / javascript:) is downgraded to unverified.
+        for bad in ("javascript:alert(1)", "estleg:Fake", "uri:x", ""):
+            c = coerce_citation({"text": "X § 1", "resolved_uri": bad, "verified": True})
+            assert c["verified"] is False
+            assert c["explorer_url"] is None
 
     def test_dict_without_uri_is_unverified(self):
         c = coerce_citation({"text": "X § 1", "verified": True})

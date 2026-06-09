@@ -164,3 +164,24 @@ class TestCitationGuidanceIsHumanReadable:
         # Sanity: neither legacy scheme prefix appears in the example line.
         assert "estleg:ActName" not in DRAFT_PROMPT
         assert "eu:DirectiveNumber" not in DRAFT_PROMPT
+
+    def test_every_vtk_prompt_carries_citation_guardrail(self):
+        """Each VTK section prompt must carry the same human-readable citation
+        guardrail as DRAFT_PROMPT (#843): VTK generation uses these prompts, so
+        they must instruct the model to cite human-readably and never invent
+        ``estleg:`` identifiers.
+        """
+        for title, prompt in VTK_SECTION_PROMPTS.items():
+            # The 'never invent identifiers' instruction is present.
+            assert "NEVER construct, guess, or invent estleg:" in prompt, (
+                f"VTK prompt for '{title}' is missing the citation guardrail"
+            )
+            # Human-readable section symbol is shown.
+            assert "§" in prompt, f"VTK prompt for '{title}' is missing the '§' symbol"
+            # Neither fabricated pseudo-URI form may appear.
+            assert "[estleg:" not in prompt, (
+                f"VTK prompt for '{title}' contains a fabricated '[estleg:...]' citation"
+            )
+            assert "/par/" not in prompt, (
+                f"VTK prompt for '{title}' contains a '/par/' pseudo-URI path"
+            )

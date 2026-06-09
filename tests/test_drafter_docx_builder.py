@@ -105,3 +105,69 @@ def test_legacy_string_is_marked(tmp_path, monkeypatch):
     assert any("kontrollimata viide: estleg:Bar/par/1" in t for t in texts), (
         "legacy raw-string citation must be marked kontrollimata"
     )
+
+
+def test_verified_wins_when_unverified_duplicate_comes_first(tmp_path, monkeypatch):
+    """A verified citation must stay authoritative even when an unverified
+    copy with the same text appears earlier (regression for PR #843 review):
+    the appendix dedupe keyed on citation text must prefer the verified entry
+    regardless of clause/citation order, so it never downgrades to the
+    "kontrollimata viide: ..." form.
+    """
+    monkeypatch.setenv("EXPORT_DIR", str(tmp_path))
+
+    clauses = [
+        {
+            "chapter": "1",
+            "paragraph": "§ 1",
+            "text": "Esimene klausel.",
+            "citations": [
+                # Unverified copy of "HKTS § 13" appears FIRST.
+                {"text": "HKTS § 13", "verified": False},
+            ],
+        },
+        {
+            "chapter": "1",
+            "paragraph": "§ 2",
+            "text": "Teine klausel.",
+            "citations": [
+                # Verified copy of the SAME text appears later.
+                {
+                    "text": "HKTS § 13",
+                    "verified": True,
+                    "label": "HKTS § 13",
+                    "resolved_uri": "https://data.riik.ee/ontology/estleg#HKTS_Par_13",
+                },
+            ],
+        },
+    ]
+    structure = {
+        "chapters": [
+            {
+                "number": "1",
+                "title": "Üldsätted",
+                "sections": [
+                    {"paragraph": "§ 1", "title": "Reguleerimisala"},
+                    {"paragraph": "§ 2", "title": "Mõisted"},
+                ],
+            }
+        ]
+    }
+
+    out_path = build_drafter_docx(
+        session_id="test-session-dupe",
+        title="Testeelnõu",
+        workflow_type="full_law",
+        structure=structure,
+        clauses=clauses,
+    )
+    texts = _appendix_texts(out_path)
+
+    hkts_lines = [t for t in texts if "HKTS § 13" in t]
+    assert hkts_lines, "HKTS § 13 citation line missing from appendix"
+    # The merged entry must be authoritative — never downgraded by the
+    # earlier unverified duplicate.
+    for line in hkts_lines:
+        assert "kontrollimata" not in line, (
+            f"verified citation must win over an earlier unverified duplicate: {line!r}"
+        )
