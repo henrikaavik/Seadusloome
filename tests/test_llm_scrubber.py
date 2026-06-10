@@ -1,8 +1,9 @@
 """Unit tests for :mod:`app.llm.scrubber`.
 
 Covers the pattern set required by NFR §7.1 (emails, Estonian / E.164
-phone numbers, UUIDs, PEM keys, JWT and ``sk-``/``pk_`` tokens), the
-``allow_raw`` opt-out, and the message-shape preservation contract of
+phone numbers, UUIDs, PEM keys, JWT and ``sk-``/``pk_`` tokens,
+Estonian isikukoodid and EE IBANs per issue #846), the ``allow_raw``
+opt-out, and the message-shape preservation contract of
 :func:`scrub_messages`.
 """
 
@@ -88,6 +89,65 @@ class TestScrubPromptPatterns:
         plain = "See on tavaline lause ilma isikuandmeteta."
         assert scrub_prompt(plain) == plain
 
+    # --- Estonian isikukood (#846) -------------------------------------
+
+    def test_isikukood_male_redacted(self) -> None:
+        out = scrub_prompt("kaebaja isikukood 38501010002 esitas taotluse")
+        assert "38501010002" not in out
+        assert out == "kaebaja isikukood [REDACTED_ISIKUKOOD] esitas taotluse"
+
+    def test_isikukood_female_2000s_redacted(self) -> None:
+        out = scrub_prompt("isik 60002290003 on registreeritud")
+        assert out == "isik [REDACTED_ISIKUKOOD] on registreeritud"
+
+    def test_isikukood_372_prefix_not_mislabelled_as_phone(self) -> None:
+        # A bare isikukood starting with 372 (male born 1972) must win
+        # over the Estonian phone pattern via list ordering.
+        out = scrub_prompt("isikukood 37201010002")
+        assert out == "isikukood [REDACTED_ISIKUKOOD]"
+
+    def test_invalid_isikukood_first_digit_unchanged(self) -> None:
+        # First digit 9 is not a valid century/sex digit.
+        plain = "number 99901010002 ei ole isikukood"
+        assert scrub_prompt(plain) == plain
+
+    def test_invalid_isikukood_month_unchanged(self) -> None:
+        # Month 91 fails the [01]\d constraint.
+        plain = "number 48191010002 ei ole isikukood"
+        assert scrub_prompt(plain) == plain
+
+    def test_isikukood_inside_longer_digit_run_unchanged(self) -> None:
+        plain = "viitenumber 3850101000212345 jääb alles"
+        assert scrub_prompt(plain) == plain
+
+    def test_isikukood_in_email_redacted_as_email(self) -> None:
+        out = scrub_prompt("kiri 38501010002@example.com saadetud")
+        assert out == "kiri [REDACTED_EMAIL] saadetud"
+
+    # --- Estonian IBAN (#846) ------------------------------------------
+
+    def test_ee_iban_compact_redacted(self) -> None:
+        out = scrub_prompt("konto EE382200221020145685 makse")
+        assert out == "konto [REDACTED_IBAN] makse"
+
+    def test_ee_iban_grouped_redacted(self) -> None:
+        out = scrub_prompt("konto EE38 2200 2210 2014 5685 makse")
+        assert out == "konto [REDACTED_IBAN] makse"
+
+    def test_short_ee_prefix_unchanged(self) -> None:
+        plain = "direktiiv EE12 3456 ei ole IBAN"
+        assert scrub_prompt(plain) == plain
+
+    def test_foreign_iban_unchanged(self) -> None:
+        # Only Estonian IBANs are in scope for the EE pattern.
+        plain = "konto SE3550000000054910000003"
+        assert scrub_prompt(plain) == plain
+
+    def test_phone_still_redacted_alongside_isikukood(self) -> None:
+        out = scrub_prompt("isik 38501010002, tel +37256789012")
+        assert "[REDACTED_ISIKUKOOD]" in out
+        assert "[REDACTED_PHONE]" in out
+
 
 class TestAllowRaw:
     def test_allow_raw_preserves_prompt(self) -> None:
@@ -169,4 +229,6 @@ class TestPatternList:
             "[REDACTED_UUID]",
             "[REDACTED_TOKEN]",
             "[REDACTED_KEY]",
+            "[REDACTED_ISIKUKOOD]",
+            "[REDACTED_IBAN]",
         }
