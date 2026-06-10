@@ -47,6 +47,7 @@ from __future__ import annotations
 from fasthtml.common import *  # noqa: F403
 
 from app.ui.primitives.icon import Icon
+from app.ui.safe_url import quote_uri_param
 
 # Placeholder strings — kept module-level so the mobile full-screen page can
 # reuse the long form. Estonian-first; do not translate.
@@ -217,7 +218,10 @@ def _entity_group(entities: list[dict]):  # noqa: ANN202
             A(  # noqa: F405
                 Div(label, cls="global-search-row-label"),  # noqa: F405
                 Div(short_type, cls="global-search-row-meta") if short_type else "",  # noqa: F405
-                href=f"/explorer?focus={uri}",
+                # #848: URL-encode the focus param so ``&``/``#``/``?`` in a
+                # SPARQL-derived URI can't truncate the query string and land
+                # the deep link on the wrong (or no) focus.
+                href=f"/explorer?focus={quote_uri_param(uri)}",
                 role="option",
                 cls="global-search-row global-search-row--entity",
                 tabindex="-1",

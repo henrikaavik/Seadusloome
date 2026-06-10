@@ -230,6 +230,37 @@ class TestMarkSingleRead:
 
     @patch("app.notifications.routes._require_auth")
     @patch("app.notifications.routes._connect")
+    def test_rejects_backslash_normalized_redirect_target(self, mock_connect, mock_auth):
+        """#848: ``/\\evil.com`` normalises to ``//evil.com`` in browsers —
+        it must not be forwarded as an HX-Redirect."""
+        mock_auth.return_value = _AUTH
+        conn = MagicMock()
+        mock_connect.return_value = _ConnectCM(conn)
+
+        fresh_notif = _make_notification(read=True)
+        with (
+            patch("app.notifications.routes.mark_read"),
+            patch(
+                "app.notifications.routes.get_notification",
+                return_value=fresh_notif,
+            ),
+        ):
+            req = _make_request(
+                path=f"/notifications/{_NOTIF_ID}/read",
+                method="POST",
+                # ``/\evil.com`` percent-encoded.
+                query_string=b"redirect=%2F%5Cevil.com",
+            )
+            result = mark_single_read(req, str(_NOTIF_ID))
+
+        if isinstance(result, Response):
+            assert result.headers.get("HX-Redirect") is None
+        else:
+            html = to_xml(result)
+            assert "evil.com" not in html
+
+    @patch("app.notifications.routes._require_auth")
+    @patch("app.notifications.routes._connect")
     def test_returns_rendered_read_state_item_when_no_redirect(self, mock_connect, mock_auth):
         """Bug 2: marking a non-link notification must return a re-rendered
         read-state notification item — not a bare Span that collapses the
@@ -316,6 +347,91 @@ class TestNotificationItemRendering:
         # No stale "Loe" button must remain.
         assert "Loe" not in html
         assert "notification-mark-btn" not in html
+
+
+# ---------------------------------------------------------------------------
+# #848: notification link gating — a user-influenced unsafe link must never
+# land in an <a href>; safe internal/absolute links still render as links.
+# ---------------------------------------------------------------------------
+
+
+class TestNotificationLinkGating:
+    def test_unsafe_link_does_not_render_as_href(self):
+        """An unread notification with a ``javascript:`` link must NOT
+        produce an ``<a href>`` — it falls through to the non-link
+        wrapper so the scheme is never clickable."""
+        notif = _make_notification(read=False, link="javascript:alert(1)")
+
+        html = to_xml(NotificationItem(notif))
+
+        assert 'href="javascript:' not in html
+        assert "href='javascript:" not in html
+        # Falls through to the non-link wrapper (with the "Loe" button).
+        assert f'id="notification-wrapper-{_NOTIF_ID}"' in html
+
+    def test_unsafe_read_link_does_not_render_as_href(self):
+        """Even a read notification with an unsafe link renders non-link."""
+        notif = _make_notification(read=True, link="data:text/html,<script>1</script>")
+
+        html = to_xml(NotificationItem(notif))
+
+        assert "href=" not in html or 'href="data:' not in html
+        assert 'href="data:' not in html
+
+    def test_safe_relative_link_renders_as_href(self):
+        """Same-origin relative links (the shape every notify() caller
+        emits today) still render as a clickable anchor."""
+        notif = _make_notification(read=False, link="/drafts/abc")
+
+        html = to_xml(NotificationItem(notif))
+
+        assert 'href="/drafts/abc"' in html
+        assert "notification-link" in html
+
+    def test_safe_absolute_http_link_renders_as_href(self):
+        notif = _make_notification(read=True, link="https://example.org/x")
+
+        html = to_xml(NotificationItem(notif))
+
+        assert 'href="https://example.org/x"' in html
+
+
+class TestIsSafeRedirect:
+    """#848: the open-redirect guard must reject backslash variants that
+    browsers normalise to ``//evil.com``."""
+
+    def test_rejects_backslash_normalized_open_redirect(self):
+        from app.notifications.routes import _is_safe_redirect
+
+        assert _is_safe_redirect("/\\evil.com") is False
+        assert _is_safe_redirect("/\\\\evil.com") is False
+
+    def test_rejects_protocol_relative_and_absolute(self):
+        from app.notifications.routes import _is_safe_redirect
+
+        assert _is_safe_redirect("//evil.com") is False
+        assert _is_safe_redirect("https://evil.com") is False
+        assert _is_safe_redirect("javascript:alert(1)") is False
+        assert _is_safe_redirect("") is False
+
+    def test_accepts_same_origin_relative_path(self):
+        from app.notifications.routes import _is_safe_redirect
+
+        assert _is_safe_redirect("/drafts/abc") is True
+        assert _is_safe_redirect("/admin/costs") is True
+
+
+class TestIsSafeLink:
+    def test_combines_relative_and_absolute_policies(self):
+        from app.notifications.routes import _is_safe_link
+
+        assert _is_safe_link("/drafts/abc") is True
+        assert _is_safe_link("https://example.org/x") is True
+        assert _is_safe_link("javascript:alert(1)") is False
+        assert _is_safe_link("//evil.example") is False
+        assert _is_safe_link("/\\evil.example") is False
+        assert _is_safe_link(None) is False
+        assert _is_safe_link("") is False
 
 
 # ---------------------------------------------------------------------------
