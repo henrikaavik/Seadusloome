@@ -35,6 +35,11 @@ htmlcov/
 # Docker
 docker/data/
 
+# Generated draft/report artifacts (#845) — encrypted uploads and rendered
+# .docx/.pdf exports must never be committed; EXPORT_DIR/STORAGE_DIR default
+# under ./storage in development.
+storage/
+
 # FastHTML
 .sesskey
 

@@ -29,7 +29,10 @@ Environment:
                  ``/var/seadusloome/exports`` otherwise. Unlike
                  ``STORAGE_DIR`` this value is not secret, so a
                  missing env var off-dev silently falls back to the
-                 prod default (no ``RuntimeError``).
+                 prod default (no ``RuntimeError``). With
+                 ``APP_ENV=production`` a value that resolves inside
+                 the application source tree fails closed at import
+                 time (#845) — see :func:`_resolve_export_dir`.
 """
 
 from __future__ import annotations
@@ -107,27 +110,80 @@ _REPORT_COLUMN_INDEX = {
 
 # ---------------------------------------------------------------------------
 # EXPORT_DIR resolution (same pattern as STORAGE_DIR in app/storage/encrypted.py)
+#
+# #845 (C2): this block is the SINGLE shared resolution path for every
+# module that writes rendered export artifacts (impact reports here,
+# drafter exports via app/drafter/docx_builder.py). Keeping the
+# production fail-closed guard in one place means neither writer can
+# drift back to an in-repo default behind the other's back.
 # ---------------------------------------------------------------------------
 
 
-def _load_export_dir() -> Path:
-    """Return the root export directory with a dev-friendly default.
+# Root of the deployed source tree (…/app/docs/docx_export.py → repo root).
+# Rendered exports contain decrypted, politically sensitive draft content;
+# in production they must never land inside the code checkout where a
+# stray ``git add`` / image rebuild could pick them up (#845).
+_SOURCE_TREE_ROOT = Path(__file__).resolve().parents[2]
 
-    Unlike STORAGE_DIR this value is not secret, so we do not raise a
-    RuntimeError when unset in prod — the default prod path is simply
-    used as a fallback.
+
+def _resolve_export_dir(raw: str | None, app_env: str) -> Path:
+    """Resolve the export directory from *raw* (``EXPORT_DIR``) + *app_env*.
+
+    Defaults: ``./storage/exports`` in development, ``/var/seadusloome/exports``
+    otherwise. Unlike STORAGE_DIR this value is not secret, so a missing
+    env var off-dev silently falls back to the prod default.
+
+    Fail-closed guard (#845): when *app_env* is production (the same
+    "production-like" rule as ``app.config.is_stub_allowed`` — staging
+    that wants prod behaviour sets ``APP_ENV=production``), a directory
+    that resolves inside the application source tree raises
+    ``RuntimeError``. The module-level ``EXPORT_DIR`` alias below runs
+    this at import time, so a misconfigured production deployment
+    refuses to start instead of leaking plaintext exports into the repo.
     """
-    raw = os.environ.get("EXPORT_DIR")
     if raw:
-        return Path(raw)
-    if os.environ.get("APP_ENV", "development") == "development":
-        return Path("./storage/exports").resolve()
-    return Path("/var/seadusloome/exports")
+        path = Path(raw)
+    elif app_env == "development":
+        path = Path("./storage/exports").resolve()
+    else:
+        path = Path("/var/seadusloome/exports")
+    if app_env == "production":
+        resolved = path.resolve()
+        if resolved == _SOURCE_TREE_ROOT or resolved.is_relative_to(_SOURCE_TREE_ROOT):
+            raise RuntimeError(
+                f"EXPORT_DIR={str(resolved)!r} resolves inside the application "
+                f"source tree ({str(_SOURCE_TREE_ROOT)!r}); refusing to start "
+                "with APP_ENV=production. Point EXPORT_DIR at a path outside "
+                "the deployed code directory, e.g. /var/seadusloome/exports."
+            )
+    return path
+
+
+def _load_export_dir() -> Path:
+    """Return the root export directory with a dev-friendly default."""
+    return _resolve_export_dir(
+        os.environ.get("EXPORT_DIR"),
+        os.environ.get("APP_ENV", "development"),
+    )
+
+
+def get_export_dir(*, create: bool = False) -> Path:
+    """Shared EXPORT_DIR accessor for every export writer (#845).
+
+    Re-reads the environment on every call so tests can monkeypatch
+    ``EXPORT_DIR``, and applies the production in-repo guard from
+    :func:`_resolve_export_dir`. ``create=True`` also mkdir-s the
+    directory (parents included) for callers about to write into it.
+    """
+    path = _load_export_dir()
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def _get_export_dir() -> Path:
     """Re-read ``EXPORT_DIR`` on every call so tests can monkeypatch it."""
-    return _load_export_dir()
+    return get_export_dir()
 
 
 # Convenience alias for callers that want to read the directory once.
