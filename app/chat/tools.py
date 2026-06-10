@@ -570,19 +570,35 @@ async def _exec_get_draft_impact(
                 """,
                 (draft_id, org_id),
             ).fetchone()
+            if row is None:
+                return {"error": f"No impact report found for draft {draft_id}"}
+
+            report_data = row[0]
+            if isinstance(report_data, str):
+                try:
+                    report_data = json.loads(report_data)
+                except json.JSONDecodeError:
+                    pass
+
+            # #844: the report itself is org-scoped by the JOIN above, but
+            # its cross-draft ``conflicts`` rows can still name OTHER orgs'
+            # drafts. Mask them (reusing this open connection) before the
+            # report goes back into the model context — masked output is
+            # exactly what the LLM should see.
+            if isinstance(report_data, dict):
+                from app.docs.impact.masking import mask_stored_conflict_rows
+
+                conflicts = list(report_data.get("conflicts") or [])
+                if conflicts:
+                    masked = mask_stored_conflict_rows(
+                        conflicts, viewer_org_id=str(org_id), conn=conn
+                    )
+                    report_data = dict(report_data)
+                    report_data["conflicts"] = masked
+                    report_data["conflict_count"] = len(masked)
     except Exception:
         logger.exception("Failed to fetch impact report for draft_id=%s", draft_id)
         return {"error": "Failed to read impact report from database"}
-
-    if row is None:
-        return {"error": f"No impact report found for draft {draft_id}"}
-
-    report_data = row[0]
-    if isinstance(report_data, str):
-        try:
-            report_data = json.loads(report_data)
-        except json.JSONDecodeError:
-            pass
 
     return {"report": report_data}
 

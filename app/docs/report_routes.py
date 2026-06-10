@@ -451,6 +451,29 @@ def _parse_report_data(raw: Any) -> dict[str, Any]:
     return {}
 
 
+def _mask_findings_conflicts(findings: dict[str, Any], auth: Any) -> dict[str, Any]:
+    """Return *findings* with its ``conflicts`` list tenant-masked (#844).
+
+    Reports persisted before tenant scoping landed can carry FOREIGN org
+    draft URIs/labels in ``conflicts`` (and a stale adhoc-probe row). Run
+    the stored rows through :func:`app.docs.impact.masking.
+    mask_stored_conflict_rows` so adhoc rows are dropped and cross-org
+    draft identities are blanked before any report consumer renders them.
+    The viewer's org comes from *auth*; ``conflict_count`` is recomputed
+    from the surviving rows so the count stays consistent with what is
+    shown. Returns a shallow copy — the input dict is not mutated.
+    """
+    from app.docs.impact.masking import mask_stored_conflict_rows
+
+    conflicts = list(findings.get("conflicts") or [])
+    viewer_org_id = auth.get("org_id") if auth else None
+    masked = mask_stored_conflict_rows(conflicts, viewer_org_id=viewer_org_id)
+    out = dict(findings)
+    out["conflicts"] = masked
+    out["conflict_count"] = len(masked)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Report page sections
 # ---------------------------------------------------------------------------
@@ -1508,7 +1531,9 @@ def draft_report_page(req: Request, draft_id: str):
     # #572: surface-to-user counts as access; reset the archive clock.
     touch_draft_access_conn(parsed)
 
-    findings = _parse_report_data(report_row[6])
+    # #844: mask any foreign-org conflict rows persisted in a pre-fix
+    # report before the section renderers touch the list.
+    findings = _mask_findings_conflicts(_parse_report_data(report_row[6]), auth)
 
     # #619 PR-C: per-row annotations.  Look up the version FK that PR-A
     # backfilled so each row's AnnotationButton can target the §9.4
@@ -1801,7 +1826,9 @@ def report_section_fragment(req: Request, draft_id: str, section: str):
     if report_row is None:
         return _not_found_page(req)
 
-    findings = _parse_report_data(report_row[6])
+    # #844: mask foreign-org conflict rows before the "Näita rohkem"
+    # fragment paginates them (no-op for non-conflict sections).
+    findings = _mask_findings_conflicts(_parse_report_data(report_row[6]), auth)
     rows = list(findings.get(findings_key) or [])
     total = len(rows)
     batch = rows[offset : offset + limit]

@@ -816,6 +816,9 @@ def explorer_draft_subgraph(req: Request, draft_id: str) -> JSONResponse:
         return JSONResponse({"error": "Eelnõu ei leitud"}, status_code=404)
 
     org_id = str(auth.get("org_id"))
+    # #844: collected inside the connection block below so the conflict
+    # masking can reuse it without opening a second connection.
+    owned_draft_ids: set[str] = set()
     try:
         with _connect() as conn:
             draft_row = conn.execute(
@@ -836,6 +839,11 @@ def explorer_draft_subgraph(req: Request, draft_id: str) -> JSONResponse:
                 """,
                 (str(draft_uuid),),
             ).fetchone()
+            # #844: the viewer's owned draft UUIDs, fetched on this same
+            # connection, drive the cross-org conflict mask applied below.
+            from app.docs.impact.masking import fetch_owned_draft_ids
+
+            owned_draft_ids = fetch_owned_draft_ids(conn, org_id)
     except Exception:
         logger.exception("draft subgraph: DB error for draft=%s", draft_id)
         # Degrade to "no report" rather than 500 — the JS shows the fallback.
@@ -855,6 +863,20 @@ def explorer_draft_subgraph(req: Request, draft_id: str) -> JSONResponse:
         )
 
     findings = _parse_report_json(report_row[0])
+    # #844: scrub foreign-org conflict rows (and stale adhoc probes) from a
+    # pre-fix persisted report before the subgraph builds nodes from them.
+    # Reuses ``owned_draft_ids`` fetched on the connection above — no extra
+    # round-trip.
+    from app.docs.impact.masking import drop_adhoc_conflict_rows, mask_conflict_rows
+
+    masked_conflicts = mask_conflict_rows(
+        drop_adhoc_conflict_rows(list(findings.get("conflicts") or [])),
+        owned_draft_ids=owned_draft_ids,
+    )
+    findings = dict(findings)
+    findings["conflicts"] = masked_conflicts
+    findings["conflict_count"] = len(masked_conflicts)
+
     subgraph = build_draft_subgraph(str(draft_uuid), title, findings)
     affected = len(list(findings.get("affected_entities") or []))
     conflicts = len(list(findings.get("conflicts") or []))
