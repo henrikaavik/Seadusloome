@@ -56,11 +56,13 @@ _QUERY_PAIR_RE = re.compile(r"(^|[?&;\s])([A-Za-z0-9_.\-]+)=([^&;#\s]+)")
 # param, form field, header, breadcrumb-data key or stack-frame local.
 # Suffix matching requires a separator (``api_key``, ``x-auth-token``)
 # or exact match (``token``) so benign names like ``status_code`` or
-# ``monkey`` survive.
+# ``monkey`` survive. Plural forms (``tokens``, ``keys``…) are covered
+# because bulk-credential collections are a real payload shape.
 _SENSITIVE_NAME_RE = re.compile(
     r"(?i)(?:^|[._\-])"
-    r"(?:token|secret|password|passwd|pwd|key|apikey|auth|authorization"
-    r"|session|sessionid|signature|sig|jwt|bearer|otp|credentials?)$"
+    r"(?:tokens?|secrets?|passwords?|passwd|pwd|keys?|apikeys?|auth"
+    r"|authorization|sessions?|sessionid|signatures?|sig|jwt|bearer"
+    r"|otp|credentials?)$"
 )
 
 # Query-param-only sensitive names: OAuth/OIDC ``code`` + ``state`` and
@@ -122,13 +124,63 @@ def _scrub_text(value: str) -> str:
     return scrub_prompt(value)
 
 
-def _scrub_str_dict(data: dict[str, Any]) -> None:
-    """In-place: redact sensitive keys, scrub remaining string values."""
-    for key in list(data.keys()):
-        if _is_sensitive_key(key):
-            data[key] = _REDACTED_KEY
-        elif isinstance(data[key], str):
-            data[key] = _scrub_text(data[key])
+# Containers nested deeper than this are replaced wholesale: we cannot
+# verify they are clean, so fail closed. Sentry's own serializer
+# truncates well before this depth, so real telemetry is unaffected.
+_MAX_SCRUB_DEPTH = 20
+
+
+def _deep_scrub(value: Any, _depth: int = 0, _seen: set[int] | None = None) -> Any:
+    """Recursively scrub *value*: dicts, lists, tuples and strings.
+
+    Review finding on #846: a shallow helper only rewrote *top-level*
+    string values, so nested JSON-like payloads (request bodies,
+    breadcrumb/span data, stack-frame locals) still shipped tokens and
+    Estonian PII verbatim. This walks the whole structure:
+
+    - ``str`` values run through :func:`_scrub_text`.
+    - Dict entries whose key matches the sensitive-name rules are
+      redacted wholesale, regardless of the value's type or depth.
+    - Dicts and lists are mutated in place (and returned) so shared
+      references inside cyclic payloads observe the scrubbed content;
+      tuples are immutable and therefore rebuilt.
+    - An ``id()``-based visited guard stops infinite recursion on
+      self-referential structures. Skipping a revisit is sound because
+      mutable containers are scrubbed in place exactly once. Tuples
+      are deliberately *not* guarded (a reference cycle cannot consist
+      of tuples alone) so a tuple shared between two branches is still
+      rebuilt scrubbed at each site.
+    - Containers nested beyond ``_MAX_SCRUB_DEPTH`` are replaced with
+      the redaction marker — fail closed rather than ship unverified
+      data.
+    """
+    if isinstance(value, str):
+        return _scrub_text(value)
+    if not isinstance(value, (dict, list, tuple)):
+        return value
+    if _depth >= _MAX_SCRUB_DEPTH:
+        return _REDACTED_KEY
+    if _seen is None:
+        _seen = set()
+
+    if isinstance(value, tuple):
+        return tuple(_deep_scrub(item, _depth + 1, _seen) for item in value)
+
+    if id(value) in _seen:
+        return value
+    _seen.add(id(value))
+
+    if isinstance(value, dict):
+        for key in list(value.keys()):
+            if isinstance(key, str) and _is_sensitive_key(key):
+                value[key] = _REDACTED_KEY
+            else:
+                value[key] = _deep_scrub(value[key], _depth + 1, _seen)
+        return value
+
+    for index in range(len(value)):
+        value[index] = _deep_scrub(value[index], _depth + 1, _seen)
+    return value
 
 
 def _scrub_request(event: dict[str, Any]) -> None:
@@ -155,13 +207,13 @@ def _scrub_request(event: dict[str, Any]) -> None:
         # Authorization / Cookie / X-Api-Key → redacted via the key
         # check; Referer and friends get URL scrubbing via the value
         # branch so token-bearing referrers don't slip through.
-        _scrub_str_dict(headers)
+        _deep_scrub(headers)
 
+    # Body can be a form dict, nested JSON structure, list-of-dicts or
+    # a raw string — deep-scrub handles every shape.
     data = request.get("data")
-    if isinstance(data, dict):
-        _scrub_str_dict(data)
-    elif isinstance(data, str):
-        request["data"] = _scrub_text(data)
+    if data is not None:
+        request["data"] = _deep_scrub(data)
 
 
 def _scrub_breadcrumbs(event: dict[str, Any]) -> None:
@@ -177,8 +229,8 @@ def _scrub_breadcrumbs(event: dict[str, Any]) -> None:
         if not isinstance(breadcrumb, dict):
             continue
         data = breadcrumb.get("data")
-        if isinstance(data, dict):
-            _scrub_str_dict(data)
+        if data is not None:
+            breadcrumb["data"] = _deep_scrub(data)
         message = breadcrumb.get("message")
         if isinstance(message, str):
             breadcrumb["message"] = _scrub_text(message)
@@ -196,23 +248,44 @@ def _scrub_spans(event: dict[str, Any]) -> None:
         if isinstance(description, str):
             span["description"] = _scrub_text(description)
         data = span.get("data")
-        if isinstance(data, dict):
-            _scrub_str_dict(data)
+        if data is not None:
+            span["data"] = _deep_scrub(data)
 
 
-def _scrub_exception(event: dict[str, Any]) -> None:
-    """Scrub stack-frame local variables on exception events."""
-    exception_info = event.get("exception")
-    if not exception_info:
-        return
-    for exc_value in exception_info.get("values", []):
-        stacktrace = exc_value.get("stacktrace")
-        if not stacktrace:
+def _scrub_stack_vars(event: dict[str, Any]) -> None:
+    """Scrub captured frame locals — the classic Sentry leak vector.
+
+    The SDK captures local variables by default, so any token /
+    isikukood / IBAN held in a variable at crash time ships with the
+    event. Covers both ``exception.values[*]`` and the
+    ``threads.values[*]`` equivalent, in dict-with-``values`` and
+    bare-list protocol shapes.
+    """
+    for section in ("exception", "threads"):
+        info = event.get(section)
+        if isinstance(info, dict):
+            entries = info.get("values", [])
+        elif isinstance(info, list):
+            entries = info
+        else:
             continue
-        for frame in stacktrace.get("frames", []):
-            local_vars = frame.get("vars")
-            if isinstance(local_vars, dict):
-                _scrub_str_dict(local_vars)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            stacktrace = entry.get("stacktrace")
+            if not isinstance(stacktrace, dict):
+                continue
+            frames = stacktrace.get("frames", [])
+            if not isinstance(frames, list):
+                continue
+            for frame in frames:
+                if not isinstance(frame, dict):
+                    continue
+                local_vars = frame.get("vars")
+                if local_vars is not None:
+                    frame["vars"] = _deep_scrub(local_vars)
 
 
 def _scrub_logentry(event: dict[str, Any]) -> None:
@@ -225,12 +298,8 @@ def _scrub_logentry(event: dict[str, Any]) -> None:
         if isinstance(value, str):
             logentry[field] = _scrub_text(value)
     params = logentry.get("params")
-    if isinstance(params, list):
-        logentry["params"] = [
-            _scrub_text(param) if isinstance(param, str) else param for param in params
-        ]
-    elif isinstance(params, dict):
-        _scrub_str_dict(params)
+    if params is not None:
+        logentry["params"] = _deep_scrub(params)
 
 
 def _get_git_sha() -> str:
@@ -263,12 +332,14 @@ def _scrub_pii(event: dict[str, Any], hint: dict[str, Any]) -> dict[str, Any] | 
     ``before_send_transaction`` (performance events) so the two egress
     paths share one implementation (issue #846). Strips ``user``
     context entirely, scrubs the request envelope (URL, query string,
-    headers, cookies, body), redacts sensitive keys in breadcrumb
-    data / span data / stack-frame locals, and runs every free-form
-    string through :func:`app.llm.scrubber.scrub_prompt` so emails,
-    phone numbers, UUIDs, Estonian isikukoodid, EE IBANs and
-    secret-like tokens are redacted with the same regex set the LLM
-    egress path uses (NFR §7.1).
+    headers, cookies, body), deep-scrubs every arbitrary structure the
+    protocol carries (breadcrumb data, span data, ``extra``,
+    ``contexts``, exception/thread stack-frame locals — at any nesting
+    depth), and runs every free-form string through
+    :func:`app.llm.scrubber.scrub_prompt` so emails, phone numbers,
+    UUIDs, Estonian isikukoodid, EE IBANs and secret-like tokens are
+    redacted with the same regex set the LLM egress path uses
+    (NFR §7.1).
     """
     # Remove top-level user context so emails/names never reach Sentry.
     event.pop("user", None)
@@ -276,8 +347,16 @@ def _scrub_pii(event: dict[str, Any], hint: dict[str, Any]) -> dict[str, Any] | 
     _scrub_request(event)
     _scrub_breadcrumbs(event)
     _scrub_spans(event)
-    _scrub_exception(event)
+    _scrub_stack_vars(event)
     _scrub_logentry(event)
+
+    # Free-form attachment points: ``extra`` is arbitrary user data,
+    # ``contexts`` carries trace/runtime metadata whose identifiers
+    # (32-hex trace_id, 16-hex span_id) survive _scrub_text untouched.
+    for section in ("extra", "contexts"):
+        value = event.get(section)
+        if isinstance(value, (dict, list)):
+            _deep_scrub(value)
 
     return event
 

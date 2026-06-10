@@ -363,6 +363,190 @@ class TestLogentryScrubbing:
         assert logentry["params"] == ["https://x.ee/auth/reset/[redacted]"]
 
 
+class TestDeepScrubbing:
+    """#846 review — nested payloads must be scrubbed at any depth."""
+
+    def test_nested_request_data_three_levels_deep(self):
+        from app.observability import _scrub_pii
+
+        event = {
+            "request": {
+                "data": {
+                    "payload": {
+                        "users": [
+                            {
+                                "kirjeldus": "isik 38501010002 esitas taotluse",
+                                "konto": "EE382200221020145685",
+                                "api_key": "sk-abcdefghijklmnop123456",
+                            }
+                        ],
+                        "pair": ("EE382200221020145685", 200),
+                    }
+                }
+            }
+        }
+        result = _scrub_pii(event, {})
+        assert result is not None
+        user = result["request"]["data"]["payload"]["users"][0]
+        assert user["kirjeldus"] == "isik [REDACTED_ISIKUKOOD] esitas taotluse"
+        assert user["konto"] == "[REDACTED_IBAN]"
+        # Sensitive key at depth 3 → wholesale redaction.
+        assert user["api_key"] == "[Redacted]"
+        # Tuples are rebuilt scrubbed, shape and non-str members kept.
+        pair = result["request"]["data"]["payload"]["pair"]
+        assert isinstance(pair, tuple)
+        assert pair == ("[REDACTED_IBAN]", 200)
+
+    def test_request_data_as_list_of_dicts(self):
+        from app.observability import _scrub_pii
+
+        event = {"request": {"data": [{"token": "abc123"}, {"note": "isik 38501010002"}]}}
+        result = _scrub_pii(event, {})
+        assert result is not None
+        data = result["request"]["data"]
+        assert data[0]["token"] == "[Redacted]"
+        assert data[1]["note"] == "isik [REDACTED_ISIKUKOOD]"
+
+    def test_breadcrumb_data_list_of_dicts(self):
+        from app.observability import _scrub_pii
+
+        event = {
+            "breadcrumbs": {
+                "values": [
+                    {
+                        "data": {
+                            "results": [
+                                {"url": "https://x.ee/f?token=abc", "status": 200},
+                                {"url": f"https://x.ee/auth/reset/{_RESET_TOKEN}"},
+                            ]
+                        }
+                    }
+                ]
+            }
+        }
+        result = _scrub_pii(event, {})
+        assert result is not None
+        results = result["breadcrumbs"]["values"][0]["data"]["results"]
+        assert results[0]["url"] == "https://x.ee/f?token=[redacted]"
+        assert results[0]["status"] == 200
+        assert results[1]["url"] == "https://x.ee/auth/reset/[redacted]"
+
+    def test_nested_frame_vars_scrubbed(self):
+        from app.observability import _scrub_pii
+
+        event = {
+            "exception": {
+                "values": [
+                    {
+                        "stacktrace": {
+                            "frames": [
+                                {
+                                    "vars": {
+                                        "payload": {
+                                            "reset_token": f"'{_RESET_TOKEN}'",
+                                            "saaja": {"isikukood": "38501010002"},
+                                        },
+                                        "rows": [["EE382200221020145685"]],
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        }
+        result = _scrub_pii(event, {})
+        assert result is not None
+        local_vars = result["exception"]["values"][0]["stacktrace"]["frames"][0]["vars"]
+        # Sensitive key nested one level down → wholesale redaction.
+        assert local_vars["payload"]["reset_token"] == "[Redacted]"
+        # Sensitive key two levels down, exact-name rule.
+        assert local_vars["payload"]["saaja"]["isikukood"] == "[Redacted]"
+        # PII value inside list-of-lists.
+        assert local_vars["rows"] == [["[REDACTED_IBAN]"]]
+
+    def test_threads_frame_vars_scrubbed(self):
+        from app.observability import _scrub_pii
+
+        event = {
+            "threads": {
+                "values": [
+                    {"stacktrace": {"frames": [{"vars": {"ctx": {"klient": "isik 38501010002"}}}]}}
+                ]
+            }
+        }
+        result = _scrub_pii(event, {})
+        assert result is not None
+        local_vars = result["threads"]["values"][0]["stacktrace"]["frames"][0]["vars"]
+        assert local_vars["ctx"]["klient"] == "isik [REDACTED_ISIKUKOOD]"
+
+    def test_sensitive_key_wholesale_at_depth_regardless_of_type(self):
+        from app.observability import _scrub_pii
+
+        event = {
+            "request": {"data": {"outer": {"auth": {"nested": "structure"}, "tokens": [1, 2, 3]}}}
+        }
+        result = _scrub_pii(event, {})
+        assert result is not None
+        outer = result["request"]["data"]["outer"]
+        # Dict-valued sensitive key → redacted wholesale, not recursed.
+        assert outer["auth"] == "[Redacted]"
+        # "tokens" matches the suffix rule → list value redacted too.
+        assert outer["tokens"] == "[Redacted]"
+
+    def test_self_referential_structure_no_infinite_loop(self):
+        from app.observability import _scrub_pii
+
+        data: dict = {"kirjeldus": "isik 38501010002"}
+        data["self"] = data
+        cyclic_list: list = ["EE382200221020145685"]
+        cyclic_list.append(cyclic_list)
+        data["loop"] = cyclic_list
+
+        event = {"request": {"data": data}}
+        result = _scrub_pii(event, {})
+        assert result is not None
+        scrubbed = result["request"]["data"]
+        assert scrubbed["kirjeldus"] == "isik [REDACTED_ISIKUKOOD]"
+        # In-place mutation means the cyclic reference sees scrubbed data.
+        assert scrubbed["self"] is scrubbed
+        assert scrubbed["loop"][0] == "[REDACTED_IBAN]"
+        assert scrubbed["loop"][1] is scrubbed["loop"]
+
+    def test_depth_cap_fails_closed(self):
+        from app.observability import _scrub_pii
+
+        node: dict = {"kirjeldus": "isik 38501010002"}
+        for _ in range(25):
+            node = {"child": node}
+        event = {"request": {"data": node}}
+        result = _scrub_pii(event, {})
+        assert result is not None
+        # The over-deep container is replaced, the PII never ships.
+        assert "38501010002" not in repr(result)
+        assert "[Redacted]" in repr(result)
+
+    def test_extra_and_contexts_scrubbed_trace_ids_survive(self):
+        from app.observability import _scrub_pii
+
+        event = {
+            "extra": {"debug": {"link": f"https://x.ee/auth/reset/{_RESET_TOKEN}"}},
+            "contexts": {
+                "trace": {"trace_id": "4c79f60c11214eb38604f4ae0781bfb2", "op": "http.server"},
+                "runtime": {"name": "CPython", "version": "3.13.2"},
+                "leak": {"konto": "EE382200221020145685"},
+            },
+        }
+        result = _scrub_pii(event, {})
+        assert result is not None
+        assert result["extra"]["debug"]["link"] == "https://x.ee/auth/reset/[redacted]"
+        assert result["contexts"]["leak"]["konto"] == "[REDACTED_IBAN]"
+        # Trace correlation and runtime metadata stay intact.
+        assert result["contexts"]["trace"]["trace_id"] == "4c79f60c11214eb38604f4ae0781bfb2"
+        assert result["contexts"]["trace"]["op"] == "http.server"
+        assert result["contexts"]["runtime"] == {"name": "CPython", "version": "3.13.2"}
+
+
 class TestInitSentry:
     def test_noop_without_dsn(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.delenv("SENTRY_DSN", raising=False)
