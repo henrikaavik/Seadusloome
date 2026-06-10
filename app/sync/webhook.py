@@ -10,7 +10,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from app.sync.orchestrator import has_recent_running_row, run_sync
-from app.sync.webhook_deliveries import record_delivery
+from app.sync.webhook_deliveries import record_delivery, request_rerun
 
 logger = logging.getLogger(__name__)
 
@@ -72,13 +72,16 @@ def trigger_sync_background() -> bool:
     """Run sync in a background thread so we can respond to GitHub immediately.
 
     Returns ``False`` if another sync is already in flight (detected via
-    sync_log.status='running') and the request should be treated as a
-    no-op. Returns ``True`` when a new sync thread has been spawned.
+    sync_log.status='running'); the caller must then durably queue a
+    coalesced rerun (``request_rerun``) so the push's commit isn't stranded
+    — see the round-2 review fix in :func:`webhook_handler`. Returns
+    ``True`` when a new sync thread has been spawned.
 
     NOTE: the ``has_recent_running_row`` check here is only a fast-path
     hint; the authoritative cross-process mutual exclusion is the
     advisory lock inside ``run_sync`` (#853 / H4), so even if two webhooks
-    slip past this check only one will actually proceed.
+    slip past this check only one will actually proceed (the loser sets the
+    rerun flag from inside ``run_sync`` so its work is not lost).
     """
     if has_recent_running_row():
         logger.info("Webhook sync skipped — another sync is already running")
@@ -154,9 +157,27 @@ async def webhook_handler(request: Request) -> JSONResponse:
     logger.info("Ontology repo push to main detected, triggering sync")
     started = trigger_sync_background()
 
-    if not started:
-        return JSONResponse({"status": "sync_in_progress"})
-    return JSONResponse({"status": "sync_triggered"})
+    if started:
+        return JSONResponse({"status": "sync_triggered"})
+
+    # Round-2 review (#853): a sync is already running, so this push's commit
+    # would otherwise be stranded — the running sync already cloned an older
+    # tree and GitHub does not auto-retry push deliveries. Durably schedule a
+    # single coalesced rerun; the orchestrator drains it when the current run
+    # finishes. The delivery stays recorded (dedupe correct) BECAUSE the work
+    # is now durably scheduled.
+    if request_rerun(delivery_id):
+        logger.info("Sync in progress — durable resync queued for delivery %r", delivery_id)
+        return JSONResponse({"status": "resync_queued"})
+
+    # The flag write failed (DB issue) right after the delivery was recorded.
+    # Surface it loudly: an admin re-trigger or the next push will still run
+    # fresh data, but we must not pretend the resync was scheduled.
+    logger.error(
+        "Sync in progress but failed to durably queue resync for delivery %r",
+        delivery_id,
+    )
+    return JSONResponse({"status": "resync_queue_failed"}, status_code=503)
 
 
 def register_webhook_routes(app) -> None:  # type: ignore[no-untyped-def]

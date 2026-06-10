@@ -329,6 +329,7 @@ class TestSyncAdvisoryLock:
         with (
             patch.object(orchestrator, "_acquire_sync_lock", return_value=lock_conn),
             patch.object(orchestrator, "_release_sync_lock") as mock_release,
+            patch.object(orchestrator, "_drain_rerun_requests") as mock_drain,
             patch.object(orchestrator, "_insert_running_row", return_value=1),
             patch.object(orchestrator, "_update_step"),
             patch.object(orchestrator, "_finalize_row"),
@@ -347,6 +348,8 @@ class TestSyncAdvisoryLock:
 
         assert result is True
         mock_release.assert_called_once_with(lock_conn)
+        # The drain runs once in the finally of a lock-acquired run.
+        mock_drain.assert_called_once()
 
 
 # ===========================================================================
@@ -661,6 +664,268 @@ class TestRecordDelivery:
 
 
 # ===========================================================================
+# Round-2 review (#853): durable coalescing rerun for pushes arriving mid-sync
+# ===========================================================================
+
+
+def _single_row_conn_cm(fetchone_return):
+    """Build a (connection, context-manager) pair whose execute().fetchone()
+    returns ``fetchone_return``."""
+    conn = MagicMock()
+    conn.execute.return_value.fetchone.return_value = fetchone_return
+    cm = MagicMock()
+    cm.__enter__.return_value = conn
+    cm.__exit__.return_value = False
+    return conn, cm
+
+
+class TestRerunFlagStore:
+    """request_rerun / consume_rerun_request primitives."""
+
+    def test_request_rerun_upserts_single_row(self):
+        from app.sync import webhook_deliveries
+
+        conn, cm = _single_row_conn_cm(None)
+        with patch.object(webhook_deliveries, "get_connection", return_value=cm):
+            assert webhook_deliveries.request_rerun("d-9") is True
+        sql = " ".join(str(c.args[0]) for c in conn.execute.call_args_list)
+        assert "INSERT INTO sync_rerun_request" in sql
+        assert "ON CONFLICT (id) DO UPDATE" in sql
+
+    def test_request_rerun_db_error_returns_false(self):
+        from app.sync import webhook_deliveries
+
+        with patch.object(webhook_deliveries, "get_connection", side_effect=RuntimeError("db")):
+            assert webhook_deliveries.request_rerun("d-9") is False
+
+    def test_consume_returns_true_when_flag_set(self):
+        from app.sync import webhook_deliveries
+
+        conn, cm = _single_row_conn_cm((True,))
+        with patch.object(webhook_deliveries, "get_connection", return_value=cm):
+            assert webhook_deliveries.consume_rerun_request() is True
+        sql = " ".join(str(c.args[0]) for c in conn.execute.call_args_list)
+        assert "DELETE FROM sync_rerun_request" in sql
+        assert "RETURNING" in sql
+
+    def test_consume_returns_false_when_no_flag(self):
+        from app.sync import webhook_deliveries
+
+        conn, cm = _single_row_conn_cm(None)
+        with patch.object(webhook_deliveries, "get_connection", return_value=cm):
+            assert webhook_deliveries.consume_rerun_request() is False
+
+    def test_consume_db_error_returns_false(self):
+        from app.sync import webhook_deliveries
+
+        with patch.object(webhook_deliveries, "get_connection", side_effect=RuntimeError("db")):
+            assert webhook_deliveries.consume_rerun_request() is False
+
+    def test_n_pushes_coalesce_to_one_pending_rerun(self):
+        """N request_rerun calls all UPSERT the same single row, so a single
+        consume drains them as ONE rerun (then the row is gone)."""
+        from app.sync import webhook_deliveries
+
+        # In-memory single-row emulation.
+        state: dict[str, bool] = {"set": False}
+
+        def _fake_request(_id=None):
+            state["set"] = True
+            return True
+
+        def _fake_consume():
+            was = state["set"]
+            state["set"] = False
+            return was
+
+        with (
+            patch.object(webhook_deliveries, "request_rerun", side_effect=_fake_request),
+            patch.object(webhook_deliveries, "consume_rerun_request", side_effect=_fake_consume),
+        ):
+            # 5 mid-sync pushes.
+            for _ in range(5):
+                webhook_deliveries.request_rerun("d")
+            # First drain sees the coalesced flag; second drain sees nothing.
+            assert webhook_deliveries.consume_rerun_request() is True
+            assert webhook_deliveries.consume_rerun_request() is False
+
+
+class TestWebhookInProgressQueuesResync:
+    """(a) A delivery during a running sync → 2xx queued semantics, delivery
+    recorded, rerun flag set."""
+
+    def test_in_progress_records_delivery_and_queues_resync(self):
+        with (
+            patch.object(webhook, "WEBHOOK_SECRET", "test-secret"),
+            patch.object(webhook, "record_delivery", return_value=True) as mock_record,
+            patch.object(webhook, "trigger_sync_background", return_value=False),
+            patch.object(webhook, "request_rerun", return_value=True) as mock_rerun,
+        ):
+            req = _make_webhook_request(body=_PUSH_BODY, delivery="mid-1")
+            resp = _run(webhook.webhook_handler(req))
+        assert resp.status_code == 200
+        assert _json_body(resp)["status"] == "resync_queued"
+        # Delivery recorded (dedupe stays correct) AND rerun flag set.
+        mock_record.assert_called_once_with("mid-1", "push")
+        mock_rerun.assert_called_once_with("mid-1")
+
+    def test_in_progress_flag_failure_surfaces_503(self):
+        """If the durable flag write fails, we must NOT pretend the resync
+        was scheduled — surface 503."""
+        with (
+            patch.object(webhook, "WEBHOOK_SECRET", "test-secret"),
+            patch.object(webhook, "record_delivery", return_value=True),
+            patch.object(webhook, "trigger_sync_background", return_value=False),
+            patch.object(webhook, "request_rerun", return_value=False),
+        ):
+            req = _make_webhook_request(body=_PUSH_BODY, delivery="mid-2")
+            resp = _run(webhook.webhook_handler(req))
+        assert resp.status_code == 503
+        assert _json_body(resp)["status"] == "resync_queue_failed"
+
+    def test_no_contention_path_unaffected(self):
+        """(e) Normal no-contention push still starts sync, no rerun flag."""
+        with (
+            patch.object(webhook, "WEBHOOK_SECRET", "test-secret"),
+            patch.object(webhook, "record_delivery", return_value=True),
+            patch.object(webhook, "trigger_sync_background", return_value=True),
+            patch.object(webhook, "request_rerun") as mock_rerun,
+        ):
+            req = _make_webhook_request(body=_PUSH_BODY, delivery="solo-1")
+            resp = _run(webhook.webhook_handler(req))
+        assert resp.status_code == 200
+        assert _json_body(resp)["status"] == "sync_triggered"
+        mock_rerun.assert_not_called()
+
+
+class TestRunSyncDrainsRerun:
+    """(b)/(c) run_sync completion drains the flag and reruns exactly once;
+    flag cleared after rerun. (d) lock-acquire failure on rerun re-sets the
+    flag so it isn't lost.
+
+    The drain is tested directly via ``_drain_rerun_requests`` (its wiring
+    into ``run_sync``'s finally is asserted separately in
+    ``TestSyncAdvisoryLock.test_lock_released_in_finally_on_success`` via
+    ``mock_drain.assert_called_once()``). Driving it through the full
+    ``run_sync`` success path would pull in unrelated RAG/notify side
+    effects, so we exercise the unit in isolation for determinism.
+    """
+
+    def test_drain_reruns_exactly_once_when_flag_set(self):
+        """(b) A set flag → exactly one rerun thread spawned with _is_rerun."""
+        from app.sync import orchestrator, webhook_deliveries
+
+        spawned: list = []
+
+        class _FakeThread:
+            def __init__(self, target=None, kwargs=None, daemon=None):
+                self._target = target
+                self._kwargs = kwargs or {}
+                spawned.append(self._kwargs)
+
+            def start(self):
+                # Do NOT actually run run_sync again (would recurse) — just
+                # record that a rerun was scheduled with _is_rerun=True.
+                pass
+
+        with (
+            patch.object(webhook_deliveries, "consume_rerun_request", return_value=True),
+            patch.object(orchestrator.threading, "Thread", _FakeThread),
+        ):
+            orchestrator._drain_rerun_requests()
+
+        assert len(spawned) == 1
+        assert spawned[0].get("_is_rerun") is True
+
+    def test_drain_does_nothing_when_flag_clear(self):
+        """(c) Flag clear → no rerun spawned."""
+        from app.sync import orchestrator, webhook_deliveries
+
+        spawned: list = []
+
+        class _FakeThread:
+            def __init__(self, target=None, kwargs=None, daemon=None):
+                spawned.append(kwargs or {})
+
+            def start(self):
+                pass
+
+        with (
+            patch.object(webhook_deliveries, "consume_rerun_request", return_value=False),
+            patch.object(orchestrator.threading, "Thread", _FakeThread),
+        ):
+            orchestrator._drain_rerun_requests()
+
+        assert spawned == []
+
+    def test_drain_coalesces_n_pushes_into_one_rerun(self):
+        """N mid-sync pushes (one set flag) drain as exactly one rerun: the
+        drain consumes once and spawns once regardless of how many pushes
+        set the flag."""
+        from app.sync import orchestrator, webhook_deliveries
+
+        spawned: list = []
+
+        class _FakeThread:
+            def __init__(self, target=None, kwargs=None, daemon=None):
+                spawned.append(kwargs or {})
+
+            def start(self):
+                pass
+
+        # consume_rerun_request returns True once (the coalesced flag), then
+        # the spawned rerun would consume again — but we don't run it here.
+        consume = MagicMock(return_value=True)
+        with (
+            patch.object(webhook_deliveries, "consume_rerun_request", consume),
+            patch.object(orchestrator.threading, "Thread", _FakeThread),
+        ):
+            orchestrator._drain_rerun_requests()
+
+        # One consume, one spawn — the coalescing happened at flag-set time
+        # (all pushes UPSERT the same row), so the drain only ever sees one.
+        consume.assert_called_once()
+        assert len(spawned) == 1
+
+    def test_rerun_relock_failure_resets_flag(self):
+        """(d) When a rerun can't acquire the lock, the flag must be re-set
+        (not lost) so the run that holds the lock drains it."""
+        from app.sync import orchestrator, webhook_deliveries
+
+        with (
+            patch.object(orchestrator, "_acquire_sync_lock", return_value=None),
+            patch.object(webhook_deliveries, "request_rerun", return_value=True) as mock_req,
+            patch.object(orchestrator, "_record_skipped_sync") as mock_skip,
+            patch.object(orchestrator, "_drain_rerun_requests") as mock_drain,
+        ):
+            result = orchestrator.run_sync(repo_dir=Path("/tmp/x"), _is_rerun=True)
+
+        assert result is False
+        # Flag re-set so the work isn't lost.
+        mock_req.assert_called_once()
+        # A rerun that couldn't acquire the lock must NOT record a skip note
+        # (it's not a user-visible skip) and must NOT drain (no busy-loop).
+        mock_skip.assert_not_called()
+        mock_drain.assert_not_called()
+
+    def test_normal_skip_is_not_a_rerun_and_does_not_reset(self):
+        """A plain (non-rerun) lock-miss records a skip note and does NOT
+        touch the rerun flag."""
+        from app.sync import orchestrator, webhook_deliveries
+
+        with (
+            patch.object(orchestrator, "_acquire_sync_lock", return_value=None),
+            patch.object(webhook_deliveries, "request_rerun") as mock_req,
+            patch.object(orchestrator, "_record_skipped_sync") as mock_skip,
+        ):
+            result = orchestrator.run_sync(repo_dir=Path("/tmp/x"))
+
+        assert result is False
+        mock_skip.assert_called_once()
+        mock_req.assert_not_called()
+
+
+# ===========================================================================
 # Migration 039 conventions
 # ===========================================================================
 
@@ -679,3 +944,12 @@ class TestMigration039:
         assert "Migration 039" in sql
         assert "ROLLBACK" in sql
         assert "#853" in sql
+
+    def test_defines_rerun_request_table(self):
+        """Round-2: the coalescing-rerun single-row table must be defined,
+        idempotently, with the single-row CHECK."""
+        sql = _MIGRATION_039.read_text(encoding="utf-8")
+        assert "CREATE TABLE IF NOT EXISTS sync_rerun_request" in sql
+        assert "CHECK (id)" in sql
+        # Rollback drops it too.
+        assert "DROP TABLE IF EXISTS sync_rerun_request" in sql

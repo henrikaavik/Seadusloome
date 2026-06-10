@@ -52,11 +52,17 @@ def _grant_sync_lock():
     lock helpers to the "acquired" happy path here. The dedicated
     concurrency tests in ``tests/test_sync_lockdown.py`` exercise the
     not-acquired path explicitly.
+
+    We also neutralise the round-2 coalescing-rerun drain
+    (``_drain_rerun_requests``), which otherwise opens a real DB
+    connection in every ``run_sync`` ``finally``. Its behaviour is
+    covered explicitly in ``tests/test_sync_lockdown.py``.
     """
     sentinel = object()
     with (
         patch("app.sync.orchestrator._acquire_sync_lock", return_value=sentinel),
         patch("app.sync.orchestrator._release_sync_lock"),
+        patch("app.sync.orchestrator._drain_rerun_requests"),
     ):
         yield
 

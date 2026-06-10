@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -397,6 +398,50 @@ def _record_skipped_sync(started_at: datetime) -> None:
         logger.exception("Failed to record skipped-sync note")
 
 
+def _drain_rerun_requests() -> None:
+    """Trigger one coalesced rerun if a push arrived during this sync.
+
+    Round-2 review (#853): a push that lands while a sync is running sets a
+    durable pending-rerun flag instead of starting a (lock-rejected) second
+    sync. After a run that actually held the lock completes, we drain that
+    flag here — exactly once, because N mid-sync pushes coalesce into the
+    single ``sync_rerun_request`` row.
+
+    Mechanism: ``consume_rerun_request`` atomically clears the flag. If it
+    was set, we spawn ONE fresh ``run_sync(_is_rerun=True)`` in a daemon
+    thread (fire-and-forget, mirroring the webhook). That rerun either
+    acquires the lock and runs fresh data (its own ``finally`` drains again,
+    chaining further reruns one-at-a-time until the flag stays clear), or —
+    if a fresh sync grabbed the lock first — re-sets the flag so that other
+    sync drains it. This invocation must therefore only be called when the
+    current run actually acquired the lock; calling it from a bailed
+    (lock-not-acquired) run could busy-loop.
+    """
+    from app.sync.webhook_deliveries import consume_rerun_request
+
+    try:
+        if not consume_rerun_request():
+            return
+    except Exception:
+        logger.exception("Failed to check rerun flag after sync")
+        return
+
+    logger.info("Pending rerun flag was set — triggering one coalesced resync")
+    try:
+        thread = threading.Thread(target=run_sync, kwargs={"_is_rerun": True}, daemon=True)
+        thread.start()
+    except Exception:
+        # If we couldn't even spawn the rerun, re-set the flag so a later
+        # sync (admin trigger / next push) still picks the work up.
+        logger.exception("Failed to spawn coalesced rerun — re-setting flag")
+        try:
+            from app.sync.webhook_deliveries import request_rerun
+
+            request_rerun("rerun-spawn-failed")
+        except Exception:
+            logger.exception("Failed to re-set rerun flag after spawn failure")
+
+
 class GitCommandError(RuntimeError):
     """A git/git-lfs subprocess failed. The message includes decoded stderr.
 
@@ -477,6 +522,7 @@ def run_sync(
     *,
     log_id: int | None = None,
     started_at: datetime | None = None,
+    _is_rerun: bool = False,
 ) -> bool:
     """Execute the full sync pipeline.
 
@@ -496,6 +542,12 @@ def run_sync(
             the id here so the orchestrator doesn't create a second row.
         started_at: Paired with ``log_id`` — the timestamp recorded on the
             pre-allocated row. Used for finalize fallback paths.
+        _is_rerun: Internal. True when this invocation was spawned by
+            :func:`_drain_rerun_requests` to satisfy pushes that arrived
+            mid-sync (round-2 review of #853). When a rerun cannot acquire
+            the advisory lock (a fresh sync grabbed it first) it re-sets the
+            pending-rerun flag so the now-running sync drains it instead —
+            this is how the coalesced rerun is never lost in that race.
 
     Returns:
         True if sync succeeded.
@@ -514,6 +566,17 @@ def run_sync(
     lock_conn = _acquire_sync_lock()
     if lock_conn is None:
         logger.info("Sync skipped — another sync holds the advisory lock")
+        if _is_rerun:
+            # Round-2 review (#853): we were spawned to drain a pending
+            # rerun, but a fresh sync grabbed the lock in the window since
+            # the flag was consumed. Re-set the flag so the run that now
+            # holds the lock drains it on completion — otherwise the
+            # mid-sync push that scheduled this rerun would be stranded.
+            # We deliberately do NOT drain again from this invocation's
+            # finally (the lock wasn't acquired), so this can't busy-loop.
+            from app.sync.webhook_deliveries import request_rerun
+
+            request_rerun("rerun-relock-failed")
         if log_id is not None:
             # A caller (admin handler) pre-inserted a 'running' row before
             # spawning us. Close it out as failed so the UI doesn't show a
@@ -526,7 +589,7 @@ def run_sync(
                     "Skipped: another sync holds the advisory lock (concurrent trigger)."
                 ),
             )
-        else:
+        elif not _is_rerun:
             _record_skipped_sync(started_at)
         return False
 
@@ -786,6 +849,16 @@ def run_sync(
     finally:
         # Release the advisory lock + its connection (#853 / H4). Done in
         # finally so it frees on every exit path, including exceptions.
+        # This block only runs for invocations that acquired the lock (the
+        # not-acquired branch returns before the try), so it is always safe
+        # to drain the rerun flag here.
         _release_sync_lock(lock_conn)
         if use_temp and repo_dir:
             shutil.rmtree(repo_dir, ignore_errors=True)
+        # Round-2 review (#853): drain any push that arrived mid-sync. Done
+        # AFTER releasing the lock so the spawned rerun can acquire it.
+        # Best-effort — never let a drain failure mask the sync's outcome.
+        try:
+            _drain_rerun_requests()
+        except Exception:
+            logger.exception("Rerun drain after sync failed (non-critical)")

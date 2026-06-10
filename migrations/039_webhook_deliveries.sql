@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 039: webhook_deliveries — GitHub webhook replay protection (#853)
+-- Migration 039: webhook_deliveries + sync_rerun_request (#853)
 -- =============================================================================
 --
 -- Issue #853 (H5): the GitHub webhook receiver (``app/sync/webhook.py``) had
@@ -9,6 +9,17 @@
 -- delivery with a unique ``X-GitHub-Delivery`` UUID; persisting the ones we
 -- have already processed lets us reject duplicates even when the signature
 -- checks out.
+--
+-- Round-2 review (#853): a push arriving WHILE a sync is already running was
+-- recorded as processed but never synced — ``trigger_sync_background`` returns
+-- False (another sync in flight) and the commit was stranded until some
+-- unrelated later push, because GitHub does not auto-retry push deliveries.
+-- The fix is a durable, cross-process **coalescing rerun**: when a valid push
+-- lands mid-sync we still record the delivery (dedupe stays correct precisely
+-- because the work is now durably scheduled) AND set a single pending-rerun
+-- flag. The orchestrator drains that flag at the end of every sync and runs
+-- exactly one more pass, coalescing N mid-sync pushes into one rerun. That
+-- flag lives in ``sync_rerun_request`` (below).
 --
 -- Design decisions:
 --   - ``delivery_id`` is the PRIMARY KEY (the GitHub delivery UUID, stored as
@@ -28,15 +39,29 @@
 --   - ``idx_webhook_deliveries_received_at`` keeps the retention DELETE
 --     (``WHERE received_at < now() - interval '7 days'``) index-backed.
 --
+-- ``sync_rerun_request`` design decisions:
+--   - SINGLE-ROW coalescing table. The ``id`` column is a BOOLEAN pinned to
+--     TRUE with a CHECK, so there is at most one row ever: every "please rerun
+--     after the current sync" request is an UPSERT onto that one row
+--     (``ON CONFLICT (id) DO UPDATE``). N mid-sync pushes therefore collapse
+--     into one pending rerun — exactly the coalescing the fix needs.
+--   - ``requested_at`` / ``requested_by`` are forensic only (when, and which
+--     delivery id last set the flag). The mere EXISTENCE of the row is the
+--     flag; consuming it is a ``DELETE ... RETURNING`` so that, if two drainers
+--     race, only the one that actually removes the row "wins" and triggers the
+--     single rerun.
+--   - No retention needed: the table holds 0 or 1 row by construction.
+--
 -- Idempotency:
 --   - ``CREATE TABLE IF NOT EXISTS`` + ``CREATE INDEX IF NOT EXISTS`` make the
 --     migration safe to re-run.
 --
 -- ROLLBACK procedure (manual; requires app on pre-#853 code):
 --   DROP TABLE IF EXISTS webhook_deliveries;
+--   DROP TABLE IF EXISTS sync_rerun_request;
 --   DELETE FROM schema_migrations WHERE version = '039_webhook_deliveries';
---   Then redeploy the previous app image. No durable state is lost — the table
---   only holds transient replay-dedupe records.
+--   Then redeploy the previous app image. No durable state is lost — both
+--   tables only hold transient dedupe / coalescing records.
 -- =============================================================================
 
 CREATE TABLE IF NOT EXISTS webhook_deliveries (
@@ -47,3 +72,11 @@ CREATE TABLE IF NOT EXISTS webhook_deliveries (
 
 CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_received_at
     ON webhook_deliveries (received_at);
+
+-- Single-row coalescing flag: a pending "rerun sync once the current run
+-- finishes" request. At most one row exists (id pinned to TRUE).
+CREATE TABLE IF NOT EXISTS sync_rerun_request (
+    id            BOOLEAN     PRIMARY KEY DEFAULT TRUE CHECK (id),  -- always TRUE → single row
+    requested_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    requested_by  TEXT                                              -- delivery id that last set it; forensic only
+);
