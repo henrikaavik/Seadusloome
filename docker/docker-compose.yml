@@ -1,3 +1,29 @@
+# =============================================================================
+# Service exposure matrix (#853 / H2 + DoD "make clear which services are
+# externally reachable and which must remain internal")
+# =============================================================================
+# This file is LOCAL DEVELOPMENT ONLY. Production runs on Coolify, which does
+# NOT read this compose file — it manages each service and Traefik routing
+# independently. The published-port (``ports:``) bindings below therefore only
+# affect a developer's machine.
+#
+#   Service   | Local dev (this file)        | Production (Coolify)
+#   ----------+------------------------------+--------------------------------
+#   app       | 0.0.0.0:5001 (host browser)  | EXTERNAL via Traefik (HTTPS,
+#             |                              |   seadusloome.sixtyfour.ee only)
+#   postgres  | 127.0.0.1:5432 (loopback)    | INTERNAL only — private Docker
+#             |                              |   network, NOT port-published,
+#             |                              |   reached via DATABASE_URL
+#   jena      | 127.0.0.1:3030 (loopback)    | INTERNAL only — reached via
+#             |                              |   JENA_URL; write endpoints also
+#             |                              |   behind fuseki:allowedUsers
+#   tika      | 127.0.0.1:9998 (loopback)    | INTERNAL only — separate Coolify
+#             |                              |   app, reached via TIKA_URL
+#
+# RULE: only ``app`` is ever externally reachable (and only via Traefik over
+# HTTPS). postgres / jena / tika MUST stay internal in production — never add
+# a Coolify "port mapping" / "public" toggle to them.
+# =============================================================================
 services:
   app:
     build:
@@ -83,7 +109,17 @@ services:
   postgres:
     image: pgvector/pgvector:pg18
     ports:
-      - "5432:5432"
+      # #853 / H2: bind to the loopback interface only. A bare "5432:5432"
+      # publishes Postgres on 0.0.0.0, i.e. every interface of the host —
+      # on a cloud VM that means the database is reachable from the public
+      # internet (and Docker's published-port iptables rules bypass UFW).
+      # 127.0.0.1 keeps it reachable for local psql / app-on-host dev while
+      # closing external exposure. PRODUCTION NOTE: prod runs on Coolify,
+      # which ignores this compose file — Postgres there is an INTERNAL-only
+      # Coolify service reached over the private Docker network by
+      # DATABASE_URL and is never port-published. See the externally-vs-
+      # internally-reachable matrix below.
+      - "127.0.0.1:5432:5432"
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-seadusloome}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-localdev}
@@ -102,7 +138,10 @@ services:
     # with network alias `seadusloome-tika` (set TIKA_URL accordingly).
     image: apache/tika:3.3.0.0-full
     ports:
-      - "9998:9998"  # Exposed for local curl testing; internal-only in prod
+      # #853 / H2: loopback-only for local curl testing; internal-only in
+      # prod (separate Coolify app, reached via TIKA_URL). See the matrix
+      # at the top of this file.
+      - "127.0.0.1:9998:9998"
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:9998/tika || exit 1"]
       interval: 10s
@@ -114,7 +153,14 @@ services:
   jena:
     image: apache/jena-fuseki:5.4.0
     ports:
-      - "3030:3030"
+      # #853 / H2: loopback-only, same rationale as postgres above. Even
+      # though the write endpoints are now behind fuseki:allowedUsers
+      # (docker/fuseki-config/ontology.ttl), the read/query + admin
+      # ($/datasets) endpoints should not face the public internet from a
+      # dev box. PRODUCTION NOTE: on Coolify, Jena is an INTERNAL-only
+      # service reached via JENA_URL over the private network — not
+      # port-published. See the matrix below.
+      - "127.0.0.1:3030:3030"
     environment:
       ADMIN_PASSWORD: ${FUSEKI_ADMIN_PASSWORD:-localdev}
     volumes:

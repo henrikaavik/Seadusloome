@@ -42,6 +42,25 @@ from app.sync.orchestrator import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _grant_sync_lock():
+    """Grant the #853/H4 advisory lock to every pipeline test by default.
+
+    ``run_sync`` now opens a real DB connection to take
+    ``pg_try_advisory_lock`` before doing any work. These pipeline tests
+    mock the whole DB layer and never reach a Postgres, so we stub the
+    lock helpers to the "acquired" happy path here. The dedicated
+    concurrency tests in ``tests/test_sync_lockdown.py`` exercise the
+    not-acquired path explicitly.
+    """
+    sentinel = object()
+    with (
+        patch("app.sync.orchestrator._acquire_sync_lock", return_value=sentinel),
+        patch("app.sync.orchestrator._release_sync_lock"),
+    ):
+        yield
+
+
 class TestParseViolationCount:
     def test_parses_simple_count(self):
         assert _parse_violation_count("Results (2634)") == 2634
