@@ -66,22 +66,29 @@ class TestClaudeStubMode:
 
 
 class TestClaudeProdMode:
-    def test_claude_stubs_in_prod_without_key(self, monkeypatch: pytest.MonkeyPatch):
-        """APP_ENV=production + no key -> stub mode (NOT RuntimeError).
+    def test_claude_raises_in_prod_without_key(self, monkeypatch: pytest.MonkeyPatch):
+        """APP_ENV=production + no key -> RuntimeError (fail closed, #847).
 
-        Unlike STORAGE_ENCRYPTION_KEY (data-loss risk) and TIKA_URL
-        (hard dep for parsing), the Anthropic key is explicitly optional
-        per README Phase 2 Step 5.
+        Phase 2 hotfix a3e4430 had exempted Claude from is_stub_allowed()
+        so a prod deploy without a key silently served canned responses.
+        #847 reversed that: a production key loss must raise, never stub.
         """
         monkeypatch.setenv("APP_ENV", "production")
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
-        provider = ClaudeProvider()
-        assert provider._stubbed is True
-        assert provider.complete("test").startswith("[STUB Claude]")
+        with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
+            ClaudeProvider()
+
+    def test_claude_raises_on_unknown_env_without_key(self, monkeypatch: pytest.MonkeyPatch):
+        """Unknown APP_ENV values fail closed like production (#847)."""
+        monkeypatch.setenv("APP_ENV", "prod")
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+        with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
+            ClaudeProvider()
 
     def test_claude_stubbed_in_staging(self, monkeypatch: pytest.MonkeyPatch):
-        """#449: APP_ENV=staging is now explicitly stub-mode-eligible."""
+        """#449: APP_ENV=staging is explicitly stub-mode-eligible."""
         monkeypatch.setenv("APP_ENV", "staging")
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 

@@ -152,8 +152,17 @@ def migrate() -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    if not os.environ.get("STORAGE_ENCRYPTION_KEY") and os.environ.get("APP_ENV") == "production":
-        logger.error("STORAGE_ENCRYPTION_KEY must be set in production")
+    # #847 ride-along: the key is required UNCONDITIONALLY, not just when
+    # APP_ENV=production. Running the backfill in any environment without
+    # an explicit key would silently encrypt rows with the ephemeral
+    # dev-mode Fernet key, which is lost on process exit — making every
+    # backfilled ciphertext permanently undecryptable.
+    if not os.environ.get("STORAGE_ENCRYPTION_KEY"):
+        logger.error(
+            "STORAGE_ENCRYPTION_KEY must be set to run the chat encryption "
+            "backfill (in EVERY environment — without it the rows would be "
+            "encrypted with an ephemeral key and lost on exit)."
+        )
         return 1
 
     database_url = _get_database_url()

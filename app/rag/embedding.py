@@ -5,10 +5,14 @@ the same pattern as :class:`app.llm.provider.LLMProvider`. The default
 concrete implementation uses Voyage AI's ``voyage-multilingual-2`` model
 (1024 dimensions), which excels at multilingual text including Estonian.
 
-When ``VOYAGE_API_KEY`` is unset the provider switches to stub mode and
-returns random vectors of the correct dimensionality. This mirrors the
-``ClaudeProvider`` pattern: never crash due to a missing optional key,
-even in production.
+When ``VOYAGE_API_KEY`` is unset AND :func:`app.config.is_stub_allowed`
+permits it (``APP_ENV`` in development/test/ci/staging), the provider
+switches to stub mode and returns random vectors of the correct
+dimensionality. This mirrors the ``ClaudeProvider`` pattern. In
+production or any unrecognized ``APP_ENV`` (#847) a missing key raises
+``RuntimeError`` at construction instead — random stub vectors must
+never be persisted over real embeddings (the ingestion pipeline writes
+with ``ON CONFLICT DO UPDATE``).
 """
 
 from __future__ import annotations
@@ -19,6 +23,8 @@ import random
 import threading
 from abc import ABC, abstractmethod
 from typing import Any
+
+from app.config import STUB_ALLOWED_ENVS, get_app_env, is_stub_allowed
 
 logger = logging.getLogger(__name__)
 
@@ -51,17 +57,33 @@ class VoyageProvider(EmbeddingProvider):
     """Voyage AI embedding backend with a dev-mode stub path.
 
     Attributes:
-        _stubbed: True when running with no API key; methods return
-            random vectors instead of calling Voyage AI.
+        _stubbed: True when running with no API key in a stub-allowed
+            environment; methods return random vectors instead of
+            calling Voyage AI.
         _api_key: The ``VOYAGE_API_KEY`` value (empty when stubbed).
         _model: Model identifier, from ``VOYAGE_MODEL`` env var.
         _dimensions: Vector dimensionality for the selected model.
+
+    Raises:
+        RuntimeError: When ``VOYAGE_API_KEY`` is missing and
+            :func:`app.config.is_stub_allowed` is False (production or
+            an unrecognized ``APP_ENV``) — the fail-closed gate of #847.
     """
 
     def __init__(self) -> None:
         api_key = os.environ.get("VOYAGE_API_KEY", "").strip()
 
         if not api_key:
+            if not is_stub_allowed():
+                raise RuntimeError(
+                    "VOYAGE_API_KEY is not set and stub mode is disabled "
+                    f"for APP_ENV={get_app_env()!r} (stubs are only allowed in "
+                    f"{sorted(STUB_ALLOWED_ENVS)}). Refusing to generate "
+                    "random stub embeddings — they would be persisted over "
+                    "real vectors by the ingestion pipeline. Set "
+                    "VOYAGE_API_KEY, or fix APP_ENV if this is not a "
+                    "production deployment (#847)."
+                )
             logger.warning(
                 "VOYAGE_API_KEY not set — VoyageProvider running in STUB mode. "
                 "All embeddings return random vectors. Set VOYAGE_API_KEY "

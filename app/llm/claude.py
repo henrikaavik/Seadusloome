@@ -1,9 +1,14 @@
 """Anthropic Claude concrete ``LLMProvider`` implementation.
 
 Phase 2 shipped only the scaffolding; Phase 3A fills in real Anthropic
-API calls. When ``ANTHROPIC_API_KEY`` is unset, the provider switches to
+API calls. When ``ANTHROPIC_API_KEY`` is unset AND
+:func:`app.config.is_stub_allowed` permits it (``APP_ENV`` in
+development/test/ci/staging), the provider switches to
 ``_stubbed = True`` and returns canned responses so tests, local dev,
-and CI never make network calls.
+and CI never make network calls. In production or any unrecognized
+``APP_ENV`` (#847) a missing key raises ``RuntimeError`` at
+construction instead — a prod key loss must never silently serve
+canned advice.
 
 The real implementation path (when the SDK is installed and a key is
 set) calls the Anthropic Messages API and logs token usage via
@@ -21,6 +26,7 @@ import time
 from collections.abc import AsyncIterator
 from typing import Any
 
+from app.config import STUB_ALLOWED_ENVS, get_app_env, is_stub_allowed
 from app.llm.provider import LLMProvider, StreamEvent
 from app.llm.retry import retry_async, retry_sync
 from app.llm.scrubber import scrub_messages, scrub_prompt
@@ -35,16 +41,31 @@ class ClaudeProvider(LLMProvider):
     """Anthropic Claude backend with a dev-mode stub path.
 
     Attributes:
-        _stubbed: True when running with no API key; methods return
-            canned responses instead of calling Anthropic.
+        _stubbed: True when running with no API key in a stub-allowed
+            environment; methods return canned responses instead of
+            calling Anthropic.
         _api_key: The ``ANTHROPIC_API_KEY`` value (empty when stubbed).
         _model: Model identifier, from ``CLAUDE_MODEL`` env var.
+
+    Raises:
+        RuntimeError: When ``ANTHROPIC_API_KEY`` is missing and
+            :func:`app.config.is_stub_allowed` is False (production or
+            an unrecognized ``APP_ENV``) — the fail-closed gate of #847.
     """
 
     def __init__(self) -> None:
         api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
 
         if not api_key:
+            if not is_stub_allowed():
+                raise RuntimeError(
+                    "ANTHROPIC_API_KEY is not set and stub mode is disabled "
+                    f"for APP_ENV={get_app_env()!r} (stubs are only allowed in "
+                    f"{sorted(STUB_ALLOWED_ENVS)}). Refusing to serve canned "
+                    "LLM responses — set ANTHROPIC_API_KEY in the Coolify "
+                    "environment, or fix APP_ENV if this is not a production "
+                    "deployment (#847)."
+                )
             logger.warning(
                 "ANTHROPIC_API_KEY not set — ClaudeProvider running in STUB mode. "
                 "All completions return canned responses. Set ANTHROPIC_API_KEY "
