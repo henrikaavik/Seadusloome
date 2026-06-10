@@ -55,7 +55,9 @@ the worker's fallback stub.
 from __future__ import annotations
 
 import logging
+import os
 import uuid
+from pathlib import Path
 from typing import Any
 
 from app.docs.docx_export import get_export_dir
@@ -65,29 +67,46 @@ from app.sync.jena_loader import delete_named_graph
 logger = logging.getLogger(__name__)
 
 
-def _export_artifacts_for_draft(draft_id: str) -> list[Any]:
+def _export_artifacts_for_draft(draft_id: str) -> list[Path]:
     """Return every rendered export file in EXPORT_DIR for *draft_id*.
 
     Export writers key report artifacts as ``<draft_id>-<report_id>``
     with ``.docx`` / ``.pdf`` / ``-summary.docx`` suffixes, so a single
-    ``<draft_id>-*`` glob covers all of them. The draft id is required
-    to parse as a UUID before it is interpolated into the glob — a
-    malformed payload value must never be able to widen the pattern
+    ``<draft_id>-`` prefix match covers all of them. The draft id is
+    required to parse as a UUID before it reaches the filename match —
+    a malformed payload value must never be able to widen the pattern
     (defense in depth; the payload is produced by our own delete route).
+
+    Implementation note (#845 review): this deliberately uses
+    ``os.scandir`` instead of ``Path.glob`` because pathlib's glob
+    *silently swallows* scandir OSErrors (verified on CPython 3.13) —
+    with glob, an unreadable EXPORT_DIR is indistinguishable from "no
+    artifacts" and the purge this handler exists for would be silently
+    skipped while reporting success.
+
+    Raises:
+        OSError: when EXPORT_DIR exists but cannot be scanned (e.g.
+            permissions / IO error). The caller records this as a
+            cleanup error so the worker's retry budget engages. A
+            *missing* directory is NOT an error — nothing was ever
+            exported, so there is legitimately nothing to delete.
     """
     try:
         parsed = uuid.UUID(draft_id)
     except (TypeError, ValueError):
         return []
+    export_dir = get_export_dir()
+    prefix = f"{parsed}-"
     try:
-        export_dir = get_export_dir()
-        return sorted(p for p in export_dir.glob(f"{parsed}-*") if p.is_file())
-    except OSError:
-        logger.exception(
-            "draft_cleanup: failed to scan export dir for draft=%s",
-            draft_id,
-        )
+        entries = os.scandir(export_dir)
+    except FileNotFoundError:
         return []
+    out: list[Path] = []
+    with entries:
+        for entry in entries:
+            if entry.name.startswith(prefix) and entry.is_file():
+                out.append(Path(entry.path))
+    return sorted(out)
 
 
 def _collect(payload: dict[str, Any], plural_key: str, singular_key: str) -> list[str]:
@@ -150,15 +169,27 @@ def draft_cleanup(
     draft_id = str(payload.get("draft_id") or "")
     storage_paths = _collect(payload, "storage_paths", "storage_path")
     graph_uris = _collect(payload, "graph_uris", "graph_uri")
-    # #845 (B2): rendered report exports (<draft_id>-<report_id>.docx/.pdf/
-    # -summary.docx) are plaintext derivatives of the encrypted draft and
-    # must die with it.
-    export_paths = _export_artifacts_for_draft(draft_id)
 
     storage_deleted = 0
     graph_deleted = 0
     exports_deleted = 0
     errors: list[str] = []
+
+    # #845 (B2): rendered report exports (<draft_id>-<report_id>.docx/.pdf/
+    # -summary.docx) are plaintext derivatives of the encrypted draft and
+    # must die with it. A scan failure (unreadable EXPORT_DIR) is a cleanup
+    # error — NOT an empty result — or the purge would be silently skipped
+    # while the job reports success (#845 review); a missing directory
+    # simply means nothing was ever exported.
+    export_paths: list[Path] = []
+    try:
+        export_paths = _export_artifacts_for_draft(draft_id)
+    except OSError as exc:
+        errors.append(f"export-scan[{draft_id}]: {exc}")
+        logger.exception(
+            "draft_cleanup: failed to scan export dir draft=%s",
+            draft_id,
+        )
 
     for storage_path in storage_paths:
         try:

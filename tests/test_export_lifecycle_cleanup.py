@@ -99,6 +99,94 @@ class TestExportArtifactPurge:
                 draft_cleanup({"draft_id": _DRAFT_ID})
 
 
+class TestExportScanFailureSemantics:
+    """#845 review finding 2: an unreadable EXPORT_DIR must FAIL the run.
+
+    ``Path.glob`` silently swallows scandir OSErrors (verified on
+    CPython 3.13), so the pre-review code reported success with
+    ``exports_total=0`` over a permissions error — silently skipping
+    exactly the plaintext artifacts this cleanup exists to delete. A
+    *missing* directory stays a success: nothing was ever exported.
+    """
+
+    @patch("app.docs.cleanup_handler.delete_named_graph", return_value=True)
+    @patch("app.docs.cleanup_handler.delete_encrypted_file")
+    def test_missing_export_dir_is_success_with_zero_artifacts(
+        self, mock_file: MagicMock, mock_graph: MagicMock, tmp_path: Path, monkeypatch
+    ):
+        monkeypatch.setenv("EXPORT_DIR", str(tmp_path / "never-created"))
+        result = draft_cleanup(
+            {
+                "draft_id": _DRAFT_ID,
+                "storage_paths": ["/tmp/v1.enc"],
+                "graph_uris": [f"https://example.org/drafts/{_DRAFT_ID}"],
+            }
+        )
+        assert result["exports_total"] == 0
+        assert result["exports_deleted"] == 0
+        assert result["storage_deleted"] == 1
+        assert result["graph_deleted"] == 1
+
+    @patch("app.docs.cleanup_handler.delete_named_graph", return_value=True)
+    @patch("app.docs.cleanup_handler.delete_encrypted_file")
+    def test_unreadable_export_dir_fails_the_run(
+        self, mock_file: MagicMock, mock_graph: MagicMock, export_dir: Path
+    ):
+        """Permissions error on EXPORT_DIR → cleanup error → retry budget."""
+        import os
+
+        if os.geteuid() == 0:  # pragma: no cover - root ignores dir modes
+            pytest.skip("chmod 000 does not block root")
+        (export_dir / f"{_DRAFT_ID}-{_REPORT_ID}.docx").write_bytes(b"PK")
+        os.chmod(export_dir, 0o000)
+        try:
+            with pytest.raises(RuntimeError, match="export-scan"):
+                draft_cleanup(
+                    {
+                        "draft_id": _DRAFT_ID,
+                        "storage_paths": ["/tmp/v1.enc"],
+                    }
+                )
+        finally:
+            os.chmod(export_dir, 0o755)
+        # The other cleanup steps still ran before the raise.
+        mock_file.assert_called_once_with("/tmp/v1.enc")
+
+    @patch("app.docs.cleanup_handler.delete_named_graph", return_value=True)
+    @patch("app.docs.cleanup_handler.delete_encrypted_file")
+    def test_scan_oserror_is_recorded_not_swallowed(
+        self, mock_file: MagicMock, mock_graph: MagicMock, export_dir: Path
+    ):
+        """Same contract, driven through a patched scan so it holds on
+        any platform/uid: a scan OSError becomes a cleanup error."""
+        with patch(
+            "app.docs.cleanup_handler._export_artifacts_for_draft",
+            side_effect=PermissionError(13, "Permission denied"),
+        ):
+            with pytest.raises(RuntimeError, match="export-scan"):
+                draft_cleanup({"draft_id": _DRAFT_ID})
+
+    def test_helper_returns_empty_for_missing_dir(self, tmp_path: Path, monkeypatch):
+        from app.docs.cleanup_handler import _export_artifacts_for_draft
+
+        monkeypatch.setenv("EXPORT_DIR", str(tmp_path / "ghost"))
+        assert _export_artifacts_for_draft(_DRAFT_ID) == []
+
+    def test_helper_raises_on_unreadable_dir(self, export_dir: Path):
+        import os
+
+        from app.docs.cleanup_handler import _export_artifacts_for_draft
+
+        if os.geteuid() == 0:  # pragma: no cover - root ignores dir modes
+            pytest.skip("chmod 000 does not block root")
+        os.chmod(export_dir, 0o000)
+        try:
+            with pytest.raises(OSError):
+                _export_artifacts_for_draft(_DRAFT_ID)
+        finally:
+            os.chmod(export_dir, 0o755)
+
+
 class TestJenaFalseIsAnError:
     @patch("app.docs.cleanup_handler.delete_named_graph", return_value=False)
     @patch("app.docs.cleanup_handler.delete_encrypted_file")

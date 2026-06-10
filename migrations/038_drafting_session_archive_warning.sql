@@ -9,12 +9,30 @@
 -- The scan now also sweeps stale *active* drafting sessions and emits a
 -- new ``drafting_session_archive_warning`` notification type.
 --
---   1. Extends the notifications.type CHECK constraint with
---      'drafting_session_archive_warning'. Mirrors migration 036's
---      cleanup pattern: drop BOTH historical constraint names
---      (chk_notifications_type from 012, notifications_type_check from
---      015/036) and recreate a single canonical constraint, so the
---      final state is independent of which prior migrations ran.
+--   1. Recreates the notifications.type CHECK constraint as the UNION
+--      of every type literal the codebase emits (grep of type="..."
+--      across notify()/create_notification() callers: app/notifications/
+--      wire.py + app/jobs/archive_warning.py) plus the constraint
+--      history (012/015/036), adding:
+--
+--        * 'drafting_session_archive_warning' — the new type this
+--          migration exists for;
+--        * 'annotation_mention' — emitted by notify_annotation_mention()
+--          (wire.py, wired from app/annotations/routes.py) but NEVER
+--          added to any prior CHECK, so every such insert has been
+--          silently dropped since the feature shipped (notify()
+--          swallows DB errors by design). Because the old constraint
+--          rejected those rows, none exist — this ADD CONSTRAINT
+--          cannot be blocked by existing data; it FIXES the silent
+--          drop going forward. (#845 review finding 1; pinned by
+--          tests/test_export_lifecycle_sessions_sweep.py's superset
+--          regression test.)
+--
+--      Mirrors migration 036's cleanup pattern: drop BOTH historical
+--      constraint names (chk_notifications_type from 012,
+--      notifications_type_check from 015/036) and recreate a single
+--      canonical constraint, so the final state is independent of
+--      which prior migrations ran.
 --
 --   2. Partial index on drafting_sessions(updated_at) WHERE
 --      status = 'active' so the daily stale-session scan stays cheap.
@@ -41,6 +59,7 @@ alter table notifications
     add constraint notifications_type_check
     check (type in (
         'annotation_reply',
+        'annotation_mention',
         'analysis_done',
         'drafter_complete',
         'sync_failed',

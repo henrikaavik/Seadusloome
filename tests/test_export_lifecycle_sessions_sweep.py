@@ -11,6 +11,7 @@ the scan.
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -195,17 +196,45 @@ class TestSchedulerRunsBothScans:
         assert calls == ["drafts", "sessions"]
 
 
+_MIGRATION_038 = (
+    Path(__file__).parent.parent / "migrations" / "038_drafting_session_archive_warning.sql"
+)
+
+
+def _migration_038_allowed_types() -> set[str]:
+    """Parse the type list out of migration 038's recreated CHECK."""
+    match = re.search(r"check \(type in \((.*?)\)\)", _MIGRATION_038.read_text(), re.DOTALL)
+    assert match, "could not locate the CHECK (type in (...)) list in migration 038"
+    return set(re.findall(r"'([a-z_]+)'", match.group(1)))
+
+
+def _emitted_notification_types() -> set[str]:
+    """Every ``type="..."`` literal in modules that call the notify layer.
+
+    Scans all of ``app/`` but only extracts from files that actually
+    invoke ``notify(`` / ``create_notification(`` — factory *wrappers*
+    like ``notify_draft_shared(...)`` don't match the call pattern and
+    carry no type literals, so UI ``type="checkbox"``-style attributes
+    never leak in. Self-extending: a future module that emits a new
+    notification type is picked up automatically.
+    """
+    app_dir = Path(__file__).parent.parent / "app"
+    emitted: set[str] = set()
+    for path in sorted(app_dir.rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        if "notify(" not in text and "create_notification(" not in text:
+            continue
+        emitted |= set(re.findall(r'\btype="([a-z_]+)"', text))
+    return emitted
+
+
 class TestMigration038Contract:
     """The code emits ``drafting_session_archive_warning``; the CHECK
     constraint must allow it or ``notify()`` silently drops every
     warning (the exact regression migration 036 fixed for #572)."""
 
     def test_migration_allows_new_type_and_indexes_scan(self):
-        migration = (
-            Path(__file__).parent.parent
-            / "migrations"
-            / "038_drafting_session_archive_warning.sql"
-        ).read_text()
+        migration = _MIGRATION_038.read_text()
         assert "drafting_session_archive_warning" in migration
         assert "notifications_type_check" in migration
         # 036 regression guard: BOTH historical constraint names dropped.
@@ -213,3 +242,29 @@ class TestMigration038Contract:
         # Partial index for the daily scan.
         assert "drafting_sessions(updated_at)" in migration
         assert "status = 'active'" in migration
+
+    def test_check_list_is_superset_of_every_emitted_type(self):
+        """#845 review finding 1: rebuilding the canonical CHECK from a
+        stale snapshot can silently drop an in-use type — exactly what
+        happened to ``annotation_mention`` (emitted by wire.py since the
+        annotations feature, never in any constraint, every insert
+        silently swallowed by ``notify()``). The recreated list must be
+        a superset of every type literal the codebase emits, so the
+        next constraint rebuild cannot regress one."""
+        emitted = _emitted_notification_types()
+        allowed = _migration_038_allowed_types()
+        # Extraction sanity: the patterns must keep finding real usage.
+        assert "drafting_session_archive_warning" in emitted
+        assert "annotation_mention" in emitted
+        assert len(allowed) >= 9
+        missing = emitted - allowed
+        assert not missing, (
+            f"migration 038 CHECK omits emitted notification types: {sorted(missing)} — "
+            "notify() swallows the CHECK violation, so these would be dropped silently"
+        )
+
+    def test_annotation_mention_explicitly_allowed(self):
+        """Pin the finding-1 fix itself: annotation_mention inserts have
+        been silently dropped since the feature shipped (no prior
+        migration ever allowed the type); 038 fixes that."""
+        assert "annotation_mention" in _migration_038_allowed_types()

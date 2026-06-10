@@ -29,10 +29,11 @@ Environment:
                  ``/var/seadusloome/exports`` otherwise. Unlike
                  ``STORAGE_DIR`` this value is not secret, so a
                  missing env var off-dev silently falls back to the
-                 prod default (no ``RuntimeError``). With
-                 ``APP_ENV=production`` a value that resolves inside
-                 the application source tree fails closed at import
-                 time (#845) — see :func:`_resolve_export_dir`.
+                 prod default (no ``RuntimeError``). In production-like
+                 environments (normalized ``APP_ENV`` outside
+                 development/test/ci/staging) a value that resolves
+                 inside the application source tree fails closed at
+                 import time (#845) — see :func:`_resolve_export_dir`.
 """
 
 from __future__ import annotations
@@ -125,36 +126,57 @@ _REPORT_COLUMN_INDEX = {
 # stray ``git add`` / image rebuild could pick them up (#845).
 _SOURCE_TREE_ROOT = Path(__file__).resolve().parents[2]
 
+# Environments where an in-repo EXPORT_DIR is tolerated (developer
+# convenience + CI workspaces). Anything OUTSIDE this set — "production",
+# "prod", casing/whitespace variants, typos, unknown values — is treated
+# as production-like and the in-repo guard fails closed (#845 review).
+_GUARD_EXEMPT_ENVS = frozenset({"development", "test", "ci", "staging"})
 
-def _resolve_export_dir(raw: str | None, app_env: str) -> Path:
+
+def _normalize_app_env(app_env: str | None) -> str:
+    """Normalize an ``APP_ENV`` value: strip + lowercase, missing/empty → development.
+
+    Duplicates the fail-closed normalization PR #865 introduces in
+    ``app.config`` — kept as an inline helper here because that PR owns
+    ``app/config.py`` and has not merged yet; consolidate on the shared
+    helper once #865 lands.
+    """
+    return (app_env or "").strip().lower() or "development"
+
+
+def _resolve_export_dir(raw: str | None, app_env: str | None) -> Path:
     """Resolve the export directory from *raw* (``EXPORT_DIR``) + *app_env*.
 
     Defaults: ``./storage/exports`` in development, ``/var/seadusloome/exports``
     otherwise. Unlike STORAGE_DIR this value is not secret, so a missing
     env var off-dev silently falls back to the prod default.
 
-    Fail-closed guard (#845): when *app_env* is production (the same
-    "production-like" rule as ``app.config.is_stub_allowed`` — staging
-    that wants prod behaviour sets ``APP_ENV=production``), a directory
-    that resolves inside the application source tree raises
-    ``RuntimeError``. The module-level ``EXPORT_DIR`` alias below runs
-    this at import time, so a misconfigured production deployment
-    refuses to start instead of leaking plaintext exports into the repo.
+    Fail-closed guard (#845): unless the *normalized* environment
+    (strip + lowercase, empty → development) is one of
+    :data:`_GUARD_EXEMPT_ENVS`, a directory that resolves inside the
+    application source tree raises ``RuntimeError`` — so ``production``,
+    ``Production``, ``" production "``, ``prod`` and any unknown value
+    all hit the guard instead of bypassing it on a casing/whitespace
+    mismatch. The module-level ``EXPORT_DIR`` alias below runs this at
+    import time, so a misconfigured production deployment refuses to
+    start instead of leaking plaintext exports into the repo.
     """
+    env = _normalize_app_env(app_env)
     if raw:
         path = Path(raw)
-    elif app_env == "development":
+    elif env == "development":
         path = Path("./storage/exports").resolve()
     else:
         path = Path("/var/seadusloome/exports")
-    if app_env == "production":
+    if env not in _GUARD_EXEMPT_ENVS:
         resolved = path.resolve()
         if resolved == _SOURCE_TREE_ROOT or resolved.is_relative_to(_SOURCE_TREE_ROOT):
             raise RuntimeError(
                 f"EXPORT_DIR={str(resolved)!r} resolves inside the application "
                 f"source tree ({str(_SOURCE_TREE_ROOT)!r}); refusing to start "
-                "with APP_ENV=production. Point EXPORT_DIR at a path outside "
-                "the deployed code directory, e.g. /var/seadusloome/exports."
+                f"with production-like APP_ENV={app_env!r}. Point EXPORT_DIR at "
+                "a path outside the deployed code directory, e.g. "
+                "/var/seadusloome/exports."
             )
     return path
 
@@ -163,7 +185,7 @@ def _load_export_dir() -> Path:
     """Return the root export directory with a dev-friendly default."""
     return _resolve_export_dir(
         os.environ.get("EXPORT_DIR"),
-        os.environ.get("APP_ENV", "development"),
+        os.environ.get("APP_ENV"),
     )
 
 

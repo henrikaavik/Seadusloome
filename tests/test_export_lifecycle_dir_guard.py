@@ -10,6 +10,11 @@ Covers:
 
 * ``_resolve_export_dir`` fails closed for an in-repo directory when
   ``APP_ENV=production`` and allows it in development.
+* APP_ENV is normalized (strip + lowercase, missing/empty →
+  development) and the guard applies to EVERY value outside the
+  development/test/ci/staging allowlist — ``Production``,
+  ``" production "``, ``prod`` and unknown values cannot bypass it on
+  a casing/whitespace mismatch (#845 review finding 3).
 * The production *defaults* already point outside the tree.
 * ``get_export_dir`` re-reads the environment and can mkdir.
 * ``app.drafter.docx_builder`` delegates to the SAME shared resolver,
@@ -58,6 +63,47 @@ class TestResolveExportDirGuard:
     def test_development_allows_explicit_in_repo_dir(self):
         in_repo = str(_SOURCE_TREE_ROOT / "storage" / "exports")
         assert _resolve_export_dir(in_repo, "development") == Path(in_repo)
+
+
+class TestAppEnvNormalization:
+    """#845 review finding 3: the guard must key on a NORMALIZED env.
+
+    ``APP_ENV=Production`` / ``" production "`` / ``prod`` previously
+    bypassed the exact-match ``== "production"`` check; unknown values
+    must fail closed too (same normalization PR #865 introduces in
+    ``app.config`` — duplicated here until that PR lands).
+    """
+
+    _IN_REPO = str(_SOURCE_TREE_ROOT / "storage" / "exports")
+
+    @pytest.mark.parametrize(
+        "env",
+        ["Production", "PRODUCTION", " production ", "prod", "live", "totally-unknown"],
+    )
+    def test_production_like_and_unknown_values_are_guarded(self, env: str):
+        with pytest.raises(RuntimeError, match="production-like"):
+            _resolve_export_dir(self._IN_REPO, env)
+
+    @pytest.mark.parametrize(
+        "env",
+        ["test", "TEST", " ci ", "staging", "Staging", "Development"],
+    )
+    def test_allowlisted_envs_tolerate_in_repo_dir(self, env: str):
+        """test/ci/staging (any casing/whitespace) keep developer + CI
+        workspaces working with an in-repo EXPORT_DIR."""
+        assert _resolve_export_dir(self._IN_REPO, env) == Path(self._IN_REPO)
+
+    @pytest.mark.parametrize("env", [None, "", "   "])
+    def test_missing_or_empty_env_normalizes_to_development(self, env: str | None):
+        resolved = _resolve_export_dir(None, env)
+        assert resolved == Path("./storage/exports").resolve()
+        # ...and the in-repo dev default is permitted (no raise above).
+
+    def test_unknown_env_without_export_dir_uses_prod_default_and_passes(self):
+        """An unknown env with NO explicit EXPORT_DIR falls back to the
+        /var default, which sits outside the tree → guard passes."""
+        resolved = _resolve_export_dir(None, "prod")
+        assert resolved == Path("/var/seadusloome/exports")
 
 
 class TestGetExportDir:
