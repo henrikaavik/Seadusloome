@@ -70,6 +70,7 @@ from __future__ import annotations
 # because every URI we generate uses neither. A future feature that
 # needs fragments or query params must extend the regex AND the SPARQL
 # template, not loosen this allowlist in isolation.
+from app.ontology.scoping import ADHOC_GRAPH_PREFIX, draft_graph_prefix_for
 from app.sync.jena_loader import _SAFE_GRAPH_URI, _validate_graph_uri
 
 __all__ = [
@@ -218,15 +219,34 @@ LIMIT 500
 # (severity medium) so the drafter reads the relevant case law before
 # proposing a change.
 #
-# The FILTER excludes the current draft graph from the "other drafts"
-# side so we don't self-report. We materialise the graph URI as a
-# literal in the FILTER with ``str(?otherGraph) != ...`` — rdflib's
-# URIRef comparison is strict about named-graph identity.
+# Three exclusions guard the cross-draft arm (#844):
+#
+#   A5 (REQUIRED, #849 depends on it): a draft must never self-conflict
+#   against its OWN prior-version graphs. Versions share the
+#   ``…/drafts/<uuid>`` prefix (v1 = ``…/drafts/<uuid>``, v2+ =
+#   ``…/drafts/<uuid>/v<n>`` per upload.py §9.5), so an exact ``!=``
+#   exclusion of just the current graph (the old behaviour) left v1/v2
+#   visible to a v3 analyze run as phantom "another draft". We exclude
+#   the whole ``{draft_prefix}`` namespace with ``!STRSTARTS`` instead.
+#
+#   A3(c): ephemeral Normi-mõjuahel probe graphs (``…/estleg/adhoc/…``)
+#   are typed ``estleg:DraftLegislation`` (adhoc_analysis.py) so a
+#   concurrent probe would otherwise be persisted into a real impact
+#   report as a phantom conflict. Exclude the adhoc namespace too.
+#
+#   A3(b) — org scoping of FOREIGN drafts — is NOT expressible in SPARQL
+#   here (Jena has no notion of Postgres org ownership). It is enforced
+#   downstream in ``ImpactAnalyzer._detect_conflicts`` by post-filtering
+#   the ``?conflictEntity`` draft URIs against the org's owned graphs and
+#   masking the rest (mirrors ``similarity.list_similar_drafts_for_view``).
+#
+# ``{draft_prefix}`` is the version-agnostic ``…/drafts/<uuid>`` prefix
+# derived from ``{graph_uri}`` by the builder.
 
 CONFLICTS = (
     PREFIXES
     + """
-SELECT DISTINCT ?draftRef ?conflictEntity ?conflictLabel ?reason ?relation WHERE {{
+SELECT DISTINCT ?draftRef ?conflictEntity ?conflictLabel ?reason ?relation ?otherGraph WHERE {{
   GRAPH <{graph_uri}> {{ ?draft estleg:references ?draftRef . }}
   {{
     # Another draft references the same entity.
@@ -234,7 +254,10 @@ SELECT DISTINCT ?draftRef ?conflictEntity ?conflictLabel ?reason ?relation WHERE
       ?otherDraft a estleg:DraftLegislation ;
                   estleg:references ?draftRef .
     }}
-    FILTER(str(?otherGraph) != "{graph_uri}")
+    # A5: exclude this draft's own (current + prior-version) graphs.
+    FILTER(!STRSTARTS(str(?otherGraph), "{draft_prefix}"))
+    # A3(c): exclude ephemeral adhoc probe graphs.
+    FILTER(!STRSTARTS(str(?otherGraph), "{adhoc_prefix}"))
     BIND(?otherDraft AS ?conflictEntity)
     OPTIONAL {{ ?conflictEntity rdfs:label ?conflictLabel }}
     BIND("Teine eelnõu viitab juba sellele sättele" AS ?reason)
@@ -406,9 +429,27 @@ def build_affected_entities_query(graph_uri: str) -> str:
 
 
 def build_conflicts_query(graph_uri: str) -> str:
-    """Return the validated CONFLICTS query."""
+    """Return the validated CONFLICTS query.
+
+    Besides the validated ``{graph_uri}``, two namespace prefixes are
+    interpolated for the self-conflict (A5) and adhoc (A3c) exclusions:
+
+    * ``{draft_prefix}`` — the version-agnostic ``…/drafts/<uuid>``
+      prefix of *graph_uri*, so the query excludes this draft's own
+      prior-version graphs (e.g. v3 must not conflict with its own
+      v1/v2). Derived from the already-validated URI.
+    * ``{adhoc_prefix}`` — the constant ``…/estleg/adhoc/`` namespace, so
+      ephemeral Normi-mõjuahel probes never surface as phantom conflicts.
+
+    Both prefixes are server-derived constants / functions of the
+    validated URI, so no user input reaches the template.
+    """
     safe = _validate_graph_uri(graph_uri)
-    return CONFLICTS.format(graph_uri=safe)
+    return CONFLICTS.format(
+        graph_uri=safe,
+        draft_prefix=draft_graph_prefix_for(safe),
+        adhoc_prefix=ADHOC_GRAPH_PREFIX,
+    )
 
 
 def build_gaps_query(graph_uri: str) -> str:

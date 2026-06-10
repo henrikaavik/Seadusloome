@@ -1,7 +1,20 @@
 """SPARQL query templates for the Estonian Legal Ontology explorer."""
 
+from app.ontology.scoping import public_subject_filter
+
 # Ontology namespace
 ESTLEG_NS = "https://data.riik.ee/ontology/estleg#"
+
+# A4 (#844): global search must scope to public ontology data explicitly
+# rather than relying on Fuseki's implicit default-graph behaviour. The
+# shared ``public_subject_filter`` drops any ``?entity`` whose IRI sits in
+# the org-private draft (``…/estleg/drafts/``) or ephemeral adhoc
+# (``…/estleg/adhoc/``) namespace — so even if ``unionDefaultGraph`` is
+# ever enabled (it is not today; #853 owns that config), draft labels can
+# never surface in search results. The clause is pure SPARQL 1.1
+# ``STRSTARTS`` so it behaves identically on Fuseki/ARQ and on the rdflib
+# engine the regression tests exercise.
+_PUBLIC_ENTITY_FILTER = public_subject_filter("entity")
 
 # Common prefixes used in all queries
 PREFIXES = """
@@ -116,6 +129,9 @@ WHERE {{
     ?entity rdfs:label ?label .
     ?entity rdf:type ?type .
     FILTER(REGEX(?label, "{search_pattern}", "i"))
+"""
+    + _PUBLIC_ENTITY_FILTER
+    + """
 }}
 ORDER BY ?label
 LIMIT {limit}

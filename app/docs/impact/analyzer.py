@@ -80,7 +80,12 @@ class ImpactAnalyzer:
     def __init__(self, sparql_client: SparqlClient | None = None) -> None:
         self.client = sparql_client if sparql_client is not None else SparqlClient()
 
-    def analyze(self, draft_graph_uri: str) -> ImpactFindings:
+    def analyze(
+        self,
+        draft_graph_uri: str,
+        *,
+        owned_draft_ids: set[str] | None = None,
+    ) -> ImpactFindings:
         """Execute every pass and return the aggregated findings.
 
         Args:
@@ -88,6 +93,14 @@ class ImpactAnalyzer:
                 Must already be loaded into Jena — the analyzer does
                 not put the graph itself (that is the responsibility
                 of :func:`app.docs.analyze_handler.analyze_impact`).
+            owned_draft_ids: The set of draft UUIDs owned by the org this
+                analysis belongs to (#844 A3b). When provided, cross-draft
+                conflict rows pointing at drafts *outside* this set are
+                masked so the report never persists a foreign org's draft
+                identity. ``None`` (the default, used by ad-hoc analyses
+                that have no owning org) masks **every** cross-draft row —
+                the safe default. The analyzer itself never touches
+                Postgres; the caller supplies this set.
 
         Returns:
             An :class:`ImpactFindings` populated with whatever each
@@ -97,7 +110,7 @@ class ImpactAnalyzer:
         logger.info("ImpactAnalyzer.analyze start graph=%s", draft_graph_uri)
 
         affected = self._find_affected(draft_graph_uri)
-        conflicts = self._detect_conflicts(draft_graph_uri)
+        conflicts = self._detect_conflicts(draft_graph_uri, owned_draft_ids=owned_draft_ids)
         gaps = self._analyze_gaps(draft_graph_uri)
         eu_compliance = self._check_eu_compliance(draft_graph_uri)
 
@@ -184,28 +197,60 @@ class ImpactAnalyzer:
             )
         return out
 
-    def _detect_conflicts(self, graph_uri: str) -> list[dict[str, str]]:
+    def _detect_conflicts(
+        self,
+        graph_uri: str,
+        *,
+        owned_draft_ids: set[str] | None = None,
+    ) -> list[dict[str, str]]:
         """Run the conflict query and return one dict per hit.
 
         Each row carries a ``relation`` field for C5 rendering.
+
+        Tenant scoping (#844 A3b): the cross-draft arm can report another
+        org's draft. Any cross-draft row whose target draft UUID is not in
+        *owned_draft_ids* is masked so the report never persists a foreign
+        org's draft URI / title. The conflict *count* is preserved (masked
+        rows stay in the list with their identity blanked) so the impact
+        score stays truthful. ``owned_draft_ids=None`` masks every
+        cross-draft row — the safe default for an ad-hoc analysis with no
+        owning org. The SPARQL query already excludes this draft's own
+        prior versions (A5) and adhoc probes (A3c);
+        :func:`drop_adhoc_conflict_rows` is a belt-and-braces second pass
+        for legacy data shapes. The analyzer never touches Postgres — the
+        caller resolves *owned_draft_ids* (see
+        :func:`app.docs.analyze_handler.analyze_impact`).
         """
+        from app.docs.impact.masking import drop_adhoc_conflict_rows, mask_conflict_rows
+
         try:
             query = build_conflicts_query(graph_uri)
             rows = self.client.query(query)
         except Exception as exc:  # noqa: BLE001
             logger.warning("ImpactAnalyzer._detect_conflicts failed: %s", exc)
             return []
-        return [
+        shaped = [
             {
                 "draft_ref": row.get("draftRef", ""),
                 "conflicting_entity": row.get("conflictEntity", ""),
                 "conflicting_label": row.get("conflictLabel", ""),
                 "reason": row.get("reason", ""),
                 "relation": row.get("relation", ""),
+                # Carry the raw graph projection through so the masking
+                # pass can bucket the row even when ``conflictEntity`` is
+                # an unexpected shape; stripped before the row is stored.
+                "other_graph": row.get("otherGraph", ""),
             }
             for row in rows
             if row.get("draftRef")
         ]
+        stripped = drop_adhoc_conflict_rows(shaped)
+        masked = mask_conflict_rows(stripped, owned_draft_ids=owned_draft_ids or set())
+        # Drop the internal ``other_graph`` helper key before returning —
+        # it must never reach the persisted report or a renderer.
+        for r in masked:
+            r.pop("other_graph", None)
+        return masked
 
     def _analyze_gaps(self, graph_uri: str) -> list[dict[str, str]]:
         """Run the gap-analysis query and return one dict per cluster."""

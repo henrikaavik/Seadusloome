@@ -282,16 +282,29 @@ LIMIT """
 # Lookup a single Institution's rdfs:label by URI — used by
 # :func:`get_institution_label` when the route only has a URI in hand
 # (e.g. deep-linked from the explorer evidence card).
+#
+# A2 (#844): the query REQUIRES ``?institution a estleg:Institution`` so a
+# stray URI (e.g. a draft subject, a court decision, or an arbitrary
+# attacker-supplied estleg URI) cannot resolve a label here. Combined
+# with the namespace guard in :func:`get_institution_label`, only a
+# genuine ``estleg:`` Institution URI can ever produce a label.
 _INSTITUTION_LABEL_QUERY = (
     PREFIXES
     + """
 SELECT ?label
 WHERE {
+  ?institution a estleg:Institution .
   ?institution rdfs:label ?label .
 }
 LIMIT 1
 """
 )
+
+# A2 (#844): only the canonical estleg namespace is a valid Institution
+# URI host. Reject anything else *before* it reaches Jena so a foreign
+# URI (draft graph, data.riik.ee fragment elsewhere, attacker URL) never
+# touches the triplestore via the institution-label path.
+_ESTLEG_URI_PREFIX = "https://data.riik.ee/ontology/estleg#"
 
 
 # ---------------------------------------------------------------------------
@@ -349,6 +362,17 @@ def search_institutions_by_label(
     return out
 
 
+def is_estleg_institution_uri(uri: str) -> bool:
+    """Return ``True`` if *uri* is in the canonical estleg namespace (A2).
+
+    The single gate for "is this a URI we will even attempt to resolve as
+    an Institution". Used by :func:`get_institution_label` and by the
+    padevused direct-URI route branch so both reject foreign URIs
+    identically.
+    """
+    return bool(uri) and uri.strip().startswith(_ESTLEG_URI_PREFIX)
+
+
 def get_institution_label(
     institution_uri: str,
     *,
@@ -358,9 +382,18 @@ def get_institution_label(
 
     Used when the route is invoked with a URI directly (a deep-link from
     the explorer) and we need a readable label for the page heading.
+
+    A2 (#844): only a canonical ``estleg:`` Institution URI is resolvable.
+    A URI outside that namespace returns ``""`` without hitting Jena, and
+    the underlying query additionally requires ``?institution a
+    estleg:Institution`` so even an in-namespace non-Institution URI
+    yields nothing.
     """
     uri = (institution_uri or "").strip()
     if not uri:
+        return ""
+    if not is_estleg_institution_uri(uri):
+        logger.debug("get_institution_label: rejecting non-estleg URI %r", uri)
         return ""
 
     client = sparql_client if sparql_client is not None else SparqlClient()
@@ -601,6 +634,7 @@ __all__ = [
     "InstitutionCompetences",
     "search_institutions_by_label",
     "get_institution_label",
+    "is_estleg_institution_uri",
     "list_competences_for_institution",
     "list_competence_overlaps",
     "gather_institution_competences",
