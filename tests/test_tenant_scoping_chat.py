@@ -7,6 +7,10 @@ DoD verification:
   to reach a draft named graph in the shared dataset).
 - Chat SPARQL responses have a hard row cap + serialised-byte cap, and a
   query without a LIMIT gets a safe enforced LIMIT.
+- (#844 review) Only SELECT / ASK are accepted — DESCRIBE and CONSTRUCT
+  are rejected at the executor (uncappable / wrong result shape), and the
+  LIMIT detector is literal- and comment-aware so a ``LIMIT`` inside a
+  string can't suppress injection.
 """
 
 from __future__ import annotations
@@ -128,10 +132,6 @@ class TestEnforceQueryLimit:
         q = "ASK { ?s ?p ?o }"
         assert _enforce_query_limit(q) == q
 
-    def test_describe_not_limited(self):
-        q = "DESCRIBE <https://data.riik.ee/ontology/estleg#KarS_Par_1>"
-        assert _enforce_query_limit(q) == q
-
     def test_limit_injected_after_prefixes(self):
         q = (
             "PREFIX estleg: <https://data.riik.ee/ontology/estleg#>\n"
@@ -139,6 +139,34 @@ class TestEnforceQueryLimit:
         )
         out = _enforce_query_limit(q)
         assert out.rstrip().upper().endswith(f"LIMIT {200}".upper()) or "LIMIT 200" in out
+
+    # ---- #844 review: literal- and comment-aware LIMIT detection --------
+
+    def test_limit_inside_string_literal_still_injects(self):
+        """A ``LIMIT 5`` inside a quoted string must NOT suppress
+        injection — otherwise the query reaches Jena uncapped."""
+        q = (
+            "SELECT ?s ?label WHERE { ?s rdfs:label ?label . "
+            'FILTER(CONTAINS(?label, "no LIMIT 5 here")) }'
+        )
+        out = _enforce_query_limit(q)
+        assert out != q, "literal-LIMIT must not be mistaken for a real clause"
+        assert out.rstrip().endswith("LIMIT 200")
+
+    def test_limit_inside_triple_quoted_literal_still_injects(self):
+        q = "SELECT ?s WHERE { ?s ?p ?o . FILTER(?x = '''multi\nLIMIT 9\nline''') }"
+        out = _enforce_query_limit(q)
+        assert out.rstrip().endswith("LIMIT 200")
+
+    def test_limit_in_comment_still_injects(self):
+        """A ``LIMIT`` mentioned only in a ``#`` comment doesn't count."""
+        q = "SELECT ?s WHERE { ?s ?p ?o }\n# this mentions LIMIT 5 in a comment"
+        out = _enforce_query_limit(q)
+        assert out.rstrip().endswith("LIMIT 200")
+
+    def test_real_trailing_limit_not_doubled(self):
+        q = "SELECT ?s WHERE { ?s ?p ?o }\nLIMIT 5"
+        assert _enforce_query_limit(q) == q
 
 
 class TestQueryOntologyResultCaps:
@@ -172,3 +200,75 @@ class TestQueryOntologyResultCaps:
         )
         assert "truncated" not in result
         assert len(result["results"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# #844 review — DESCRIBE / CONSTRUCT rejected at the executor; the
+# literal-LIMIT bypass is closed end-to-end (the query reaching Jena
+# carries a real LIMIT).
+# ---------------------------------------------------------------------------
+
+
+class TestQueryOntologyFormRejection:
+    def test_describe_rejected_before_jena(self):
+        """DESCRIBE would make Jena materialise the whole public graph
+        server-side before the row cap could apply — reject it outright."""
+        sparql = _make_sparql([{"s": "x"}])
+        result = asyncio.run(
+            execute_tool(
+                "query_ontology",
+                {"query": "DESCRIBE ?s WHERE { ?s ?p ?o }"},
+                sparql,
+            )
+        )
+        assert "error" in result
+        assert "SELECT or ASK" in result["error"]
+        sparql.query.assert_not_called()  # type: ignore[attr-defined]
+
+    def test_bare_describe_uri_rejected(self):
+        sparql = _make_sparql()
+        result = asyncio.run(
+            execute_tool(
+                "query_ontology",
+                {"query": "DESCRIBE <https://data.riik.ee/ontology/estleg#KarS_Par_1>"},
+                sparql,
+            )
+        )
+        assert "error" in result
+        sparql.query.assert_not_called()  # type: ignore[attr-defined]
+
+    def test_construct_rejected_before_jena(self):
+        sparql = _make_sparql()
+        result = asyncio.run(
+            execute_tool(
+                "query_ontology",
+                {"query": "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }"},
+                sparql,
+            )
+        )
+        assert "error" in result
+        sparql.query.assert_not_called()  # type: ignore[attr-defined]
+
+    def test_ask_still_executes(self):
+        """ASK is a bounded form and must still run."""
+        sparql = _make_sparql([])
+        result = asyncio.run(
+            execute_tool("query_ontology", {"query": "ASK { ?s a estleg:LegalProvision }"}, sparql)
+        )
+        assert "results" in result
+        sparql.query.assert_called_once()  # type: ignore[attr-defined]
+
+    def test_literal_limit_query_reaches_jena_with_real_limit(self):
+        """End-to-end: a SELECT with ``LIMIT`` only inside a string literal
+        must reach Jena with an *injected* real LIMIT appended."""
+        sparql = _make_sparql([])
+        q = (
+            "SELECT ?s ?label WHERE { ?s rdfs:label ?label . "
+            'FILTER(CONTAINS(?label, "contains LIMIT 5 text")) }'
+        )
+        asyncio.run(execute_tool("query_ontology", {"query": q}, sparql))
+        sparql.query.assert_called_once()  # type: ignore[attr-defined]
+        sent = sparql.query.call_args.args[0]  # type: ignore[attr-defined]
+        assert sent.rstrip().endswith("LIMIT 200"), (
+            f"executor must inject a real LIMIT despite the literal LIMIT; sent: {sent!r}"
+        )

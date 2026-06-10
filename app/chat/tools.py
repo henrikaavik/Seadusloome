@@ -237,10 +237,75 @@ CHAT_TOOLS: list[dict[str, Any]] = [
 _COMMENT_PATTERN = re.compile(r"(?:^|(?<=\s))#[^\n]*", re.MULTILINE)
 
 # Allowed SPARQL query forms (whitelist approach).
+#
+# Restricted to SELECT + ASK only (#844 review). The tool's purpose is to
+# *find* provisions / relationships (SELECT) and answer existence
+# questions (ASK) — both bounded result shapes the executor knows how to
+# cap. DESCRIBE and CONSTRUCT are rejected:
+#   * DESCRIBE has no enforceable LIMIT in the bare ``DESCRIBE <uri>``
+#     form and invites whole-public-graph server-side materialisation
+#     that the post-query row cap cannot prevent.
+#   * CONSTRUCT emits a graph (triples), not the binding rows the
+#     executor's row/byte caps + ``_extract_bindings`` are built for, and
+#     LIMIT-injection on it is not part of the tool's stated job.
 _ALLOWED_QUERY_FORMS = re.compile(
-    r"^(SELECT|ASK|DESCRIBE|CONSTRUCT)\b",
+    r"^(SELECT|ASK)\b",
     re.IGNORECASE,
 )
+
+# ---------------------------------------------------------------------------
+# Literal/comment-aware SPARQL pre-processing
+# ---------------------------------------------------------------------------
+#
+# LIMIT detection is an *allow-list* decision ("this query already has a
+# LIMIT, so don't add one"), so it MUST NOT be fooled by the keyword
+# appearing inside a string literal or a comment — otherwise an attacker
+# writes ``SELECT … FILTER(CONTAINS(?x, "LIMIT 5")) …`` and skips
+# injection, leaving the query uncapped at the server. We therefore strip
+# string literals AND comments before scanning for ``LIMIT``.
+#
+# (The GRAPH/FROM rejection in ``app.ontology.scoping`` is a *deny-list*
+# decision scanning raw text; a literal there can only cause a harmless
+# false rejection, never a bypass, so it is left as-is by design.)
+#
+# A single combined scanner matching, in priority order at each position:
+#   1. a triple-quoted literal ('''…''' / """…""")
+#   2. a single-quoted literal ('…' / "…", no raw newline)
+#   3. a ``#`` comment to end-of-line
+# Scanning left-to-right with one alternation avoids the literal-vs-comment
+# ordering hazard (a ``#`` inside a string, or a quote inside a comment, is
+# consumed by whichever construct opened first). All escape sequences are
+# honoured so a ``\'`` / ``\"`` inside a literal does not close it early.
+_LITERAL_OR_COMMENT = re.compile(
+    r"'''(?:\\.|[^\\])*?'''"  # '''...'''  (escape-aware, may span lines)
+    r'|"""(?:\\.|[^\\])*?"""'  # """..."""
+    r"|'(?:\\.|[^'\\\n])*'"  # '...'  (no raw newline)
+    r'|"(?:\\.|[^"\\\n])*"'  # "..."
+    r"|(?:^|(?<=\s))#[^\n]*",  # # comment to end-of-line
+    re.DOTALL | re.MULTILINE,
+)
+
+
+def _strip_literals_and_comments(query: str) -> str:
+    """Return *query* with string literals and ``#`` comments blanked.
+
+    A single left-to-right pass replaces each string literal with ``""``
+    (a harmless empty literal) and each comment with the empty string, so
+    a subsequent keyword scan (e.g. for ``LIMIT``) only ever sees the
+    query's *structure*, never user-controlled text. Using one combined
+    pattern means a ``#`` inside a literal stays part of the literal and a
+    quote inside a comment stays part of the comment — no ordering hazard.
+    """
+
+    def _blank(m: re.Match[str]) -> str:
+        token = m.group(0)
+        # A literal collapses to an empty literal; a comment vanishes.
+        if token.startswith(("'", '"')):
+            return '""'
+        return ""
+
+    return _LITERAL_OR_COMMENT.sub(_blank, query)
+
 
 # Block SERVICE keyword to prevent SSRF via federated queries.
 _SERVICE_PATTERN = re.compile(r"\bSERVICE\b", re.IGNORECASE)
@@ -262,21 +327,29 @@ _QUERY_ONTOLOGY_BYTE_CAP = 200_000  # ~200 KB of serialised JSON
 _QUERY_ONTOLOGY_DEFAULT_LIMIT = 200
 
 # Detect a top-level LIMIT so we don't double-append one. SPARQL allows a
-# trailing ``LIMIT n [OFFSET m]``; a case-insensitive search for the
-# keyword is sufficient because LIMIT is a reserved word that cannot
-# appear in a URI or string literal in a well-formed SELECT.
+# trailing ``LIMIT n [OFFSET m]``. The scan runs over the
+# literal/comment-stripped query (see ``_strip_literals_and_comments``) so
+# a ``LIMIT`` inside a quoted string or a ``#`` comment is NOT mistaken
+# for a real clause — that asymmetry matters because LIMIT detection is an
+# allow-list decision and a false positive would skip injection.
 _LIMIT_PATTERN = re.compile(r"\bLIMIT\s+\d+", re.IGNORECASE)
 
 
 def _enforce_query_limit(query: str, default_limit: int = _QUERY_ONTOLOGY_DEFAULT_LIMIT) -> str:
-    """Append a ``LIMIT`` to *query* when it has none (G1).
+    """Append a ``LIMIT`` to a SELECT *query* when it has none (G1).
 
-    A no-op when the query already carries a ``LIMIT``. ASK/DESCRIBE
-    queries are returned unchanged — ASK yields a single boolean and
-    DESCRIBE is bounded by the described resource, so a LIMIT is either
-    meaningless or syntactically invalid there.
+    Only SELECT is limited here — by the time this runs the form has
+    already been narrowed to SELECT or ASK by :func:`_is_read_only_sparql`
+    (DESCRIBE / CONSTRUCT are rejected). ASK yields a single boolean and
+    needs no LIMIT, so it is returned unchanged.
+
+    The "does it already have a LIMIT?" check is literal- and
+    comment-aware: a ``LIMIT 5`` appearing inside a string literal or a
+    ``#`` comment must NOT suppress injection, otherwise the query reaches
+    Jena uncapped. We therefore scan a stripped copy of the query.
     """
-    body = _COMMENT_PATTERN.sub("", query).strip()
+    stripped = _strip_literals_and_comments(query)
+    body = stripped.strip()
     # Strip leading PREFIX/BASE to find the query form.
     while True:
         m = re.match(r"(?i)\s*PREFIX\s+\S+:\s*<[^>]*>\s*", body)
@@ -289,21 +362,25 @@ def _enforce_query_limit(query: str, default_limit: int = _QUERY_ONTOLOGY_DEFAUL
             continue
         break
     body = body.lstrip()
-    if not re.match(r"(?i)^(SELECT|CONSTRUCT)\b", body):
-        # ASK / DESCRIBE — LIMIT not applicable.
+    if not re.match(r"(?i)^SELECT\b", body):
+        # ASK — LIMIT not applicable.
         return query
-    if _LIMIT_PATTERN.search(_COMMENT_PATTERN.sub("", query)):
+    if _LIMIT_PATTERN.search(stripped):
         return query
     return f"{query.rstrip()}\nLIMIT {default_limit}"
 
 
 def _is_read_only_sparql(query: str) -> bool:
-    """Return True if *query* is a safe read-only SPARQL query.
+    """Return True if *query* is a safe, capable-of-being-capped query.
 
     Uses a whitelist approach:
     1. Strip comments (``#...`` to end of line).
     2. Strip leading PREFIX/BASE declarations.
-    3. Verify the query body starts with SELECT, ASK, DESCRIBE, or CONSTRUCT.
+    3. Verify the query body starts with SELECT or ASK. DESCRIBE and
+       CONSTRUCT are rejected (#844 review): DESCRIBE can't be reliably
+       LIMIT-bounded and invites whole-graph server-side materialisation;
+       CONSTRUCT emits triples rather than the binding rows the executor's
+       caps are built for.
     4. Block the SERVICE keyword anywhere (prevents SSRF via federated queries).
     """
     # Strip comments
@@ -341,27 +418,27 @@ async def _exec_query_ontology(
     tool_input: dict[str, Any],
     sparql: SparqlClient,
 ) -> dict[str, Any]:
-    """Execute an arbitrary read-only, public-graph-only SPARQL query.
+    """Execute a read-only, public-graph-only, capped SPARQL query.
 
     Three security/safety gates (#844):
 
-    1. :func:`_is_read_only_sparql` — reject any mutation form.
+    1. :func:`_is_read_only_sparql` — accept only SELECT / ASK (reject
+       mutations and the uncappable DESCRIBE / CONSTRUCT forms).
     2. :func:`app.ontology.scoping.assert_public_only` — reject any
        ``GRAPH`` / ``FROM`` / ``FROM NAMED`` keyword so the query can
        only touch the public default graph, never an org-private draft
        named graph (C1).
-    3. result caps — inject a ``LIMIT`` when missing, then truncate the
-       returned rows to :data:`_QUERY_ONTOLOGY_ROW_CAP` and the
-       serialised payload to :data:`_QUERY_ONTOLOGY_BYTE_CAP` (G1).
+    3. result caps — inject a ``LIMIT`` when missing (literal/comment-aware
+       detection), then truncate the returned rows to
+       :data:`_QUERY_ONTOLOGY_ROW_CAP` and the serialised payload to
+       :data:`_QUERY_ONTOLOGY_BYTE_CAP` (G1).
     """
     query = tool_input.get("query", "")
     if not query.strip():
         return {"error": "Empty SPARQL query"}
 
     if not _is_read_only_sparql(query):
-        return {
-            "error": "Only read-only SPARQL queries (SELECT/ASK/DESCRIBE/CONSTRUCT) are allowed"
-        }
+        return {"error": "Only read-only SELECT or ASK SPARQL queries are allowed"}
 
     # C1: confine the LLM to the public default graph. Any GRAPH / FROM /
     # FROM NAMED keyword could reach an org-private draft named graph in
