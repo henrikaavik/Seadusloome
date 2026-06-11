@@ -31,6 +31,8 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+from app.ontology.temporal_scope import TemporalScope
+
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "ontology_canonical.ttl"
 
 
@@ -533,7 +535,7 @@ def test_burden_resolved_provision_renders_full_result(
     # Suggested actions include the "Tagasi" link.
     assert "Tagasi analüüsikeskusesse" in body
 
-    mock_list.assert_called_once_with(_TLS_P12_URI)
+    mock_list.assert_called_once_with(_TLS_P12_URI, scope=TemporalScope.CURRENT)
 
 
 @patch("app.analyysikeskus.routes.list_burden_for_act")
@@ -562,7 +564,7 @@ def test_burden_resolved_law_uses_act_query(
     assert resp.status_code == 200
     # The route now passes the literal act title (from partial_match)
     # rather than a fake URI — matches the real resolver shape.
-    mock_list_act.assert_called_once_with("Töölepingu seadus")
+    mock_list_act.assert_called_once_with("Töölepingu seadus", scope=TemporalScope.CURRENT)
 
 
 @patch("app.analyysikeskus.routes.list_burden_for_act")
@@ -595,7 +597,7 @@ def test_burden_bare_law_input_routes_to_for_act(
     body = resp.text
 
     # The act-level helper was called with the literal title.
-    mock_list_act.assert_called_once_with("Töölepingu seadus")
+    mock_list_act.assert_called_once_with("Töölepingu seadus", scope=TemporalScope.CURRENT)
     # The RAG fallback was NOT consulted.
     mock_rag.assert_not_called()
     # The "Ei tuvastanud" warning is absent — we resolved (partially).

@@ -59,6 +59,11 @@ from app.ontology.relations import (
     norm_type_key,
 )
 from app.ontology.sparql_client import SparqlClient
+from app.ontology.temporal_scope import (
+    DEFAULT_SCOPE,
+    TemporalScope,
+    temporal_scope_clause,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -298,7 +303,7 @@ def burden_key_order() -> tuple[BurdenKey, ...]:
 # so the count grid is honest).
 
 
-def _build_act_burden_query() -> str:
+def _build_act_burden_query(scope: TemporalScope = DEFAULT_SCOPE) -> str:
     """Return the act-level burden SPARQL.
 
     Joins via ``estleg:sourceAct`` only — the Wave 2 spike confirmed
@@ -308,6 +313,12 @@ def _build_act_burden_query() -> str:
     or a URI (canonical TTL fixture shape); the ``BIND`` clauses
     derive ``?act`` (URI form when applicable) and ``?actLabel``
     (label-or-literal) from whichever object the data carries.
+
+    The *temporal scope* (#850) is injected as a ``FILTER NOT EXISTS``
+    block via :func:`app.ontology.temporal_scope.temporal_scope_clause`.
+    The default :data:`~app.ontology.temporal_scope.DEFAULT_SCOPE`
+    (current law) drops provisions whose owning act is *positively*
+    marked repealed; pass :attr:`TemporalScope.ALL` for the full history.
     """
     return (
         PREFIXES
@@ -325,6 +336,7 @@ WHERE {{
        IF(isLiteral(?actLit), STR(?actLit), ""))
     AS ?actLabel
   )
+{temporal_scope_clause(scope, "provision")}
 }}
 ORDER BY ?provision
 LIMIT {_MAX_BURDEN_ROWS_PER_ACT}
@@ -332,13 +344,21 @@ LIMIT {_MAX_BURDEN_ROWS_PER_ACT}
     )
 
 
-def _build_provision_burden_query() -> str:
+def _build_provision_burden_query(scope: TemporalScope = DEFAULT_SCOPE) -> str:
     """Return the provision-level burden SPARQL (single-row OPTIONAL fan-out).
 
     Joins via ``estleg:sourceAct`` only — see :func:`_build_act_burden_query`
     for the rationale (Wave 2 spike, 2026-05-18). The whole
     ``sourceAct`` chain is wrapped in an OPTIONAL because a provision
     URI looked up in isolation may not carry the membership edge yet.
+
+    The temporal scope (#850) is injected as a ``FILTER NOT EXISTS``
+    block. Default = current law (positively-repealed provisions
+    dropped); :attr:`TemporalScope.ALL` keeps everything. Note the
+    ``?provision`` here is bound by the caller's URI VALUES clause, so
+    the filter operates on that single provision (it disappears from the
+    single-row result when the provision / its act is positively
+    repealed and the scope is current).
     """
     return (
         PREFIXES
@@ -358,6 +378,7 @@ WHERE {{
   }}
   OPTIONAL {{ ?provision <{PREDICATES.NORMATIVE_TYPE}> ?normType }}
   OPTIONAL {{ ?provision <{PREDICATES.DUTY_HOLDER}> ?dutyHolder }}
+{temporal_scope_clause(scope, "provision")}
 }}
 LIMIT 1
 """
@@ -412,6 +433,7 @@ def _looks_like_uri(value: str) -> bool:
 def list_burden_for_act(
     act: str,
     *,
+    scope: TemporalScope = DEFAULT_SCOPE,
     sparql_client: SparqlClient | None = None,
 ) -> BurdenSummary:
     """Return the deontic-classified rows + counts for every provision of *act*.
@@ -432,6 +454,11 @@ def list_burden_for_act(
             detects the shape and emits the appropriate VALUES
             binding. Empty / whitespace input yields an empty
             :class:`BurdenSummary` (no SPARQL hit).
+        scope: Temporal scope (#850). Default
+            :data:`~app.ontology.temporal_scope.DEFAULT_SCOPE` (current
+            law) excludes provisions whose owning act is positively
+            marked repealed; :attr:`TemporalScope.ALL` includes the full
+            history.
         sparql_client: Optional :class:`SparqlClient` override (tests
             inject a mocked one).
 
@@ -446,7 +473,7 @@ def list_burden_for_act(
         return _empty_summary()
 
     client = sparql_client if sparql_client is not None else SparqlClient()
-    query = _build_act_burden_query()
+    query = _build_act_burden_query(scope)
     try:
         if _looks_like_uri(ident):
             rows = client.query(query, uri_bindings={"actLit": ident})
@@ -462,6 +489,7 @@ def list_burden_for_act(
 def list_burden_for_provision(
     provision_uri: str,
     *,
+    scope: TemporalScope = DEFAULT_SCOPE,
     sparql_client: SparqlClient | None = None,
 ) -> BurdenSummary:
     """Return the deontic-classified single-row summary for a provision URI.
@@ -470,6 +498,17 @@ def list_burden_for_provision(
     Useful when the user's input resolves to a §-reference rather than an
     act / draft — the count grid then shows ``1`` in exactly one bucket
     and ``0`` in the rest.
+
+    Args:
+        provision_uri: The ``LegalProvision`` URI.
+        scope: Temporal scope (#850). Default current law — a
+            positively-repealed provision (or one whose owning act is
+            repealed) yields an empty summary under the current-law
+            scope. :attr:`TemporalScope.ALL` keeps it. The draft-delta
+            path (:func:`burden_delta_for_draft`) calls this without an
+            explicit scope and therefore inherits the current-law default
+            for its "before" baseline.
+        sparql_client: Optional :class:`SparqlClient` override.
     """
     uri = (provision_uri or "").strip()
     if not uri:
@@ -478,7 +517,7 @@ def list_burden_for_provision(
     client = sparql_client if sparql_client is not None else SparqlClient()
     try:
         rows = client.query(
-            _build_provision_burden_query(),
+            _build_provision_burden_query(scope),
             uri_bindings={"provision": uri},
         )
     except Exception:

@@ -63,6 +63,11 @@ from typing import Any
 
 from app.ontology.queries import PREFIXES
 from app.ontology.sparql_client import SparqlClient
+from app.ontology.temporal_scope import (
+    DEFAULT_SCOPE,
+    TemporalScope,
+    temporal_scope_clause,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -237,20 +242,33 @@ LIMIT """
 # membership edge in prod (the Wave 2 spike confirmed both
 # ``estleg:partOf`` and ``estleg:partOfAct`` carry zero triples in this
 # corpus). OPTIONAL so an orphan provision still surfaces.
-_INSTITUTION_COMPETENCES_QUERY = (
-    PREFIXES
-    + """
+#
+# Temporal scope (#850): the competence row IS a ``LegalProvision``, so
+# the current-law filter from :mod:`app.ontology.temporal_scope` drops
+# powers vested by provisions of a positively-repealed act — a ministry
+# lawyer asking "what powers does this body hold today" should not see
+# competences granted by acts that no longer exist. Default current law;
+# :attr:`TemporalScope.ALL` includes historical powers. Built as a
+# function so the scope clause can be spliced per call.
+
+
+def _build_institution_competences_query(scope: TemporalScope = DEFAULT_SCOPE) -> str:
+    """Competence provisions vested in an institution, scoped by *scope* (#850)."""
+    return (
+        PREFIXES
+        + f"""
 SELECT ?provision ?provisionLabel ?actLit
-WHERE {
+WHERE {{
   ?provision estleg:competentAuthority ?institution .
-  OPTIONAL { ?provision rdfs:label ?provisionLabel }
-  OPTIONAL { ?provision estleg:sourceAct ?actLit }
-}
+  OPTIONAL {{ ?provision rdfs:label ?provisionLabel }}
+  OPTIONAL {{ ?provision estleg:sourceAct ?actLit }}
+{temporal_scope_clause(scope, "provision")}
+}}
 ORDER BY ?actLit ?provision
-LIMIT """
-    + str(_MAX_COMPETENCES_PER_INSTITUTION + 1)  # +1 sentinel so we can detect truncation
-    + "\n"
-)
+LIMIT {_MAX_COMPETENCES_PER_INSTITUTION + 1}
+"""
+    )
+
 
 # Overlap rows — every provision where the seed institution and at
 # least one *other* institution both appear on ``competentAuthority``.
@@ -260,24 +278,32 @@ LIMIT """
 #
 # ``FILTER(?other != ?institution)`` excludes self-pairs; the route
 # also runs a defence-in-depth Python filter.
-_INSTITUTION_OVERLAPS_QUERY = (
-    PREFIXES
-    + """
+#
+# Temporal scope (#850): same provision-level filter as the competences
+# query — an overlap on a repealed-act provision is not a live overlap.
+
+
+def _build_institution_overlaps_query(scope: TemporalScope = DEFAULT_SCOPE) -> str:
+    """Competence-overlap provisions for an institution, scoped by *scope* (#850)."""
+    return (
+        PREFIXES
+        + f"""
 SELECT DISTINCT ?provision ?provisionLabel ?actLit ?other ?otherLabel
-WHERE {
+WHERE {{
   ?provision estleg:competentAuthority ?institution .
   ?provision estleg:competentAuthority ?other .
   ?other a estleg:Institution .
-  OPTIONAL { ?provision rdfs:label ?provisionLabel }
-  OPTIONAL { ?provision estleg:sourceAct ?actLit }
-  OPTIONAL { ?other rdfs:label ?otherLabel }
+  OPTIONAL {{ ?provision rdfs:label ?provisionLabel }}
+  OPTIONAL {{ ?provision estleg:sourceAct ?actLit }}
+  OPTIONAL {{ ?other rdfs:label ?otherLabel }}
   FILTER(?other != ?institution)
-}
+{temporal_scope_clause(scope, "provision")}
+}}
 ORDER BY ?actLit ?provision ?other
-LIMIT """
-    + str(_MAX_OVERLAP_ROWS)
-    + "\n"
-)
+LIMIT {_MAX_OVERLAP_ROWS}
+"""
+    )
+
 
 # Lookup a single Institution's rdfs:label by URI — used by
 # :func:`get_institution_label` when the route only has a URI in hand
@@ -422,6 +448,7 @@ def get_institution_label(
 def list_competences_for_institution(
     institution_uri: str,
     *,
+    scope: TemporalScope = DEFAULT_SCOPE,
     sparql_client: SparqlClient | None = None,
 ) -> list[CompetenceRow]:
     """Return every competence provision vested in *institution_uri*.
@@ -433,6 +460,9 @@ def list_competences_for_institution(
     Args:
         institution_uri: The ``estleg:Institution`` URI. Empty input
             returns ``[]`` without hitting Jena.
+        scope: Temporal scope (#850). Default current law excludes
+            powers vested by provisions of a positively-repealed act;
+            :attr:`TemporalScope.ALL` includes historical powers.
         sparql_client: Optional :class:`SparqlClient` override.
 
     Returns:
@@ -449,7 +479,7 @@ def list_competences_for_institution(
     client = sparql_client if sparql_client is not None else SparqlClient()
     try:
         rows = client.query(
-            _INSTITUTION_COMPETENCES_QUERY,
+            _build_institution_competences_query(scope),
             uri_bindings={"institution": uri},
         )
     except Exception:
@@ -466,6 +496,7 @@ def list_competences_for_institution(
 def list_competence_overlaps(
     institution_uri: str,
     *,
+    scope: TemporalScope = DEFAULT_SCOPE,
     sparql_client: SparqlClient | None = None,
 ) -> list[OverlapRow]:
     """Return overlap rows — provisions where the institution shares competence.
@@ -478,6 +509,9 @@ def list_competence_overlaps(
     Args:
         institution_uri: The seed ``estleg:Institution`` URI. Empty
             input returns ``[]`` without hitting Jena.
+        scope: Temporal scope (#850). Default current law excludes
+            overlaps on provisions of a positively-repealed act;
+            :attr:`TemporalScope.ALL` includes historical overlaps.
         sparql_client: Optional :class:`SparqlClient` override.
 
     Returns:
@@ -491,7 +525,7 @@ def list_competence_overlaps(
     client = sparql_client if sparql_client is not None else SparqlClient()
     try:
         rows = client.query(
-            _INSTITUTION_OVERLAPS_QUERY,
+            _build_institution_overlaps_query(scope),
             uri_bindings={"institution": uri},
         )
     except Exception:
@@ -530,6 +564,7 @@ def gather_institution_competences(
     institution_uri: str,
     *,
     institution_label: str | None = None,
+    scope: TemporalScope = DEFAULT_SCOPE,
     sparql_client: SparqlClient | None = None,
 ) -> InstitutionCompetences:
     """Aggregate the full A3 v1 view for one institution.
@@ -547,6 +582,9 @@ def gather_institution_competences(
             the URI is non-empty, this function calls
             :func:`get_institution_label` so the result always carries a
             label (or the URI tail as a last resort).
+        scope: Temporal scope (#850), threaded to both the competences
+            and overlaps queries. Default current law; pass
+            :attr:`TemporalScope.ALL` for the full history.
         sparql_client: Optional :class:`SparqlClient` override — passed
             through to all three SPARQL calls so tests inject one mock.
 
@@ -568,7 +606,7 @@ def gather_institution_competences(
         tail = uri.rsplit("#", 1)[-1].rsplit("/", 1)[-1]
         label = tail or uri
 
-    rows = list_competences_for_institution(uri, sparql_client=sparql_client)
+    rows = list_competences_for_institution(uri, scope=scope, sparql_client=sparql_client)
     # Detect truncation: the SPARQL LIMIT is _MAX + 1 so we can see one
     # past the cap; we then trim back to _MAX for the actual view.
     truncated = len(rows) > _MAX_COMPETENCES_PER_INSTITUTION
@@ -584,7 +622,7 @@ def gather_institution_competences(
         # edge; the route labels it "Muud" rather than blank.
         by_act.setdefault(row.act_label, []).append(row)
 
-    overlaps = list_competence_overlaps(uri, sparql_client=sparql_client)
+    overlaps = list_competence_overlaps(uri, scope=scope, sparql_client=sparql_client)
 
     return InstitutionCompetences(
         institution_uri=uri,

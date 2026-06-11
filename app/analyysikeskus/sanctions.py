@@ -43,6 +43,11 @@ from typing import Any
 
 from app.ontology.queries import PREFIXES
 from app.ontology.sparql_client import SparqlClient
+from app.ontology.temporal_scope import (
+    DEFAULT_SCOPE,
+    TemporalScope,
+    temporal_scope_clause,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -193,10 +198,21 @@ def sanction_unit_label(unit: str, currency: str | None = None) -> str:
 # every field except ``provision`` and ``sanction`` because the
 # corpus' completeness varies — e.g. some sanctions have only a max
 # bound, some lack currency entirely.
+#
+# Temporal scope (#850): every template binds ``?provision`` (a
+# ``LegalProvision``) so the current-law filter from
+# :mod:`app.ontology.temporal_scope` drops sanctions attached to
+# provisions of positively-repealed acts. The default is current law;
+# :attr:`TemporalScope.ALL` keeps repealed-act sanctions. The templates
+# are now builder *functions* (rather than module constants) so the
+# scope clause can be spliced at call time.
 
-_PROVISION_SANCTIONS_QUERY = (
-    PREFIXES
-    + """
+
+def _build_provision_sanctions_query(scope: TemporalScope = DEFAULT_SCOPE) -> str:
+    """Sanctions attached to a single provision, scoped by *scope* (#850)."""
+    return (
+        PREFIXES
+        + f"""
 SELECT ?sanction ?provision ?provisionLabel
        ?actLit
        ?sanctionType
@@ -205,29 +221,32 @@ SELECT ?sanction ?provision ?provisionLabel
        ?minCurrency ?maxCurrency
        ?enforcedAtLevel
        ?isStatutoryDefault
-WHERE {
+WHERE {{
   ?provision estleg:hasSanction ?sanction .
-  OPTIONAL { ?provision rdfs:label ?provisionLabel }
-  OPTIONAL { ?provision estleg:sourceAct ?actLit }
-  OPTIONAL { ?sanction estleg:sanctionType ?sanctionType }
-  OPTIONAL { ?sanction estleg:minPenaltyAmount ?minAmount }
-  OPTIONAL { ?sanction estleg:maxPenaltyAmount ?maxAmount }
-  OPTIONAL { ?sanction estleg:minPenaltyUnit ?minUnit }
-  OPTIONAL { ?sanction estleg:maxPenaltyUnit ?maxUnit }
-  OPTIONAL { ?sanction estleg:minPenaltyCurrency ?minCurrency }
-  OPTIONAL { ?sanction estleg:maxPenaltyCurrency ?maxCurrency }
-  OPTIONAL { ?sanction estleg:enforcedAtLevel ?enforcedAtLevel }
-  OPTIONAL { ?sanction estleg:isStatutoryDefault ?isStatutoryDefault }
-}
+  OPTIONAL {{ ?provision rdfs:label ?provisionLabel }}
+  OPTIONAL {{ ?provision estleg:sourceAct ?actLit }}
+  OPTIONAL {{ ?sanction estleg:sanctionType ?sanctionType }}
+  OPTIONAL {{ ?sanction estleg:minPenaltyAmount ?minAmount }}
+  OPTIONAL {{ ?sanction estleg:maxPenaltyAmount ?maxAmount }}
+  OPTIONAL {{ ?sanction estleg:minPenaltyUnit ?minUnit }}
+  OPTIONAL {{ ?sanction estleg:maxPenaltyUnit ?maxUnit }}
+  OPTIONAL {{ ?sanction estleg:minPenaltyCurrency ?minCurrency }}
+  OPTIONAL {{ ?sanction estleg:maxPenaltyCurrency ?maxCurrency }}
+  OPTIONAL {{ ?sanction estleg:enforcedAtLevel ?enforcedAtLevel }}
+  OPTIONAL {{ ?sanction estleg:isStatutoryDefault ?isStatutoryDefault }}
+{temporal_scope_clause(scope, "provision")}
+}}
 ORDER BY ?provision
-LIMIT """
-    + str(_MAX_SANCTIONS_PER_ACT)
-    + "\n"
-)
+LIMIT {_MAX_SANCTIONS_PER_ACT}
+"""
+    )
 
-_ACT_SANCTIONS_QUERY = (
-    PREFIXES
-    + """
+
+def _build_act_sanctions_query(scope: TemporalScope = DEFAULT_SCOPE) -> str:
+    """Sanctions across every provision of an act, scoped by *scope* (#850)."""
+    return (
+        PREFIXES
+        + f"""
 SELECT ?sanction ?provision ?provisionLabel
        ?actLit
        ?sanctionType
@@ -236,46 +255,54 @@ SELECT ?sanction ?provision ?provisionLabel
        ?minCurrency ?maxCurrency
        ?enforcedAtLevel
        ?isStatutoryDefault
-WHERE {
+WHERE {{
   ?provision estleg:sourceAct ?actLit .
   ?provision estleg:hasSanction ?sanction .
-  OPTIONAL { ?provision rdfs:label ?provisionLabel }
-  OPTIONAL { ?sanction estleg:sanctionType ?sanctionType }
-  OPTIONAL { ?sanction estleg:minPenaltyAmount ?minAmount }
-  OPTIONAL { ?sanction estleg:maxPenaltyAmount ?maxAmount }
-  OPTIONAL { ?sanction estleg:minPenaltyUnit ?minUnit }
-  OPTIONAL { ?sanction estleg:maxPenaltyUnit ?maxUnit }
-  OPTIONAL { ?sanction estleg:minPenaltyCurrency ?minCurrency }
-  OPTIONAL { ?sanction estleg:maxPenaltyCurrency ?maxCurrency }
-  OPTIONAL { ?sanction estleg:enforcedAtLevel ?enforcedAtLevel }
-  OPTIONAL { ?sanction estleg:isStatutoryDefault ?isStatutoryDefault }
-}
+  OPTIONAL {{ ?provision rdfs:label ?provisionLabel }}
+  OPTIONAL {{ ?sanction estleg:sanctionType ?sanctionType }}
+  OPTIONAL {{ ?sanction estleg:minPenaltyAmount ?minAmount }}
+  OPTIONAL {{ ?sanction estleg:maxPenaltyAmount ?maxAmount }}
+  OPTIONAL {{ ?sanction estleg:minPenaltyUnit ?minUnit }}
+  OPTIONAL {{ ?sanction estleg:maxPenaltyUnit ?maxUnit }}
+  OPTIONAL {{ ?sanction estleg:minPenaltyCurrency ?minCurrency }}
+  OPTIONAL {{ ?sanction estleg:maxPenaltyCurrency ?maxCurrency }}
+  OPTIONAL {{ ?sanction estleg:enforcedAtLevel ?enforcedAtLevel }}
+  OPTIONAL {{ ?sanction estleg:isStatutoryDefault ?isStatutoryDefault }}
+{temporal_scope_clause(scope, "provision")}
+}}
 ORDER BY ?provision
-LIMIT """
-    + str(_MAX_SANCTIONS_PER_ACT)
-    + "\n"
-)
+LIMIT {_MAX_SANCTIONS_PER_ACT}
+"""
+    )
 
-# Similar sanctions — same sanctionType, other acts only, with a
-# range-overlap filter on the amount bounds. We bind ``?type`` /
-# ``?seedMin`` / ``?seedMax`` / ``?seedActLit`` via
-# :meth:`SparqlClient._inject_bindings`. The injector emits VALUES
-# with **string literals** (it has to — the same injector is used for
-# URI strings, language tags, etc.), so the numeric comparisons in the
-# FILTER cast explicitly through ``xsd:decimal(?seedMin)`` and
-# ``xsd:decimal(?seedMax)``. Without the cast SPARQL compares lex order
-# string-to-decimal, which silently returns no overlapping rows (F2,
-# 2026-05-15 review repro: rdflib confirmed 0 rows for string vs 1 row
-# for typed decimal).
-#
-# The range-overlap maths: two ranges [a, b] and [c, d] overlap iff
-# a <= d AND c <= b, i.e. ``?seedMin <= ?maxAmount`` AND
-# ``?minAmount <= ?seedMax``. Either bound missing on the candidate
-# row passes the filter (treated as open-ended), so we don't lose
-# rows that have only one numeric bound.
-_SIMILAR_SANCTIONS_QUERY = (
-    PREFIXES
-    + """
+
+def _build_similar_sanctions_query(scope: TemporalScope = DEFAULT_SCOPE) -> str:
+    """Comparable sanctions in *other* acts, scoped by *scope* (#850).
+
+    Same sanctionType, other acts only, with a range-overlap filter on
+    the amount bounds. We bind ``?type`` / ``?seedMin`` / ``?seedMax`` /
+    ``?seedActLit`` via :meth:`SparqlClient._inject_bindings`. The
+    injector emits VALUES with **string literals** (it has to — the same
+    injector is used for URI strings, language tags, etc.), so the
+    numeric comparisons in the FILTER cast explicitly through
+    ``xsd:decimal(?seedMin)`` and ``xsd:decimal(?seedMax)``. Without the
+    cast SPARQL compares lex order string-to-decimal, which silently
+    returns no overlapping rows (F2, 2026-05-15 review repro: rdflib
+    confirmed 0 rows for string vs 1 row for typed decimal).
+
+    The range-overlap maths: two ranges [a, b] and [c, d] overlap iff
+    a <= d AND c <= b, i.e. ``?seedMin <= ?maxAmount`` AND
+    ``?minAmount <= ?seedMax``. Either bound missing on the candidate
+    row passes the filter (treated as open-ended), so we don't lose
+    rows that have only one numeric bound.
+
+    Temporal scope (#850): the comparison list should not surface
+    sanctions from repealed acts as live alternatives, so the default
+    current-law filter is applied here too.
+    """
+    return (
+        PREFIXES
+        + f"""
 SELECT ?sanction ?provision ?provisionLabel
        ?actLit
        ?sanctionType
@@ -284,29 +311,38 @@ SELECT ?sanction ?provision ?provisionLabel
        ?minCurrency ?maxCurrency
        ?enforcedAtLevel
        ?isStatutoryDefault
-WHERE {
+WHERE {{
   ?provision estleg:hasSanction ?sanction .
   ?sanction estleg:sanctionType ?sanctionType .
-  OPTIONAL { ?provision rdfs:label ?provisionLabel }
-  OPTIONAL { ?provision estleg:sourceAct ?actLit }
-  OPTIONAL { ?sanction estleg:minPenaltyAmount ?minAmount }
-  OPTIONAL { ?sanction estleg:maxPenaltyAmount ?maxAmount }
-  OPTIONAL { ?sanction estleg:minPenaltyUnit ?minUnit }
-  OPTIONAL { ?sanction estleg:maxPenaltyUnit ?maxUnit }
-  OPTIONAL { ?sanction estleg:minPenaltyCurrency ?minCurrency }
-  OPTIONAL { ?sanction estleg:maxPenaltyCurrency ?maxCurrency }
-  OPTIONAL { ?sanction estleg:enforcedAtLevel ?enforcedAtLevel }
-  OPTIONAL { ?sanction estleg:isStatutoryDefault ?isStatutoryDefault }
+  OPTIONAL {{ ?provision rdfs:label ?provisionLabel }}
+  OPTIONAL {{ ?provision estleg:sourceAct ?actLit }}
+  OPTIONAL {{ ?sanction estleg:minPenaltyAmount ?minAmount }}
+  OPTIONAL {{ ?sanction estleg:maxPenaltyAmount ?maxAmount }}
+  OPTIONAL {{ ?sanction estleg:minPenaltyUnit ?minUnit }}
+  OPTIONAL {{ ?sanction estleg:maxPenaltyUnit ?maxUnit }}
+  OPTIONAL {{ ?sanction estleg:minPenaltyCurrency ?minCurrency }}
+  OPTIONAL {{ ?sanction estleg:maxPenaltyCurrency ?maxCurrency }}
+  OPTIONAL {{ ?sanction estleg:enforcedAtLevel ?enforcedAtLevel }}
+  OPTIONAL {{ ?sanction estleg:isStatutoryDefault ?isStatutoryDefault }}
   FILTER(STR(?sanctionType) = ?type)
   FILTER(!BOUND(?actLit) || STR(?actLit) != ?seedActLit)
   FILTER(!BOUND(?maxAmount) || xsd:decimal(?seedMin) <= ?maxAmount)
   FILTER(!BOUND(?minAmount) || ?minAmount <= xsd:decimal(?seedMax))
-}
+{temporal_scope_clause(scope, "provision")}
+}}
 ORDER BY ?actLit ?provision
-LIMIT """
-    + str(_MAX_SIMILAR_SANCTIONS)
-    + "\n"
-)
+LIMIT {_MAX_SIMILAR_SANCTIONS}
+"""
+    )
+
+
+# Default-scope (current-law) snapshots of the templates. Kept as
+# module constants for backwards compatibility with callers / tests that
+# referenced the pre-#850 ``_*_QUERY`` strings directly; new code should
+# call the builder functions with an explicit scope.
+_PROVISION_SANCTIONS_QUERY = _build_provision_sanctions_query()
+_ACT_SANCTIONS_QUERY = _build_act_sanctions_query()
+_SIMILAR_SANCTIONS_QUERY = _build_similar_sanctions_query()
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +353,7 @@ LIMIT """
 def list_sanctions_for_provision(
     provision_uri: str,
     *,
+    scope: TemporalScope = DEFAULT_SCOPE,
     sparql_client: SparqlClient | None = None,
 ) -> list[SanctionRow]:
     """Return every Sanction attached to *provision_uri*.
@@ -325,6 +362,9 @@ def list_sanctions_for_provision(
         provision_uri: A ``LegalProvision`` URI (the
             ``estleg:hasSanction`` subject). Empty / whitespace
             input yields ``[]`` without hitting Jena.
+        scope: Temporal scope (#850). Default current law — a sanction
+            on a positively-repealed provision / act is dropped;
+            :attr:`TemporalScope.ALL` keeps it.
         sparql_client: Optional :class:`SparqlClient` override (tests
             inject one whose ``.query`` is mocked).
 
@@ -341,7 +381,7 @@ def list_sanctions_for_provision(
     client = sparql_client if sparql_client is not None else SparqlClient()
     try:
         rows = client.query(
-            _PROVISION_SANCTIONS_QUERY,
+            _build_provision_sanctions_query(scope),
             uri_bindings={"provision": uri},
         )
     except Exception:
@@ -358,6 +398,7 @@ def list_sanctions_for_provision(
 def list_sanctions_for_act(
     act_title: str,
     *,
+    scope: TemporalScope = DEFAULT_SCOPE,
     sparql_client: SparqlClient | None = None,
 ) -> list[SanctionRow]:
     """Return every Sanction attached to any provision of *act_title*.
@@ -381,6 +422,9 @@ def list_sanctions_for_act(
             caller passes a URI here by mistake the query simply returns
             no rows (no triples have a URI on the right-hand side of
             ``sourceAct``) — degrades gracefully rather than 500-ing.
+        scope: Temporal scope (#850). Default current law excludes
+            sanctions on provisions of a positively-repealed act;
+            :attr:`TemporalScope.ALL` includes them.
         sparql_client: Optional :class:`SparqlClient` override.
 
     Returns:
@@ -395,7 +439,7 @@ def list_sanctions_for_act(
     client = sparql_client if sparql_client is not None else SparqlClient()
     try:
         rows = client.query(
-            _ACT_SANCTIONS_QUERY,
+            _build_act_sanctions_query(scope),
             bindings={"actLit": title},
         )
     except Exception:
@@ -413,6 +457,7 @@ def find_similar_sanctions(
     sanction_row: SanctionRow,
     *,
     limit: int = 10,
+    scope: TemporalScope = DEFAULT_SCOPE,
     sparql_client: SparqlClient | None = None,
 ) -> list[SanctionRow]:
     """Find sanctions in *other* acts with matching type and overlapping range.
@@ -432,6 +477,9 @@ def find_similar_sanctions(
         limit: Cap the result list (default 10). Hard-capped to
             :data:`_MAX_SIMILAR_SANCTIONS` so the SPARQL query stays
             quick on a 1M-triple corpus.
+        scope: Temporal scope (#850). Default current law — comparable
+            sanctions are not drawn from positively-repealed acts;
+            :attr:`TemporalScope.ALL` widens to the full corpus.
         sparql_client: Optional :class:`SparqlClient` override.
 
     Returns:
@@ -472,7 +520,7 @@ def find_similar_sanctions(
     client = sparql_client if sparql_client is not None else SparqlClient()
     try:
         rows = client.query(
-            _SIMILAR_SANCTIONS_QUERY,
+            _build_similar_sanctions_query(scope),
             bindings={
                 "type": sanction_type,
                 "seedMin": _xsd_decimal_literal(seed_min),

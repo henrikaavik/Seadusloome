@@ -117,6 +117,7 @@ from app.docs.labels import TYPE_LABELS_ET as _TYPE_LABELS_ET
 from app.docs.reference_resolver import ReferenceResolver
 from app.docs.report_routes import explorer_focus_url
 from app.drafter.state_machine import STEP_LABELS_ET, Step
+from app.ontology.temporal_scope import TemporalScope, scope_from_param
 from app.ui.capabilities import CAPABILITIES, Capability
 from app.ui.data.data_table import Column, DataTable
 from app.ui.layout import PageShell
@@ -590,9 +591,13 @@ _CELEX_TOKEN_RE = re.compile(r"^\d{5}[A-Z]\d{1,4}$", re.IGNORECASE)
 class _Scope:
     """Parsed ``Ulatus`` scope from the GET query params.
 
-    ``oigus`` is informational only (temporal redactions aren't wired —
-    the second select option is disabled). The boolean flags are
-    workflow-specific:
+    ``oigus`` is the temporal-scope token: ``"current"`` (*kehtiv õigus*,
+    the default) vs ``"all"`` (*kogu ajalugu*). Since #850 it is **wired
+    end-to-end** — :attr:`temporal_scope` maps it to a
+    :class:`~app.ontology.temporal_scope.TemporalScope`, the Sanktsioonid
+    / Halduskoormus / Pädevused / Kohtupraktika handlers pass that scope
+    to their engine calls, and :func:`_scope_form` reflects the URL state
+    in the select. The boolean flags are workflow-specific:
 
     * **Normi mõjuahel** — ``include_eu`` / ``include_court`` actually
       filter the analysis output; ``org_wide_drafts`` only re-frames the
@@ -637,9 +642,26 @@ class _Scope:
                 self.include_eu = True
                 self.include_court = True
                 self.org_wide_drafts = False
-        self.oigus = params.get("oigus") or "current"
+        # Canonicalise the temporal-scope token through the helper so the
+        # form select + carried links always reflect a known value
+        # (``"current"`` / ``"all"``) even when the URL carried a legacy
+        # alias (``"kogu_ajalugu"`` / ``"current_plus_history"``). #850.
+        self.oigus = scope_from_param(params.get("oigus")).value
         self.ajavahemik_algus = params.get("ajavahemik_algus") or ""
         self.ajavahemik_lopp = params.get("ajavahemik_lopp") or ""
+
+    @property
+    def temporal_scope(self) -> TemporalScope:
+        """Map the ``?oigus=`` token to a :class:`TemporalScope` (#850).
+
+        ``"current"`` → :attr:`TemporalScope.CURRENT` (kehtiv õigus,
+        default); ``"all"`` / legacy history aliases →
+        :attr:`TemporalScope.ALL` (kogu ajalugu). The engines splice this
+        into their SPARQL so a positively-repealed provision is excluded
+        under the current-law default and kept under the all-history
+        scope.
+        """
+        return scope_from_param(self.oigus)
 
     def query_pairs(self, sisend: str) -> list[tuple[str, str]]:
         """Return the ``(key, value)`` pairs to carry the scope through links."""
@@ -735,6 +757,45 @@ _LAW_SCOPE_OPTIONS: list[tuple[str, str]] = [
     ("current", "Kehtiv õigus"),
     ("current_plus_history", "Kehtiv + varasemad redaktsioonid (tulekul)"),
 ]
+
+# #850: the *enabled* temporal-scope options for the four engines that
+# honour the scope end-to-end (Sanktsioonid / Halduskoormus / Pädevused /
+# Kohtupraktika). "Kehtiv õigus" excludes positively-repealed provisions;
+# "Kogu ajalugu" includes them. The option values are the canonical
+# ``TemporalScope`` tokens so the form round-trips through ``?oigus=``.
+_TEMPORAL_SCOPE_OPTIONS: list[tuple[str, str]] = [
+    (TemporalScope.CURRENT.value, "Kehtiv õigus"),
+    (TemporalScope.ALL.value, "Kogu ajalugu"),
+]
+
+
+def _temporal_scope_select(oigus: str) -> Any:
+    """Render the enabled ``Õigus`` (temporal-scope) field reflecting the URL.
+
+    Shared by the four scope-aware workflow forms (#850). The select's
+    value mirrors the request's ``?oigus=`` token (canonicalised by
+    :class:`_Scope` to ``"current"`` / ``"all"``) so a reload preserves
+    the user's choice, and the field name ``oigus`` round-trips the
+    selection straight back into the workflow URL. The default option,
+    *Kehtiv õigus*, excludes provisions whose owning act is positively
+    marked repealed; *Kogu ajalugu* includes the full history.
+    """
+    value = oigus if oigus in {opt[0] for opt in _TEMPORAL_SCOPE_OPTIONS} else "current"
+    return Div(  # noqa: F405
+        Label("Õigus", fr="analyysikeskus-scope-law"),  # noqa: F405
+        Select(
+            "oigus",
+            _TEMPORAL_SCOPE_OPTIONS,
+            value=value,
+            id="analyysikeskus-scope-law",
+        ),
+        Small(  # noqa: F405
+            "“Kehtiv õigus” jätab välja kehtetuks tunnistatud sätted; "
+            "“Kogu ajalugu” kaasab ka varasema õiguse.",
+            cls="muted-text",
+        ),
+        cls="form-field",
+    )
 
 
 def _scope_form(
@@ -2639,10 +2700,6 @@ def _sanctions_scope_block(sisend: str, scope: _Scope, *, include_comparison: bo
     also runs :func:`find_similar_sanctions` and renders the comparison
     section.
     """
-    # ``scope`` accepted for call-site symmetry with the sibling scope
-    # blocks even though Sanktsioonide indeks has just the one toggle
-    # — keeps the result-shell wiring identical across workflows.
-    _ = scope
     return Form(  # noqa: F405
         P(  # noqa: F405
             "Vaikimisi näitan ainult valitud sätte/akti sanktsioone. Märkige, "
@@ -2651,6 +2708,8 @@ def _sanctions_scope_block(sisend: str, scope: _Scope, *, include_comparison: bo
         ),
         Hidden(name="sisend", value=sisend),  # noqa: F405
         Hidden(name="ulatus_submitted", value="1"),  # noqa: F405
+        # #850: temporal scope — kehtiv õigus (default) vs kogu ajalugu.
+        _temporal_scope_select(scope.oigus),
         Checkbox(
             "vordle_sarnaste_aktidega",
             checked=include_comparison,
@@ -3056,28 +3115,29 @@ def _render_sanctions_result(
     label = _resolved_label(resolved, sisend)
     type_label = _resolved_type_label(resolved)
     partial_title = _partial_act_title(resolved)
+    ts = scope.temporal_scope  # #850 — kehtiv õigus / kogu ajalugu
 
     if entity_uri and _is_provision_resolved(resolved):
-        rows = list_sanctions_for_provision(entity_uri)
+        rows = list_sanctions_for_provision(entity_uri, scope=ts)
     elif partial_title is not None and not entity_uri:
         # Bare law input — Wave 2 Step 2 resolver returns
         # entity_uri=None, partial_match.act_title=<literal title>.
         # Route directly to the act-level helper with that title.
-        rows = list_sanctions_for_act(partial_title)
+        rows = list_sanctions_for_act(partial_title, scope=ts)
     else:
         # The act join is on the ``estleg:sourceAct`` literal title in
         # prod (no act URIs exist on provisions — see the Wave 2 spike
         # in ``docs/2026-05-18-bugfix-plan.md``). The best title we have
         # for a resolved law ref is the human label the resolver
         # surfaced; pass that to the SPARQL helper.
-        rows = list_sanctions_for_act(label)
+        rows = list_sanctions_for_act(label, scope=ts)
 
     similar_rows: list[Any] | None = None
     if include_comparison and rows:
         # Seed on the first row — keeps the comparison deterministic.
         # Future iterations may surface a "pick which sanction to
         # compare" affordance for multi-sanction provisions.
-        similar_rows = find_similar_sanctions(rows[0], limit=_MAX_RESULT_ROWS)
+        similar_rows = find_similar_sanctions(rows[0], limit=_MAX_RESULT_ROWS, scope=ts)
 
     input_summary = P(  # noqa: F405
         "Analüüsisin: ",
@@ -3322,7 +3382,6 @@ def _kohtupraktika_scope_block(sisend: str, scope: _Scope) -> Any:
     UX parity with the other workflows; the toggles ride through so URLs
     stay shareable.
     """
-    _ = scope  # call-site symmetry
     return Form(  # noqa: F405
         P(  # noqa: F405
             "Vaatan kõiki kohtuid, mis on seda sätet või akti tõlgendanud. "
@@ -3331,6 +3390,9 @@ def _kohtupraktika_scope_block(sisend: str, scope: _Scope) -> Any:
         ),
         Hidden(name="sisend", value=sisend),  # noqa: F405
         Hidden(name="ulatus_submitted", value="1"),  # noqa: F405
+        # #850: temporal scope — kehtiv õigus (default) excludes court
+        # practice that interprets provisions of a repealed act.
+        _temporal_scope_select(scope.oigus),
         Small(  # noqa: F405
             "Praeguses versioonis kuvan Riigikohtu, Euroopa Kohtu ja "
             "ringkonnakohtute lahendid eraldi sektsioonides; täpsemad "
@@ -3605,14 +3667,15 @@ def _render_court_practice_result(
     label = _resolved_label(resolved, sisend)
     type_label = _resolved_type_label(resolved)
     partial_title = _partial_act_title(resolved)
+    ts = scope.temporal_scope  # #850 — kehtiv õigus / kogu ajalugu
 
     if entity_uri and _is_court_practice_provision(resolved):
-        rows = list_decisions_for_provision(entity_uri)
+        rows = list_decisions_for_provision(entity_uri, scope=ts)
     elif partial_title is not None and not entity_uri:
         # Bare law input — the act-level helper accepts a literal title.
-        rows = list_decisions_for_act(partial_title)
+        rows = list_decisions_for_act(partial_title, scope=ts)
     else:
-        rows = list_decisions_for_act(entity_uri)
+        rows = list_decisions_for_act(entity_uri, scope=ts)
 
     groups = group_by_court(rows)
 
@@ -4057,8 +4120,8 @@ def _burden_actions(*, focus_uri: str | None) -> list[dict[str, str]]:
     return actions
 
 
-def _burden_scope_block(sisend: str) -> Any:
-    """A minimal ``Ulatus`` form — v1 has no toggles, just a "Uuenda" submit + intro."""
+def _burden_scope_block(sisend: str, scope: _Scope) -> Any:
+    """The ``Ulatus`` form for Halduskoormus — temporal scope + intro (#850)."""
     return Form(  # noqa: F405
         P(  # noqa: F405
             "Vaikimisi loendatakse kõik sätte või akti deontilised liigitused. "
@@ -4068,6 +4131,9 @@ def _burden_scope_block(sisend: str) -> Any:
         ),
         Hidden(name="sisend", value=sisend),  # noqa: F405
         Hidden(name="ulatus_submitted", value="1"),  # noqa: F405
+        # #850: temporal scope — kehtiv õigus (default) excludes the
+        # deontic rows of provisions belonging to a repealed act.
+        _temporal_scope_select(scope.oigus),
         Button("Uuenda ulatust", type="submit", variant="secondary", size="sm"),
         method="get",
         action="/analyysikeskus/halduskoormus",
@@ -4142,6 +4208,7 @@ def _render_burden_result(
     theme: str,
     resolved: Any,
     sisend: str,
+    scope: _Scope,
 ) -> Any:
     """Render the result page for a single resolved entity.
 
@@ -4154,15 +4221,20 @@ def _render_burden_result(
     * No URI but ``partial_match["act_title"]`` set (bare law input
       like ``TLS``) → :func:`list_burden_for_act` against the literal
       title. Wave 2 Step 5 (#801 follow-up).
+
+    The act/provision branches honour the ``?oigus=`` temporal scope
+    (#850); the draft-delta branch is owned by the draft engine and is
+    left on its existing behaviour.
     """
     entity_uri_raw = getattr(resolved, "entity_uri", None)
     entity_uri = str(entity_uri_raw) if entity_uri_raw else ""
     label = _resolved_label(resolved, sisend)
     type_label = _resolved_type_label(resolved)
     partial_title = _partial_act_title(resolved)
+    ts = scope.temporal_scope
 
     if entity_uri and _is_provision_resolved(resolved):
-        summary = list_burden_for_provision(entity_uri)
+        summary = list_burden_for_provision(entity_uri, scope=ts)
         results_block: Any = _burden_results_block(summary)
         evidence_summary = summary
     elif entity_uri and _is_draft_resolved(resolved):
@@ -4171,11 +4243,11 @@ def _render_burden_result(
         evidence_summary = delta.before
     elif partial_title is not None and not entity_uri:
         # Bare law input — pass the literal title to the act helper.
-        summary = list_burden_for_act(partial_title)
+        summary = list_burden_for_act(partial_title, scope=ts)
         results_block = _burden_results_block(summary)
         evidence_summary = summary
     else:
-        summary = list_burden_for_act(entity_uri)
+        summary = list_burden_for_act(entity_uri, scope=ts)
         results_block = _burden_results_block(summary)
         evidence_summary = summary
 
@@ -4196,7 +4268,7 @@ def _render_burden_result(
         actions=actions,
         user=auth,
         theme=theme,
-        scope_block=_burden_scope_block(sisend),
+        scope_block=_burden_scope_block(sisend, scope),
     )
 
 
@@ -4206,6 +4278,7 @@ def _render_burden_disambiguation(
     theme: str,
     resolved: list[Any],
     sisend: str,
+    scope: _Scope,
 ) -> Any:
     """Render a disambiguation page listing plausible resolutions as links."""
     candidates: list[dict[str, str]] = []
@@ -4239,7 +4312,7 @@ def _render_burden_disambiguation(
         ],
         user=auth,
         theme=theme,
-        scope_block=_burden_scope_block(sisend),
+        scope_block=_burden_scope_block(sisend, scope),
     )
 
 
@@ -4249,6 +4322,7 @@ def _render_burden_unresolved(
     theme: str,
     sisend: str,
     org_id: str | None,
+    scope: _Scope,
 ) -> Any:
     """Render the "no structured reference recognised" page (+ optional RAG candidates)."""
     warning = Alert(
@@ -4282,7 +4356,7 @@ def _render_burden_unresolved(
         ],
         user=auth,
         theme=theme,
-        scope_block=_burden_scope_block(sisend),
+        scope_block=_burden_scope_block(sisend, scope),
     )
 
 
@@ -4311,6 +4385,9 @@ def halduskoormus_page(req: Request):
     org_id = auth.get("org_id") if auth else None
 
     sisend = (req.query_params.get("sisend") or "").strip()
+    # #850: parse the ``?oigus=`` temporal scope so the engine calls + the
+    # scope form honour kehtiv õigus (default) vs kogu ajalugu.
+    scope = _Scope(req.query_params, workflow=_WORKFLOW_NORMI)
 
     if not sisend:
         return _render_burden_landing(auth=auth, theme=theme)
@@ -4328,6 +4405,7 @@ def halduskoormus_page(req: Request):
             theme=theme,
             resolved=unique_resolved[0],
             sisend=sisend,
+            scope=scope,
         )
 
     if len(unique_resolved) > 1:
@@ -4336,6 +4414,7 @@ def halduskoormus_page(req: Request):
             theme=theme,
             resolved=unique_resolved,
             sisend=sisend,
+            scope=scope,
         )
 
     return _render_burden_unresolved(
@@ -4343,6 +4422,7 @@ def halduskoormus_page(req: Request):
         theme=theme,
         sisend=sisend,
         org_id=org_id,
+        scope=scope,
     )
 
 
@@ -4401,11 +4481,11 @@ def _padevused_scope_block(sisend: str, scope: _Scope) -> Any:
     """The ``Ulatus`` scope form for the Pädevuste kaardistus workflow.
 
     Legal-language only — the controls explain what the page covers (and
-    what it does **not** yet cover in v1). No active toggles in v1 since
-    the grouping vocabulary (competence area) is missing from the
-    ontology; the form is kept for UX parity and shareability.
+    what it does **not** yet cover in v1). Since #850 the temporal-scope
+    select (kehtiv õigus / kogu ajalugu) is active and the submit is
+    enabled; pädevusala-grouping + gap analysis remain deferred (they
+    need ontology CompetenceShape + competenceArea).
     """
-    _ = scope  # call-site symmetry
     return Form(  # noqa: F405
         P(  # noqa: F405
             "Vaatan kõiki sätteid, mille puhul valitud asutus on määratud "
@@ -4415,6 +4495,9 @@ def _padevused_scope_block(sisend: str, scope: _Scope) -> Any:
         ),
         Hidden(name="sisend", value=sisend),  # noqa: F405
         Hidden(name="ulatus_submitted", value="1"),  # noqa: F405
+        # #850: temporal scope — kehtiv õigus (default) excludes powers
+        # vested by provisions of a repealed act.
+        _temporal_scope_select(scope.oigus),
         Small(  # noqa: F405
             "Pädevusalade kaupa rühmitamine ja lünkade analüüs on tulekul — "
             "ootame ontoloogia täiendust (CompetenceShape + competenceArea).",
@@ -4425,8 +4508,6 @@ def _padevused_scope_block(sisend: str, scope: _Scope) -> Any:
             type="submit",
             variant="secondary",
             size="sm",
-            disabled=True,
-            title="Tulekul",
         ),
         method="get",
         action="/analyysikeskus/padevused",
@@ -4764,6 +4845,7 @@ def _render_padevused_result(
     view = gather_institution_competences(
         institution_uri,
         institution_label=institution_label,
+        scope=scope.temporal_scope,  # #850 — kehtiv õigus / kogu ajalugu
     )
     label = view.institution_label or institution_label or sisend
 
