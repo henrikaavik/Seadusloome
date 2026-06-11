@@ -252,18 +252,31 @@ class TestNotifySyncFailed:
 
 
 class TestNotifyCostAlert:
+    @patch("app.notifications.wire.push_notification")
     @patch("app.notifications.wire.notify")
     @patch("app.db.get_connection")
-    def test_notifies_org_admins(self, mock_connect, mock_notify):
+    def test_notifies_org_admins(self, mock_connect, mock_notify, mock_push):
+        """The atomic fan-out (#882 P2) takes an advisory lock, then dedupes,
+        then notifies each admin via notify(conn=conn). Dispatch the mock
+        connection's execute by SQL so the lock/day/dedupe/admins calls all
+        return sane results (full lock-key/atomicity coverage lives in
+        tests/test_cost_alerts.py)."""
         admin1 = uuid.uuid4()
         conn = MagicMock()
-        # 1st execute: per-org/day dedupe check (no prior alert -> None).
-        # 2nd execute: the admin lookup.
-        dedupe_cursor = MagicMock()
-        dedupe_cursor.fetchone.return_value = None
-        admins_cursor = MagicMock()
-        admins_cursor.fetchall.return_value = [(admin1,)]
-        conn.execute.side_effect = [dedupe_cursor, admins_cursor]
+
+        def _execute(sql, params=()):
+            cur = MagicMock()
+            if "to_char" in sql:
+                cur.fetchone.return_value = ("2026-06-11",)
+            elif "pg_advisory_xact_lock" in sql:
+                cur.fetchone.return_value = (True,)
+            elif "FROM notifications" in sql:
+                cur.fetchone.return_value = None  # no prior alert today
+            elif "FROM users" in sql:
+                cur.fetchall.return_value = [(admin1,)]
+            return cur
+
+        conn.execute.side_effect = _execute
         mock_connect.return_value = _ConnectCM(conn)
 
         notify_cost_alert(_ORG_ID, 42.0, 50.0)
@@ -273,6 +286,8 @@ class TestNotifyCostAlert:
         assert call_kwargs["user_id"] == admin1
         assert call_kwargs["type"] == "cost_alert"
         assert "84%" in call_kwargs["title"]
+        # Insert joined the lock-holding transaction.
+        assert call_kwargs["conn"] is conn
 
 
 # ---------------------------------------------------------------------------

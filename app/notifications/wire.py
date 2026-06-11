@@ -15,7 +15,8 @@ import logging
 from typing import Any
 from uuid import UUID
 
-from app.notifications.notify import notify
+from app.notifications.models import Notification
+from app.notifications.notify import notify, push_notification
 
 logger = logging.getLogger(__name__)
 
@@ -463,6 +464,14 @@ def _cost_alert_already_sent_today(conn: Any, org_id: UUID | str, notif_type: st
     types are deduped independently so crossing 100% still fires once
     even after an 80% alert went out earlier the same day.
 
+    **Concurrency** — this read is only safe against duplicate fan-outs
+    when it runs *under the advisory lock* taken by
+    :func:`_fan_out_cost_alert` on the same connection. The lock
+    serialises the whole check-then-insert sequence for a given
+    ``(org, type, day)``; without it two concurrent budget checks could
+    both read "not sent" and both fan out. Never call this on a
+    connection that doesn't already hold that lock.
+
     Returns ``False`` on any DB error so a transient failure degrades to
     "send the alert" rather than silently suppressing it.
     """
@@ -486,31 +495,65 @@ def _cost_alert_already_sent_today(conn: Any, org_id: UUID | str, notif_type: st
     return row is not None
 
 
-def notify_cost_alert(
+def _fan_out_cost_alert(
     org_id: UUID | str,
+    *,
+    type: str,  # noqa: A002 — matches notify()/create_notification() param name
+    title: str,
+    body: str,
+    pct: int,
     current_cost: float,
     budget: float,
 ) -> None:
-    """Notify org admins when LLM cost hits 80% of the budget.
+    """Atomically dedupe + fan a cost alert out to every active org admin.
 
-    Queries the ``users`` table for active org_admin/admin users in
-    the given org and sends each one a notification.
+    ``check_org_cost_budget`` fires on *every* LLM turn, so two
+    near-simultaneous turns for one org both run this. A plain
+    read-then-insert (the dedupe SELECT on a connection that closes, then
+    a fan-out on fresh connections) lets both see "not sent today" and
+    both insert one notification per admin — duplicate alerts.
 
-    Deduped to one ``cost_alert`` per org per calendar day (see
-    :func:`_cost_alert_already_sent_today`): the budget check runs on
-    every LLM turn, so without this guard every admin's inbox would fill
-    with one identical alert per message once the org crossed 80%.
+    To make the check-and-insert atomic this runs in a single
+    transaction and takes a **transaction-scoped advisory lock** keyed to
+    ``cost_alert:<org>:<type>:<YYYY-MM-DD>`` (the same shape as
+    ``check_org_cost_budget``'s ``cost_budget:<org>`` lock). The second
+    concurrent caller blocks on the lock acquire until the first commits;
+    it then re-reads the dedupe and finds the row, so it sends nothing.
+    The day component is read from the DB (``to_char(now(), …)``) so the
+    lock key matches the ``date_trunc('day', now())`` boundary the dedupe
+    SELECT uses — no app-vs-DB timezone skew.
 
-    Args:
-        org_id: The organisation UUID.
-        current_cost: Current month's LLM cost in USD.
-        budget: The monthly budget cap in USD.
+    Inserts go through ``notify(..., conn=conn)`` so they land in *this*
+    transaction (under the lock), then a single ``commit`` releases the
+    lock, then the WS pushes fire (post-commit, on durable rows).
+
+    The advisory-lock acquire is bounded by ``SET LOCAL lock_timeout``:
+    if a sibling caller holds the lock longer than that, ``psycopg``
+    raises ``LockNotAvailable``; we treat that as "another check for this
+    (org, type, day) is already in flight and will send the alert" and
+    skip silently rather than risk a duplicate. Every other failure is
+    swallowed (fire-and-forget) like the rest of this module.
     """
     try:
         from app.db import get_connection
 
+        inserted: list[Notification] = []
         with get_connection() as conn:
-            if _cost_alert_already_sent_today(conn, org_id, "cost_alert"):
+            # Bound the lock acquire so a stuck sibling can't hang the turn.
+            conn.execute("SET LOCAL lock_timeout = '3s'")
+            # Day boundary from the DB so the lock key matches the dedupe
+            # SELECT's ``date_trunc('day', now())`` window exactly.
+            day_row = conn.execute("SELECT to_char(now(), 'YYYY-MM-DD')").fetchone()
+            day = day_row[0] if day_row else ""
+            lock_key = f"cost_alert:{org_id}:{type}:{day}"
+            # Serialise the whole dedupe+fan-out for this (org, type, day).
+            # Released automatically on commit/rollback.
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (lock_key,),
+            )
+
+            if _cost_alert_already_sent_today(conn, org_id, type):
                 return
 
             rows = conn.execute(
@@ -520,31 +563,84 @@ def notify_cost_alert(
                 (str(org_id),),
             ).fetchall()
 
-        pct = int((current_cost / budget) * 100) if budget > 0 else 0
-        for row in rows:
-            admin_id = row[0]
-            notify(
-                user_id=admin_id,
-                type="cost_alert",
-                title=f"LLM kuluhoiatus: {pct}% eelarvest kasutatud",
-                body=(
-                    f"Organisatsiooni igakuine LLM-i kulu on "
-                    f"{current_cost:.2f} USD / {budget:.2f} USD ({pct}%)."
-                ),
-                link="/admin/costs",
-                metadata={
-                    "org_id": str(org_id),
-                    "current_cost": current_cost,
-                    "budget": budget,
-                    "pct": pct,
-                },
+            for row in rows:
+                result = notify(
+                    user_id=row[0],
+                    type=type,
+                    title=title,
+                    body=body,
+                    link="/admin/costs",
+                    metadata={
+                        "org_id": str(org_id),
+                        "current_cost": current_cost,
+                        "budget": budget,
+                        "pct": pct,
+                    },
+                    conn=conn,
+                )
+                if result is not None:
+                    inserted.append(result)
+
+            # Commit releases the advisory lock and makes the rows durable.
+            conn.commit()
+
+        # Post-commit: announce the now-durable rows over WS. Best-effort.
+        for result in inserted:
+            push_notification(result)
+    except Exception as exc:
+        # lock_timeout firing on the advisory-lock acquire raises
+        # LockNotAvailable (SQLSTATE 55P03): a sibling holds the lock and
+        # will send the alert, so skip silently rather than risk a
+        # duplicate. ``sqlstate`` is checked instead of importing psycopg
+        # so this module stays import-light for stub users.
+        if getattr(exc, "sqlstate", None) == "55P03":
+            logger.debug(
+                "cost-alert lock busy for org=%s type=%s — sibling will send it",
+                org_id,
+                type,
             )
-    except Exception:
+            return
         logger.warning(
-            "Failed to send cost_alert notifications for org=%s",
+            "Failed to send %s notifications for org=%s",
+            type,
             org_id,
             exc_info=True,
         )
+
+
+def notify_cost_alert(
+    org_id: UUID | str,
+    current_cost: float,
+    budget: float,
+) -> None:
+    """Notify org admins when LLM cost hits 80% of the budget.
+
+    Fans the alert out to every active org_admin/admin in the org,
+    deduped to one ``cost_alert`` per org per calendar day. The budget
+    check runs on every LLM turn, so without the dedupe every admin's
+    inbox would fill with one identical alert per message once the org
+    crossed 80%. The dedupe + fan-out are made atomic under an advisory
+    lock by :func:`_fan_out_cost_alert` so two concurrent turns can't
+    both fan out.
+
+    Args:
+        org_id: The organisation UUID.
+        current_cost: Current month's LLM cost in USD.
+        budget: The monthly budget cap in USD.
+    """
+    pct = int((current_cost / budget) * 100) if budget > 0 else 0
+    _fan_out_cost_alert(
+        org_id,
+        type="cost_alert",
+        title=f"LLM kuluhoiatus: {pct}% eelarvest kasutatud",
+        body=(
+            f"Organisatsiooni igakuine LLM-i kulu on "
+            f"{current_cost:.2f} USD / {budget:.2f} USD ({pct}%)."
+        ),
+        pct=pct,
+        current_cost=current_cost,
+        budget=budget,
+    )
 
 
 def notify_cost_exhausted(
@@ -561,54 +657,30 @@ def notify_cost_exhausted(
     need a louder, one-time heads-up to raise the cap or wait for the
     monthly reset.
 
-    Deduped to one ``cost_exhausted`` per org per calendar day (see
-    :func:`_cost_alert_already_sent_today`), independent of the 80%
-    alert, so the budget check firing on every blocked turn does not spam
-    admins.
+    Deduped to one ``cost_exhausted`` per org per calendar day,
+    independent of the 80% alert (different advisory-lock key + dedupe
+    type), so crossing 100% still fires once even after an 80% alert went
+    out earlier the same day, and the budget check firing on every
+    blocked turn does not spam admins. The dedupe + fan-out are atomic
+    under an advisory lock (see :func:`_fan_out_cost_alert`).
 
     Args:
         org_id: The organisation UUID.
         current_cost: Current month's LLM cost in USD.
         budget: The monthly budget cap in USD.
     """
-    try:
-        from app.db import get_connection
-
-        with get_connection() as conn:
-            if _cost_alert_already_sent_today(conn, org_id, "cost_exhausted"):
-                return
-
-            rows = conn.execute(
-                "SELECT id FROM users "
-                "WHERE org_id = %s AND role IN ('org_admin', 'admin') "
-                "AND is_active = TRUE",
-                (str(org_id),),
-            ).fetchall()
-
-        pct = int((current_cost / budget) * 100) if budget > 0 else 100
-        for row in rows:
-            admin_id = row[0]
-            notify(
-                user_id=admin_id,
-                type="cost_exhausted",
-                title="LLM kuluhoiatus: kuueelarve on täis",
-                body=(
-                    f"Organisatsiooni igakuine LLM-i kulueelarve on täielikult "
-                    f"kasutatud ({current_cost:.2f} USD / {budget:.2f} USD). "
-                    "AI-funktsioonid on peatatud kuni eelarve suurendamiseni "
-                    "või kuu vahetumiseni."
-                ),
-                link="/admin/costs",
-                metadata={
-                    "org_id": str(org_id),
-                    "current_cost": current_cost,
-                    "budget": budget,
-                    "pct": pct,
-                },
-            )
-    except Exception:
-        logger.warning(
-            "Failed to send cost_exhausted notifications for org=%s",
-            org_id,
-            exc_info=True,
-        )
+    pct = int((current_cost / budget) * 100) if budget > 0 else 100
+    _fan_out_cost_alert(
+        org_id,
+        type="cost_exhausted",
+        title="LLM kuluhoiatus: kuueelarve on täis",
+        body=(
+            f"Organisatsiooni igakuine LLM-i kulueelarve on täielikult "
+            f"kasutatud ({current_cost:.2f} USD / {budget:.2f} USD). "
+            "AI-funktsioonid on peatatud kuni eelarve suurendamiseni "
+            "või kuu vahetumiseni."
+        ),
+        pct=pct,
+        current_cost=current_cost,
+        budget=budget,
+    )

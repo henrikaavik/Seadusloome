@@ -267,16 +267,29 @@ class TestSyncFailedCopy:
 
 
 class TestCostExhaustedCopy:
+    @patch("app.notifications.wire.push_notification")
     @patch("app.notifications.wire.notify")
     @patch("app.db.get_connection")
-    def test_title_and_body_use_proper_diacritics(self, mock_connect, mock_notify):
+    def test_title_and_body_use_proper_diacritics(self, mock_connect, mock_notify, mock_push):
         admin_id = uuid.uuid4()
         conn = MagicMock()
-        dedupe_cursor = MagicMock()
-        dedupe_cursor.fetchone.return_value = None
-        admins_cursor = MagicMock()
-        admins_cursor.fetchall.return_value = [(admin_id,)]
-        conn.execute.side_effect = [dedupe_cursor, admins_cursor]
+
+        # The atomic fan-out (#882 P2) issues lock_timeout/to_char/lock/
+        # dedupe/admins before notify(); dispatch by SQL so each returns
+        # a sane result regardless of call count.
+        def _execute(sql, params=()):
+            cur = MagicMock()
+            if "to_char" in sql:
+                cur.fetchone.return_value = ("2026-06-11",)
+            elif "pg_advisory_xact_lock" in sql:
+                cur.fetchone.return_value = (True,)
+            elif "FROM notifications" in sql:
+                cur.fetchone.return_value = None
+            elif "FROM users" in sql:
+                cur.fetchall.return_value = [(admin_id,)]
+            return cur
+
+        conn.execute.side_effect = _execute
         mock_connect.return_value = _ConnectCM(conn)
 
         notify_cost_exhausted(_ORG_ID, 50.0, 50.0)
