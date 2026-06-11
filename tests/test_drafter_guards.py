@@ -18,18 +18,20 @@ class TestRequireRealLlm:
             require_real_llm()
 
     def test_stubbed_provider_in_prod_raises(self, monkeypatch: pytest.MonkeyPatch):
-        """Even in production, if the key is missing, drafter should block.
+        """Even in production, if the key is missing, drafter must block.
 
-        Phase 2 hotfix a3e4430 exempted Claude from is_stub_allowed() so
-        the extraction pipeline could run in stub mode in prod. But the
-        drafter MUST NOT run in stub mode — so this guard catches it
-        regardless of APP_ENV.
+        Since #847 the provider itself fails closed: ``ClaudeProvider``
+        refuses to instantiate without a key when stubs are disallowed,
+        so the guard surfaces a ``RuntimeError`` from provider
+        construction instead of a ``DrafterNotAvailableError`` from the
+        ``_stubbed`` check. Either way the drafter cannot run on canned
+        responses in production.
         """
         _reset_default_provider()
         monkeypatch.setenv("APP_ENV", "production")
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
-        with pytest.raises(DrafterNotAvailableError, match="ANTHROPIC_API_KEY"):
+        with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
             require_real_llm()
 
     def test_real_provider_passes(self, monkeypatch: pytest.MonkeyPatch):
