@@ -38,6 +38,16 @@ def AnnotationButton(
     # a data attribute on the wrapper for round-trip identification.
     popover_id = target_dom_id(target_type, target_id)
 
+    # #861: the container the popover is swapped INTO must NOT share the
+    # popover's own id. AnnotationPopover renders its outer Div with
+    # ``id=popover_id``, so if the container also used ``popover_id`` the
+    # innerHTML swap would nest two elements with the same id — and the
+    # popover's create form (``hx-target=#popover_id``, ``outerHTML``) would
+    # then resolve to the container (the first match) and blow it away,
+    # breaking reload-after-create. The container gets a distinct, derived
+    # id so the two stay separable.
+    container_id = f"{popover_id}-container"
+
     # #773: build the HTMX URL with structured encoding so reserved
     # characters in target_type / target_id are escaped exactly once.
     qs = urlencode({"target_type": target_type, "target_id": target_id})
@@ -50,7 +60,9 @@ def AnnotationButton(
         badge,
         type="button",
         hx_get=hx_get_url,
-        hx_target=f"#{popover_id}",
+        # Swap the popover INTO the container (distinct id), not onto an
+        # element that shares the popover's id (#861).
+        hx_target=f"#{container_id}",
         hx_swap="innerHTML",
         cls="annotation-button",
         aria_label=f"Lisa märkus sellele reale ({count})",
@@ -60,7 +72,7 @@ def AnnotationButton(
         title="Lisa märkus sellele reale",
     )
 
-    container = Div(id=popover_id, cls="annotation-popover-container")  # noqa: F405
+    container = Div(id=container_id, cls="annotation-popover-container")  # noqa: F405
 
     return Div(  # noqa: F405
         btn,

@@ -814,6 +814,74 @@ class TestResolveReopenToggle:
         # The fragment now shows the resolve button again.
         assert "Lahenda" in resp.text
 
+    @patch("app.annotations.routes._load_panel_messages")
+    @patch("app.annotations.routes.resolve_row_thread")
+    @patch("app.annotations.routes._connect")
+    @patch("app.auth.middleware._get_provider")
+    def test_resolve_non_author_non_admin_returns_403(
+        self, mock_prov, mock_connect, mock_resolve, mock_load
+    ):
+        """#861: a drafter who never posted in the thread cannot resolve it."""
+        mock_prov.return_value = _stub_provider()  # caller is _USER_ID, drafter
+        mock_conn, _ = _patch_acl_lookup(owning_org_id=_ORG_ID)
+        mock_connect.side_effect = mock_conn
+
+        # Thread authored entirely by someone else → gate denies.
+        mock_load.return_value = [_make_annotation(user_id=_OTHER_USER_ID)]
+
+        client = _authed_client()
+        resp = client.post(f"{_ROW_BASE}/resolve")
+
+        assert resp.status_code == 403
+        # The resolve must not have run.
+        mock_resolve.assert_not_called()
+
+    @patch("app.annotations.routes.log_row_annotation_resolve")
+    @patch("app.annotations.routes._load_panel_messages")
+    @patch("app.annotations.routes.resolve_row_thread")
+    @patch("app.annotations.routes._connect")
+    @patch("app.auth.middleware._get_provider")
+    def test_resolve_admin_bypasses_author_gate(
+        self, mock_prov, mock_connect, mock_resolve, mock_load, mock_audit
+    ):
+        """#861: an admin may resolve a thread they did not author."""
+        mock_prov.return_value = _stub_provider(user=_authed_user(role="admin"))
+        mock_conn, _ = _patch_acl_lookup(owning_org_id=_ORG_ID)
+        mock_connect.side_effect = mock_conn
+
+        mock_resolve.return_value = 1
+        mock_load.return_value = [_make_annotation(user_id=_OTHER_USER_ID, resolved=True)]
+
+        with patch(
+            "app.annotations.routes._user_display_name",
+            return_value="Test Kasutaja",
+        ):
+            client = _authed_client()
+            resp = client.post(f"{_ROW_BASE}/resolve")
+
+        assert resp.status_code == 200
+        mock_resolve.assert_called_once()
+
+    @patch("app.annotations.routes._load_panel_messages")
+    @patch("app.annotations.routes.reopen_row_thread")
+    @patch("app.annotations.routes._connect")
+    @patch("app.auth.middleware._get_provider")
+    def test_reopen_non_author_non_admin_returns_403(
+        self, mock_prov, mock_connect, mock_reopen, mock_load
+    ):
+        """#861: reopen is gated the same way as resolve."""
+        mock_prov.return_value = _stub_provider()
+        mock_conn, _ = _patch_acl_lookup(owning_org_id=_ORG_ID)
+        mock_connect.side_effect = mock_conn
+
+        mock_load.return_value = [_make_annotation(user_id=_OTHER_USER_ID, resolved=True)]
+
+        client = _authed_client()
+        resp = client.post(f"{_ROW_BASE}/reopen")
+
+        assert resp.status_code == 403
+        mock_reopen.assert_not_called()
+
     def test_resolve_row_thread_sets_resolved_by_and_resolved_at(self):
         """Service-layer assertion: resolve_row_thread sets the right columns."""
         from app.annotations.models import resolve_row_thread

@@ -30,6 +30,8 @@ _USER_ID = "33333333-3333-3333-3333-333333333333"
 _OTHER_USER_ID = "44444444-4444-4444-4444-444444444444"
 _ANN_ID = uuid.UUID("55555555-5555-5555-5555-555555555555")
 _REPLY_ID = uuid.UUID("66666666-6666-6666-6666-666666666666")
+# #861: a real UUID draft id so the legacy-create target ACL can authorise it.
+_DRAFT_TARGET_ID = "77777777-7777-7777-7777-777777777777"
 
 
 def _authed_user(
@@ -177,8 +179,11 @@ class TestCreateAnnotation:
         mock_prov.return_value = _stub_provider()
         mock_load.return_value = []
 
-        # Mock the DB connection context manager
+        # Mock the DB connection context manager. The #861 target ACL queries
+        # the draft's org_id first; return the caller's org so the draft is
+        # in-org and the create proceeds.
         mock_db = MagicMock()
+        mock_db.execute.return_value.fetchone.return_value = (uuid.UUID(_ORG_ID),)
         mock_conn.return_value.__enter__ = MagicMock(return_value=mock_db)
         mock_conn.return_value.__exit__ = MagicMock(return_value=False)
 
@@ -188,8 +193,10 @@ class TestCreateAnnotation:
             resp = client.post(
                 "/api/annotations",
                 data={
+                    # #861: target_id must be a real UUID-owned draft for the
+                    # ownership ACL to authorise it.
                     "target_type": "draft",
-                    "target_id": "test-123",
+                    "target_id": _DRAFT_TARGET_ID,
                     "content": "Uus markus",
                 },
             )
@@ -206,6 +213,7 @@ class TestCreateAnnotation:
         mock_load.return_value = []
 
         mock_db = MagicMock()
+        mock_db.execute.return_value.fetchone.return_value = (uuid.UUID(_ORG_ID),)
         mock_conn.return_value.__enter__ = MagicMock(return_value=mock_db)
         mock_conn.return_value.__exit__ = MagicMock(return_value=False)
 
@@ -216,13 +224,82 @@ class TestCreateAnnotation:
                 "/api/annotations",
                 json={
                     "target_type": "draft",
-                    "target_id": "test-123",
+                    "target_id": _DRAFT_TARGET_ID,
                     "content": "Uus markus",
                 },
             )
 
         assert resp.status_code == 200
         assert "annotation-popover" in resp.text
+
+    @patch("app.annotations.routes._connect")
+    @patch("app.auth.middleware._get_provider")
+    def test_create_annotation_cross_org_target_returns_404(self, mock_prov, mock_conn):
+        """#861: annotating another org's draft is rejected with 404."""
+        mock_prov.return_value = _stub_provider()
+
+        # The ACL lookup reports the draft is owned by a DIFFERENT org.
+        mock_db = MagicMock()
+        mock_db.execute.return_value.fetchone.return_value = (uuid.UUID(_OTHER_ORG_ID),)
+        mock_conn.return_value.__enter__ = MagicMock(return_value=mock_db)
+        mock_conn.return_value.__exit__ = MagicMock(return_value=False)
+
+        client = _authed_client()
+        resp = client.post(
+            "/api/annotations",
+            json={
+                "target_type": "draft",
+                "target_id": _DRAFT_TARGET_ID,
+                "content": "Uus markus",
+            },
+        )
+
+        assert resp.status_code == 404
+
+    @patch("app.annotations.routes.notify_annotation_mention")
+    @patch("app.annotations.routes.parse_mentions")
+    @patch("app.annotations.routes.log_annotation_create")
+    @patch("app.annotations.routes._load_annotations_with_replies")
+    @patch("app.annotations.routes._connect")
+    @patch("app.auth.middleware._get_provider")
+    def test_create_with_mention_fires_mention_notification(
+        self,
+        mock_prov,
+        mock_conn,
+        mock_load,
+        mock_audit,
+        mock_parse,
+        mock_notify_mention,
+    ):
+        """#861: the legacy create path resolves @mentions and notifies."""
+        mock_prov.return_value = _stub_provider()
+        mock_load.return_value = []
+
+        mock_db = MagicMock()
+        mock_db.execute.return_value.fetchone.return_value = (uuid.UUID(_ORG_ID),)
+        mock_conn.return_value.__enter__ = MagicMock(return_value=mock_db)
+        mock_conn.return_value.__exit__ = MagicMock(return_value=False)
+
+        mentioned = uuid.UUID(_OTHER_USER_ID)
+        mock_parse.return_value = [mentioned]
+        ann = _make_annotation()
+        ann.mentions = [mentioned]
+
+        with patch("app.annotations.routes.create_annotation", return_value=ann):
+            client = _authed_client()
+            resp = client.post(
+                "/api/annotations",
+                json={
+                    "target_type": "draft",
+                    "target_id": _DRAFT_TARGET_ID,
+                    "content": "Vaata @keegi",
+                },
+            )
+
+        assert resp.status_code == 200
+        mock_parse.assert_called_once()
+        mock_notify_mention.assert_called_once()
+        assert mock_notify_mention.call_args.kwargs["mentioned_user_ids"] == [mentioned]
 
     @patch("app.auth.middleware._get_provider")
     def test_create_annotation_empty_content_rejected(self, mock_prov):
@@ -293,6 +370,54 @@ class TestReplyAnnotation:
             )
 
         assert resp.status_code == 404
+
+    @patch("app.annotations.routes.notify_annotation_mention")
+    @patch("app.annotations.routes.notify_annotation_reply")
+    @patch("app.annotations.routes.parse_mentions")
+    @patch("app.annotations.routes.log_annotation_reply")
+    @patch("app.annotations.routes._connect")
+    @patch("app.auth.middleware._get_provider")
+    def test_reply_with_mention_fires_mention_notification(
+        self,
+        mock_prov,
+        mock_conn,
+        mock_audit,
+        mock_parse,
+        mock_notify_reply,
+        mock_notify_mention,
+    ):
+        """#861: a reply that mentions a user fans out a mention notification
+        in addition to the existing reply notification."""
+        mock_prov.return_value = _stub_provider()
+
+        mentioned = uuid.UUID(_OTHER_USER_ID)
+        ann = _make_annotation()
+        reply = _make_reply()
+        reply.mentions = [mentioned]
+        mock_parse.return_value = [mentioned]
+
+        mock_db = MagicMock()
+        mock_conn.return_value.__enter__ = MagicMock(return_value=mock_db)
+        mock_conn.return_value.__exit__ = MagicMock(return_value=False)
+
+        with (
+            patch("app.annotations.routes.get_annotation", return_value=ann),
+            patch("app.annotations.routes.create_reply", return_value=reply),
+            patch("app.annotations.routes.list_replies", return_value=[]),
+        ):
+            client = _authed_client()
+            resp = client.post(
+                f"/api/annotations/{_ANN_ID}/reply",
+                data={"content": "Vaata @keegi"},
+            )
+
+        assert resp.status_code == 200
+        # create_reply received the resolved mentions.
+        assert mock_parse.called
+        # Both notifications fired.
+        mock_notify_reply.assert_called_once()
+        mock_notify_mention.assert_called_once()
+        assert mock_notify_mention.call_args.kwargs["mentioned_user_ids"] == [mentioned]
 
 
 # ---------------------------------------------------------------------------
@@ -474,3 +599,40 @@ class TestAnnotationPopoverWithUriTargetId:
             count=2,
         )
         assert result is not None
+
+    def test_button_container_id_differs_from_popover_id(self):
+        """#861: the AnnotationButton container and the AnnotationPopover must
+        NOT share a DOM id, otherwise the innerHTML swap nests two elements
+        with the same id and the popover's create form (outerHTML on that id)
+        blows the container away — breaking reload-after-create.
+        """
+        import re
+
+        from fasthtml.common import to_xml
+
+        from app.annotations.row_keys import target_dom_id
+        from app.ui.primitives.annotation_button import AnnotationButton
+        from app.ui.surfaces.annotation_popover import AnnotationPopover
+
+        target_type, target_id = "draft", "draft-xyz"
+        popover_id = target_dom_id(target_type, target_id)
+
+        btn_html = to_xml(AnnotationButton(target_type, target_id, count=1))
+        pop_html = to_xml(
+            AnnotationPopover(target_type, target_id, annotations=[], auth={"id": _USER_ID})
+        )
+
+        # The button targets the container, whose id is distinct from the
+        # popover's own id.
+        assert f'hx-target="#{popover_id}-container"' in btn_html
+        assert f'id="{popover_id}-container"' in btn_html
+        # The container id is NOT the bare popover id.
+        container_ids = re.findall(r'id="(annotation-popover-[^"]*-container)"', btn_html)
+        assert container_ids == [f"{popover_id}-container"]
+        assert f'id="{popover_id}"' not in btn_html
+
+        # The popover's outer id is the bare popover id, and its create form
+        # targets that same id (outerHTML replace-in-place on reload).
+        assert f'id="{popover_id}"' in pop_html
+        assert f'hx-target="#{popover_id}"' in pop_html
+        assert f"{popover_id}-container" not in pop_html

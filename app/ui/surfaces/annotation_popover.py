@@ -39,10 +39,16 @@ def AnnotationPopover(
     """
     count = len(annotations)
 
-    # #773: derive the same hashed CSS id as the AnnotationButton primitive
-    # so the trigger's ``hx-target`` and the popover's outer id stay in
-    # lockstep.  Raw ontology URIs as target_id would otherwise blow up
-    # the ``#annotation-popover-...`` selector.
+    # #773: derive the same hashed CSS id the AnnotationButton primitive
+    # uses so the two surfaces agree on the popover's identity. Raw ontology
+    # URIs as target_id would otherwise blow up the ``#annotation-popover-…``
+    # selector.
+    #
+    # #861: this is the popover's OWN outer id. The AnnotationButton renders
+    # a *separate* container (``{popover_id}-container``) and swaps the
+    # popover into it, so the two never collide. The create form below
+    # targets ``#popover_id`` with ``outerHTML`` to replace just this
+    # popover in place on reload-after-create.
     popover_id = target_dom_id(target_type, target_id)
 
     # Header
