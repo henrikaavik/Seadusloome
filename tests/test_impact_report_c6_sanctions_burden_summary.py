@@ -58,6 +58,11 @@ _USER_ID = uuid.UUID("cccccccc-cccc-cccc-cccc-cccccccccccc")
 _ORG_ID = uuid.UUID("dddddddd-dddd-dddd-dddd-dddddddddddd")
 
 _NS = "https://data.riik.ee/ontology/estleg#"
+# #855: analyze_burden_delta now takes the draft's *named graph* URI (its
+# triples live at ``<graph_uri>#self`` inside the graph). Use a valid
+# drafts/<uuid> graph URI so the GRAPH-scoped lookup's URI validation
+# passes.
+_DRAFT_GRAPH_URI = f"https://data.riik.ee/ontology/estleg/drafts/{_DRAFT_ID}"
 _KARS_URI = f"{_NS}karistusseadustik"
 _KARS_P211_URI = f"{_NS}KarS-p211"
 _KARS_P211_SANCTION_URI = f"{_NS}KarS-p211-Sanction"
@@ -249,7 +254,9 @@ class TestAnalyzeBurdenDelta:
             [_burden_sparql_row(provision_uri=f"{_NS}P1", norm_type=_OBLIGATION_URI)],
             [_burden_sparql_row(provision_uri=f"{_NS}P2", norm_type=_PROHIBITION_URI)],
         ]
-        report = analyze_burden_delta(f"{_NS}Draft_1", sparql_client=stub)
+        # #855: pass the draft's *named graph* URI; the helper now
+        # GRAPH-scopes the affected-provision lookup to it.
+        report = analyze_burden_delta(_DRAFT_GRAPH_URI, sparql_client=stub)
         assert report.affected_count == 2
         assert report.counts["obligation"] == 1
         assert report.counts["prohibition"] == 1
@@ -264,10 +271,21 @@ class TestAnalyzeBurdenDelta:
         assert "Kohustused" in labels
         assert "Keelud" in labels
 
+        # #855 regression: the first (affected-provisions) query must be
+        # GRAPH-scoped to the draft's named graph and address the ``#self``
+        # subject — proving the C6 burden lookup reads the named graph
+        # where the draft triples actually live, not the (empty) default
+        # graph.
+        first_query = stub.query.call_args_list[0]
+        sent_sparql = first_query.args[0]
+        assert f"GRAPH <{_DRAFT_GRAPH_URI}>" in sent_sparql
+        self_subject = first_query.kwargs.get("uri_bindings", {}).get("draftSelf")
+        assert self_subject == f"{_DRAFT_GRAPH_URI}#self"
+
     def test_jena_failure_returns_empty_report(self) -> None:
         stub = MagicMock()
         stub.query.side_effect = RuntimeError("jena down")
-        report = analyze_burden_delta(f"{_NS}Draft_1", sparql_client=stub)
+        report = analyze_burden_delta(_DRAFT_GRAPH_URI, sparql_client=stub)
         assert report.affected_count == 0
         assert report.before_score == 0
 

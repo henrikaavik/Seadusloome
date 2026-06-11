@@ -311,6 +311,18 @@ class ImpactAnalyzer:
 # ---------------------------------------------------------------------------
 
 
+def _looks_like_uri(value: str) -> bool:
+    """Return ``True`` when *value* is shaped like an http(s) URI.
+
+    Used to filter act-title LITERAL rows (``estleg:referencesAct``) out of
+    the affected-provision list before they reach a URI-only SPARQL
+    binding (#855). A bare title such as ``"Riigieelarve seadus"`` returns
+    ``False``; a provision IRI returns ``True``.
+    """
+    v = (value or "").strip()
+    return v.startswith("http://") or v.startswith("https://")
+
+
 @dataclass(frozen=True)
 class SanctionsDeltaRow:
     """One sanction row in the impact report's sanctions-delta section.
@@ -513,6 +525,19 @@ def analyze_sanctions_delta(
         provision_uri = (raw_uri or "").strip()
         if not provision_uri:
             continue
+        # #855: the affected-entities pass surfaces act-level partial
+        # matches as ``estleg:referencesAct "<title>"`` LITERAL rows whose
+        # ``uri`` field is the act title (e.g. ``"Riigieelarve seadus"``),
+        # not a provision URI. Those flow into ``affected_uris`` in
+        # ``analyze_handler`` and, if handed to
+        # ``list_sanctions_for_provision`` → ``uri_bindings``, trip the
+        # SparqlClient's strict URI allowlist with a ``ValueError`` that
+        # was caught + logged once PER TITLE PER RUN (warning spam, never a
+        # real lookup). Sanctions attach to provision URIs only, so a
+        # non-URI value can never have sanctions — skip it before the call
+        # rather than letting it raise-and-log.
+        if not _looks_like_uri(provision_uri):
+            continue
         try:
             sanction_rows = list_sanctions_for_provision(
                 provision_uri, sparql_client=sparql_client
@@ -568,7 +593,7 @@ def _sanction_to_delta_row(sanction: SanctionRow) -> SanctionsDeltaRow:
 
 
 def analyze_burden_delta(
-    draft_uri: str,
+    draft_graph_uri: str,
     *,
     sparql_client: SparqlClient | None = None,
 ) -> BurdenDeltaReport:
@@ -579,8 +604,15 @@ def analyze_burden_delta(
     counts in JSON-friendly form, a burden score, and a percent-delta).
 
     Args:
-        draft_uri: The ``DraftLegislation`` URI. An empty URI yields an
-            empty :class:`BurdenDeltaReport` with all zero counters.
+        draft_graph_uri: The draft's Jena **named graph** URI (the same
+            value :func:`app.docs.analyze_handler.analyze_impact` passes
+            for every other pass). #855: an uploaded draft's triples live
+            at ``<graph_uri>#self`` *inside* this named graph, so the
+            burden lookup is GRAPH-scoped to it and addresses the ``#self``
+            subject. Passing the bare graph URI to the default-graph query
+            (the old behaviour) matched nothing, so the C6 section was
+            silently always zero. An empty URI yields an empty
+            :class:`BurdenDeltaReport` with all zero counters.
         sparql_client: Optional :class:`SparqlClient` override.
 
     Returns:
@@ -589,15 +621,23 @@ def analyze_burden_delta(
         not yet carry their own ``normativeType`` edges — see the
         :class:`BurdenDelta` docstring for the v2 backfill dependency.
     """
-    uri = (draft_uri or "").strip()
-    if not uri:
+    graph_uri = (draft_graph_uri or "").strip()
+    if not graph_uri:
         return BurdenDeltaReport(counts=_empty_burden_counts())
 
     # Lazy import — see TYPE_CHECKING block above.
     from app.analyysikeskus.burden import burden_delta_for_draft
 
     try:
-        delta = burden_delta_for_draft(uri, sparql_client=sparql_client)
+        # The draft subject the graph builder wrote is ``<graph_uri>#self``;
+        # pass it as the ``draft_uri`` (used for the default-graph fallback
+        # arm + logging) and the graph URI as ``graph_uri`` so the
+        # GRAPH-scoped lookup reads the named graph (#855).
+        delta = burden_delta_for_draft(
+            f"{graph_uri}#self",
+            graph_uri=graph_uri,
+            sparql_client=sparql_client,
+        )
     except Exception as exc:  # noqa: BLE001 — pass-level isolation
         logger.warning("analyze_burden_delta: burden_delta_for_draft failed: %s", exc)
         return BurdenDeltaReport(counts=_empty_burden_counts())

@@ -373,6 +373,14 @@ def _build_draft_affected_provisions_query() -> str:
     provision" in non-AmendmentEvent contexts). The UNION arm guards
     against the half-populated corpus where some drafts have references
     but no AmendmentEvent rows yet.
+
+    This is the **default-graph** variant: the draft subject is supplied
+    by the caller as a ``?draftUri`` URI binding and the triples are
+    expected in the default graph. It remains the public ontology path
+    (e.g. an enacted-Act draft already merged into the default graph).
+    For an *uploaded* draft whose triples live at ``<graph_uri>#self``
+    inside a named graph, use :func:`_build_draft_affected_provisions_graph_query`
+    instead (see #855).
     """
     return (
         PREFIXES
@@ -386,6 +394,53 @@ WHERE {{
   }}
   UNION
   {{ ?draftUri <{PREDICATES.REFERENCES}> ?provision }}
+}}
+LIMIT {_MAX_BURDEN_ROWS_PER_ACT}
+"""
+    )
+
+
+def _build_draft_affected_provisions_graph_query(graph_uri: str) -> str:
+    """Return the GRAPH-scoped affected-provisions SPARQL for an uploaded draft.
+
+    #855 — the C6 burden section was silently always zero. An uploaded
+    draft's triples are written by :func:`app.docs.graph_builder.build_draft_graph`
+    as ``<graph_uri>#self estleg:references <provision>`` **inside the
+    named graph** ``<graph_uri>``. The default-graph variant above (which
+    binds ``?draftUri`` to the bare ``graph_uri`` and matches the default
+    graph) therefore never matched: wrong subject (missing ``#self``) AND
+    wrong graph (Fuseki has no ``unionDefaultGraph`` — see
+    ``docker/fuseki-config/ontology.ttl``). The whole burden delta came
+    back empty and nothing errored.
+
+    This variant fixes both:
+
+    * the draft-side patterns are wrapped in ``GRAPH <graph_uri> {…}`` so
+      they read the named graph where the draft triples actually live;
+    * the subject is the ``<graph_uri>#self`` IRI, bound by the caller via
+      ``uri_bindings={"draftSelf": "<graph_uri>#self"}`` (the SparqlClient
+      URI allowlist admits ``#``).
+
+    ``graph_uri`` is interpolated directly into the ``GRAPH`` clause and
+    MUST already be validated by :func:`app.sync.jena_loader._validate_graph_uri`
+    — the caller (:func:`burden_delta_for_draft`) does this before calling.
+    The amendment-event arm reads the AmendmentEvent → Provision hop from
+    the default graph (enacted ontology) since AmendmentEvents are public
+    ontology nodes, while the draft → event hop stays inside the graph.
+    """
+    return (
+        PREFIXES
+        + f"""
+SELECT DISTINCT ?provision
+WHERE {{
+  {{
+    GRAPH <{graph_uri}> {{ ?draftSelf ?p ?ev . }}
+    ?ev <{PREDICATES.AMENDS}> ?provision .
+  }}
+  UNION
+  {{
+    GRAPH <{graph_uri}> {{ ?draftSelf <{PREDICATES.REFERENCES}> ?provision . }}
+  }}
 }}
 LIMIT {_MAX_BURDEN_ROWS_PER_ACT}
 """
@@ -495,6 +550,7 @@ def list_burden_for_provision(
 def burden_delta_for_draft(
     draft_uri: str,
     *,
+    graph_uri: str | None = None,
     sparql_client: SparqlClient | None = None,
 ) -> BurdenDelta:
     """Return the burden delta for a draft URI vs. the prior-law baseline.
@@ -509,6 +565,17 @@ def burden_delta_for_draft(
     Args:
         draft_uri: A ``DraftLegislation`` URI. Empty / whitespace input
             yields an empty delta with ``affected_count=0``.
+        graph_uri: The draft's Jena **named graph** URI (#855). When
+            provided, the affected-provision lookup is GRAPH-scoped to
+            that graph and addresses the ``<graph_uri>#self`` subject the
+            graph builder actually wrote — the only shape that works for
+            an *uploaded* draft (its triples never reach the default
+            graph). When ``None`` (the legacy/default-graph path, used by
+            callers that pre-merged the draft into the default graph and
+            by the existing unit tests), the default-graph variant binds
+            ``?draftUri`` to *draft_uri* as before. Must match the draft
+            graph allowlist when supplied; an invalid value degrades to an
+            empty delta rather than raising.
         sparql_client: Optional :class:`SparqlClient` override.
 
     Returns:
@@ -520,15 +587,31 @@ def burden_delta_for_draft(
         return BurdenDelta(before=_empty_summary(), after=None, affected_count=0)
 
     client = sparql_client if sparql_client is not None else SparqlClient()
+    scoped_graph = (graph_uri or "").strip()
     try:
-        rows = client.query(
-            _build_draft_affected_provisions_query(),
-            uri_bindings={"draftUri": uri},
-        )
+        if scoped_graph:
+            # #855: GRAPH-scoped lookup against the draft's named graph,
+            # addressing the ``#self`` subject. Validate the graph URI
+            # before it is interpolated into the GRAPH clause (the same
+            # allowlist the GSP transport + impact builders use; widened
+            # for ``/v<n>`` in #849).
+            from app.sync.jena_loader import _validate_graph_uri
+
+            safe_graph = _validate_graph_uri(scoped_graph)
+            rows = client.query(
+                _build_draft_affected_provisions_graph_query(safe_graph),
+                uri_bindings={"draftSelf": f"{safe_graph}#self"},
+            )
+        else:
+            rows = client.query(
+                _build_draft_affected_provisions_query(),
+                uri_bindings={"draftUri": uri},
+            )
     except Exception:
         logger.warning(
-            "burden_delta_for_draft: affected-provision query failed for %r",
+            "burden_delta_for_draft: affected-provision query failed for %r (graph=%r)",
             uri,
+            scoped_graph or None,
             exc_info=True,
         )
         return BurdenDelta(before=_empty_summary(), after=None, affected_count=0)
