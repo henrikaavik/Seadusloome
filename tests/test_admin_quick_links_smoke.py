@@ -4,19 +4,20 @@ The 2026-04-29 UI review (`docs/2026-04-29-ui-review-seadusloome-live.md`,
 finding "P1 - Admin quick links lead to raw 500 pages") found that all
 five admin sub-pages returned ``Internal Server Error`` on the live
 deployment even though the routes were correctly registered. The cause
-was the ``app.templates.admin_dashboard`` shim's ``_rebind`` helper:
-it swaps each rebound page handler's ``__globals__`` to the shim's
-module dict so test patches on the shim take effect, but the shim only
-re-imports a subset of the helpers each handler uses. Consequently
-every helper not imported into the shim raised ``NameError`` at
-call-time and bubbled up as a 500.
+was the now-removed ``app.templates.admin_dashboard`` shim's ``_rebind``
+helper, which swapped each rebound page handler's ``__globals__`` to the
+shim's module dict (so test patches on the shim took effect) but only
+re-imported a subset of the helpers each handler used; every helper not
+imported into the shim raised ``NameError`` at call-time and bubbled up
+as a 500.
 
-This module is the regression guard: each admin quick-link route is
-hit through the real FastHTML ``app`` with an authenticated admin
-client and must return 200. A failure here means a new admin sub-page
-was added without either (a) inlining the necessary local imports in
-its handler or (b) updating the shim, and a 500 is reaching real
-admins again.
+The shim and its ``_rebind`` machinery are gone — handlers now import
+their module-private helpers as locals — but this module remains the
+regression guard: each admin quick-link route is hit through the real
+FastHTML ``app`` with an authenticated admin client and must return
+200. A failure here means a new admin sub-page was added without
+inlining the necessary local imports in its handler, and a 500 is
+reaching real admins again.
 """
 
 from __future__ import annotations

@@ -419,14 +419,11 @@ def _window_selector(active: str) -> object:
 def admin_analytics_page(req: Request):
     """GET /admin/analytics -- usage analytics page.
 
-    Helpers are imported as locals inside the function body so the page
-    works correctly when rebound by the ``app.templates.admin_dashboard``
-    shim — that shim swaps ``__globals__`` to its own module dict, which
-    means private helpers cannot be resolved via the function's global
-    namespace.  The whole body is wrapped in a try/except so any backend
-    failure (missing ``usage_daily`` materialized view, transient DB
-    error) renders a styled error banner instead of bubbling up as a
-    raw 500.
+    Module-private helpers are imported as locals inside the function
+    body so tests can patch them on this module's real path.  The whole
+    body is wrapped in a try/except so any backend failure (missing
+    ``usage_daily`` materialized view, transient DB error) renders a
+    styled error banner instead of bubbling up as a raw 500.
     """
     auth = req.scope.get("auth")
     theme = get_theme_from_request(req)
@@ -786,8 +783,8 @@ def admin_analytics_refresh(req: Request):
 def admin_analytics_export(req: Request):
     """GET /admin/analytics/export — download per-day rows as CSV.
 
-    Helpers are imported as locals so this handler works correctly when
-    rebound by the admin_dashboard shim.  On error returns a styled
+    Module-private helpers are imported as locals so tests can patch
+    them on this module's real path.  On error returns a styled
     plain-text response rather than a raw 500.
     """
     try:

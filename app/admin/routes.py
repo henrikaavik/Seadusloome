@@ -5,8 +5,8 @@ that live in the ``app.admin.*`` sub-modules. Every route is wrapped in
 ``require_role("admin")`` so unauthenticated or non-admin callers get the
 standard auth redirect/403 before the handler runs.
 
-Why this module exists (post-refactor pattern, replaces the historical
-``app.templates.admin_dashboard`` shim):
+Why this module exists (post-refactor pattern; it replaced the
+historical ``app.templates.admin_dashboard`` shim, now removed):
 
 * Each admin sub-module (``health``, ``sync``, ``audit``, ``analytics``,
   ``cost_dashboard``, ``job_monitor``, ``performance``) owns its own
