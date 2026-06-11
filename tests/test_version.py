@@ -125,8 +125,15 @@ class TestReadVersion:
         assert v2["app"] == "1.0.0"
 
 
-class TestHealthEndpointIncludesVersion:
-    def test_health_payload_has_version_block(self):
+class TestHealthEndpointVersionGating:
+    """#861-D: the unauthenticated /api/health payload must NOT leak the
+    version/git-SHA block; the rich payload (incl. version) is admin-only.
+
+    ``read_version`` itself is exercised directly by the tests above; here we
+    only assert the public endpoint's reduced contract.
+    """
+
+    def test_unauthenticated_health_payload_has_no_version_block(self):
         # Using importlib avoids shadowing the ``app`` package name with
         # the ASGI ``app`` object. We import the main module first (which
         # registers admin routes), then pull out the ASGI callable by
@@ -146,9 +153,6 @@ class TestHealthEndpointIncludesVersion:
 
         assert response.status_code == 200
         data = response.json()
-        assert "version" in data
-        version = data["version"]
-        assert set(version.keys()) == {"app", "sha", "built_at"}
-        assert isinstance(version["app"], str)
-        assert isinstance(version["sha"], str)
-        assert isinstance(version["built_at"], str)
+        # Public callers see status only — no version, git SHA, or
+        # per-subsystem breakdown.
+        assert data == {"status": "ok"}

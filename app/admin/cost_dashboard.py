@@ -42,6 +42,14 @@ _FEATURE_LABELS: dict[str, str] = {
 _WINDOW_CHOICES: tuple[str, ...] = ("7d", "30d", "90d", "ytd")
 _DEFAULT_WINDOW = "30d"
 
+# ``ORG_MAX_MONTHLY_COST_USD`` is a *monthly* budget, so a "% of monthly
+# budget" reading only makes sense for the ~30-day window. For 7d/90d/ytd
+# the comparison is misleading — 90d/ytd routinely exceed 100% and 7d
+# under-reads — so the budget bar + utilisation badge are shown only when
+# the active window equals ``_BUDGET_WINDOW`` (#861-A). Other windows
+# render a neutral, clearly-labelled spend column instead.
+_BUDGET_WINDOW = "30d"
+
 # Estonian labels for the window selector tabs.
 _WINDOW_LABELS: dict[str, str] = {
     "7d": "Viimased 7 päeva",
@@ -544,6 +552,7 @@ def admin_cost_page(req: Request):
     try:
         from app.admin._shared import _tooltip
         from app.admin.cost_dashboard import (
+            _BUDGET_WINDOW,
             _csv_export_link,
             _empty_state,
             _feature_label,
@@ -591,41 +600,76 @@ def admin_cost_page(req: Request):
         toolbar_children.append(_csv_export_link(window, effective_org_id))
         toolbar = Div(*toolbar_children, cls="cost-toolbar")  # noqa: F405
 
-        # ---- Card 1: Cost by org with progress bars ----
+        # ---- Card 1: Cost by org ----
+        # The monthly budget only maps cleanly onto the ~30-day window, so the
+        # budget/utilisation columns appear only for ``_BUDGET_WINDOW`` (#861-A).
+        # Other windows show spend without a spurious "% of monthly budget".
+        show_budget = window == _BUDGET_WINDOW
         if org_costs:
-            org_columns = [
-                Column(key="org_name", label="Organisatsioon", sortable=False),
-                Column(key="cost", label="Kulu (USD)", sortable=False),
-                Column(key="budget", label="Eelarve (USD)", sortable=False),
-                Column(key="progress", label="Kasutus", sortable=False),
-                Column(key="pct", label="Protsent", sortable=False),
-            ]
-            org_rows = []
-            for oc in org_costs:
-                pct = (oc["cost_usd"] / oc["budget_usd"] * 100) if oc["budget_usd"] > 0 else 0
-                variant = "danger" if pct >= 90 else ("warning" if pct >= 70 else "default")
-                org_rows.append(
+            if show_budget:
+                org_columns = [
+                    Column(key="org_name", label="Organisatsioon", sortable=False),
+                    Column(key="cost", label="Kulu (USD)", sortable=False),
+                    Column(key="budget", label="Kuueelarve (USD)", sortable=False),
+                    Column(key="progress", label="Eelarve kasutus", sortable=False),
+                    Column(key="pct", label="Protsent eelarvest", sortable=False),
+                ]
+                org_rows = []
+                for oc in org_costs:
+                    pct = (oc["cost_usd"] / oc["budget_usd"] * 100) if oc["budget_usd"] > 0 else 0
+                    variant = "danger" if pct >= 90 else ("warning" if pct >= 70 else "default")
+                    org_rows.append(
+                        {
+                            "org_name": oc["org_name"],
+                            "cost": f"${oc['cost_usd']:.4f}",
+                            "budget": f"${oc['budget_usd']:.2f}",
+                            "progress": _progress_bar(oc["cost_usd"], oc["budget_usd"]),
+                            "pct": Badge(f"{pct:.0f}%", variant=variant),
+                        }
+                    )
+            else:
+                # Spend-only view: no %-of-monthly-budget bar for non-month
+                # windows. Show the period spend's share of the period total
+                # as a clearly-labelled alternative bar.
+                period_total = sum(oc["cost_usd"] for oc in org_costs) or 1.0
+                org_columns = [
+                    Column(key="org_name", label="Organisatsioon", sortable=False),
+                    Column(key="cost", label="Kulu (USD)", sortable=False),
+                    Column(key="share", label="Osakaal perioodist", sortable=False),
+                ]
+                org_rows = [
                     {
                         "org_name": oc["org_name"],
                         "cost": f"${oc['cost_usd']:.4f}",
-                        "budget": f"${oc['budget_usd']:.2f}",
-                        "progress": _progress_bar(oc["cost_usd"], oc["budget_usd"]),
-                        "pct": Badge(f"{pct:.0f}%", variant=variant),
+                        "share": _progress_bar(oc["cost_usd"], period_total),
                     }
-                )
+                    for oc in org_costs
+                ]
             org_table: object = DataTable(columns=org_columns, rows=org_rows)
         else:
             org_table = _empty_state()
+
+        if show_budget:
+            org_card_tip = "Valitud ajavahemiku kulu vs kuueelarve organisatsioonide lõikes"
+            org_card_note: object = ""
+        else:
+            org_card_tip = "Valitud ajavahemiku kulu organisatsioonide lõikes"
+            # Make it explicit that the monthly-budget comparison is hidden
+            # because the active window is not a calendar month.
+            org_card_note = P(  # noqa: F405
+                "Eelarve kasutust näidatakse ainult 30 päeva vaates (kuueelarve põhjal).",
+                cls="muted-text",
+            )
 
         org_card = Card(
             CardHeader(
                 H3(  # noqa: F405
                     "Kulu organisatsioonide kaupa",
-                    _tooltip("Valitud ajavahemiku kulu vs eelarve organisatsioonide lõikes"),
+                    _tooltip(org_card_tip),
                     cls="card-title",
                 )
             ),
-            CardBody(org_table),
+            CardBody(org_card_note, org_table),
         )
 
         # ---- Card 2: Cost by feature ----

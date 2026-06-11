@@ -899,3 +899,87 @@ class TestCostDashboardAuth:
         response = client.get("/admin/costs/export?format=csv&window=30d")
         assert response.status_code == 303
         assert response.headers["location"] == "/auth/login"
+
+
+# ---------------------------------------------------------------------------
+# Budget-bar window awareness (#861-A)
+# ---------------------------------------------------------------------------
+
+
+class TestBudgetBarWindowScoping:
+    """The monthly budget bar/% must only appear in the 30-day window.
+
+    For 7d/90d/ytd, dividing window spend by the monthly budget produces a
+    misleading % (often >100% for 90d/ytd), so those windows show spend
+    without a %-of-monthly-budget bar.
+    """
+
+    def _patch_all(self):
+        # Helper returning the seven page-data patchers as a list so each
+        # test can enter them with a single ExitStack-free loop.
+        return [
+            patch("app.admin.cost_dashboard._get_orgs_for_filter", return_value=[]),
+            patch("app.admin.cost_dashboard._get_monthly_trend", return_value=[]),
+            patch("app.admin.cost_dashboard._get_daily_trend", return_value=[]),
+            patch("app.admin.cost_dashboard._get_top_users", return_value=[]),
+            patch("app.admin.cost_dashboard._get_cost_by_model", return_value=[]),
+            patch("app.admin.cost_dashboard._get_cost_by_feature", return_value=[]),
+        ]
+
+    def _render(self, window: str, org_costs: list[dict]) -> str:  # type: ignore[type-arg]
+        from fasthtml.common import to_xml
+
+        from app.admin.cost_dashboard import admin_cost_page
+
+        patchers = self._patch_all()
+        for p in patchers:
+            p.start()
+        org_patch = patch("app.admin.cost_dashboard._get_cost_by_org", return_value=org_costs)
+        org_patch.start()
+        try:
+            req = _make_request("/admin/costs", f"window={window}")
+            return to_xml(admin_cost_page(req))
+        finally:
+            org_patch.stop()
+            for p in patchers:
+                p.stop()
+
+    def test_month_window_shows_budget_columns(self):
+        html = self._render(
+            "30d",
+            [{"org_name": "Org A", "cost_usd": 20.0, "budget_usd": 50.0}],
+        )
+        # Budget utilisation columns + a percentage badge are present.
+        assert "Protsent eelarvest" in html
+        assert "Eelarve kasutus" in html
+        assert "Kuueelarve" in html
+        assert "40%" in html  # 20/50
+
+    def test_long_window_hides_budget_percentage(self):
+        # 90d spend far exceeds the monthly budget — the old code would have
+        # rendered a spurious >100% badge here.
+        html = self._render(
+            "90d",
+            [{"org_name": "Org A", "cost_usd": 140.0, "budget_usd": 50.0}],
+        )
+        assert "Protsent eelarvest" not in html
+        # The budget-utilisation column header is gone (the note text
+        # "Eelarve kasutust …" legitimately contains the substring, so we
+        # match the column-header form ">Eelarve kasutus<").
+        assert ">Eelarve kasutus<" not in html
+        # No spurious over-budget percentage badge (280% = 140/50). The
+        # badge wraps its text in a <span>, so match the badge form.
+        assert ">280%<" not in html
+        # The spend-only alternative + explanatory note are shown instead.
+        assert "Osakaal perioodist" in html
+        assert "Eelarve kasutust näidatakse ainult 30 päeva vaates" in html
+        # The raw spend is still surfaced.
+        assert "140" in html
+
+    def test_ytd_window_hides_budget_percentage(self):
+        html = self._render(
+            "ytd",
+            [{"org_name": "Org A", "cost_usd": 500.0, "budget_usd": 50.0}],
+        )
+        assert "Protsent eelarvest" not in html
+        assert "Osakaal perioodist" in html

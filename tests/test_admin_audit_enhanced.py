@@ -101,6 +101,22 @@ class TestBuildAuditWhere:
         assert "a.detail::text ILIKE %s" in where
         assert "%draft%" in params
 
+    def test_query_filter_has_escape_clause(self):
+        """#861-B: the ILIKE pattern must carry an explicit ESCAPE clause."""
+        from app.admin.audit import _build_audit_where
+
+        where, _params = _build_audit_where(query="draft")
+        assert "ILIKE %s ESCAPE '\\'" in where
+
+    def test_query_filter_escapes_like_wildcards(self):
+        """#861-B: %, _ and \\ in a user query must be matched literally."""
+        from app.admin.audit import _build_audit_where
+
+        _where, params = _build_audit_where(query="100%_x\\y")
+        # The bound pattern is wrapped in %...% but the user's own wildcards
+        # are backslash-escaped so they cannot act as wildcards.
+        assert params[-1] == "%100\\%\\_x\\\\y%"
+
     def test_combined_filters(self):
         from app.admin.audit import _build_audit_where
 
@@ -327,6 +343,340 @@ class TestExtractFilters:
         f = _extract_filters(req)
         assert f["org"] == "org-42"
 
+    def test_org_present_flag_tracks_explicit_param(self):
+        """#861-B: ``org_present`` distinguishes a blank ?org= from no ?org=."""
+        from app.admin.audit import _extract_filters
+
+        # Present but blank (explicit "all orgs" opt-in).
+        f_blank = _extract_filters(_make_request("/admin/audit", "org="))
+        assert f_blank["org_present"] is True
+        # Absent entirely (default-to-own-org).
+        f_absent = _extract_filters(_make_request("/admin/audit", "user=u-1"))
+        assert f_absent["org_present"] is False
+
+
+# ---------------------------------------------------------------------------
+# Org-scoping policy + LIKE escaping (#861-B)
+# ---------------------------------------------------------------------------
+
+
+class TestEscapeLike:
+    def test_escapes_percent_underscore_backslash(self):
+        from app.admin.audit import _escape_like
+
+        assert _escape_like("100%") == "100\\%"
+        assert _escape_like("a_b") == "a\\_b"
+        # Backslash escaped first so it is not double-processed.
+        assert _escape_like("a\\b") == "a\\\\b"
+
+    def test_plain_text_unchanged(self):
+        from app.admin.audit import _escape_like
+
+        assert _escape_like("draft.upload") == "draft.upload"
+
+
+class TestResolveOrgScope:
+    def test_defaults_to_own_org_when_no_param(self):
+        from app.admin.audit import _resolve_org_scope
+
+        filters = {"org": "", "org_present": False}
+        auth = {"role": "admin", "org_id": "own-org"}
+        assert _resolve_org_scope(filters, auth) == "own-org"
+
+    def test_platform_admin_without_org_sees_all_by_default(self):
+        from app.admin.audit import _resolve_org_scope
+
+        filters = {"org": "", "org_present": False}
+        auth = {"role": "admin"}  # no org_id
+        assert _resolve_org_scope(filters, auth) is None
+
+    def test_explicit_org_override_wins(self):
+        from app.admin.audit import _resolve_org_scope
+
+        filters = {"org": "picked-org", "org_present": True}
+        auth = {"role": "admin", "org_id": "own-org"}
+        assert _resolve_org_scope(filters, auth) == "picked-org"
+
+    def test_explicit_all_token_returns_none(self):
+        from app.admin.audit import _resolve_org_scope
+
+        auth = {"role": "admin", "org_id": "own-org"}
+        for token in ("all", "*", ""):
+            filters = {"org": token, "org_present": True}
+            assert _resolve_org_scope(filters, auth) is None
+
+    def test_no_auth_returns_none(self):
+        from app.admin.audit import _resolve_org_scope
+
+        assert _resolve_org_scope({"org": "", "org_present": False}, None) is None
+
+
+class TestHasNarrowingFilter:
+    def test_all_org_is_not_narrowing(self):
+        from app.admin.audit import _has_narrowing_filter
+
+        base = {"action": "", "actions": [], "user": "", "from": "", "to": "", "query": ""}
+        assert _has_narrowing_filter({**base, "org": "all", "org_present": True}) is False
+        assert _has_narrowing_filter({**base, "org": "", "org_present": True}) is False
+
+    def test_explicit_specific_org_is_narrowing(self):
+        from app.admin.audit import _has_narrowing_filter
+
+        base = {"action": "", "actions": [], "user": "", "from": "", "to": "", "query": ""}
+        # An explicitly-chosen specific org narrows the result set.
+        assert _has_narrowing_filter({**base, "org": "org-7", "org_present": True}) is True
+
+    def test_resolved_default_org_is_not_narrowing(self):
+        """#886 review: a specific org that came from the default-to-own-org
+        resolution (org_present=False) must NOT count as a narrowing filter —
+        otherwise an org admin with an empty log gets an "over-filtered" empty
+        state and a clear-filters button that just reloads the same scope."""
+        from app.admin.audit import _has_narrowing_filter
+
+        base = {"action": "", "actions": [], "user": "", "from": "", "to": "", "query": ""}
+        # Own-org UUID resolved as the default — org_present is False.
+        assert _has_narrowing_filter({**base, "org": "own-org", "org_present": False}) is False
+
+    def test_other_filters_are_narrowing(self):
+        from app.admin.audit import _has_narrowing_filter
+
+        base = {
+            "action": "",
+            "actions": [],
+            "user": "",
+            "from": "",
+            "to": "",
+            "query": "",
+            "org": "all",
+            "org_present": True,
+        }
+        assert _has_narrowing_filter({**base, "query": "x"}) is True
+        assert _has_narrowing_filter({**base, "action": "user.login"}) is True
+
+
+class TestAuditPageOrgScoping:
+    """End-to-end: the page handler applies the default-to-own-org policy."""
+
+    @patch("app.admin.audit._get_audit_orgs")
+    @patch("app.admin.audit._get_audit_users")
+    @patch("app.admin.audit._get_distinct_actions")
+    @patch("app.admin.audit._get_audit_log_page")
+    def test_default_scopes_query_to_own_org(
+        self,
+        mock_page: MagicMock,
+        mock_actions: MagicMock,
+        mock_users: MagicMock,
+        mock_orgs: MagicMock,
+    ):
+        from app.admin.audit import admin_audit_page
+
+        mock_page.return_value = ([], 0)
+        mock_actions.return_value = []
+        mock_users.return_value = []
+        mock_orgs.return_value = []
+
+        # Admin with an org_id, no ?org= override.
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/admin/audit",
+            "headers": [],
+            "query_string": b"",
+            "scheme": "http",
+            "server": ("testserver", 80),
+            "client": ("127.0.0.1", 12345),
+            "auth": {
+                "role": "admin",
+                "id": "a-1",
+                "org_id": "home-org",
+                "email": "a@b.ee",
+                "full_name": "Admin User",
+            },
+        }
+        admin_audit_page(Request(scope))
+        # The DB query must have been scoped to the admin's own org.
+        assert mock_page.call_args.kwargs.get("org_id") == "home-org"
+
+    @patch("app.admin.audit._get_audit_orgs")
+    @patch("app.admin.audit._get_audit_users")
+    @patch("app.admin.audit._get_distinct_actions")
+    @patch("app.admin.audit._get_audit_log_page")
+    def test_explicit_all_widens_to_cross_org(
+        self,
+        mock_page: MagicMock,
+        mock_actions: MagicMock,
+        mock_users: MagicMock,
+        mock_orgs: MagicMock,
+    ):
+        from app.admin.audit import admin_audit_page
+
+        mock_page.return_value = ([], 0)
+        mock_actions.return_value = []
+        mock_users.return_value = []
+        mock_orgs.return_value = []
+
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/admin/audit",
+            "headers": [],
+            "query_string": b"org=all",
+            "scheme": "http",
+            "server": ("testserver", 80),
+            "client": ("127.0.0.1", 12345),
+            "auth": {
+                "role": "admin",
+                "id": "a-1",
+                "org_id": "home-org",
+                "email": "a@b.ee",
+                "full_name": "Admin User",
+            },
+        }
+        admin_audit_page(Request(scope))
+        # Cross-org opt-in => no org predicate.
+        assert mock_page.call_args.kwargs.get("org_id") is None
+
+
+def _audit_scope(query_string: str = "", *, org_id: str | None = "home-org") -> Request:
+    """Admin Request for the audit page; ``org_id=None`` => platform admin."""
+    auth: dict[str, object] = {
+        "role": "admin",
+        "id": "a-1",
+        "email": "a@b.ee",
+        "full_name": "Admin User",
+    }
+    if org_id is not None:
+        auth["org_id"] = org_id
+    return Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/admin/audit",
+            "headers": [],
+            "query_string": query_string.encode(),
+            "scheme": "http",
+            "server": ("testserver", 80),
+            "client": ("127.0.0.1", 12345),
+            "auth": auth,
+        }
+    )
+
+
+class TestAuditEmptyStateOrgScoping:
+    """#886 review: the empty-state copy must not treat the resolved default
+    org scope as a user-applied filter (the no-op clear-filters loop)."""
+
+    @patch("app.admin.audit._get_audit_orgs")
+    @patch("app.admin.audit._get_audit_users")
+    @patch("app.admin.audit._get_distinct_actions")
+    @patch("app.admin.audit._get_audit_log_page")
+    def test_default_scope_empty_log_shows_plain_empty_copy(
+        self,
+        mock_page: MagicMock,
+        mock_actions: MagicMock,
+        mock_users: MagicMock,
+        mock_orgs: MagicMock,
+    ):
+        from fasthtml.common import to_xml
+
+        from app.admin.audit import admin_audit_page
+
+        mock_page.return_value = ([], 0)
+        mock_actions.return_value = []
+        mock_users.return_value = []
+        mock_orgs.return_value = []
+
+        # Org admin, no ?org= — scoped to own org by default, empty log.
+        html = to_xml(admin_audit_page(_audit_scope("")))
+        # Plain "log is empty" copy, NOT the over-filtered variant, and NO
+        # clear-filters button (it would just reload the identical scope).
+        assert "Auditilogis kirjeid ei leitud" in html
+        assert "Praeguste filtritega" not in html
+        assert "Tühjenda filtrid" not in html
+
+    @patch("app.admin.audit._get_audit_orgs")
+    @patch("app.admin.audit._get_audit_users")
+    @patch("app.admin.audit._get_distinct_actions")
+    @patch("app.admin.audit._get_audit_log_page")
+    def test_explicit_org_empty_result_shows_filtered_empty_state(
+        self,
+        mock_page: MagicMock,
+        mock_actions: MagicMock,
+        mock_users: MagicMock,
+        mock_orgs: MagicMock,
+    ):
+        from fasthtml.common import to_xml
+
+        from app.admin.audit import admin_audit_page
+
+        mock_page.return_value = ([], 0)
+        mock_actions.return_value = []
+        mock_users.return_value = []
+        mock_orgs.return_value = []
+
+        # Platform admin explicitly picks a specific org that has no rows.
+        html = to_xml(admin_audit_page(_audit_scope("org=other-org", org_id=None)))
+        assert "Praeguste filtritega ei leitud kirjeid" in html
+        assert "Tühjenda filtrid" in html
+        assert "Auditilogis kirjeid ei leitud" not in html
+
+
+class TestAuditPaginationScopePreservation:
+    """#886 review: pagination + CSV links must carry the *effective* org so
+    page 2 / the export does not silently widen back to all orgs."""
+
+    def _render(self, req, rows: int) -> str:
+        from fasthtml.common import to_xml
+
+        from app.admin.audit import admin_audit_page
+
+        entries = [
+            {
+                "id": i,
+                "user_id": "u-1",
+                "user_name": "U",
+                "action": "user.login",
+                "detail": {"x": 1},
+                "created_at": datetime(2026, 4, 8, 9, 0),
+                "org_id": "home-org",
+            }
+            for i in range(rows)
+        ]
+        with (
+            patch("app.admin.audit._get_audit_log_page", return_value=(entries, rows)),
+            patch("app.admin.audit._get_distinct_actions", return_value=[]),
+            patch("app.admin.audit._get_audit_users", return_value=[]),
+            patch(
+                "app.admin.audit._get_audit_orgs",
+                return_value=[
+                    {"id": "home-org", "name": "Home"},
+                    {"id": "other-org", "name": "Other"},
+                ],
+            ),
+        ):
+            return to_xml(admin_audit_page(req))
+
+    def test_default_own_org_pagination_keeps_scope(self):
+        # 60 rows over 25/page => multiple pages, so pagination links render.
+        html = self._render(_audit_scope(""), rows=60)
+        # Page-2 link must re-resolve to the same own-org scope. We emit it by
+        # omitting ?org= (page 2 re-defaults to own-org) — so the page-2 href
+        # must NOT carry an explicit foreign org and must point back to the
+        # audit page.
+        assert "/admin/audit?" in html
+        assert "org=other-org" not in html
+
+    def test_explicit_all_pagination_preserves_cross_org(self):
+        html = self._render(_audit_scope("org=all", org_id="home-org"), rows=60)
+        # The cross-org opt-in must survive pagination as org=all.
+        assert "org=all" in html
+
+    def test_explicit_specific_org_csv_link_carries_org(self):
+        html = self._render(_audit_scope("org=other-org", org_id=None), rows=5)
+        # The CSV export href is scoped to the chosen org.
+        assert "/admin/audit/export?" in html
+        assert "org=other-org" in html
+
 
 class TestFilterQuerystring:
     def test_round_trip_preserves_actions(self):
@@ -502,6 +852,212 @@ class TestAuditDetailFragment:
         req.scope["path_params"] = {"id": "abc"}
         result = admin_audit_detail(req)
         assert result.status_code == 400  # type: ignore[union-attr]
+
+
+# ---------------------------------------------------------------------------
+# Detail-endpoint org scoping (#886 review)
+# ---------------------------------------------------------------------------
+
+
+def _detail_request(entry_id: str, *, query_string: str = "", org_id: str | None) -> Request:
+    """Build an /admin/audit/detail/{id} Request with a controllable scope.
+
+    ``org_id=None`` models a platform admin (no home org); otherwise the
+    admin is bound to that org.
+    """
+    auth: dict[str, object] = {"role": "admin", "id": "a-1", "email": "a@b.ee"}
+    if org_id is not None:
+        auth["org_id"] = org_id
+    req = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": f"/admin/audit/detail/{entry_id}",
+            "headers": [],
+            "query_string": query_string.encode(),
+            "scheme": "http",
+            "server": ("testserver", 80),
+            "client": ("127.0.0.1", 12345),
+            "auth": auth,
+            "path_params": {"id": entry_id},
+        }
+    )
+    return req
+
+
+class TestGetAuditEntryScoping:
+    """#886: the single-row fetch must apply the SAME org predicate as the list."""
+
+    @patch("app.admin.audit._connect")
+    def test_no_org_id_has_no_org_predicate(self, mock_connect: MagicMock):
+        from app.admin.audit import _get_audit_entry
+
+        mock_conn = MagicMock()
+        mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+        mock_conn.execute.return_value.fetchone.return_value = None
+
+        _get_audit_entry(5)
+        sql = mock_conn.execute.call_args[0][0]
+        params = mock_conn.execute.call_args[0][1]
+        assert "u.org_id" not in sql
+        assert list(params) == [5]
+
+    @patch("app.admin.audit._connect")
+    def test_org_id_adds_predicate_and_param(self, mock_connect: MagicMock):
+        from app.admin.audit import _get_audit_entry
+
+        mock_conn = MagicMock()
+        mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+        mock_conn.execute.return_value.fetchone.return_value = None
+
+        _get_audit_entry(5, org_id="home-org")
+        sql = mock_conn.execute.call_args[0][0]
+        params = mock_conn.execute.call_args[0][1]
+        # Same join + predicate the list path uses.
+        assert "LEFT JOIN users u ON u.id = a.user_id" in sql
+        assert "u.org_id = %s" in sql
+        assert list(params) == [5, "home-org"]
+
+
+class TestAuditDetailOrgScoping:
+    """#886: the HTMX detail endpoint enforces the list's org scope and treats
+    an out-of-scope id exactly like a missing row (no existence leak)."""
+
+    @patch("app.admin.audit._get_audit_entry")
+    def test_own_org_admin_can_expand_own_org_entry(self, mock_entry: MagicMock):
+        from fasthtml.common import to_xml
+
+        from app.admin.audit import admin_audit_detail
+
+        mock_entry.return_value = {
+            "id": 5,
+            "user_id": "u-1",
+            "user_name": "Alice",
+            "action": "doc.upload",
+            "detail": {"filename": "x.docx"},
+            "created_at": datetime(2025, 6, 15, 12, 0),
+        }
+        result = admin_audit_detail(_detail_request("5", org_id="home-org"))
+        html = to_xml(result)
+        assert "x.docx" in html
+        # The fetch was scoped to the admin's own org.
+        assert mock_entry.call_args.kwargs.get("org_id") == "home-org"
+
+    @patch("app.admin.audit._get_audit_entry", return_value=None)
+    def test_own_org_admin_other_org_id_gets_not_found(self, mock_entry: MagicMock):
+        """An org admin requesting another org's id: the scoped fetch returns
+        None (the DB predicate excludes it), so the handler shows the
+        not-found branch — identical to a genuinely missing row, no 403 body."""
+        from fasthtml.common import to_xml
+
+        from app.admin.audit import admin_audit_detail
+
+        result = admin_audit_detail(_detail_request("999", org_id="home-org"))
+        html = to_xml(result)
+        assert "Kirjet ei leitud" in html
+        # The fetch was scoped to own-org; the foreign id simply did not match.
+        assert mock_entry.call_args.kwargs.get("org_id") == "home-org"
+        # Same not-found copy as TestAuditDetailFragment — no distinct 403.
+        assert "keelatud" not in html.lower()
+
+    @patch("app.admin.audit._get_audit_entry")
+    def test_platform_admin_reads_any_entry(self, mock_entry: MagicMock):
+        from fasthtml.common import to_xml
+
+        from app.admin.audit import admin_audit_detail
+
+        mock_entry.return_value = {
+            "id": 7,
+            "user_id": "u-9",
+            "user_name": "Bob",
+            "action": "draft.create",
+            "detail": {"title": "Foo"},
+            "created_at": datetime(2025, 6, 15, 12, 0),
+        }
+        # Platform admin: no org_id, no ?org= => no scoping predicate.
+        result = admin_audit_detail(_detail_request("7", org_id=None))
+        html = to_xml(result)
+        assert "Foo" in html
+        assert mock_entry.call_args.kwargs.get("org_id") is None
+
+    @patch("app.admin.audit._get_audit_entry")
+    def test_explicit_org_all_imposes_no_scope(self, mock_entry: MagicMock):
+        from fasthtml.common import to_xml
+
+        from app.admin.audit import admin_audit_detail
+
+        mock_entry.return_value = {
+            "id": 8,
+            "user_id": "u-3",
+            "user_name": "Cara",
+            "action": "doc.upload",
+            "detail": {"filename": "y.docx"},
+            "created_at": datetime(2025, 6, 15, 12, 0),
+        }
+        # Org admin who explicitly opted into the cross-org view.
+        result = admin_audit_detail(
+            _detail_request("8", query_string="org=all", org_id="home-org")
+        )
+        html = to_xml(result)
+        assert "y.docx" in html
+        # ?org=all => cross-org => no org predicate on the fetch.
+        assert mock_entry.call_args.kwargs.get("org_id") is None
+
+    @patch("app.admin.audit._get_audit_entry")
+    def test_explicit_specific_org_scopes_fetch(self, mock_entry: MagicMock):
+        from app.admin.audit import admin_audit_detail
+
+        mock_entry.return_value = None
+        # Platform admin drilling into one specific org's entry.
+        admin_audit_detail(_detail_request("9", query_string="org=other-org", org_id=None))
+        assert mock_entry.call_args.kwargs.get("org_id") == "other-org"
+
+
+class TestAuditDetailExpanderUrl:
+    """#886: the list expander hx_get must carry the active org so the
+    fragment resolves the same scope as the list it was rendered in."""
+
+    def _render_list(self, req, *, org_rows: bool = True) -> str:
+        from fasthtml.common import to_xml
+
+        from app.admin.audit import admin_audit_page
+
+        entries = [
+            {
+                "id": 42,
+                "user_id": "u-1",
+                "user_name": "U",
+                "action": "doc.upload",
+                "detail": {"filename": "z.docx"},
+                "created_at": datetime(2026, 4, 8, 9, 0),
+                "org_id": "home-org",
+            }
+        ]
+        orgs = (
+            [{"id": "home-org", "name": "Home"}, {"id": "other-org", "name": "Other"}]
+            if org_rows
+            else []
+        )
+        with (
+            patch("app.admin.audit._get_audit_log_page", return_value=(entries, 1)),
+            patch("app.admin.audit._get_distinct_actions", return_value=[]),
+            patch("app.admin.audit._get_audit_users", return_value=[]),
+            patch("app.admin.audit._get_audit_orgs", return_value=orgs),
+        ):
+            return to_xml(admin_audit_page(req))
+
+    def test_explicit_all_expander_carries_org(self):
+        html = self._render_list(_audit_scope("org=all", org_id="home-org"))
+        assert "/admin/audit/detail/42?org=all" in html
+
+    def test_default_own_org_expander_omits_org(self):
+        # Default scope: the expander omits ?org= (the fragment re-defaults to
+        # own-org), matching the pagination/CSV omission policy.
+        html = self._render_list(_audit_scope("", org_id="home-org"))
+        assert "/admin/audit/detail/42" in html
+        assert "/admin/audit/detail/42?org=" not in html
 
 
 # ---------------------------------------------------------------------------
