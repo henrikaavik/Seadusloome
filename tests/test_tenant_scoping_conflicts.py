@@ -20,14 +20,14 @@ from unittest.mock import MagicMock
 from rdflib import Dataset, Literal, Namespace, URIRef
 from rdflib.namespace import RDF, RDFS
 
-from app.docs.impact.analyzer import ImpactAnalyzer
-from app.docs.impact.masking import (
+from app.impact.analyzer import ImpactAnalyzer
+from app.impact.masking import (
     _MASKED_CONFLICT_LABEL,
     drop_adhoc_conflict_rows,
     mask_conflict_rows,
     mask_stored_conflict_rows,
 )
-from app.docs.impact.queries import CONFLICTS, build_conflicts_query
+from app.impact.queries import CONFLICTS, build_conflicts_query
 from app.ontology.scoping import ADHOC_GRAPH_PREFIX, draft_graph_prefix_for
 
 EST = Namespace("https://data.riik.ee/ontology/estleg#")

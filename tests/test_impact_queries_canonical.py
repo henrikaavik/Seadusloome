@@ -1,6 +1,6 @@
 """Run the impact-engine SPARQL templates against a seeded rdflib graph (C0).
 
-The impact engine's queries (``app.docs.impact.queries``) live in a
+The impact engine's queries (``app.impact.queries``) live in a
 ``GRAPH <...>`` envelope that scopes the draft's references to a named
 graph. To exercise them without a real Jena, we build an in-memory
 :class:`rdflib.Dataset` (so the ``GRAPH`` keyword is honoured), seed it
@@ -24,7 +24,7 @@ import pytest
 from rdflib import Dataset, Literal, Namespace, URIRef
 from rdflib.namespace import RDF
 
-from app.docs.impact.queries import (
+from app.impact.queries import (
     build_affected_entities_query,
     build_conflicts_query,
     build_eu_compliance_query,

@@ -105,7 +105,7 @@ def _canned_resolved_refs():
 
 
 def _canned_findings(affected: int = 2, conflicts: int = 1, gaps: int = 0):
-    from app.docs.impact.analyzer import ImpactFindings
+    from app.impact.analyzer import ImpactFindings
 
     return ImpactFindings(
         affected_entities=[

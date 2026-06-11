@@ -433,7 +433,7 @@ class TestIntegratedDraftAnalyzeLinksVersion:
 
         from app.docs.analyze_handler import analyze_impact
         from app.docs.draft_model import Draft
-        from app.docs.impact.analyzer import ImpactFindings
+        from app.impact.analyzer import ImpactFindings
 
         now = datetime.now(UTC)
         version_id = uuid.UUID("66666666-6666-6666-6666-666666666666")

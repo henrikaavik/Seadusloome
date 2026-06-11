@@ -1,6 +1,6 @@
 """Cross-org masking for impact-report conflict rows (#844 A3b + remediation).
 
-The cross-draft arm of the conflict query (:data:`app.docs.impact.queries.
+The cross-draft arm of the conflict query (:data:`app.impact.queries.
 CONFLICTS`) reports "another draft already references this section". That
 "other draft" can belong to a **different organisation**, and its URI /
 ``rdfs:label`` carry the foreign draft's identity (the graph URI embeds
@@ -10,7 +10,7 @@ org boundary leaks pre-publication draft metadata.
 Two entry points share one masking rule:
 
 * :func:`mask_conflict_rows` — applied **at detection time** in
-  :meth:`app.docs.impact.analyzer.ImpactAnalyzer._detect_conflicts`, so a
+  :meth:`app.impact.analyzer.ImpactAnalyzer._detect_conflicts`, so a
   freshly-generated report never *persists* a foreign org's draft URI in
   the first place.
 

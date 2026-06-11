@@ -12,9 +12,9 @@ resolves the user's input to one ontology entity URI, then:
        — mirroring the single ``estleg:references`` edge a draft's named
        graph carries (the analyzer's SPARQL queries pivot off exactly
        that predicate; see :mod:`app.docs.graph_builder` +
-       :mod:`app.docs.impact.queries`).
-    3. Runs :meth:`app.docs.impact.analyzer.ImpactAnalyzer.analyze` and
-       :func:`app.docs.impact.scoring.calculate_impact_score` against
+       :mod:`app.impact.queries`).
+    3. Runs :meth:`app.impact.analyzer.ImpactAnalyzer.analyze` and
+       :func:`app.impact.scoring.calculate_impact_score` against
        the graph — exactly as the draft analyze pipeline does.
     4. **Always** ``delete_named_graph``-s the graph in a ``finally`` —
        including on a PUT failure or an analyzer exception — so no
@@ -34,7 +34,7 @@ from uuid import uuid4
 from rdflib import Graph, Namespace, URIRef
 from rdflib.namespace import RDF
 
-from app.docs.impact import ImpactAnalyzer, ImpactFindings, calculate_impact_score
+from app.impact import ImpactAnalyzer, ImpactFindings, calculate_impact_score
 from app.sync.jena_loader import delete_named_graph, put_named_graph
 
 logger = logging.getLogger(__name__)

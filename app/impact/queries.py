@@ -1,7 +1,7 @@
 """SPARQL query templates for the Impact Analysis Engine.
 
 Each template is a format string with ``{graph_uri}`` placeholders
-that :class:`app.docs.impact.analyzer.ImpactAnalyzer` fills in at run
+that :class:`app.impact.analyzer.ImpactAnalyzer` fills in at run
 time. Queries use the ``GRAPH`` keyword to scope the draft subject
 lookup to the draft's named graph while letting the body clauses
 traverse the default graph (the enacted ontology) freely.

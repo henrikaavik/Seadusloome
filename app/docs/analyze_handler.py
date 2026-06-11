@@ -5,7 +5,7 @@ Pipeline (spec §7 + §8):
     1. Load the draft + every resolved reference from Postgres.
     2. Build the draft's Turtle graph via :mod:`app.docs.graph_builder`.
     3. PUT the graph into its named Jena graph.
-    4. Run :class:`app.docs.impact.ImpactAnalyzer` against the graph.
+    4. Run :class:`app.impact.ImpactAnalyzer` against the graph.
     5. Compute an impact score.
     6. Persist a new ``impact_reports`` row with the full findings JSON.
     7. Flip the draft row to ``status='ready'``.
@@ -44,8 +44,6 @@ from app.docs.draft_model import fetch_draft, get_draft, update_draft_status
 from app.docs.entity_extractor import ExtractedRef
 from app.docs.error_mapping import map_failure_to_user_message
 from app.docs.graph_builder import build_draft_graph, write_doc_lineage
-from app.docs.impact import ImpactAnalyzer, calculate_impact_score
-from app.docs.impact.analyzer import analyze_burden_delta, analyze_sanctions_delta
 from app.docs.reference_resolver import ResolvedRef
 from app.docs.similarity import (
     compute_entity_set_hash,
@@ -55,6 +53,8 @@ from app.docs.similarity import (
     update_uri_index,
 )
 from app.docs.version_model import get_latest_version
+from app.impact import ImpactAnalyzer, calculate_impact_score
+from app.impact.analyzer import analyze_burden_delta, analyze_sanctions_delta
 from app.jobs.worker import register_handler
 from app.sync.jena_loader import put_named_graph
 
@@ -522,7 +522,7 @@ def _owned_draft_ids_on_conn(conn: Any, org_id: UUID | str | None) -> set[str]:
     if not org_id:
         return set()
     try:
-        from app.docs.impact.masking import fetch_owned_draft_ids
+        from app.impact.masking import fetch_owned_draft_ids
 
         return fetch_owned_draft_ids(conn, str(org_id))
     except Exception:  # noqa: BLE001 — masking must never break analysis

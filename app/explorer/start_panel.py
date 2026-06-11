@@ -30,7 +30,7 @@ from typing import TypedDict
 from urllib.parse import quote
 
 from app.db import get_connection as _connect
-from app.docs.impact.scoring import IMPACT_BAND_LABELS_ET, impact_band
+from app.impact.scoring import IMPACT_BAND_LABELS_ET, impact_band
 
 logger = logging.getLogger(__name__)
 

@@ -89,7 +89,7 @@ _WHY_IT_MATTERS: dict[str, str] = {
 }
 
 #: Estonian labels for impact bands used by :func:`why_it_matters` — kept here
-#: (rather than imported from :mod:`app.docs.impact.scoring`) so the explorer
+#: (rather than imported from :mod:`app.impact.scoring`) so the explorer
 #: API has no dependency on the document-analysis layer for this small rule.
 _BAND_LABELS_ET: dict[str, str] = {
     "low": "madal mõju",
@@ -138,7 +138,7 @@ def why_it_matters(name_or_uri: str, band: str | None = None) -> str:
     """Return a one-line plain-language "miks see oluline on" note.
 
     Deterministic — a lookup in :data:`_WHY_IT_MATTERS` keyed on the relation's
-    local name, with the optional :data:`~app.docs.impact.scoring.ImpactBand`
+    local name, with the optional :data:`~app.impact.scoring.ImpactBand`
     appended for context when it's a high-stakes band. There is no LLM call.
 
     Examples::
@@ -552,7 +552,7 @@ def explorer_timeline(req: Request) -> JSONResponse:
 # instead of the full 90k-entity graph. The data comes straight out of the
 # draft's latest ``impact_reports`` row (the same JSON the report page and the
 # .docx export read), so this is *not* a fresh full-ontology traversal: it is
-# the already-computed :class:`~app.docs.impact.analyzer.ImpactFindings`
+# the already-computed :class:`~app.impact.analyzer.ImpactFindings`
 # reshaped into D3 ``{nodes, links}`` form.
 #
 # Access control mirrors ``app.explorer.pages._fetch_draft_overlay``:
@@ -841,7 +841,7 @@ def explorer_draft_subgraph(req: Request, draft_id: str) -> JSONResponse:
             ).fetchone()
             # #844: the viewer's owned draft UUIDs, fetched on this same
             # connection, drive the cross-org conflict mask applied below.
-            from app.docs.impact.masking import fetch_owned_draft_ids
+            from app.impact.masking import fetch_owned_draft_ids
 
             owned_draft_ids = fetch_owned_draft_ids(conn, org_id)
     except Exception:
@@ -867,7 +867,7 @@ def explorer_draft_subgraph(req: Request, draft_id: str) -> JSONResponse:
     # pre-fix persisted report before the subgraph builds nodes from them.
     # Reuses ``owned_draft_ids`` fetched on the connection above — no extra
     # round-trip.
-    from app.docs.impact.masking import drop_adhoc_conflict_rows, mask_conflict_rows
+    from app.impact.masking import drop_adhoc_conflict_rows, mask_conflict_rows
 
     masked_conflicts = mask_conflict_rows(
         drop_adhoc_conflict_rows(list(findings.get("conflicts") or [])),

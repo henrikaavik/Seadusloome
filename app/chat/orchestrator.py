@@ -210,7 +210,7 @@ def _load_impact_summary(draft_id: str, org_id: str) -> str | None:
     """Load the latest impact report for *draft_id* and compose an Estonian summary.
 
     The ``impact_reports.report_data`` JSON is the
-    :class:`app.docs.impact.analyzer.ImpactFindings` dataclass as
+    :class:`app.impact.analyzer.ImpactFindings` dataclass as
     written by :mod:`app.docs.analyze_handler` — it has NO ``summary``
     key. The headline metrics live in dedicated columns
     (``affected_count`` / ``conflict_count`` / ``gap_count`` /

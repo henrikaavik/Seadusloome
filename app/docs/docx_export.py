@@ -410,7 +410,7 @@ def _owned_draft_ids_for_export(org_id: Any) -> set[str]:
         return set()
     try:
         from app.db import get_connection
-        from app.docs.impact.masking import fetch_owned_draft_ids
+        from app.impact.masking import fetch_owned_draft_ids
 
         with get_connection() as conn:
             return fetch_owned_draft_ids(conn, str(org_id))
@@ -443,7 +443,7 @@ def _add_conflicts(
     the ``Draft`` row); ``owned_draft_ids=None`` masks every cross-draft
     row (the safe default).
     """
-    from app.docs.impact.masking import drop_adhoc_conflict_rows, mask_conflict_rows
+    from app.impact.masking import drop_adhoc_conflict_rows, mask_conflict_rows
 
     doc.add_heading("Konfliktid", level=1)
 

@@ -64,7 +64,7 @@ _EU_ACT_URI = "https://data.riik.ee/ontology/estleg#EU-32016R0679"
 
 
 def _canned_findings():
-    from app.docs.impact.analyzer import ImpactFindings
+    from app.impact.analyzer import ImpactFindings
 
     affected = [
         {

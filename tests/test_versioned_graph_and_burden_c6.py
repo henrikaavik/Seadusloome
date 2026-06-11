@@ -38,8 +38,8 @@ from app.analyysikeskus.burden import (
     _build_draft_affected_provisions_graph_query,
     burden_delta_for_draft,
 )
-from app.docs.impact.analyzer import analyze_burden_delta, analyze_sanctions_delta
-from app.docs.impact.queries import (
+from app.impact.analyzer import analyze_burden_delta, analyze_sanctions_delta
+from app.impact.queries import (
     build_affected_entities_query,
     build_conflicts_query,
     build_eu_compliance_query,
@@ -152,7 +152,7 @@ class TestVersionedUploadAnalyzeAndCleanup:
         """#868 sequencing guard: a v2 analyze must NOT report this draft's
         own v1 graph as a conflict (the whole ``…/drafts/<uuid>`` namespace
         is excluded)."""
-        from app.docs.impact.queries import CONFLICTS
+        from app.impact.queries import CONFLICTS
         from app.ontology.scoping import ADHOC_GRAPH_PREFIX, draft_graph_prefix_for
 
         q = CONFLICTS.format(

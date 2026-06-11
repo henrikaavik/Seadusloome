@@ -35,7 +35,7 @@ title / policy area via a label search
 (:func:`app.analyysikeskus.eu_lookup.search_eu_acts_by_label`); several
 matches are surfaced as clickable candidates, never silently picked —
 then runs an **entity-centered, act/provision-level transposition
-query** (:func:`app.docs.impact.eu_transposition.run_eu_transposition`,
+query** (:func:`app.impact.eu_transposition.run_eu_transposition`,
 no synthetic graph) and renders the transposition table + risk band
 through the same result shell. There is no EU Article/Obligation entity
 model in the ontology, so the article-by-article matrix is a separate
@@ -110,13 +110,13 @@ from app.analyysikeskus.similarity import (
 )
 from app.db import get_connection as _connect
 from app.docs.entity_extractor import ExtractedRef
-from app.docs.impact.analyzer import ImpactFindings
-from app.docs.impact.eu_transposition import run_eu_transposition
-from app.docs.impact.scoring import IMPACT_BAND_LABELS_ET, ImpactBand, impact_band
 from app.docs.labels import TYPE_LABELS_ET as _TYPE_LABELS_ET
 from app.docs.reference_resolver import ReferenceResolver
 from app.docs.report_routes import explorer_focus_url
 from app.drafter.state_machine import STEP_LABELS_ET, Step
+from app.impact.analyzer import ImpactFindings
+from app.impact.eu_transposition import run_eu_transposition
+from app.impact.scoring import IMPACT_BAND_LABELS_ET, ImpactBand, impact_band
 from app.ontology.temporal_scope import TemporalScope, scope_from_param
 from app.ui.capabilities import CAPABILITIES, Capability
 from app.ui.data.data_table import Column, DataTable
@@ -1487,7 +1487,7 @@ def _findings_from_report_data(
     can carry FOREIGN org draft URIs/labels in their ``conflicts`` list
     (and a stale adhoc-probe conflict). When *viewer_org_id* is given, the
     stored conflict rows are run through
-    :func:`app.docs.impact.masking.mask_stored_conflict_rows` so adhoc
+    :func:`app.impact.masking.mask_stored_conflict_rows` so adhoc
     rows are dropped and cross-org draft identities are blanked before
     anything is rendered. ``conflict_count`` is recomputed from the
     surviving rows so the "N konflikti" summary stays consistent with what
@@ -1498,7 +1498,7 @@ def _findings_from_report_data(
     gaps = list(data.get("gaps") or [])
     eu = list(data.get("eu_compliance") or [])
 
-    from app.docs.impact.masking import mask_stored_conflict_rows
+    from app.impact.masking import mask_stored_conflict_rows
 
     conflicts = mask_stored_conflict_rows(conflicts, viewer_org_id=viewer_org_id)
 
@@ -2237,7 +2237,7 @@ def _eu_results_block(rows: list[dict[str, Any]], *, eu_label: str) -> list[Any]
     but a dead-Jena ``[]`` reaches here) renders a one-line muted row.
     The ``Vastutav asutus`` column is intentionally absent: no
     competent-authority predicate is wired in the app yet (see
-    :mod:`app.docs.impact.eu_transposition`), and shipping a column of
+    :mod:`app.impact.eu_transposition`), and shipping a column of
     "—" would be noise.
     """
     if not rows:
@@ -2385,7 +2385,7 @@ def _render_eu_transposition_result(
 ) -> Any:
     """Render the EL ülevõtt result page for a resolved EU act URI.
 
-    Runs :func:`app.docs.impact.eu_transposition.run_eu_transposition`
+    Runs :func:`app.impact.eu_transposition.run_eu_transposition`
     (entity-centered, no synthetic graph) and lays the rows out through
     :func:`analysis_result_shell`. A dead Jena ⇒ ``run_eu_transposition``
     returns ``[]`` ⇒ the ``Tulemused`` block shows a graceful "ei

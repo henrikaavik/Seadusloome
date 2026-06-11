@@ -2,7 +2,7 @@
 
 :class:`ImpactAnalyzer` is a thin orchestrator: each analysis pass is
 a private method that executes a SPARQL query from
-:mod:`app.docs.impact.queries` and parses the result into a list of
+:mod:`app.impact.queries` and parses the result into a list of
 dicts. Every pass is wrapped in a try/except so a failure in one pass
 (e.g. a malformed predicate URI) does not kill the whole analysis —
 partial results are strictly better than no results, and the user can
@@ -31,24 +31,26 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
 
-from app.docs.impact.queries import (
+from app.impact.burden import (
+    BurdenRow,
+    burden_delta_for_draft,
+    burden_label,
+)
+from app.impact.masking import drop_adhoc_conflict_rows, mask_conflict_rows
+from app.impact.queries import (
     build_affected_entities_query,
     build_conflicts_query,
     build_eu_compliance_query,
     build_gaps_query,
 )
+from app.impact.sanctions import (
+    SanctionRow,
+    list_sanctions_for_provision,
+    sanction_type_label,
+    sanction_unit_label,
+)
 from app.ontology.sparql_client import SparqlClient
-
-if TYPE_CHECKING:
-    # Lazy import — at runtime ``app.analyysikeskus.*`` triggers
-    # ``app.analyysikeskus.__init__`` which pulls in routes.py, which
-    # imports back into ``app.docs.impact``. The TYPE_CHECKING guard
-    # gives pyright the type info without the circular runtime cost;
-    # the function bodies below import the helpers locally.
-    from app.analyysikeskus.burden import BurdenRow
-    from app.analyysikeskus.sanctions import SanctionRow
 
 logger = logging.getLogger(__name__)
 
@@ -221,8 +223,6 @@ class ImpactAnalyzer:
         caller resolves *owned_draft_ids* (see
         :func:`app.docs.analyze_handler.analyze_impact`).
         """
-        from app.docs.impact.masking import drop_adhoc_conflict_rows, mask_conflict_rows
-
         try:
             query = build_conflicts_query(graph_uri)
             rows = self.client.query(query)
@@ -327,7 +327,7 @@ def _looks_like_uri(value: str) -> bool:
 class SanctionsDeltaRow:
     """One sanction row in the impact report's sanctions-delta section.
 
-    Mirrors the SPARQL projection of :class:`app.analyysikeskus.sanctions.SanctionRow`
+    Mirrors the SPARQL projection of :class:`app.impact.sanctions.SanctionRow`
     flattened to JSON-serialisable primitives so the row can survive a
     round-trip through Postgres JSONB and back into the renderer / docx
     export. The ``change`` field labels the row as new / modified /
@@ -397,7 +397,7 @@ class BurdenDeltaRow:
 class BurdenDeltaReport:
     """Aggregate burden-delta for an impact report (C6, #791).
 
-    Wraps the A2 :class:`app.analyysikeskus.burden.BurdenDelta` into a
+    Wraps the A2 :class:`app.impact.burden.BurdenDelta` into a
     JSON-friendly shape with derived totals for the one-line summary
     "{obligations} uut kohustust · {prohibitions} keeldu · {rights}
     õigus — koormus skoor {±N}% vs current law".
@@ -411,7 +411,7 @@ class BurdenDeltaReport:
     Attributes:
         rows: One :class:`BurdenDeltaRow` per affected provision (the
             "what does this draft touch" view — the same v1 caveat as
-            :class:`app.analyysikeskus.burden.BurdenDelta`).
+            :class:`app.impact.burden.BurdenDelta`).
         counts: Per-bucket count of rows (always populated for every
             canonical key so the renderer can iterate the canonical
             order without ``dict.get`` defaults).
@@ -449,7 +449,6 @@ def _sanction_penalty_range(row: SanctionRow) -> str:
       * ``"alates 100 EUR"`` (min-only)
       * ``"—"`` (both bounds missing)
     """
-    from app.analyysikeskus.sanctions import sanction_unit_label
 
     def _fmt(amount: float | None) -> str:
         if amount is None:
@@ -476,8 +475,6 @@ def _sanction_penalty_range(row: SanctionRow) -> str:
 
 def _sanction_summary_text(row: SanctionRow) -> str:
     """One-line "type + range" summary for a sanction row (before/after labels)."""
-    from app.analyysikeskus.sanctions import sanction_type_label
-
     type_label = sanction_type_label(row.sanction_type)
     range_text = _sanction_penalty_range(row)
     if range_text and range_text != "—":
@@ -515,9 +512,6 @@ def analyze_sanctions_delta(
     """
     if not affected_provision_uris:
         return SanctionsDelta()
-
-    # Lazy import — see TYPE_CHECKING block above for the circular-import rationale.
-    from app.analyysikeskus.sanctions import list_sanctions_for_provision
 
     seen_sanction_keys: set[str] = set()
     out_rows: list[SanctionsDeltaRow] = []
@@ -572,8 +566,6 @@ def analyze_sanctions_delta(
 
 def _sanction_to_delta_row(sanction: SanctionRow) -> SanctionsDeltaRow:
     """Project a :class:`SanctionRow` into a :class:`SanctionsDeltaRow`."""
-    from app.analyysikeskus.sanctions import sanction_type_label
-
     after_summary = _sanction_summary_text(sanction)
     return SanctionsDeltaRow(
         change="new",
@@ -599,7 +591,7 @@ def analyze_burden_delta(
 ) -> BurdenDeltaReport:
     """Return the burden delta for a draft in impact-report-friendly form.
 
-    Wraps :func:`app.analyysikeskus.burden.burden_delta_for_draft` with
+    Wraps :func:`app.impact.burden.burden_delta_for_draft` with
     the additional fields the impact-report renderer needs (per-bucket
     counts in JSON-friendly form, a burden score, and a percent-delta).
 
@@ -624,9 +616,6 @@ def analyze_burden_delta(
     graph_uri = (draft_graph_uri or "").strip()
     if not graph_uri:
         return BurdenDeltaReport(counts=_empty_burden_counts())
-
-    # Lazy import — see TYPE_CHECKING block above.
-    from app.analyysikeskus.burden import burden_delta_for_draft
 
     try:
         # The draft subject the graph builder wrote is ``<graph_uri>#self``;
@@ -661,8 +650,6 @@ def analyze_burden_delta(
 
 
 def _burden_to_delta_row(row: BurdenRow) -> BurdenDeltaRow:
-    from app.analyysikeskus.burden import burden_label
-
     return BurdenDeltaRow(
         provision_uri=row.provision_uri,
         provision_label=row.provision_label or row.provision_uri,

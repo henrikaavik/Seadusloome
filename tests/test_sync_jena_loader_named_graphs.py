@@ -187,13 +187,13 @@ class TestGraphUriValidation:
         mock_delete.assert_called_once()
 
     def test_validator_re_exported_from_queries(self):
-        """#480: ``app.docs.impact.queries`` must re-export the validator.
+        """#480: ``app.impact.queries`` must re-export the validator.
 
         This guards against future drift — someone refactoring the
         queries module could otherwise inline a second regex that
         drifts from the jena_loader canonical definition.
         """
-        from app.docs.impact import queries
+        from app.impact import queries
 
         assert queries._validate_graph_uri is jena_loader._validate_graph_uri
         assert queries._SAFE_GRAPH_URI is jena_loader._SAFE_GRAPH_URI
@@ -297,11 +297,11 @@ class TestVersionedGraphUriValidation:
         """All four impact query builders must accept a versioned graph URI.
 
         They re-use the canonical ``_validate_graph_uri`` (re-exported in
-        ``app.docs.impact.queries``), so the #849 widening must reach them
+        ``app.impact.queries``), so the #849 widening must reach them
         without a second edit. A versioned URI that previously raised must
         now build a query string containing the GRAPH clause.
         """
-        from app.docs.impact.queries import (
+        from app.impact.queries import (
             build_affected_entities_query,
             build_conflicts_query,
             build_eu_compliance_query,
@@ -321,7 +321,7 @@ class TestVersionedGraphUriValidation:
         """#849 + #868 (A5): a v2 graph's conflict query must exclude the
         whole ``…/drafts/<uuid>`` namespace so it never self-conflicts
         against its own v1."""
-        from app.docs.impact.queries import build_conflicts_query
+        from app.impact.queries import build_conflicts_query
 
         q = build_conflicts_query(self._V2)
         # The version-agnostic prefix (no ``/v2``) is what the exclusion

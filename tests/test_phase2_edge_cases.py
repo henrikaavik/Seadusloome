@@ -74,8 +74,8 @@ from docx import Document
 
 from app.docs.analyze_handler import _row_to_resolved_ref
 from app.docs.entity_extractor import ExtractedRef, extract_refs_from_text
-from app.docs.impact.analyzer import ImpactAnalyzer, ImpactFindings
-from app.docs.impact.scoring import calculate_impact_score
+from app.impact.analyzer import ImpactAnalyzer, ImpactFindings
+from app.impact.scoring import calculate_impact_score
 
 # ---------------------------------------------------------------------------
 # Fixture discovery
@@ -740,7 +740,7 @@ class TestExtractHandlerLargeInput:
 
 
 # Graph URI shape must match the production allowlist enforced by
-# ``app.docs.impact.queries._validate_graph_uri`` — see #476.
+# ``app.impact.queries._validate_graph_uri`` — see #476.
 _GRAPH_URI = "https://data.riik.ee/ontology/estleg/drafts/22222222-2222-2222-2222-222222222222"
 
 

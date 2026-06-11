@@ -40,8 +40,8 @@ from app.annotations.row_keys import (
     stable_hash,
 )
 from app.docs.draft_model import Draft
-from app.docs.impact.analyzer import ImpactFindings
 from app.docs.version_model import DraftVersion
+from app.impact.analyzer import ImpactFindings
 
 # ---------------------------------------------------------------------------
 # Constants + fixtures

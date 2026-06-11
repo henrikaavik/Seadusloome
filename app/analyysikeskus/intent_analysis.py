@@ -45,8 +45,8 @@ from uuid import UUID
 from app.analyysikeskus.adhoc_analysis import AdhocAnalysisResult, run_adhoc_impact_analysis
 from app.analyysikeskus.intent_extractor import IntentCandidate, extract_intent_candidates
 from app.docs.entity_extractor import ExtractedRef
-from app.docs.impact import ImpactAnalyzer
 from app.docs.reference_resolver import ReferenceResolver, ResolvedRef
+from app.impact import ImpactAnalyzer
 from app.llm import LLMProvider
 
 logger = logging.getLogger(__name__)

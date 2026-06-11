@@ -38,8 +38,8 @@ from app.analyysikeskus.eu_transposition import (
 from app.auth.audit import log_action
 from app.auth.policy import ROLE_REVIEWER, ROLE_SYSTEM_ADMIN
 from app.db import get_connection as _connect
-from app.docs.impact.scoring import IMPACT_BAND_LABELS_ET, ImpactBand, impact_band
 from app.drafter.state_machine import STEP_LABELS_ET, Step
+from app.impact.scoring import IMPACT_BAND_LABELS_ET, ImpactBand, impact_band
 from app.ui.capabilities import CAPABILITIES, Capability
 from app.ui.components.capability_card import CapabilityCard
 from app.ui.data.data_table import Column, DataTable
@@ -122,7 +122,7 @@ def _get_active_drafter_sessions(user_id: str, org_id: str | None) -> list[dict]
 def _get_high_risk_reports(org_id: str | None, *, limit: int = _MAX_HIGH_RISK) -> list[dict]:  # type: ignore[type-arg]
     """Return recent High/Critical impact reports for the org.
 
-    "High/Critical" is decided by :func:`app.docs.impact.scoring.impact_band`
+    "High/Critical" is decided by :func:`app.impact.scoring.impact_band`
     (the 51-80 / 81-100 bands) — the SQL filter uses ``impact_score > 50`` as a
     cheap pre-filter and the band helper produces the user-facing label so the
     cut-offs are never duplicated.

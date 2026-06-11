@@ -2,9 +2,9 @@
 
 Covers:
 
-1. :func:`app.docs.impact.analyzer.analyze_sanctions_delta` —
+1. :func:`app.impact.analyzer.analyze_sanctions_delta` —
    per-provision Sanction aggregation, dedup, empty / failure paths.
-2. :func:`app.docs.impact.analyzer.analyze_burden_delta` — wraps the
+2. :func:`app.impact.analyzer.analyze_burden_delta` — wraps the
    A2 burden delta and adds before-score + dataclass-friendly fields.
 3. :func:`app.docs.docx_export.export_executive_summary` — the 1-2
    page .docx printout has every required field (title, author,
@@ -33,19 +33,19 @@ from app.docs.docx_export import (
     export_executive_summary,
 )
 from app.docs.draft_model import Draft
-from app.docs.impact.analyzer import (
-    BurdenDeltaReport,
-    SanctionsDelta,
-    SanctionsDeltaRow,
-    analyze_burden_delta,
-    analyze_sanctions_delta,
-)
 from app.docs.report_routes import (
     _burden_delta_section,
     _burden_delta_summary_line,
     _print_stylesheet,
     _sanctions_delta_section,
     _sanctions_delta_summary_line,
+)
+from app.impact.analyzer import (
+    BurdenDeltaReport,
+    SanctionsDelta,
+    SanctionsDeltaRow,
+    analyze_burden_delta,
+    analyze_sanctions_delta,
 )
 
 # ---------------------------------------------------------------------------
