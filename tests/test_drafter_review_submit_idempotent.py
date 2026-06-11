@@ -273,6 +273,7 @@ class TestIntegratedReviewTempfile:
             patch("app.drafter.docx_builder.build_drafter_docx", side_effect=fake_builder),
             patch("app.storage.store_file", return_value=stored) as mock_store,
             patch("app.docs.draft_model.create_draft", return_value=draft),
+            patch("app.docs.version_model.create_draft_version"),
             patch("app.drafter.routes._connect") as mock_connect,
             patch("app.drafter.routes.JobQueue") as mock_queue_cls,
         ):
@@ -312,3 +313,246 @@ class TestIntegratedReviewTempfile:
             Path(tempfile.gettempdir()).glob(f"seadusloome-integreeritud-{_SESSION_ID}-*")
         )
         assert leftovers == []
+
+
+# ---------------------------------------------------------------------------
+# #852 review F1 — integrated-review drafts get a v1 draft_versions row
+# ---------------------------------------------------------------------------
+#
+# ``_trigger_integrated_review`` used to create the drafts row + patch
+# graph_uri but never insert the required v1 ``draft_versions`` row that
+# normal uploads create (``app/docs/upload.py::_create_new_draft``, #618
+# PR-B). Consequence chain: ``analyze_impact`` resolved
+# ``latest_version=None`` → ``impact_reports.draft_version_id`` NULL →
+# stale-annotation reconciliation skipped and the §4.2 status mirror had
+# no version row, for EVERY drafter-generated draft. (Gap pre-dates #852
+# — present on merged main — but fixed here as part of this PR's blast
+# radius.)
+
+
+class TestIntegratedReviewVersionRow:
+    def _run_trigger_with_version_capture(self) -> dict:
+        from app.drafter.routes import _trigger_integrated_review
+
+        captured: dict = {}
+        conn = MagicMock()
+
+        def fake_create_draft(c, **kwargs):
+            captured["draft_conn"] = c
+            draft = MagicMock()
+            draft.id = _DRAFT_ID
+            return draft
+
+        def fake_create_version(c, **kwargs):
+            captured["version_conn"] = c
+            captured["version_kwargs"] = kwargs
+            # Same-transaction proof: the connection must NOT have been
+            # committed between the draft insert and the version insert.
+            captured["commits_before_version"] = conn.commit.call_count
+            return MagicMock()
+
+        def fake_builder(**kwargs):
+            out_path = kwargs["out_path"]
+            Path(out_path).write_bytes(b"PK-fake-docx")
+            return Path(out_path)
+
+        stored = MagicMock()
+        stored.storage_path = "stored/path.enc"
+
+        with (
+            patch("app.drafter.docx_builder.build_drafter_docx", side_effect=fake_builder),
+            patch("app.storage.store_file", return_value=stored),
+            patch("app.docs.draft_model.create_draft", side_effect=fake_create_draft),
+            patch(
+                "app.docs.version_model.create_draft_version",
+                side_effect=fake_create_version,
+            ),
+            patch("app.drafter.routes.log_action") as mock_log,
+            patch("app.drafter.routes._connect") as mock_connect,
+            patch("app.drafter.routes.JobQueue"),
+        ):
+            mock_connect.return_value.__enter__ = MagicMock(return_value=conn)
+            mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+            session = _make_session()
+            result = _trigger_integrated_review(session, _authed_user())  # type: ignore[arg-type]
+
+        captured["result"] = result
+        captured["total_commits"] = conn.commit.call_count
+        captured["log_calls"] = mock_log.call_args_list
+        return captured
+
+    def test_v1_version_row_created_in_same_transaction(self):
+        captured = self._run_trigger_with_version_capture()
+
+        assert captured["result"] == _DRAFT_ID
+        # The version insert happened — and on the SAME connection as
+        # the draft insert, BEFORE the single commit (one transaction:
+        # a partial commit can never leave a draft without its v1 row).
+        assert captured["version_conn"] is captured["draft_conn"]
+        assert captured["commits_before_version"] == 0
+        assert captured["total_commits"] == 1
+
+    def test_v1_version_row_mirrors_upload_path_fields(self):
+        captured = self._run_trigger_with_version_capture()
+        kwargs = captured["version_kwargs"]
+
+        # Mirrors app/docs/upload.py::_create_new_draft exactly.
+        assert kwargs["draft_id"] == _DRAFT_ID
+        assert kwargs["version_number"] == 1
+        assert kwargs["reading_stage"] == "vtk"
+        assert kwargs["status"] == "uploaded"
+        # created_by = the drafting-session OWNER (not e.g. org).
+        assert kwargs["created_by"] == uuid.UUID(_USER_ID)
+        assert kwargs["storage_path"] == "stored/path.enc"
+        # The version points at the FINAL graph URI (with the draft id),
+        # not the pending- placeholder.
+        assert kwargs["graph_uri"].endswith(str(_DRAFT_ID))
+        assert "pending-" not in kwargs["graph_uri"]
+
+    def test_v1_creation_is_audited_like_uploads(self):
+        captured = self._run_trigger_with_version_capture()
+
+        version_logs = [c for c in captured["log_calls"] if c.args[1] == "draft.version.create"]
+        assert len(version_logs) == 1
+        assert version_logs[0].args[0] == _USER_ID
+        assert version_logs[0].args[2]["draft_id"] == str(_DRAFT_ID)
+        assert version_logs[0].args[2]["version_number"] == 1
+
+
+class TestIntegratedDraftAnalyzeLinksVersion:
+    """End of the F1 chain: once the v1 row exists, ``analyze_impact``
+    must bind ``impact_reports.draft_version_id`` to it (NOT NULL).
+
+    Uses the REAL ``get_latest_version`` reading the v1 row off the
+    insert connection — no patching of the version lookup — so this
+    proves the wiring an integrated-review draft now satisfies.
+    """
+
+    def test_analyze_binds_report_to_v1_version(self):
+        from datetime import datetime as _dt
+
+        from app.docs.analyze_handler import analyze_impact
+        from app.docs.draft_model import Draft
+        from app.docs.impact.analyzer import ImpactFindings
+
+        now = datetime.now(UTC)
+        version_id = uuid.UUID("66666666-6666-6666-6666-666666666666")
+        graph_uri = f"https://data.riik.ee/ontology/estleg/drafts/{_DRAFT_ID}"
+        draft = Draft(
+            id=_DRAFT_ID,
+            user_id=uuid.UUID(_USER_ID),
+            org_id=uuid.UUID(_ORG_ID),
+            title="Integreeritud eelnõu",
+            filename=f"drafter-{_SESSION_ID}.docx",
+            content_type=(
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            ),
+            file_size=1024,
+            storage_path="stored/path.enc",
+            graph_uri=graph_uri,
+            status="analyzing",
+            parsed_text_encrypted=None,
+            entity_count=0,
+            error_message=None,
+            created_at=now,
+            updated_at=now,
+        )
+        findings = ImpactFindings(
+            affected_entities=[],
+            conflicts=[],
+            gaps=[],
+            eu_compliance=[],
+            affected_count=0,
+            conflict_count=0,
+            gap_count=0,
+        )
+
+        # Row served to the REAL get_latest_version — _VERSION_COLUMNS
+        # order: id, draft_id, version_number, reading_stage,
+        # parsed_text_encrypted, storage_path, graph_uri, status,
+        # created_at, created_by.
+        version_row = (
+            str(version_id),
+            str(_DRAFT_ID),
+            1,
+            "vtk",
+            None,
+            "stored/path.enc",
+            graph_uri,
+            "analyzing",
+            now,
+            _USER_ID,
+        )
+
+        load_conn = MagicMock()
+        eu_cursor = MagicMock()
+        eu_cursor.fetchall.return_value = []
+        entity_cursor = MagicMock()
+        entity_cursor.fetchall.return_value = []
+        load_conn.execute.side_effect = [eu_cursor, entity_cursor]
+
+        sync_conn = MagicMock()
+        sync_conn.execute.return_value.fetchone.return_value = (
+            _dt(2026, 6, 1, 12, 0, tzinfo=UTC),
+            90000,
+        )
+
+        insert_conn = MagicMock()
+        insert_sqls: list[tuple] = []
+
+        def insert_execute(sql: str, params: tuple | None = None):
+            insert_sqls.append((sql, params))
+            cursor = MagicMock()
+            cursor.rowcount = 1
+            if "from draft_versions" in " ".join(str(sql).lower().split()):
+                cursor.fetchone.return_value = version_row
+            else:
+                cursor.fetchone.return_value = None
+            return cursor
+
+        insert_conn.execute.side_effect = insert_execute
+
+        class _CM:
+            def __init__(self, c):
+                self.c = c
+
+            def __enter__(self):
+                return self.c
+
+            def __exit__(self, *_):
+                return False
+
+        mock_analyzer = MagicMock()
+        mock_analyzer.analyze.return_value = findings
+
+        with (
+            patch("app.docs.analyze_handler.get_connection") as mock_get_conn,
+            patch("app.docs.analyze_handler.get_draft", return_value=draft),
+            patch("app.docs.analyze_handler.build_draft_graph", return_value="# t"),
+            patch("app.docs.analyze_handler.put_named_graph", return_value=True),
+            patch("app.docs.analyze_handler.write_doc_lineage", return_value=None),
+            patch("app.docs.analyze_handler.fetch_draft", return_value=None),
+            patch("app.docs.analyze_handler.ImpactAnalyzer", return_value=mock_analyzer),
+            patch("app.docs.analyze_handler.calculate_impact_score", return_value=7),
+        ):
+            mock_get_conn.side_effect = [
+                _CM(load_conn),
+                _CM(sync_conn),
+                _CM(insert_conn),
+            ]
+            analyze_impact({"draft_id": str(_DRAFT_ID)})
+
+        report_inserts = [
+            (sql, params)
+            for sql, params in insert_sqls
+            if "insert into impact_reports" in " ".join(str(sql).lower().split())
+        ]
+        assert len(report_inserts) == 1
+        _sql, params = report_inserts[0]
+        # Param order: report_id, draft_id, draft_version_id, ...
+        assert params is not None
+        assert params[2] == str(version_id), (
+            "impact_reports.draft_version_id must bind to the v1 row that "
+            "_trigger_integrated_review now creates — NULL means the F1 "
+            "regression is back"
+        )

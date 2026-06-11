@@ -1119,7 +1119,21 @@ def drafter_regenerate_clause(
         result = _require_llm_json(
             result, context=f"drafter_regenerate_clause clause {clause_index}"
         )
-        clause["text"] = result.get("text", clause.get("text", ""))
+        # #852 review F2: same nonblank contract as ``drafter_draft`` —
+        # ``{"text": ""}`` (or whitespace-only) passes the parse check
+        # above but used to OVERWRITE a good clause with blank text. A
+        # blank regeneration now raises (retry-gating engages) and the
+        # existing clause is left untouched; only a non-blank result may
+        # replace the text. Stub payloads carry no ``text`` and keep the
+        # existing clause so keyless local dev still completes.
+        new_text = str(result.get("text") or "").strip()
+        if not new_text and not result.get("stub"):
+            raise LLMOutputError(
+                "drafter_regenerate_clause: LLM returned no clause text for "
+                f"clause {clause_index} ({clause.get('paragraph', '?')!r})"
+            )
+        if new_text:
+            clause["text"] = result["text"]
         # #842: resolve citations through the ontology (see drafter_draft).
         clause["citations"] = resolve_citations(
             result.get("citations", clause.get("citations", []))

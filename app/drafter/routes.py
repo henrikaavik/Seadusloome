@@ -1267,6 +1267,8 @@ def _trigger_integrated_review(session: DraftingSession, auth: UserDict) -> uuid
 
     graph_uri_prefix = "https://data.riik.ee/ontology/estleg/drafts/"
 
+    from app.docs.version_model import create_draft_version
+
     with _connect() as conn:
         draft = create_draft(
             conn,
@@ -1284,7 +1286,38 @@ def _trigger_integrated_review(session: DraftingSession, auth: UserDict) -> uuid
             "UPDATE drafts SET graph_uri = %s WHERE id = %s",
             (final_graph_uri, str(draft.id)),
         )
+        # #852 review F1: mirror the upload path (#618 PR-B,
+        # ``app/docs/upload.py::_create_new_draft``) — every new drafts
+        # row needs its explicit v1 ``draft_versions`` row in the SAME
+        # transaction. Without it ``analyze_impact`` resolves
+        # ``latest_version=None`` → ``impact_reports.draft_version_id``
+        # NULL, the stale-annotation reconciliation is skipped, and the
+        # §4.2 status mirror has no version row to write to. (The gap
+        # predates #852: Phase 3A never retrofitted the #618 PR-B
+        # version bookkeeping into this path.)
+        create_draft_version(
+            conn,
+            draft_id=draft.id,
+            version_number=1,
+            reading_stage="vtk",
+            storage_path=stored.storage_path,
+            graph_uri=final_graph_uri,
+            status="uploaded",
+            created_by=session.user_id,
+        )
         conn.commit()
+
+    # Audit parity with the upload path's v1 creation (fire-and-forget;
+    # log_action never raises).
+    log_action(
+        str(session.user_id),
+        "draft.version.create",
+        {
+            "draft_id": str(draft.id),
+            "version_number": 1,
+            "reading_stage": "vtk",
+        },
+    )
 
     # Enqueue parse_draft job
     try:

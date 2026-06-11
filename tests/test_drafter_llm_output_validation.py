@@ -494,3 +494,174 @@ class TestRegenerateParseFailure:
             drafter_regenerate_clause({"session_id": str(_SESSION_ID), "clause_index": 0})
 
         mock_update.assert_not_called()
+
+
+class TestRegenerateNonblankContract:
+    """#852 review F2 — a blank regeneration must never overwrite a good
+    clause. ``{"text": ""}`` passes the parse check (no ``error`` key)
+    but used to land via ``result.get("text", ...)`` — the key IS
+    present, so the blank value replaced the existing text and the job
+    "succeeded"."""
+
+    _OLD_TEXT = "Vana kehtiv tekst."
+
+    def _drive(
+        self,
+        payload: dict[str, Any],
+        mock_fetch: MagicMock,
+        mock_decrypt: MagicMock,
+        mock_get_provider: MagicMock,
+        mock_conn: MagicMock,
+    ) -> None:
+        mock_fetch.return_value = _make_session(
+            current_step=5,
+            proposed_structure=_STRUCTURE,
+            draft_content_encrypted=b"encrypted",
+        )
+        mock_decrypt.return_value = json.dumps(
+            {
+                "clauses": [
+                    {
+                        "chapter": "1",
+                        "paragraph": "§ 1",
+                        "title": "Reguleerimisala",
+                        "text": self._OLD_TEXT,
+                        "citations": [],
+                        "notes": "",
+                    }
+                ]
+            }
+        )
+        mock_get_provider.return_value = _provider(payload)
+        _wire_conn(mock_conn)
+
+    @patch("app.drafter.handlers.encrypt_text")
+    @patch("app.drafter.handlers.get_connection")
+    @patch("app.drafter.handlers.update_session")
+    @patch("app.drafter.handlers.get_default_provider")
+    @patch("app.drafter.handlers.decrypt_text")
+    @patch("app.drafter.handlers.fetch_session")
+    def test_blank_text_fails_and_leaves_clause_untouched(
+        self,
+        mock_fetch: MagicMock,
+        mock_decrypt: MagicMock,
+        mock_get_provider: MagicMock,
+        mock_update: MagicMock,
+        mock_conn: MagicMock,
+        mock_encrypt: MagicMock,
+    ):
+        self._drive(
+            {"text": "", "citations": [], "notes": ""},
+            mock_fetch,
+            mock_decrypt,
+            mock_get_provider,
+            mock_conn,
+        )
+
+        from app.drafter.handlers import drafter_regenerate_clause
+
+        with pytest.raises(RuntimeError, match="no clause text"):
+            drafter_regenerate_clause({"session_id": str(_SESSION_ID), "clause_index": 0})
+
+        # Nothing re-encrypted, nothing persisted — the good clause
+        # survives for the retry.
+        mock_encrypt.assert_not_called()
+        mock_update.assert_not_called()
+
+    @patch("app.drafter.handlers.encrypt_text")
+    @patch("app.drafter.handlers.get_connection")
+    @patch("app.drafter.handlers.update_session")
+    @patch("app.drafter.handlers.get_default_provider")
+    @patch("app.drafter.handlers.decrypt_text")
+    @patch("app.drafter.handlers.fetch_session")
+    def test_whitespace_only_text_fails_too(
+        self,
+        mock_fetch: MagicMock,
+        mock_decrypt: MagicMock,
+        mock_get_provider: MagicMock,
+        mock_update: MagicMock,
+        mock_conn: MagicMock,
+        mock_encrypt: MagicMock,
+    ):
+        self._drive(
+            {"text": " \n\t ", "citations": [], "notes": ""},
+            mock_fetch,
+            mock_decrypt,
+            mock_get_provider,
+            mock_conn,
+        )
+
+        from app.drafter.handlers import drafter_regenerate_clause
+
+        with pytest.raises(RuntimeError, match="no clause text"):
+            drafter_regenerate_clause({"session_id": str(_SESSION_ID), "clause_index": 0})
+
+        mock_encrypt.assert_not_called()
+        mock_update.assert_not_called()
+
+    @patch("app.drafter.handlers.encrypt_text")
+    @patch("app.drafter.handlers.get_connection")
+    @patch("app.drafter.handlers.update_session")
+    @patch("app.drafter.handlers.get_default_provider")
+    @patch("app.drafter.handlers.decrypt_text")
+    @patch("app.drafter.handlers.fetch_session")
+    def test_valid_regeneration_still_applies(
+        self,
+        mock_fetch: MagicMock,
+        mock_decrypt: MagicMock,
+        mock_get_provider: MagicMock,
+        mock_update: MagicMock,
+        mock_conn: MagicMock,
+        mock_encrypt: MagicMock,
+    ):
+        self._drive(
+            {"text": "Uus parem tekst.", "citations": [], "notes": ""},
+            mock_fetch,
+            mock_decrypt,
+            mock_get_provider,
+            mock_conn,
+        )
+        mock_encrypt.return_value = b"encrypted-clauses"
+
+        from app.drafter.handlers import drafter_regenerate_clause
+
+        result = drafter_regenerate_clause({"session_id": str(_SESSION_ID), "clause_index": 0})
+
+        assert result["clause_index"] == 0
+        # The persisted clause list carries the NEW text.
+        persisted = json.loads(mock_encrypt.call_args.args[0])
+        assert persisted["clauses"][0]["text"] == "Uus parem tekst."
+        mock_update.assert_called_once()
+
+    @patch("app.drafter.handlers.encrypt_text")
+    @patch("app.drafter.handlers.get_connection")
+    @patch("app.drafter.handlers.update_session")
+    @patch("app.drafter.handlers.get_default_provider")
+    @patch("app.drafter.handlers.decrypt_text")
+    @patch("app.drafter.handlers.fetch_session")
+    def test_stub_payload_keeps_existing_text(
+        self,
+        mock_fetch: MagicMock,
+        mock_decrypt: MagicMock,
+        mock_get_provider: MagicMock,
+        mock_update: MagicMock,
+        mock_conn: MagicMock,
+        mock_encrypt: MagicMock,
+    ):
+        """Keyless local dev: stub regen succeeds without clobbering."""
+        self._drive(
+            {"stub": True, "prompt": "..."},
+            mock_fetch,
+            mock_decrypt,
+            mock_get_provider,
+            mock_conn,
+        )
+        mock_encrypt.return_value = b"encrypted-clauses"
+
+        from app.drafter.handlers import drafter_regenerate_clause
+
+        result = drafter_regenerate_clause({"session_id": str(_SESSION_ID), "clause_index": 0})
+
+        assert result["clause_index"] == 0
+        persisted = json.loads(mock_encrypt.call_args.args[0])
+        assert persisted["clauses"][0]["text"] == self._OLD_TEXT
