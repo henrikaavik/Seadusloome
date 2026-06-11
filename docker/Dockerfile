@@ -1,5 +1,5 @@
 # Build stage: install dependencies with uv
-FROM python:3.13-slim AS builder
+FROM python:3.13-slim@sha256:f82c96458eedc847b233e582eb31336f4954b39cae020b6dcf5b3ed0e5cbcd74 AS builder
 
 # Build metadata — populated by CI via --build-arg (see .github/workflows/ci.yml).
 # Defaults let local `docker build` work without explicit args; in that case we
@@ -8,7 +8,7 @@ FROM python:3.13-slim AS builder
 ARG GIT_SHA=dev
 ARG BUILD_TIME=unknown
 
-COPY --from=ghcr.io/astral-sh/uv:0.11.5 /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.11.5@sha256:555ac94f9a22e656fc5f2ce5dfee13b04e94d099e46bb8dd3a73ec7263f2e484 /uv /usr/local/bin/uv
 
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
 
@@ -41,7 +41,7 @@ RUN printf '{"app": "0.1.0", "sha": "%s", "built_at": "%s"}\n' \
     cat /app/VERSION.json
 
 # Runtime stage
-FROM python:3.13-slim
+FROM python:3.13-slim@sha256:f82c96458eedc847b233e582eb31336f4954b39cae020b6dcf5b3ed0e5cbcd74
 
 # Install curl for HEALTHCHECK, git for the sync pipeline, and git-lfs for
 # large ontology files.
@@ -65,13 +65,23 @@ RUN apt-get update && \
 # automatically. Must run as root, before the USER appuser switch below.
 RUN git lfs install --system
 
-# §4.3 LibreOffice base image (Eelnõud sprint plan 2026-05-02).
-# Installed here so the deploy risk is validated independently before any
-# code that calls `soffice --headless --convert-to pdf` ships (#613 PDF export).
-# Nothing in the app uses LibreOffice yet — this is a pure infrastructure step.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends libreoffice-core libreoffice-writer \
-    && rm -rf /var/lib/apt/lists/*
+# §4.3 LibreOffice — optional, ~500 MB.  Off by default.
+#
+# Enable for production (Coolify "Additional Build Arguments"):
+#   --build-arg INSTALL_LIBREOFFICE=true
+#
+# Enable for local builds:
+#   docker build --build-arg INSTALL_LIBREOFFICE=true -f docker/Dockerfile .
+#
+# Required only when PDF-export via `soffice --headless --convert-to pdf`
+# ships in the app (#613). Gated here so all other containers stay lean
+# until that feature lands.
+ARG INSTALL_LIBREOFFICE=false
+RUN if [ "$INSTALL_LIBREOFFICE" = "true" ]; then \
+        apt-get update \
+        && apt-get install -y --no-install-recommends libreoffice-core libreoffice-writer \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
 
 WORKDIR /app
 

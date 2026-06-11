@@ -116,7 +116,7 @@ services:
   #   restart: unless-stopped
 
   postgres:
-    image: pgvector/pgvector:pg18
+    image: pgvector/pgvector:pg18@sha256:42e7f6b4e1eceb02ff14e3e6bc6108bbe259abbe83879dc1845d0da1ddeb555d
     ports:
       # #853 / H2: bind to the loopback interface only. A bare "5432:5432"
       # publishes Postgres on 0.0.0.0, i.e. every interface of the host —
@@ -145,12 +145,34 @@ services:
   tika:
     # Local dev only. In production, Tika is a separate Coolify application
     # with network alias `seadusloome-tika` (set TIKA_URL accordingly).
-    image: apache/tika:3.3.0.0-full
+    image: apache/tika:3.3.0.0-full@sha256:ecdd37e204308266b1f8e28569f8516ebd5b96d7a4518a71d3904710b20c03b3
     ports:
       # #853 / H2: loopback-only for local curl testing; internal-only in
       # prod (separate Coolify app, reached via TIKA_URL). See the matrix
       # at the top of this file.
       - "127.0.0.1:9998:9998"
+    environment:
+      # Bound the JVM heap so the JVM honours the container memory limit
+      # instead of sizing itself against the host RAM.  The container hard
+      # limit is set via deploy.resources.limits.memory below.
+      # 512m heap + ~100m metaspace/native ≈ fits in 768m container limit.
+      # Adjust these values if you raise/lower the memory limit.
+      #
+      # JAVA_TOOL_OPTIONS, not JAVA_OPTS: the official apache/tika-docker
+      # entrypoint invokes `java` directly without shell-expanding $JAVA_OPTS,
+      # so JAVA_OPTS is silently ignored. JAVA_TOOL_OPTIONS is read by HotSpot
+      # itself at JVM startup regardless of how java is invoked — the JVM
+      # prints "Picked up JAVA_TOOL_OPTIONS: ..." at boot, which also serves
+      # as confirmation that the flags were applied.
+      JAVA_TOOL_OPTIONS: "-Xms128m -Xmx512m"
+    deploy:
+      resources:
+        limits:
+          # Hard cap: Tika OOMs without a limit on multi-document bursts.
+          # 768 MB covers a 512 MB heap + JVM overhead; raise to 1g if
+          # parsing large PDFs regularly.  Production: set the equivalent
+          # limit in the Coolify service "Resources" tab.
+          memory: 768m
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:9998/tika || exit 1"]
       interval: 10s
@@ -160,7 +182,14 @@ services:
     restart: unless-stopped
 
   jena:
-    image: apache/jena-fuseki:5.4.0
+    # stain/jena-fuseki matches the exact digest running in production
+    # (read off the prod VPS).  The previous reference, apache/jena-fuseki:5.4.0,
+    # does not exist on Docker Hub — the apache/ namespace for Fuseki is not
+    # published there, which is also why the anonymous-token grant came back
+    # empty during the #861 digest-pinning pass.  A Fuseki version upgrade is
+    # tracked separately; do not change this image without a dedicated upgrade
+    # PR and testing against the fuseki-config assembler.
+    image: stain/jena-fuseki:latest@sha256:b1d0c96f19adddef417520184471ac816cf36c6e72936a88ea02b29f4305929a
     ports:
       # #853 / H2: loopback-only, same rationale as postgres above. Even
       # though the write endpoints are now behind fuseki:allowedUsers
