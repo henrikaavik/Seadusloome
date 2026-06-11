@@ -8,6 +8,33 @@
 # The official apache/jena-fuseki image auto-loads every .ttl under
 # /fuseki/configuration/ on startup, so mounting this file creates the
 # `ontology` dataset deterministically on a fresh volume (#429).
+#
+# Write-endpoint access control (#853 / H1)
+# -----------------------------------------
+# The read endpoints (query / sparql / get) are intentionally left
+# OPEN: the app's SPARQL traffic (Õiguskaart, Nõustaja, impact engine)
+# is read-only and hits ``/sparql`` + ``/get`` without credentials, and
+# graph-level secrecy is enforced by org-scoped SPARQL, not Fuseki auth.
+#
+# The WRITE endpoints (update / data / upload) are guarded with
+# ``fuseki:allowedUsers "admin"`` so a request must authenticate as the
+# ``admin`` user (the one the official image provisions from the
+# ``ADMIN_PASSWORD`` env var into its Shiro user registry). Before #853
+# any process on the Docker network could PUT/POST/DELETE to these
+# endpoints and silently overwrite or drop the entire ontology.
+#
+# ``app/sync/jena_loader.py`` already sends HTTP Basic auth
+# (``auth=(JENA_ADMIN_USER, FUSEKI_ADMIN_PASSWORD)``) on every write
+# path — ``upload_turtle`` / ``clear_default_graph`` / ``put_named_graph``
+# / ``delete_named_graph`` / ``upload_turtle_to_named_graph`` and the
+# ``_sparql_update`` helper behind COPY/DROP — so the admin-credentialed
+# sync + draft pipelines keep working unchanged. The read helpers
+# (``sparql_query`` / ``named_graph_exists``) deliberately send no auth,
+# matching the open read endpoints above.
+#
+# Syntax is the Fuseki 5.x assembler endpoint-level ACL form
+# (``fuseki:allowedUsers`` on the endpoint blank node); see
+# https://jena.apache.org/documentation/fuseki2/fuseki-data-access-control.html
 :service1 a fuseki:Service ;
     fuseki:name                       "ontology" ;
     fuseki:endpoint                   [ fuseki:operation fuseki:query ] ;
@@ -16,13 +43,16 @@
     fuseki:endpoint                   [ fuseki:operation fuseki:query ;
                                         fuseki:name "sparql" ] ;
     fuseki:endpoint                   [ fuseki:operation fuseki:update ;
-                                        fuseki:name "update" ] ;
+                                        fuseki:name "update" ;
+                                        fuseki:allowedUsers "admin" ] ;
     fuseki:endpoint                   [ fuseki:operation fuseki:gsp-r ;
                                         fuseki:name "get" ] ;
     fuseki:endpoint                   [ fuseki:operation fuseki:gsp-rw ;
-                                        fuseki:name "data" ] ;
+                                        fuseki:name "data" ;
+                                        fuseki:allowedUsers "admin" ] ;
     fuseki:endpoint                   [ fuseki:operation fuseki:upload ;
-                                        fuseki:name "upload" ] ;
+                                        fuseki:name "upload" ;
+                                        fuseki:allowedUsers "admin" ] ;
     fuseki:dataset                    :tdb_dataset .
 
 :tdb_dataset a tdb2:DatasetTDB2 ;

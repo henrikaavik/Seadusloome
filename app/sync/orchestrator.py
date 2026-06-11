@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -45,6 +46,35 @@ def _parse_violation_count(results_line: str) -> int:
         except ValueError:
             return 0
     return 0
+
+
+# #853 (optional same-scope): redact secrets from error text before it is
+# persisted to sync_log.error_message or fanned into admin notifications.
+# Two leak vectors matter here:
+#   * tokenised/basic-auth remote URLs — ``https://user:token@host/…`` —
+#     which git/httpx echo verbatim in network errors, and
+#   * the Fuseki admin password, which httpx never prints itself but which
+#     could appear if a future code path interpolates it into a message.
+# We mask the userinfo component of any URL and, defensively, any literal
+# occurrence of the live FUSEKI_ADMIN_PASSWORD.
+_URL_CREDENTIALS_RE = re.compile(r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.\-]*://)[^/\s:@]+:[^/\s@]+@")
+
+
+def _scrub_secrets(text: str) -> str:
+    """Return *text* with credential-bearing substrings masked.
+
+    Masks ``scheme://user:pass@`` userinfo down to ``scheme://***:***@``
+    and replaces any literal occurrence of the configured Fuseki admin
+    password with ``***``. Safe to call on arbitrary exception text; a
+    ``None``/empty input round-trips to an empty string.
+    """
+    if not text:
+        return ""
+    scrubbed = _URL_CREDENTIALS_RE.sub(r"\g<scheme>***:***@", text)
+    secret = os.environ.get("FUSEKI_ADMIN_PASSWORD")
+    if secret and secret in scrubbed:
+        scrubbed = scrubbed.replace(secret, "***")
+    return scrubbed
 
 
 # Lazy import to avoid circular dependencies; used for WS notifications.
@@ -250,6 +280,12 @@ def has_recent_running_row(max_age_minutes: int = 30) -> bool:
     admin-triggered one is in flight. The age bound protects against a
     phantom 'running' row wedging future syncs if startup cleanup also
     failed.
+
+    NOTE (#853 / H4): this is a *best-effort, non-atomic* hint only — it
+    reads a row that another racing caller may be about to write. The
+    authoritative mutual exclusion is the Postgres advisory lock taken in
+    :func:`run_sync` (see ``SYNC_ADVISORY_LOCK_KEY``); this helper just
+    lets the UI/webhook short-circuit early in the common case.
     """
     try:
         with get_connection() as conn:
@@ -264,6 +300,155 @@ def has_recent_running_row(max_age_minutes: int = 30) -> bool:
     except Exception:
         logger.exception("Failed to check for running sync row")
         return False
+
+
+# #853 / H4: a fixed, well-known advisory-lock key that serialises the
+# whole sync pipeline across processes (admin trigger, webhook, manual
+# CLI). The previous "DB-level lock" claimed in the docstring did not
+# exist — it was an in-memory flag (app/admin/sync.py) plus the
+# non-atomic ``has_recent_running_row`` read above, so two webhooks
+# arriving within the same DB round-trip could both pass the check and
+# both promote into the shared ``urn:estleg:staging`` slot.
+#
+# We take a *session-scoped* ``pg_try_advisory_lock`` on a dedicated
+# connection held open for the duration of the run and release it in a
+# ``finally``. ``try`` (not the blocking ``pg_advisory_lock``) means a
+# second concurrent caller returns immediately instead of queueing —
+# the right behaviour for "another sync is already running, skip this
+# one". The key is an arbitrary but stable 64-bit constant; it only has
+# to be unique among advisory locks this app takes (the chat budget
+# locks use ``hashtextextended('cost_budget:…')`` which lives in a
+# different value space, so a collision is astronomically unlikely).
+SYNC_ADVISORY_LOCK_KEY = 8_530_000_000_000_001
+
+
+def _acquire_sync_lock():  # type: ignore[no-untyped-def]
+    """Try to take the session-scoped sync advisory lock.
+
+    Returns the open connection holding the lock on success, or ``None``
+    if the lock is already held (another sync is in flight) or a DB error
+    occurred. The caller MUST pass the returned connection to
+    :func:`_release_sync_lock` in a ``finally`` so the lock and the
+    connection are both released.
+    """
+    try:
+        conn = get_connection()
+    except Exception:
+        logger.exception("Could not open connection for sync advisory lock")
+        return None
+    try:
+        row = conn.execute("SELECT pg_try_advisory_lock(%s)", (SYNC_ADVISORY_LOCK_KEY,)).fetchone()
+        acquired = bool(row[0]) if row else False
+        if not acquired:
+            conn.close()
+            return None
+        return conn
+    except Exception:
+        logger.exception("Failed to acquire sync advisory lock")
+        try:
+            conn.close()
+        except Exception:
+            logger.debug("Closing lock connection after acquire failure also failed")
+        return None
+
+
+def _release_sync_lock(conn) -> None:  # type: ignore[no-untyped-def]
+    """Release the sync advisory lock and close its connection.
+
+    Best-effort: a session-scoped advisory lock is also released
+    automatically when the backend connection closes, so even if the
+    explicit ``pg_advisory_unlock`` fails the ``close()`` below frees it.
+    """
+    if conn is None:
+        return
+    try:
+        conn.execute("SELECT pg_advisory_unlock(%s)", (SYNC_ADVISORY_LOCK_KEY,))
+        conn.commit()
+    except Exception:
+        logger.debug("pg_advisory_unlock failed (lock frees on close anyway)", exc_info=True)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            logger.debug("Closing sync lock connection failed", exc_info=True)
+
+
+def _record_skipped_sync(started_at: datetime, *, rerun_queued: bool = True) -> None:
+    """Write a terminal ``failed`` sync_log note for a skipped (locked-out) run.
+
+    When a sync can't acquire the advisory lock another run owns the
+    pipeline, so this run is a clean no-op. We still drop a short
+    ``sync_log`` breadcrumb (status='failed' with an explanatory message)
+    so operators can see in the admin history that a concurrent trigger
+    was correctly skipped rather than silently dropped.
+
+    Round-3 review (#853): every lock-loser now queues a rerun, so the note
+    states whether that resync was durably scheduled — the admin UI must
+    not imply the trigger was dropped when in fact a rerun is pending.
+    """
+    note = (
+        "Skipped: another sync holds the advisory lock — resync queued."
+        if rerun_queued
+        else (
+            "Skipped: another sync holds the advisory lock; "
+            "FAILED to queue resync (will retry on next trigger)."
+        )
+    )
+    try:
+        with get_connection() as conn:
+            conn.execute(
+                """INSERT INTO sync_log
+                   (started_at, finished_at, status, error_message)
+                   VALUES (%s, now(), 'failed', %s)""",  # type: ignore[arg-type]
+                (started_at, note),
+            )
+            conn.commit()
+    except Exception:
+        logger.exception("Failed to record skipped-sync note")
+
+
+def _drain_rerun_requests() -> None:
+    """Trigger one coalesced rerun if a push arrived during this sync.
+
+    Round-2 review (#853): a push that lands while a sync is running sets a
+    durable pending-rerun flag instead of starting a (lock-rejected) second
+    sync. After a run that actually held the lock completes, we drain that
+    flag here — exactly once, because N mid-sync pushes coalesce into the
+    single ``sync_rerun_request`` row.
+
+    Mechanism: ``consume_rerun_request`` atomically clears the flag. If it
+    was set, we spawn ONE fresh ``run_sync(_is_rerun=True)`` in a daemon
+    thread (fire-and-forget, mirroring the webhook). That rerun either
+    acquires the lock and runs fresh data (its own ``finally`` drains again,
+    chaining further reruns one-at-a-time until the flag stays clear), or —
+    if a fresh sync grabbed the lock first — re-sets the flag so that other
+    sync drains it. This invocation must therefore only be called when the
+    current run actually acquired the lock; calling it from a bailed
+    (lock-not-acquired) run could busy-loop.
+    """
+    from app.sync.webhook_deliveries import consume_rerun_request
+
+    try:
+        if not consume_rerun_request():
+            return
+    except Exception:
+        logger.exception("Failed to check rerun flag after sync")
+        return
+
+    logger.info("Pending rerun flag was set — triggering one coalesced resync")
+    try:
+        thread = threading.Thread(target=run_sync, kwargs={"_is_rerun": True}, daemon=True)
+        thread.start()
+    except Exception:
+        # If we couldn't even spawn the rerun, re-set the flag so a later
+        # sync (admin trigger / next push) still picks the work up.
+        logger.exception("Failed to spawn coalesced rerun — re-setting flag")
+        try:
+            from app.sync.webhook_deliveries import request_rerun
+
+            request_rerun("rerun-spawn-failed")
+        except Exception:
+            logger.exception("Failed to re-set rerun flag after spawn failure")
 
 
 class GitCommandError(RuntimeError):
@@ -346,6 +531,7 @@ def run_sync(
     *,
     log_id: int | None = None,
     started_at: datetime | None = None,
+    _is_rerun: bool = False,
 ) -> bool:
     """Execute the full sync pipeline.
 
@@ -365,6 +551,12 @@ def run_sync(
             the id here so the orchestrator doesn't create a second row.
         started_at: Paired with ``log_id`` — the timestamp recorded on the
             pre-allocated row. Used for finalize fallback paths.
+        _is_rerun: Internal. True when this invocation was spawned by
+            :func:`_drain_rerun_requests` to satisfy pushes that arrived
+            mid-sync (round-2 review of #853). When a rerun cannot acquire
+            the advisory lock (a fresh sync grabbed it first) it re-sets the
+            pending-rerun flag so the now-running sync drains it instead —
+            this is how the coalesced rerun is never lost in that race.
 
     Returns:
         True if sync succeeded.
@@ -372,6 +564,49 @@ def run_sync(
     if started_at is None:
         started_at = datetime.now(UTC)
     logger.info("Starting sync pipeline at %s", started_at.isoformat())
+
+    # #853 / H4: take the authoritative cross-process lock BEFORE doing
+    # anything else. ``pg_try_advisory_lock`` returns immediately; if a
+    # concurrent sync already holds it, bail cleanly without touching the
+    # staging graph or the live default graph. This is the real mutual
+    # exclusion that two racing webhooks/admin clicks rely on — the
+    # in-memory flag and ``has_recent_running_row`` checks upstream are
+    # only fast-path hints.
+    lock_conn = _acquire_sync_lock()
+    if lock_conn is None:
+        logger.info("Sync skipped — another sync holds the advisory lock")
+        # Round-2 + round-3 review (#853): EVERY lock-loser durably queues a
+        # rerun, not just ``_is_rerun`` ones. A non-rerun loser is a real
+        # trigger (a racing webhook push, or an admin clicking "sync now")
+        # whose tree the current lock-holder may already have cloned past —
+        # if we only recorded a skip note, that commit would be stranded.
+        # The uniform rule is also the right admin semantics: a manual sync
+        # fired while another runs should still produce fresh data, which is
+        # exactly what the queued rerun delivers. The flag is drained by
+        # whoever holds the lock; we return BEFORE the try/finally below so
+        # this branch never drains and therefore cannot busy-loop.
+        from app.sync.webhook_deliveries import request_rerun
+
+        rerun_label = "rerun-relock-failed" if _is_rerun else "lock-loser-rerun"
+        rerun_queued = request_rerun(rerun_label)
+        if log_id is not None:
+            # A caller (admin handler) pre-inserted a 'running' row before
+            # spawning us. Close it out so the UI doesn't show a phantom
+            # in-flight sync forever — and tell the truth about the rerun.
+            note = (
+                "Skipped: another sync holds the advisory lock — resync queued."
+                if rerun_queued
+                else (
+                    "Skipped: another sync holds the advisory lock; "
+                    "FAILED to queue resync (will retry on next trigger)."
+                )
+            )
+            _finalize_row(log_id, "failed", started_at, error_message=note)
+        elif not _is_rerun:
+            # Webhook/CLI-spawned loser (no pre-inserted row): leave a
+            # breadcrumb in sync_log reflecting the queued rerun.
+            _record_skipped_sync(started_at, rerun_queued=rerun_queued)
+        return False
 
     # Insert 'running' row up front so the admin UI can show live progress.
     # All subsequent step transitions reference this row via log_id. The
@@ -609,18 +844,36 @@ def run_sync(
 
     except Exception as e:
         logger.exception("Sync pipeline failed")
-        _finalize_row(log_id, "failed", started_at, error_message=str(e)[:1000])
+        # #853 (optional same-scope): git / httpx errors can embed the
+        # Fuseki admin password or a tokenised remote URL in their text.
+        # Scrub before persisting to sync_log.error_message and fanning
+        # the message into admin notifications.
+        safe_message = _scrub_secrets(str(e))[:1000]
+        _finalize_row(log_id, "failed", started_at, error_message=safe_message)
 
         # Notify all system admins about the sync failure.
         try:
             from app.notifications.wire import notify_sync_failed
 
-            notify_sync_failed(str(e)[:1000])
+            notify_sync_failed(safe_message)
         except Exception:
             logger.debug("notify_sync_failed failed (non-critical)", exc_info=True)
 
         return False
 
     finally:
+        # Release the advisory lock + its connection (#853 / H4). Done in
+        # finally so it frees on every exit path, including exceptions.
+        # This block only runs for invocations that acquired the lock (the
+        # not-acquired branch returns before the try), so it is always safe
+        # to drain the rerun flag here.
+        _release_sync_lock(lock_conn)
         if use_temp and repo_dir:
             shutil.rmtree(repo_dir, ignore_errors=True)
+        # Round-2 review (#853): drain any push that arrived mid-sync. Done
+        # AFTER releasing the lock so the spawned rerun can acquire it.
+        # Best-effort — never let a drain failure mask the sync's outcome.
+        try:
+            _drain_rerun_requests()
+        except Exception:
+            logger.exception("Rerun drain after sync failed (non-critical)")

@@ -20,6 +20,7 @@ from app.sync.orchestrator import (
     _insert_running_row,
     has_recent_running_row,
 )
+from app.sync.webhook_deliveries import request_rerun
 from app.ui.data.data_table import Column, DataTable
 from app.ui.data.pagination import Pagination
 from app.ui.forms.app_form import AppForm
@@ -570,7 +571,30 @@ def trigger_sync(req: Request):
                 _sync_in_progress = False
 
     if already_running_memory or already_running_db:
-        banner = ("warning", "S\u00fcnkroniseerimine on juba k\u00e4imas.")
+        # Round-4 review (#853): honour the same durable semantics as the
+        # webhook. An admin clicking "S\u00fcnkroniseeri kohe" while a sync is
+        # already running used to get the "already running" banner and
+        # nothing else \u2014 no rerun was queued, because this branch never
+        # spawns run_sync() (the orchestrator's lock-loser rule only fires
+        # when run_sync actually runs). Durably queue a coalesced rerun so
+        # the admin's trigger produces fresh data once the current run
+        # finishes. No delivery id here, so the plain flag write is used;
+        # N rapid double-clicks coalesce into one pending rerun (single-row
+        # table). On a flag-write failure surface an explicit error banner
+        # rather than silently implying success (mirrors the webhook 503).
+        if request_rerun("admin-sync-now"):
+            banner = (
+                "warning",
+                "S\u00fcnkroniseerimine juba k\u00e4ib \u2014 uus "
+                "s\u00fcnkroniseerimine pandi j\u00e4rjekorda.",
+            )
+        else:
+            banner = (
+                "error",
+                "S\u00fcnkroniseerimine juba k\u00e4ib, kuid uue "
+                "s\u00fcnkroniseerimise j\u00e4rjekorda panemine eba\u00f5nnestus. "
+                "Proovi m\u00f5ne hetke p\u00e4rast uuesti.",
+            )
     else:
         # Synchronous running-row INSERT: the card we return must already
         # reflect the in-flight sync or HTMX won't start polling.

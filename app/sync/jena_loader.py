@@ -33,7 +33,59 @@ logger = logging.getLogger(__name__)
 JENA_URL = os.environ.get("JENA_URL", "http://localhost:3030")
 JENA_DATASET = os.environ.get("JENA_DATASET", "ontology")
 JENA_ADMIN_USER = "admin"
-JENA_ADMIN_PASSWORD = os.environ.get("FUSEKI_ADMIN_PASSWORD", "localdev")
+
+# #853 / comment item 1: the Fuseki write endpoints are now behind
+# ``fuseki:allowedUsers "admin"`` (docker/fuseki-config/ontology.ttl).
+# That lockdown is worthless if an unset ``FUSEKI_ADMIN_PASSWORD``
+# silently authenticates with a known literal — the old module-level
+# ``os.environ.get("FUSEKI_ADMIN_PASSWORD", "localdev")`` did exactly
+# that. We now resolve the password lazily at first write and FAIL
+# CLOSED outside local development when it is missing.
+#
+# We read ``APP_ENV`` directly here (NOT via app.config) on purpose:
+# app/config.py is owned by another change set, and the gate we want is
+# the same "dev-only fallback" rule app.db already applies to
+# DATABASE_URL — a missing secret is a hard error everywhere except
+# ``APP_ENV=development`` (the default for a fresh clone / tests).
+_DEV_FALLBACK_ADMIN_PASSWORD = "localdev"
+
+
+class FusekiAdminPasswordError(RuntimeError):
+    """Raised when no FUSEKI_ADMIN_PASSWORD is set outside local dev.
+
+    Surfaced lazily at the first Fuseki *write* (upload / clear / COPY /
+    DROP / named-graph PUT/DELETE) rather than at import time so that
+    read-only callers, tests, and stub-mode imports never trip it.
+    """
+
+
+def _resolve_admin_password() -> str:
+    """Return the Fuseki admin password, failing closed off-dev.
+
+    * If ``FUSEKI_ADMIN_PASSWORD`` is set (any non-empty value), use it.
+    * Otherwise, in ``APP_ENV=development`` (the default), fall back to
+      the well-known local-dev password so a freshly cloned repo and the
+      test suite work with no setup.
+    * In any other environment a missing/empty secret raises
+      :class:`FusekiAdminPasswordError` — we must never silently send a
+      guessable password to an auth-guarded write endpoint in
+      staging/production.
+    """
+    value = os.environ.get("FUSEKI_ADMIN_PASSWORD")
+    if value:
+        return value
+    if os.environ.get("APP_ENV", "development") == "development":
+        return _DEV_FALLBACK_ADMIN_PASSWORD
+    raise FusekiAdminPasswordError(
+        "FUSEKI_ADMIN_PASSWORD must be set outside local development — "
+        "the Fuseki write endpoints require admin authentication (#853). "
+        "Refusing to send a default password to an auth-guarded endpoint."
+    )
+
+
+def _admin_auth() -> tuple[str, str]:
+    """Return the ``(user, password)`` tuple for an authenticated write."""
+    return (JENA_ADMIN_USER, _resolve_admin_password())
 
 
 # #480: the same allowlist that ``app.docs.impact.queries`` uses for
@@ -116,7 +168,7 @@ def upload_turtle(turtle_data: str, graph_uri: str | None = None) -> bool:
             content=turtle_data.encode("utf-8"),
             headers={"Content-Type": "text/turtle; charset=utf-8"},
             params=params,
-            auth=(JENA_ADMIN_USER, JENA_ADMIN_PASSWORD),
+            auth=_admin_auth(),
             timeout=120.0,
         )
         response.raise_for_status()
@@ -134,7 +186,7 @@ def clear_default_graph() -> bool:
         response = httpx.delete(
             endpoint,
             params={"default": ""},
-            auth=(JENA_ADMIN_USER, JENA_ADMIN_PASSWORD),
+            auth=_admin_auth(),
             timeout=30.0,
         )
         response.raise_for_status()
@@ -230,7 +282,7 @@ def put_named_graph(graph_uri: str, turtle: str) -> bool:
             url,
             content=turtle.encode("utf-8"),
             headers={"Content-Type": "text/turtle; charset=utf-8"},
-            auth=(JENA_ADMIN_USER, JENA_ADMIN_PASSWORD),
+            auth=_admin_auth(),
             timeout=120.0,
         )
     except httpx.HTTPError:
@@ -278,7 +330,7 @@ def delete_named_graph(graph_uri: str) -> bool:
     try:
         response = httpx.delete(
             url,
-            auth=(JENA_ADMIN_USER, JENA_ADMIN_PASSWORD),
+            auth=_admin_auth(),
             timeout=30.0,
         )
     except httpx.HTTPError:
@@ -384,7 +436,7 @@ def upload_turtle_to_named_graph(graph_uri: str, turtle: str) -> bool:
             url,
             content=turtle.encode("utf-8"),
             headers={"Content-Type": "text/turtle; charset=utf-8"},
-            auth=(JENA_ADMIN_USER, JENA_ADMIN_PASSWORD),
+            auth=_admin_auth(),
             timeout=300.0,
         )
     except httpx.HTTPError:
@@ -442,7 +494,7 @@ def _sparql_update(update: str, *, timeout: float = 120.0) -> bool:
         response = httpx.post(
             endpoint,
             data={"update": update},
-            auth=(JENA_ADMIN_USER, JENA_ADMIN_PASSWORD),
+            auth=_admin_auth(),
             timeout=timeout,
         )
     except httpx.HTTPError:

@@ -820,15 +820,18 @@ class TestSyncCardLiveProgress:
 
         admin_sync._sync_in_progress = False
 
+    @patch("app.admin.sync.request_rerun", return_value=True)
     @patch("app.admin.sync._get_sync_logs")
     @patch("app.admin.sync.has_recent_running_row", return_value=True)
-    def test_post_sync_detects_running_via_db(
+    def test_post_sync_detects_running_via_db_queues_rerun(
         self,
         mock_has_running: MagicMock,
         mock_logs: MagicMock,
+        mock_rerun: MagicMock,
     ):
-        """If the DB already shows a running sync, trigger_sync must NOT
-        spawn a second thread and must show the 'already running' banner."""
+        """Round-4 (#853): if the DB already shows a running sync, trigger_sync
+        must NOT spawn a second thread but MUST durably queue a coalesced
+        rerun and show a truthful 'queued' banner."""
         from starlette.requests import Request
 
         from app.admin import sync as admin_sync
@@ -851,12 +854,159 @@ class TestSyncCardLiveProgress:
         req = Request(scope)
 
         with patch("threading.Thread") as mock_thread_cls:
-            trigger_sync(req)
+            result = trigger_sync(req)
             mock_thread_cls.assert_not_called()
+
+        # The durable rerun flag was set so the admin's click isn't dropped.
+        mock_rerun.assert_called_once()
+
+        from fasthtml.common import to_xml
+
+        html = to_xml(result)
+        # Truthful Estonian banner — a resync was queued, not a bare "already
+        # running" with no follow-up.
+        assert "järjekorda" in html
 
         # In-memory flag must be released again so a real subsequent sync
         # (after the other one finishes) can proceed.
         assert admin_sync._sync_in_progress is False
+
+    @patch("app.admin.sync.request_rerun", return_value=False)
+    @patch("app.admin.sync._get_sync_logs")
+    @patch("app.admin.sync.has_recent_running_row", return_value=True)
+    def test_post_sync_in_progress_flag_failure_shows_error_banner(
+        self,
+        mock_has_running: MagicMock,
+        mock_logs: MagicMock,
+        mock_rerun: MagicMock,
+    ):
+        """Round-4 (#853): if the durable rerun-flag write fails, the admin
+        must see an explicit error banner — not a silent success."""
+        from fasthtml.common import to_xml
+        from starlette.requests import Request
+
+        from app.admin import sync as admin_sync
+        from app.admin.sync import trigger_sync
+
+        mock_logs.return_value = [self._running_log()]
+        admin_sync._sync_in_progress = False
+
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/admin/sync",
+            "headers": [],
+            "query_string": b"",
+            "scheme": "http",
+            "server": ("testserver", 80),
+            "client": ("127.0.0.1", 12345),
+            "auth": {"role": "admin", "id": "admin-test", "email": "a@b.ee"},
+        }
+        req = Request(scope)
+
+        with patch("threading.Thread") as mock_thread_cls:
+            result = trigger_sync(req)
+            mock_thread_cls.assert_not_called()
+
+        mock_rerun.assert_called_once()
+        html = to_xml(result)
+        # Error variant + an explicit failure message (not the queued one).
+        assert "sync-banner-error" in html
+        assert "ebaõnnestus" in html
+        assert admin_sync._sync_in_progress is False
+
+    @patch("app.admin.sync.request_rerun", return_value=True)
+    @patch("app.admin.sync._get_sync_logs")
+    @patch("app.admin.sync.has_recent_running_row", return_value=True)
+    def test_post_sync_double_click_in_progress_coalesces(
+        self,
+        mock_has_running: MagicMock,
+        mock_logs: MagicMock,
+        mock_rerun: MagicMock,
+    ):
+        """Round-4 (#853): a rapid second click while a sync is running still
+        shows the queued banner and just re-arms the single-row flag (no
+        error, coalesces into one pending rerun)."""
+        from fasthtml.common import to_xml
+        from starlette.requests import Request
+
+        from app.admin import sync as admin_sync
+        from app.admin.sync import trigger_sync
+
+        mock_logs.return_value = [self._running_log()]
+        admin_sync._sync_in_progress = False
+
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/admin/sync",
+            "headers": [],
+            "query_string": b"",
+            "scheme": "http",
+            "server": ("testserver", 80),
+            "client": ("127.0.0.1", 12345),
+            "auth": {"role": "admin", "id": "admin-test", "email": "a@b.ee"},
+        }
+
+        with patch("threading.Thread") as mock_thread_cls:
+            first = trigger_sync(Request(scope))
+            second = trigger_sync(Request(scope))
+            mock_thread_cls.assert_not_called()
+
+        # Both clicks queued (re-armed) the rerun; coalescing happens at the
+        # single-row DB level. Both render the queued banner, neither errors.
+        assert mock_rerun.call_count == 2
+        for result in (first, second):
+            html = to_xml(result)
+            assert "järjekorda" in html
+            assert "sync-banner-error" not in html
+
+    @patch("app.admin.sync.request_rerun")
+    @patch("app.admin.sync._insert_running_row", return_value=42)
+    @patch("app.admin.sync._get_sync_logs")
+    @patch("app.admin.sync.has_recent_running_row", return_value=False)
+    def test_post_sync_not_running_path_unchanged(
+        self,
+        mock_has_running: MagicMock,
+        mock_logs: MagicMock,
+        mock_insert: MagicMock,
+        mock_rerun: MagicMock,
+    ):
+        """Round-4 (#853): the not-running path is untouched — it spawns
+        run_sync(log_id=...) (whose R3 lock-loser rule covers its own race)
+        and must NOT pre-arm a rerun here."""
+        from starlette.requests import Request
+
+        from app.admin import sync as admin_sync
+        from app.admin.sync import trigger_sync
+
+        mock_logs.return_value = [self._running_log()]
+        admin_sync._sync_in_progress = False
+
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/admin/sync",
+            "headers": [],
+            "query_string": b"",
+            "scheme": "http",
+            "server": ("testserver", 80),
+            "client": ("127.0.0.1", 12345),
+            "auth": {"role": "admin", "id": "admin-test", "email": "a@b.ee"},
+        }
+
+        with patch("threading.Thread") as mock_thread_cls:
+            mock_thread_cls.return_value = MagicMock()
+            trigger_sync(Request(scope))
+            # The not-running path spawns the sync thread with the log id.
+            mock_thread_cls.assert_called_once()
+            _, call_kwargs = mock_thread_cls.call_args
+            assert call_kwargs["kwargs"]["log_id"] == 42
+
+        # No rerun pre-armed on the happy path — the spawned run_sync handles
+        # any lock-loss race itself.
+        mock_rerun.assert_not_called()
+        admin_sync._sync_in_progress = False
 
 
 class TestUserStats:
