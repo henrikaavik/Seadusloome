@@ -14,8 +14,10 @@ headers on every unsafe-method HTTP request (POST/PUT/PATCH/DELETE):
    so a forged cross-site request always carries the attacker's origin
    and is rejected here with 403.
 2. No ``Origin`` → fall back to ``Referer``'s origin, same comparison.
-3. Neither → fall back to ``Sec-Fetch-Site``; ``cross-site`` is
-   rejected, ``same-origin`` / ``same-site`` / ``none`` pass.
+3. Neither → fall back to ``Sec-Fetch-Site``; only ``same-origin`` and
+   ``none`` (direct navigation) pass — ``same-site`` (sibling
+   subdomains) and ``cross-site`` are rejected. The app is strictly
+   single-origin, so a bare same-site signal is insufficient.
 4. None of the three headers → the request cannot have been initiated
    by a (modern) browser from a foreign site; it is allowed. This keeps
    server-to-server callers, curl, and test clients working. CSRF is
@@ -84,19 +86,36 @@ DEFAULT_TRUSTED_PROXY_HOSTS = (
 def get_trusted_proxy_hosts() -> list[str]:
     """Return the proxy hosts/CIDRs whose X-Forwarded-* headers are trusted.
 
-    Reads ``TRUSTED_PROXY_HOSTS`` (comma-separated IPs / CIDR networks,
-    or ``*`` to trust everything — discouraged, this restores the D3
-    vulnerability). Defaults to :data:`DEFAULT_TRUSTED_PROXY_HOSTS`.
+    Reads ``TRUSTED_PROXY_HOSTS`` (comma-separated IPs / CIDR networks).
+    Defaults to :data:`DEFAULT_TRUSTED_PROXY_HOSTS`.
+
+    Wildcards are REFUSED, not honoured (#851 review round 1): a value
+    containing ``*`` anywhere (``*``, ``10.*``, ``*.example.com``) is a
+    misconfiguration that would reopen the exact D3 hole this module
+    closes — ``trusted_hosts=["*"]`` flips uvicorn's
+    ``_TrustedHosts.always_trust`` and makes ``X-Forwarded-For`` fully
+    spoofable again. We log at ERROR and fall back to the private-range
+    defaults instead of crashing at startup: the defaults are the
+    correct production posture behind Traefik/Coolify, so degrading
+    keeps the service available while the error log (and Sentry) makes
+    the bad value visible. Globs are not supported by uvicorn anyway —
+    any non-``*`` wildcard entry would silently never match.
     """
     raw = os.environ.get("TRUSTED_PROXY_HOSTS", "").strip()
     if not raw:
         return list(DEFAULT_TRUSTED_PROXY_HOSTS)
     hosts = [item.strip() for item in raw.split(",") if item.strip()]
-    if "*" in hosts:
-        logger.warning(
-            "TRUSTED_PROXY_HOSTS contains '*' — X-Forwarded-For is trusted from "
-            "ANY peer, client IPs are spoofable (issue #851 D3)."
+    if any("*" in host for host in hosts):
+        logger.error(
+            "TRUSTED_PROXY_HOSTS=%r contains a wildcard entry — REFUSING it. "
+            "Trusting '*' would let any direct client spoof X-Forwarded-For "
+            "(issue #851 D3: throttle bypass + audit-IP forging). Falling "
+            "back to the private-range defaults %s; set explicit IPs/CIDRs "
+            "to override.",
+            raw,
+            list(DEFAULT_TRUSTED_PROXY_HOSTS),
         )
+        return list(DEFAULT_TRUSTED_PROXY_HOSTS)
     return hosts or list(DEFAULT_TRUSTED_PROXY_HOSTS)
 
 
@@ -137,7 +156,15 @@ CSRF_EXEMPT_PATHS: list[str] = [
     *_TOKEN_BEARER_PATHS,
 ]
 
-_ALLOWED_SEC_FETCH_SITE = frozenset({"same-origin", "same-site", "none"})
+# Sec-Fetch-Site values accepted when it is the DECIDING signal (i.e.
+# Origin and Referer are both absent). ``same-origin`` covers in-app
+# requests; ``none`` covers direct user navigations (address bar,
+# bookmark). ``same-site`` is deliberately ABSENT (#851 review round 1):
+# accepting it would extend write trust to every sibling subdomain of
+# the registrable domain (anything under sixtyfour.ee), and this app is
+# strictly single-origin. If a legitimate sibling-subdomain flow ever
+# appears, the revert is one word: add "same-site" back to this set.
+_ALLOWED_SEC_FETCH_SITE = frozenset({"same-origin", "none"})
 
 # Estonian rejection body. Plain page on purpose: this is shown to
 # browsers only in attack/misconfiguration scenarios.

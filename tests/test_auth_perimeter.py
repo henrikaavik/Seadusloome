@@ -138,12 +138,18 @@ class TestEvaluateHttpRequest:
     def test_referer_fallback_malformed_rejected(self):
         assert evaluate_http_request(_scope({"Referer": "garbage"})) is not None
 
-    @pytest.mark.parametrize("value", ["same-origin", "same-site", "none"])
+    @pytest.mark.parametrize("value", ["same-origin", "none"])
     def test_sec_fetch_site_allowed_values(self, value: str):
         assert evaluate_http_request(_scope({"Sec-Fetch-Site": value})) is None
 
     def test_sec_fetch_site_cross_site_rejected(self):
         assert evaluate_http_request(_scope({"Sec-Fetch-Site": "cross-site"})) is not None
+
+    def test_sec_fetch_site_bare_same_site_rejected(self):
+        """#851 review round 1: the app is single-origin, so when SFS is
+        the deciding signal (no Origin/Referer), ``same-site`` — i.e. a
+        sibling subdomain of sixtyfour.ee — is NOT sufficient."""
+        assert evaluate_http_request(_scope({"Sec-Fetch-Site": "same-site"})) is not None
 
     def test_no_provenance_headers_allowed(self):
         """No Origin/Referer/Sec-Fetch-Site → cannot be a cross-site
@@ -246,16 +252,47 @@ class TestExemptionsAndConfig:
         monkeypatch.setenv("TRUSTED_PROXY_HOSTS", "   ")
         assert get_trusted_proxy_hosts() == list(DEFAULT_TRUSTED_PROXY_HOSTS)
 
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "*",
+            " * ",
+            "10.0.0.0/8,*",
+            "*,127.0.0.1",
+            "*.sixtyfour.ee",
+            "172.16.0.0/12, 10.*",
+        ],
+    )
+    def test_trusted_proxy_wildcard_refused_with_safe_fallback(
+        self, value: str, monkeypatch: pytest.MonkeyPatch, caplog: Any
+    ):
+        """#851 review round 1 (P2): a wildcard anywhere in
+        TRUSTED_PROXY_HOSTS is REFUSED — error-logged and replaced by the
+        private-range defaults — never returned. Previously the function
+        warned but still returned ['*'], which flips uvicorn's
+        always-trust mode and reopens X-Forwarded-For spoofing (D3)."""
+        monkeypatch.setenv("TRUSTED_PROXY_HOSTS", value)
+        with caplog.at_level(logging.ERROR, logger="app.auth.perimeter"):
+            hosts = get_trusted_proxy_hosts()
+        assert hosts == list(DEFAULT_TRUSTED_PROXY_HOSTS)
+        assert all("*" not in h for h in hosts)
+        assert any(
+            "TRUSTED_PROXY_HOSTS" in r.getMessage() and r.levelno == logging.ERROR
+            for r in caplog.records
+        )
+
     def test_main_app_no_longer_trusts_all_proxies(self):
         """D3 regression pin: the wired ProxyHeadersMiddleware must not
-        be in always-trust mode (trusted_hosts='*')."""
+        be in always-trust mode, nor carry any wildcard entry."""
         from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
         proxy_layers = [m for m in app.user_middleware if m.cls is ProxyHeadersMiddleware]
         assert proxy_layers, "ProxyHeadersMiddleware missing from app"
         for layer in proxy_layers:
             trusted = layer.kwargs.get("trusted_hosts")
-            assert trusted != "*" and trusted != ["*"]
+            assert trusted not in ("*", ["*"])
+            assert isinstance(trusted, list)
+            assert all("*" not in h for h in trusted)
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +311,26 @@ class TestMiddlewareTinyApp:
     def test_safe_methods_never_checked(self, method: str, tiny_client: TestClient):
         resp = tiny_client.request(method, "/anything", headers={"Origin": "https://evil.example"})
         assert resp.status_code == 200
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("same-origin", 200),
+            ("none", 200),
+            ("same-site", 403),  # sibling subdomain — insufficient (#851 r1)
+            ("cross-site", 403),
+        ],
+    )
+    def test_sec_fetch_site_policy_as_deciding_signal(
+        self, value: str, expected: int, tiny_client: TestClient
+    ):
+        """No Origin/Referer present → Sec-Fetch-Site decides: only
+        same-origin and none pass; bare same-site is rejected because
+        the app is single-origin."""
+        resp = tiny_client.post("/anything", headers={"Sec-Fetch-Site": value})
+        assert resp.status_code == expected
+        if expected == 403:
+            assert "CSRF-kaitse" in resp.text
 
     def test_exempt_path_passes_cross_origin(self, tiny_client: TestClient):
         resp = tiny_client.post("/webhooks/github", headers={"Origin": "https://evil.example"})
