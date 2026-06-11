@@ -97,6 +97,14 @@ class Message:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+# Rendered in place of a message body when ``content_encrypted`` is present
+# but cannot be decrypted (rotated-away key or tampered ciphertext). A
+# visible sentinel — rather than an empty string — so a failed decrypt is
+# obvious to the reader instead of looking like a blank message, while still
+# letting the rest of the conversation load (raising here would take the
+# whole transcript down over a single bad row).
+_UNDECRYPTABLE_CONTENT = "[sõnumit ei õnnestunud dekrüpteerida]"
+
 # Migration 017 adds ``is_pinned``, ``is_archived``, ``pinned_at`` and
 # ``title_is_custom``. They are appended at the end of the SELECT list so
 # pre-017 test fixtures (which build 7-tuple rows) still map cleanly via
@@ -212,10 +220,15 @@ def _is_missing_v037_column_error(exc: BaseException) -> bool:
 def _decode_encrypted_text(ciphertext: bytes | memoryview | None) -> str | None:
     """Decrypt a BYTEA column; return ``None`` on NULL or decrypt failure.
 
-    Fallback semantics: the caller uses ``None`` to signal "fall back to
-    plaintext column". We log decrypt failures loudly because they can only
-    mean the key rotated or the ciphertext got corrupted — both operator
-    problems that a silent fall-through would hide.
+    ``None`` is overloaded to mean both "column was NULL" and "decrypt
+    failed". Callers that must distinguish the two (the message-body path,
+    where NULL is an invariant violation but a decrypt failure should render
+    a visible sentinel) check the NULL case *before* calling this helper.
+
+    Migration 026 dropped the plaintext payload columns, so there is no
+    plaintext to fall back to — a decrypt failure can only mean the key
+    rotated or the ciphertext got corrupted, both operator problems we log
+    loudly rather than hide.
     """
     if ciphertext is None:
         return None
@@ -223,7 +236,7 @@ def _decode_encrypted_text(ciphertext: bytes | memoryview | None) -> str | None:
     try:
         return decrypt_text(raw)
     except DecryptionError:
-        logger.exception("Failed to decrypt message column — falling back to plaintext")
+        logger.exception("Failed to decrypt message column (rotated key or tampered ciphertext)")
         return None
 
 
@@ -328,7 +341,12 @@ def _row_to_message(row: tuple[Any, ...]) -> Message:
             f"messages.id={msg_id}: content_encrypted IS NULL — "
             "encryption-at-rest invariant violated (see migration 026)"
         )
-    content = _decode_encrypted_text(content_encrypted) or ""
+    # NULL was rejected above, so a ``None`` return here means decryption
+    # failed (rotated key / tampered ciphertext). Surface a visible sentinel
+    # instead of a blank body — an empty string would render as a silently
+    # missing message and the loud log below would be the only clue (#861).
+    decrypted_content = _decode_encrypted_text(content_encrypted)
+    content = decrypted_content if decrypted_content is not None else _UNDECRYPTABLE_CONTENT
 
     tool_input = _decode_encrypted_json(tool_input_encrypted)
     if tool_input is not None and not isinstance(tool_input, dict):
@@ -838,7 +856,7 @@ def list_messages(
             SELECT {_MESSAGE_COLUMNS}
             FROM messages
             WHERE conversation_id = %s
-            ORDER BY created_at ASC
+            ORDER BY created_at ASC, id ASC
             """,
             (str(conversation_id),),
         ).fetchall()
@@ -863,7 +881,7 @@ def list_messages(
                     SELECT {_MESSAGE_COLUMNS_PRE037}
                     FROM messages
                     WHERE conversation_id = %s
-                    ORDER BY created_at ASC
+                    ORDER BY created_at ASC, id ASC
                     """,
                     (str(conversation_id),),
                 ).fetchall()
@@ -889,7 +907,7 @@ def list_messages(
                     SELECT {_MESSAGE_COLUMNS_PRE036}
                     FROM messages
                     WHERE conversation_id = %s
-                    ORDER BY created_at ASC
+                    ORDER BY created_at ASC, id ASC
                     """,
                     (str(conversation_id),),
                 ).fetchall()
@@ -919,7 +937,7 @@ def list_messages(
                     SELECT {_MESSAGE_COLUMNS_PRE017}
                     FROM messages
                     WHERE conversation_id = %s
-                    ORDER BY created_at ASC
+                    ORDER BY created_at ASC, id ASC
                     """,
                     (str(conversation_id),),
                 ).fetchall()
@@ -1018,7 +1036,7 @@ def list_pinned_messages(
             SELECT {_MESSAGE_COLUMNS}
             FROM messages
             WHERE conversation_id = %s AND is_pinned = TRUE
-            ORDER BY created_at ASC
+            ORDER BY created_at ASC, id ASC
             """,
             (str(conv_id),),
         ).fetchall()
@@ -1035,27 +1053,33 @@ def delete_messages_after(
     conn: Any,
     conv_id: uuid.UUID | str,
     after_created_at: datetime,
+    after_id: uuid.UUID | str,
 ) -> int:
-    """Delete all messages strictly after *after_created_at* in the thread.
+    """Delete all messages strictly after the boundary in the thread.
 
     Used by the edit-and-resend flow to drop downstream messages when the
-    user rewrites an earlier turn. The boundary message itself
-    (``created_at == after_created_at``) is kept. Returns the number of
-    rows deleted; returns ``0`` on DB error (logged) so callers can treat
-    the operation as a no-op.
+    user rewrites an earlier turn. The boundary message itself is kept.
+
+    The comparison is the compound ``(created_at, id)`` tuple so it agrees
+    with the ``ORDER BY created_at ASC, id ASC`` read ordering: when two
+    rows share a ``created_at`` tick, only the rows that sort *after* the
+    boundary (by id) are removed, leaving the boundary turn and its same-tick
+    predecessors intact (#861). Returns the number of rows deleted; returns
+    ``0`` on DB error (logged) so callers can treat the operation as a no-op.
     """
     try:
         cursor = conn.execute(
             """
             DELETE FROM messages
-            WHERE conversation_id = %s AND created_at > %s
+            WHERE conversation_id = %s AND (created_at, id) > (%s, %s)
             """,
-            (str(conv_id), after_created_at),
+            (str(conv_id), after_created_at, str(after_id)),
         )
     except Exception:
         logger.exception(
-            "Failed to delete messages after %s for conversation=%s",
+            "Failed to delete messages after (%s, %s) for conversation=%s",
             after_created_at,
+            after_id,
             conv_id,
         )
         return 0
@@ -1068,8 +1092,9 @@ def delete_messages_from(
     conn: Any,
     conv_id: uuid.UUID | str,
     from_created_at: datetime,
+    from_id: uuid.UUID | str,
 ) -> int:
-    """Delete every message at or after *from_created_at* (inclusive).
+    """Delete every message at or after the boundary (inclusive).
 
     The companion of :func:`delete_messages_after`. Where the latter keeps
     the boundary message (used by the edit / regenerate-from-a-user-turn
@@ -1078,21 +1103,27 @@ def delete_messages_from(
     user turn we cannot regenerate "from the user message", so we drop the
     orphan assistant reply (and anything after it) outright before the
     next turn replays — otherwise the stale reply would survive a reload
-    (issue #737). Returns the number of rows deleted; returns ``0`` on DB
-    error (logged) so callers can treat the operation as a no-op.
+    (issue #737).
+
+    The comparison is the compound ``(created_at, id)`` tuple so it agrees
+    with the ``ORDER BY created_at ASC, id ASC`` read ordering when rows
+    share a ``created_at`` tick (#861). Returns the number of rows deleted;
+    returns ``0`` on DB error (logged) so callers can treat the operation as
+    a no-op.
     """
     try:
         cursor = conn.execute(
             """
             DELETE FROM messages
-            WHERE conversation_id = %s AND created_at >= %s
+            WHERE conversation_id = %s AND (created_at, id) >= (%s, %s)
             """,
-            (str(conv_id), from_created_at),
+            (str(conv_id), from_created_at, str(from_id)),
         )
     except Exception:
         logger.exception(
-            "Failed to delete messages from %s for conversation=%s",
+            "Failed to delete messages from (%s, %s) for conversation=%s",
             from_created_at,
+            from_id,
             conv_id,
         )
         return 0
@@ -1138,13 +1169,15 @@ def fork_conversation(
 
     The caller is responsible for committing the transaction.
     """
-    # Look up the fork point so we can bound the message copy by
-    # ``created_at``. Looking up the message (rather than filtering by
-    # id alone) lets us copy a contiguous time-ordered slice instead of
-    # relying on the caller to know the insertion order.
+    # Look up the fork point so we can bound the message copy by the
+    # compound ``(created_at, id)`` key. Bounding by the tuple (rather than
+    # ``created_at`` alone) copies a contiguous slice in the same order
+    # ``list_messages`` reads — and stays complementary with
+    # :func:`delete_messages_after`, which keeps the boundary row: the fork
+    # copies up to and including that same row (#861).
     boundary = conn.execute(
         """
-        SELECT created_at, conversation_id
+        SELECT created_at, id, conversation_id
         FROM messages
         WHERE id = %s
         """,
@@ -1152,7 +1185,7 @@ def fork_conversation(
     ).fetchone()
     if boundary is None:
         raise ValueError(f"Message {up_to_message_id} not found")
-    boundary_created_at, boundary_conv_id = boundary
+    boundary_created_at, boundary_id, boundary_conv_id = boundary
     if coerce_uuid(boundary_conv_id) != coerce_uuid(source_conv_id):
         raise ValueError(
             f"Message {up_to_message_id} does not belong to conversation {source_conv_id}"
@@ -1198,10 +1231,10 @@ def fork_conversation(
                 rag_context_encrypted, is_pinned, is_truncated, created_at,
                 tool_use_id, ontology_version
             FROM messages
-            WHERE conversation_id = %s AND created_at <= %s
-            ORDER BY created_at ASC
+            WHERE conversation_id = %s AND (created_at, id) <= (%s, %s)
+            ORDER BY created_at ASC, id ASC
             """,
-            (str(new_conv.id), str(source_conv_id), boundary_created_at),
+            (str(new_conv.id), str(source_conv_id), boundary_created_at, str(boundary_id)),
         )
     except Exception as exc:
         # Migration-037 fallback for fork — if the ``ontology_version``
@@ -1233,10 +1266,10 @@ def fork_conversation(
                         rag_context_encrypted, is_pinned, is_truncated, created_at,
                         tool_use_id
                     FROM messages
-                    WHERE conversation_id = %s AND created_at <= %s
-                    ORDER BY created_at ASC
+                    WHERE conversation_id = %s AND (created_at, id) <= (%s, %s)
+                    ORDER BY created_at ASC, id ASC
                     """,
-                    (str(new_conv.id), str(source_conv_id), boundary_created_at),
+                    (str(new_conv.id), str(source_conv_id), boundary_created_at, str(boundary_id)),
                 )
             except Exception as exc2:
                 # Cascading fallback — if v036 columns are also missing,
@@ -1264,10 +1297,10 @@ def fork_conversation(
                         content_encrypted, tool_input_encrypted, tool_output_encrypted,
                         rag_context_encrypted, is_pinned, is_truncated, created_at
                     FROM messages
-                    WHERE conversation_id = %s AND created_at <= %s
-                    ORDER BY created_at ASC
+                    WHERE conversation_id = %s AND (created_at, id) <= (%s, %s)
+                    ORDER BY created_at ASC, id ASC
                     """,
-                    (str(new_conv.id), str(source_conv_id), boundary_created_at),
+                    (str(new_conv.id), str(source_conv_id), boundary_created_at, str(boundary_id)),
                 )
         elif _is_missing_v036_column_error(exc):
             logger.warning(
@@ -1291,10 +1324,10 @@ def fork_conversation(
                     content_encrypted, tool_input_encrypted, tool_output_encrypted,
                     rag_context_encrypted, is_pinned, is_truncated, created_at
                 FROM messages
-                WHERE conversation_id = %s AND created_at <= %s
-                ORDER BY created_at ASC
+                WHERE conversation_id = %s AND (created_at, id) <= (%s, %s)
+                ORDER BY created_at ASC, id ASC
                 """,
-                (str(new_conv.id), str(source_conv_id), boundary_created_at),
+                (str(new_conv.id), str(source_conv_id), boundary_created_at, str(boundary_id)),
             )
         else:
             raise

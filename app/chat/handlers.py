@@ -62,6 +62,7 @@ from starlette.responses import JSONResponse, RedirectResponse, Response
 from app.auth.audit import log_action
 from app.auth.helpers import require_auth as _require_auth
 from app.auth.policy import can_access_conversation
+from app.chat.audit import log_chat_transcript_export
 from app.chat.export import conversation_to_docx_bytes, conversation_to_markdown
 from app.chat.models import (
     Conversation,
@@ -210,14 +211,14 @@ def _set_message_pinned(conn: Any, msg_id: uuid.UUID, pinned: bool) -> None:
 def _delete_messages_after_pivot(conn: Any, conv_id: uuid.UUID, pivot_msg: Message) -> int:
     """Drop every row newer than the pivot in *conv_id*.
 
-    The real :func:`delete_messages_after` takes a ``datetime`` boundary
-    (that's the schema-level truth — there is no "delete after message X"
-    primitive). The pivot ``Message`` is the anchor for both edit (the
-    user message whose reply should be regenerated) and regenerate (the
-    assistant reply's preceding user message); we look up its
-    ``created_at`` and delegate.
+    The real :func:`delete_messages_after` bounds on the compound
+    ``(created_at, id)`` key. The pivot ``Message`` is the anchor for both
+    edit (the user message whose reply should be regenerated) and regenerate
+    (the assistant reply's preceding user message); we pass its
+    ``created_at`` *and* ``id`` so same-tick rows on the wrong side of the
+    boundary are not dropped (#861).
     """
-    return int(delete_messages_after(conn, conv_id, pivot_msg.created_at) or 0)
+    return int(delete_messages_after(conn, conv_id, pivot_msg.created_at, pivot_msg.id) or 0)
 
 
 def _delete_messages_from_pivot(conn: Any, conv_id: uuid.UUID, pivot_msg: Message) -> int:
@@ -228,7 +229,7 @@ def _delete_messages_from_pivot(conn: Any, conv_id: uuid.UUID, pivot_msg: Messag
     message, so the orphan assistant reply itself must be removed before
     the next turn — otherwise it survives a reload (issue #737).
     """
-    return int(delete_messages_from(conn, conv_id, pivot_msg.created_at) or 0)
+    return int(delete_messages_from(conn, conv_id, pivot_msg.created_at, pivot_msg.id) or 0)
 
 
 def _resolve_regenerate_pivot(
@@ -930,6 +931,7 @@ def export_md_handler(req: Request, conv_id: str):
     auth_or_redirect = _require_auth(req)
     if isinstance(auth_or_redirect, Response):
         return auth_or_redirect
+    auth = auth_or_redirect
 
     loaded = _load_conversation_or_404(req, conv_id)
     if isinstance(loaded, Response):
@@ -945,6 +947,7 @@ def export_md_handler(req: Request, conv_id: str):
 
     markdown = conversation_to_markdown(conversation, messages)
     filename = _export_filename(conversation, "md")
+    log_chat_transcript_export(auth.get("id"), parsed_conv, "md")
     return Response(
         content=markdown,
         media_type="text/markdown; charset=utf-8",
@@ -957,6 +960,7 @@ def export_docx_handler(req: Request, conv_id: str):
     auth_or_redirect = _require_auth(req)
     if isinstance(auth_or_redirect, Response):
         return auth_or_redirect
+    auth = auth_or_redirect
 
     loaded = _load_conversation_or_404(req, conv_id)
     if isinstance(loaded, Response):
@@ -977,6 +981,7 @@ def export_docx_handler(req: Request, conv_id: str):
         return Response(status_code=500)
 
     filename = _export_filename(conversation, "docx")
+    log_chat_transcript_export(auth.get("id"), parsed_conv, "docx")
     return Response(
         content=payload,
         media_type=("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
