@@ -248,11 +248,13 @@ class TestAnalyzeBurdenDelta:
     def test_aggregates_burden_over_affected_provisions(self) -> None:
         stub = MagicMock()
         # First SPARQL: affected-provisions list.
-        # Then one call per provision (the per-provision burden lookup).
+        # Second (#858): ONE batched VALUES burden query for the whole set.
         stub.query.side_effect = [
             [{"provision": f"{_NS}P1"}, {"provision": f"{_NS}P2"}],
-            [_burden_sparql_row(provision_uri=f"{_NS}P1", norm_type=_OBLIGATION_URI)],
-            [_burden_sparql_row(provision_uri=f"{_NS}P2", norm_type=_PROHIBITION_URI)],
+            [
+                _burden_sparql_row(provision_uri=f"{_NS}P1", norm_type=_OBLIGATION_URI),
+                _burden_sparql_row(provision_uri=f"{_NS}P2", norm_type=_PROHIBITION_URI),
+            ],
         ]
         # #855: pass the draft's *named graph* URI; the helper now
         # GRAPH-scopes the affected-provision lookup to it.

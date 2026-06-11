@@ -44,6 +44,13 @@ Env vars
     TIKA_TIMEOUT_SECONDS   per-request timeout, defaults to 60s. The Tika
                            spec says large PDFs can take tens of seconds,
                            so 60s is the conservative floor.
+    TIKA_MAX_TEXT_BYTES    hard ceiling on the ``PUT /tika`` response body
+                           (#858). The response is streamed and aborted
+                           with a :class:`TikaError` the moment the byte
+                           count crosses the ceiling, so a zip bomb that
+                           slipped past upload validation cannot balloon
+                           into GB-scale text in process memory /
+                           Postgres. Defaults to 20 MiB.
     APP_ENV                ``development`` (default) or ``production``.
                            Controls stub-mode eligibility.
 """
@@ -113,6 +120,53 @@ def _load_timeout(explicit: float | None) -> float:
         return 60.0
 
 
+# Default ceiling for the extracted-text response (#858). 20 MiB of
+# plaintext is far beyond any real legislative draft (the biggest
+# corpus acts come in well under 5 MB of text) while still small enough
+# that one runaway extraction cannot OOM the worker or bloat the
+# encrypted ``parsed_text`` column.
+_DEFAULT_MAX_TEXT_BYTES = 20 * 1024 * 1024
+
+
+def _load_max_text_bytes(explicit: int | None) -> int:
+    """Return the effective ``PUT /tika`` response byte ceiling."""
+    if explicit is not None:
+        return max(1, int(explicit))
+    raw = os.environ.get("TIKA_MAX_TEXT_BYTES", str(_DEFAULT_MAX_TEXT_BYTES))
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        logger.warning(
+            "Invalid TIKA_MAX_TEXT_BYTES=%r, falling back to %d",
+            raw,
+            _DEFAULT_MAX_TEXT_BYTES,
+        )
+        return _DEFAULT_MAX_TEXT_BYTES
+
+
+def _error_body_snippet(response: httpx.Response, limit: int = 200) -> str:
+    """Return a bounded snippet of an error response body.
+
+    In streaming mode (#858) the body of a non-2xx response has not
+    been read when ``raise_for_status`` fires, so ``response.text``
+    would raise ``ResponseNotRead``. Pull at most ~*limit* bytes for
+    the error message and never let the snippet read itself fail the
+    error path.
+    """
+    buf = b""
+    try:
+        for part in response.iter_bytes():
+            buf += part
+            if len(buf) >= limit:
+                break
+    except Exception:  # noqa: BLE001 — best-effort diagnostics only
+        try:
+            buf = response.content[:limit]
+        except Exception:  # noqa: BLE001
+            buf = b""
+    return buf[:limit].decode("utf-8", errors="replace")
+
+
 # ---------------------------------------------------------------------------
 # Client
 # ---------------------------------------------------------------------------
@@ -128,11 +182,20 @@ class TikaClient:
             in production.
         timeout: Per-request timeout in seconds. If ``None`` (the default),
             the client reads ``TIKA_TIMEOUT_SECONDS`` from the environment.
+        max_text_bytes: Hard ceiling on the ``PUT /tika`` response body
+            (#858). If ``None`` (the default), the client reads
+            ``TIKA_MAX_TEXT_BYTES`` from the environment (20 MiB default).
     """
 
-    def __init__(self, url: str | None = None, timeout: float | None = None) -> None:
+    def __init__(
+        self,
+        url: str | None = None,
+        timeout: float | None = None,
+        max_text_bytes: int | None = None,
+    ) -> None:
         self.url = _load_url(url)
         self.timeout = _load_timeout(timeout)
+        self.max_text_bytes = _load_max_text_bytes(max_text_bytes)
         # ``stub_mode`` is a cached boolean so we do not re-check the env
         # on every call. The caller can detect stub mode via ``is_healthy``.
         # #481: source the production/dev gate directly from
@@ -175,8 +238,28 @@ class TikaClient:
 
     # -- public API ---------------------------------------------------------
 
+    def _oversize_error(self, endpoint: str) -> TikaError:
+        """Build the canonical over-ceiling :class:`TikaError` (#858).
+
+        The ``"response exceeded"`` phrase is load-bearing: it is the
+        sentinel :func:`app.docs.error_mapping.map_failure_to_user_message`
+        matches to surface the actionable Estonian "text too large"
+        message to the user.
+        """
+        return TikaError(
+            f"Tika response exceeded {self.max_text_bytes} bytes "
+            f"(text extraction cap) at {endpoint}"
+        )
+
     def extract_text(self, file_bytes: bytes, content_type: str) -> str:
         """Extract plaintext from *file_bytes* via Tika's ``PUT /tika``.
+
+        The response is **streamed** with a hard byte ceiling (#858):
+        the moment the body crosses ``self.max_text_bytes`` the
+        connection is dropped and a :class:`TikaError` is raised, so a
+        decompression bomb can never balloon into GB-scale text in
+        process memory. A ``Content-Length`` header over the ceiling is
+        rejected before the body is read at all.
 
         Args:
             file_bytes: Raw (decrypted) file contents.
@@ -187,7 +270,8 @@ class TikaClient:
             extract anything — the handler should guard against that.
 
         Raises:
-            TikaError: On timeout, non-2xx response, or connection error.
+            TikaError: On timeout, non-2xx response, connection error,
+                or a response body over ``self.max_text_bytes``.
             RuntimeError: In production when ``TIKA_URL`` is unset.
         """
         if self._stub_mode:
@@ -196,8 +280,10 @@ class TikaClient:
 
         url = self._require_live_url()
         endpoint = f"{url}/tika"
+        cap = self.max_text_bytes
         try:
-            response = httpx.put(
+            with httpx.stream(
+                "PUT",
                 endpoint,
                 content=file_bytes,
                 headers={
@@ -205,8 +291,23 @@ class TikaClient:
                     "Accept": "text/plain",
                 },
                 timeout=self.timeout,
-            )
-            response.raise_for_status()
+            ) as response:
+                response.raise_for_status()
+                declared = response.headers.get("content-length")
+                if declared is not None:
+                    try:
+                        if int(declared) > cap:
+                            raise self._oversize_error(endpoint)
+                    except ValueError:
+                        pass  # malformed header — fall through to the counted read
+                chunks: list[bytes] = []
+                total = 0
+                for chunk in response.iter_bytes():
+                    total += len(chunk)
+                    if total > cap:
+                        raise self._oversize_error(endpoint)
+                    chunks.append(chunk)
+                encoding = response.encoding or "utf-8"
         except httpx.TimeoutException as exc:
             raise TikaError(
                 f"Tika request timed out after {self.timeout:.1f}s at {endpoint}"
@@ -214,11 +315,11 @@ class TikaClient:
         except httpx.HTTPStatusError as exc:
             raise TikaError(
                 f"Tika returned HTTP {exc.response.status_code} from {endpoint}: "
-                f"{exc.response.text[:200]}"
+                f"{_error_body_snippet(exc.response)}"
             ) from exc
         except httpx.HTTPError as exc:
             raise TikaError(f"Tika request to {endpoint} failed: {exc}") from exc
-        return response.text
+        return b"".join(chunks).decode(encoding, errors="replace")
 
     def extract_metadata(self, file_bytes: bytes, content_type: str) -> dict[str, Any]:
         """Extract document metadata via Tika's ``PUT /meta``.

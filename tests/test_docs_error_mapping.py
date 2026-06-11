@@ -16,6 +16,7 @@ from app.docs.error_mapping import (
     MSG_LLM_UNAVAILABLE,
     MSG_SPARQL_BUSY,
     MSG_TIKA_CAPACITY,
+    MSG_TIKA_TEXT_TOO_LARGE,
     MSG_UNKNOWN,
     map_failure_to_user_message,
 )
@@ -88,6 +89,27 @@ class TestTikaCapacity:
         issue (Tika took too long), not a SPARQL outage."""
         user, _ = map_failure_to_user_message(_fake_requests_timeout("upload timed out"), "parse")
         assert user == MSG_TIKA_CAPACITY
+
+
+class TestTikaTextTooLarge:
+    """#858 — the streamed-response byte ceiling maps to its own
+    actionable Estonian message (split the file), so a zip-bomb-sized
+    extraction fails with concrete user guidance, not the generic
+    capacity hint."""
+
+    def test_oversize_tika_error_maps_to_text_too_large(self):
+        from app.docs.tika_client import TikaError
+
+        exc = TikaError(
+            "Tika response exceeded 20971520 bytes (text extraction cap) at http://tika:9998/tika"
+        )
+        user, debug = map_failure_to_user_message(exc, "parse")
+        assert user == MSG_TIKA_TEXT_TOO_LARGE
+        assert "response exceeded" in debug
+
+    def test_message_is_actionable_estonian(self):
+        assert "mahukas" in MSG_TIKA_TEXT_TOO_LARGE
+        assert "jagage" in MSG_TIKA_TEXT_TOO_LARGE
 
 
 class TestSparqlBusy:

@@ -404,6 +404,36 @@ class TestTikaFailure:
         assert user_msg == MSG_UNKNOWN
         p.m_queue.enqueue.assert_not_called()
 
+    def test_tika_oversize_response_fails_with_actionable_message(self):
+        """#858: the streamed-response byte ceiling surfaces the dedicated
+        Estonian "text too large / split the file" message to the user."""
+        from app.docs.error_mapping import MSG_TIKA_TEXT_TOO_LARGE
+
+        draft = _make_draft()
+
+        with _Patches() as p:
+            p.m_get_draft.return_value = draft
+            p.m_read_file.return_value = b"data"
+            p.m_tika_client.extract_text.side_effect = TikaError(
+                "Tika response exceeded 20971520 bytes (text extraction cap) "
+                "at http://tika:9998/tika"
+            )
+
+            with pytest.raises(TikaError, match="response exceeded"):
+                parse_draft(
+                    {"draft_id": str(draft.id)},
+                    attempt=3,
+                    max_attempts=3,
+                )
+
+        statuses = _statuses_written(p.conns, p.m_update_draft_status)
+        assert "failed" in statuses
+        params = _failed_update_params(p.conns, p.m_update_draft_status)
+        assert params is not None
+        user_msg, debug_detail, _ = params
+        assert user_msg == MSG_TIKA_TEXT_TOO_LARGE
+        assert "response exceeded" in debug_detail
+
     def test_tika_error_does_not_mark_failed_when_retry_pending(self):
         """#448: a transient TikaError on attempt 1 must not flip the draft."""
         draft = _make_draft()

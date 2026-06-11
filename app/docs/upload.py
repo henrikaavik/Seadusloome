@@ -5,8 +5,9 @@ upload flow. It is deliberately kept outside ``routes.py`` so the logic
 can be unit-tested without spinning up a FastHTML ``TestClient``.
 
 Flow (new-draft branch):
-    1. Validate title, filename, content-type, and size.
-    2. Read the upload stream into memory.
+    1. Validate title, filename, content-type, and the *declared* size.
+    2. Read the upload stream incrementally with a hard byte cap, then
+       sniff magic bytes + run the .docx zip-bomb caps (#858).
     3. Encrypt and persist via ``app.storage.store_file``.
     4. Build a stable ``graph_uri`` for the draft's Jena named graph.
     5. Insert the ``drafts`` row with ``status='uploaded'``.
@@ -34,9 +35,11 @@ around with no DB row pointing at it.
 
 from __future__ import annotations
 
+import io
 import logging
 import os
 import uuid
+import zipfile
 from typing import Any, Protocol
 
 import psycopg
@@ -84,6 +87,55 @@ _ALLOWED_CONTENT_TYPES: frozenset[str] = frozenset(
 _TITLE_MIN_LEN = 1
 _TITLE_MAX_LEN = 200
 
+# ---------------------------------------------------------------------------
+# Resource bounds + content sniffing (#858)
+# ---------------------------------------------------------------------------
+
+# Incremental read window for the bounded upload reader. 1 MiB keeps the
+# per-iteration allocation small while still finishing a 50 MB upload in
+# ~50 read calls.
+_READ_CHUNK_BYTES = 1024 * 1024
+
+# Magic bytes of the two accepted formats. A .docx is an OOXML ZIP and
+# always begins with a ZIP local-file-header; a PDF must carry the
+# ``%PDF-`` header near the start (the spec tolerates a small preamble,
+# so we scan the first KiB rather than offset 0 only).
+_DOCX_MAGIC = b"PK\x03\x04"
+_PDF_MAGIC = b"%PDF-"
+_PDF_MAGIC_SCAN_BYTES = 1024
+
+# Zip-bomb guards for .docx (#858). The *claimed* uncompressed size comes
+# from the ZIP central directory (stdlib ``zipfile`` — no decompression
+# needed). Two independent caps:
+#
+#   * absolute: total claimed uncompressed size may not exceed
+#     ``_DOCX_UNCOMPRESSED_MULTIPLIER × max_upload_bytes()`` (tracks the
+#     ops-tunable upload limit, 500 MB at the 50 MB default);
+#   * ratio: above ``_RATIO_CHECK_FLOOR_BYTES`` uncompressed, the
+#     expansion ratio may not exceed ``_MAX_DOCX_COMPRESSION_RATIO``.
+#     Real-world OOXML compresses ~5-20x; sparse XML can reach ~50x.
+#     The 10 MiB floor keeps tiny-but-highly-compressible legitimate
+#     documents out of the ratio police.
+_DOCX_UNCOMPRESSED_MULTIPLIER = 10
+_MAX_DOCX_COMPRESSION_RATIO = 100
+_RATIO_CHECK_FLOOR_BYTES = 10 * 1024 * 1024
+
+# User-facing Estonian messages for the content checks. Module-level so
+# tests (and a future i18n pass) reference the exact strings.
+MSG_CONTENT_MISMATCH_DOCX = (
+    "Faili sisu ei vasta .docx vormingule. Palun laadige üles korrektne Wordi dokument."
+)
+MSG_CONTENT_MISMATCH_PDF = (
+    "Faili sisu ei vasta .pdf vormingule. Palun laadige üles korrektne PDF-dokument."
+)
+MSG_DOCX_CORRUPT = (
+    "DOCX-fail on vigane või rikutud. Palun salvestage dokument uuesti ja proovige siis uuesti."
+)
+MSG_DOCX_BOMB = (
+    "DOCX-faili pakitud sisu on lubatust palju suurem. "
+    "Palun jagage dokument väiksemateks failideks."
+)
+
 # Draft graph URIs live in a dedicated sub-namespace of the Estonian
 # legal ontology so Jena can host them alongside the enacted laws.
 _GRAPH_URI_PREFIX = "https://data.riik.ee/ontology/estleg/drafts/"
@@ -102,13 +154,19 @@ class _UploadLike(Protocol):
 
     Kept as a Protocol so unit tests can pass a tiny stub without
     depending on the full multipart machinery.
+
+    ``read`` mirrors Starlette's incremental signature (#858): the
+    bounded reader in :func:`_read_bounded` always passes an explicit
+    chunk size so an oversized upload is rejected after at most
+    ``max_upload_bytes() + 1`` buffered bytes instead of being slurped
+    whole into memory first.
     """
 
     filename: str | None
     content_type: str | None
     size: int | None
 
-    async def read(self) -> bytes: ...
+    async def read(self, size: int = -1, /) -> bytes: ...
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +202,8 @@ def max_upload_bytes() -> int:
     """Return the maximum accepted upload size in bytes.
 
     Single source of truth shared between server-side validation
-    (:func:`_validate_size`) and the upload-form UI (#776). Reads
+    (:func:`_reject_oversize_declared` / :func:`_read_bounded`) and the
+    upload-form UI (#776). Reads
     ``MAX_UPLOAD_SIZE_MB`` from the environment on every call so a
     runtime override (e.g. ``monkeypatch.setenv`` in tests, or a Coolify
     env-var change) is picked up without a restart.
@@ -205,21 +264,104 @@ def _validate_content_type(content_type: str | None) -> str:
     return primary
 
 
-def _validate_size(size: int | None, contents: bytes) -> int:
-    """Return the real (post-read) file size, enforcing the limit."""
-    actual = len(contents)
-    # Prefer the post-read length — ``UploadFile.size`` is advisory and
-    # some clients lie about it.
+def _too_large_error() -> DraftUploadError:
+    """Build the canonical Estonian oversize rejection."""
+    label = max_upload_mb_display()
+    return DraftUploadError(f"Fail on liiga suur. Maksimaalne lubatud suurus on {label}.")
+
+
+def _reject_oversize_declared(size: int | None) -> None:
+    """Reject on the *declared* size BEFORE any bytes are read (#858).
+
+    ``UploadFile.size`` carries the multipart part's Content-Length-
+    equivalent (Starlette counts the bytes while spooling the part).
+    A declared size over the limit is rejected up front so we never
+    pull an oversized spool into process memory at all. A missing /
+    lying declaration is still caught by the bounded read below.
+    """
+    if size is not None and size > max_upload_bytes():
+        raise _too_large_error()
+
+
+async def _read_bounded(upload: _UploadLike) -> bytes:
+    """Read the upload incrementally with a hard cap (#858).
+
+    Reads at most ``max_upload_bytes() + 1`` bytes in
+    :data:`_READ_CHUNK_BYTES` windows — the extra byte is only there to
+    detect "stream continues past the limit". The moment the running
+    total exceeds the limit we raise, so process memory never holds
+    more than ``limit + 1`` bytes of an attacker-sized body (the old
+    code slurped the whole stream first and size-checked afterwards).
+
+    Raises:
+        DraftUploadError: Oversized stream, or a fully-empty stream.
+    """
     limit = max_upload_bytes()
-    if actual == 0:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        window = min(_READ_CHUNK_BYTES, limit + 1 - total)
+        chunk = await upload.read(window)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            raise _too_large_error()
+        chunks.append(chunk)
+    if total == 0:
         raise DraftUploadError("Üleslaaditud fail on tühi.")
-    if actual > limit:
-        label = max_upload_mb_display()
-        raise DraftUploadError(f"Fail on liiga suur. Maksimaalne lubatud suurus on {label}.")
-    if size is not None and size > limit:
-        label = max_upload_mb_display()
-        raise DraftUploadError(f"Fail on liiga suur. Maksimaalne lubatud suurus on {label}.")
-    return actual
+    return b"".join(chunks)
+
+
+def _validate_content_matches_type(contents: bytes, filename: str) -> None:
+    """Sniff the true file type from magic bytes (#858).
+
+    The extension/content-type pair is attacker-controlled metadata; the
+    leading bytes are what Tika will actually parse. A renamed
+    executable (or anything else) is rejected here with an Estonian
+    message before it is encrypted, persisted, or shipped to Tika.
+    ``_validate_filename`` has already guaranteed the extension is one
+    of :data:`_ALLOWED_EXTENSIONS`, so the branches are exhaustive.
+    """
+    lower = filename.lower()
+    if lower.endswith(".docx"):
+        if not contents.startswith(_DOCX_MAGIC):
+            raise DraftUploadError(MSG_CONTENT_MISMATCH_DOCX)
+        _validate_docx_zip(contents)
+    elif lower.endswith(".pdf"):
+        if _PDF_MAGIC not in contents[:_PDF_MAGIC_SCAN_BYTES]:
+            raise DraftUploadError(MSG_CONTENT_MISMATCH_PDF)
+
+
+def _validate_docx_zip(contents: bytes) -> None:
+    """Validate the .docx ZIP central directory + zip-bomb caps (#858).
+
+    Opening with stdlib :mod:`zipfile` parses the central directory only
+    (no decompression), which both proves the archive is structurally
+    sound and yields each entry's *claimed* uncompressed size. The
+    claims are exactly what a classic zip bomb inflates, so capping the
+    claimed total (absolute + expansion-ratio, see the constants block)
+    stops the bomb before Tika ever tries to expand it. A bomb that
+    under-declares its sizes slips past this check but is then caught
+    by the Tika response byte ceiling (``TIKA_MAX_TEXT_BYTES``).
+    """
+    try:
+        # NOTE: deliberately *no* ``testzip()`` — that decompresses every
+        # entry and would hand the bomb exactly the CPU/RAM it wants.
+        # Central-directory parsing is metadata-only.
+        with zipfile.ZipFile(io.BytesIO(contents)) as zf:
+            infos = zf.infolist()
+    except (zipfile.BadZipFile, zipfile.LargeZipFile, ValueError, OSError) as exc:
+        raise DraftUploadError(MSG_DOCX_CORRUPT) from exc
+
+    total_uncompressed = sum(max(0, info.file_size) for info in infos)
+    if total_uncompressed > _DOCX_UNCOMPRESSED_MULTIPLIER * max_upload_bytes():
+        raise DraftUploadError(MSG_DOCX_BOMB)
+    if (
+        total_uncompressed > _RATIO_CHECK_FLOOR_BYTES
+        and total_uncompressed > _MAX_DOCX_COMPRESSION_RATIO * max(1, len(contents))
+    ):
+        raise DraftUploadError(MSG_DOCX_BOMB)
 
 
 # ---------------------------------------------------------------------------
@@ -305,8 +447,14 @@ async def handle_upload(
     filename = _validate_filename(upload.filename)
     content_type = _validate_content_type(upload.content_type)
 
-    contents = await upload.read()
-    file_size = _validate_size(upload.size, contents)
+    # #858 resource bounds: reject on the declared size BEFORE reading,
+    # then read incrementally with a hard byte cap, then sniff the true
+    # content type (magic bytes + .docx zip-bomb caps) before anything
+    # is encrypted or persisted.
+    _reject_oversize_declared(upload.size)
+    contents = await _read_bounded(upload)
+    _validate_content_matches_type(contents, filename)
+    file_size = len(contents)
 
     # Step 3: encrypt and persist. Store owner-scoped so the storage
     # path itself already includes the acting user's id.

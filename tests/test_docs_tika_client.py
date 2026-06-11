@@ -51,12 +51,36 @@ def _http_error_response(status: int, body: str = "boom") -> MagicMock:
     response = MagicMock()
     response.status_code = status
     response.text = body
+    # Streaming error paths read the body via ``iter_bytes`` (#858).
+    response.iter_bytes.return_value = [body.encode()]
     response.raise_for_status.side_effect = httpx.HTTPStatusError(
         f"{status} error",
         request=MagicMock(),
         response=response,
     )
     return response
+
+
+def _ok_stream_response(
+    chunks: list[bytes] | None = None,
+    headers: dict[str, str] | None = None,
+) -> MagicMock:
+    """Build a fake streamed 200 OK response (#858 ``httpx.stream`` path)."""
+    response = MagicMock()
+    response.status_code = 200
+    response.headers = headers or {}
+    response.encoding = "utf-8"
+    response.raise_for_status = MagicMock()
+    response.iter_bytes.return_value = chunks if chunks is not None else [b"hello world"]
+    return response
+
+
+def _stream_ctx(response: MagicMock) -> MagicMock:
+    """Wrap a fake response in the context manager ``httpx.stream`` returns."""
+    ctx = MagicMock()
+    ctx.__enter__.return_value = response
+    ctx.__exit__.return_value = False
+    return ctx
 
 
 @pytest.fixture(autouse=True)
@@ -80,8 +104,9 @@ class TestStubMode:
 
         client = TikaClient()
         # No httpx call should be made in stub mode.
-        with patch("httpx.put") as mock_put:
+        with patch("httpx.stream") as mock_stream, patch("httpx.put") as mock_put:
             result = client.extract_text(b"hello", "application/pdf")
+            mock_stream.assert_not_called()
             mock_put.assert_not_called()
 
         assert "[STUB Tika]" in result
@@ -113,9 +138,12 @@ class TestStubMode:
         client = TikaClient(url="http://fake:9998")
         assert client.url == "http://fake:9998"
         # Not stub anymore — real HTTP must be attempted.
-        with patch("httpx.put", return_value=_ok_response("extracted")) as mock_put:
+        with patch(
+            "httpx.stream",
+            return_value=_stream_ctx(_ok_stream_response([b"extracted"])),
+        ) as mock_stream:
             result = client.extract_text(b"hello", "application/pdf")
-            mock_put.assert_called_once()
+            mock_stream.assert_called_once()
         assert result == "extracted"
 
 
@@ -174,13 +202,17 @@ class TestProductionMode:
 class TestExtractText:
     def test_extract_text_happy_path(self):
         client = TikaClient(url="http://tika:9998")
-        with patch("httpx.put", return_value=_ok_response("hello world")) as mock_put:
+        with patch(
+            "httpx.stream",
+            return_value=_stream_ctx(_ok_stream_response([b"hello world"])),
+        ) as mock_stream:
             result = client.extract_text(b"pdf bytes", "application/pdf")
 
         assert result == "hello world"
-        mock_put.assert_called_once()
-        _args, kwargs = mock_put.call_args
-        # URL comes first (positional) and headers / content are keyword.
+        mock_stream.assert_called_once()
+        args, kwargs = mock_stream.call_args
+        # Method + URL are positional; headers / content are keyword.
+        assert args[0] == "PUT"
         assert kwargs["content"] == b"pdf bytes"
         assert kwargs["headers"]["Content-Type"] == "application/pdf"
         assert kwargs["headers"]["Accept"] == "text/plain"
@@ -188,35 +220,100 @@ class TestExtractText:
     def test_extract_text_trailing_slash_in_url_is_stripped(self):
         client = TikaClient(url="http://tika:9998/")
         assert client.url == "http://tika:9998"
-        with patch("httpx.put", return_value=_ok_response("ok")) as mock_put:
+        with patch(
+            "httpx.stream", return_value=_stream_ctx(_ok_stream_response([b"ok"]))
+        ) as mock_stream:
             client.extract_text(b"data", "application/pdf")
-        called_url = mock_put.call_args.args[0]
+        called_url = mock_stream.call_args.args[1]
         assert called_url == "http://tika:9998/tika"
 
     def test_extract_text_default_content_type_when_blank(self):
         client = TikaClient(url="http://tika:9998")
-        with patch("httpx.put", return_value=_ok_response("ok")) as mock_put:
+        with patch(
+            "httpx.stream", return_value=_stream_ctx(_ok_stream_response([b"ok"]))
+        ) as mock_stream:
             client.extract_text(b"data", "")
-        kwargs = mock_put.call_args.kwargs
+        kwargs = mock_stream.call_args.kwargs
         assert kwargs["headers"]["Content-Type"] == "application/octet-stream"
 
     def test_extract_text_timeout_raises_tika_error(self):
         client = TikaClient(url="http://tika:9998")
-        with patch("httpx.put", side_effect=httpx.ReadTimeout("slow")):
+        with patch("httpx.stream", side_effect=httpx.ReadTimeout("slow")):
             with pytest.raises(TikaError, match="timed out"):
                 client.extract_text(b"data", "application/pdf")
 
     def test_extract_text_500_raises_tika_error(self):
         client = TikaClient(url="http://tika:9998")
-        with patch("httpx.put", return_value=_http_error_response(500, "server down")):
+        with patch(
+            "httpx.stream",
+            return_value=_stream_ctx(_http_error_response(500, "server down")),
+        ):
             with pytest.raises(TikaError, match="HTTP 500"):
                 client.extract_text(b"data", "application/pdf")
 
     def test_extract_text_connect_error_raises_tika_error(self):
         client = TikaClient(url="http://tika:9998")
-        with patch("httpx.put", side_effect=httpx.ConnectError("refused")):
+        with patch("httpx.stream", side_effect=httpx.ConnectError("refused")):
             with pytest.raises(TikaError, match="failed"):
                 client.extract_text(b"data", "application/pdf")
+
+
+# ---------------------------------------------------------------------------
+# extract_text — #858 response byte ceiling
+# ---------------------------------------------------------------------------
+
+
+class TestExtractTextByteCeiling:
+    def test_oversize_streamed_body_raises_and_stops_reading(self):
+        """A body that crosses ``max_text_bytes`` raises TikaError and the
+        client stops consuming chunks (no full-body buffering)."""
+        client = TikaClient(url="http://tika:9998", max_text_bytes=10)
+
+        consumed: list[int] = []
+
+        def _chunks():
+            for _ in range(1000):
+                consumed.append(4)
+                yield b"xxxx"
+
+        response = _ok_stream_response()
+        response.iter_bytes.return_value = _chunks()
+
+        with patch("httpx.stream", return_value=_stream_ctx(response)):
+            with pytest.raises(TikaError, match="response exceeded"):
+                client.extract_text(b"data", "application/pdf")
+
+        # 10-byte cap → 3rd chunk (12 bytes) trips it; the remaining 997
+        # chunks must never be pulled off the wire.
+        assert len(consumed) == 3
+
+    def test_oversize_content_length_header_rejected_before_body(self):
+        """A Content-Length over the cap is rejected without reading the body."""
+        client = TikaClient(url="http://tika:9998", max_text_bytes=10)
+        response = _ok_stream_response(headers={"content-length": "999999"})
+
+        with patch("httpx.stream", return_value=_stream_ctx(response)):
+            with pytest.raises(TikaError, match="response exceeded"):
+                client.extract_text(b"data", "application/pdf")
+
+        response.iter_bytes.assert_not_called()
+
+    def test_body_at_cap_passes(self):
+        """Exactly ``max_text_bytes`` bytes is allowed (cap is exclusive)."""
+        client = TikaClient(url="http://tika:9998", max_text_bytes=11)
+        response = _ok_stream_response([b"hello world"])  # 11 bytes
+        with patch("httpx.stream", return_value=_stream_ctx(response)):
+            assert client.extract_text(b"data", "application/pdf") == "hello world"
+
+    def test_env_var_max_text_bytes(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("TIKA_MAX_TEXT_BYTES", "12345")
+        client = TikaClient(url="http://tika:9998")
+        assert client.max_text_bytes == 12345
+
+    def test_env_var_invalid_max_text_bytes_falls_back(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("TIKA_MAX_TEXT_BYTES", "not-a-number")
+        client = TikaClient(url="http://tika:9998")
+        assert client.max_text_bytes == 20 * 1024 * 1024
 
 
 # ---------------------------------------------------------------------------

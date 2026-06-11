@@ -222,28 +222,30 @@ class TestBurdenGraphScoping:
         stub.query.side_effect = [
             # affected-provisions list
             [{"provision": f"{EST}P1"}, {"provision": f"{EST}P2"}],
-            # per-provision burden
+            # ONE batched VALUES burden query for the whole set (#858)
             [
                 {
                     "provision": f"{EST}P1",
                     "provisionLabel": "P1",
                     "normType": f"{EST}NormType_Obligation",
                     "dutyHolder": "Tööandja",
-                }
-            ],
-            [
+                },
                 {
                     "provision": f"{EST}P2",
                     "provisionLabel": "P2",
                     "normType": f"{EST}NormType_Prohibition",
                     "dutyHolder": "Riik",
-                }
+                },
             ],
         ]
         delta = burden_delta_for_draft(_V2_SELF, graph_uri=_V2_GRAPH, sparql_client=stub)
         assert delta.affected_count == 2
         assert delta.before.counts["obligation"] == 1
         assert delta.before.counts["prohibition"] == 1
+        # #858 G5: exactly TWO round-trips total — affected lookup + one
+        # batched VALUES query (never one query per provision).
+        assert stub.query.call_count == 2
+        assert "VALUES ?provision" in stub.query.call_args_list[1].args[0]
         # The first query must be GRAPH-scoped + bind the ``#self`` subject.
         first = stub.query.call_args_list[0]
         assert f"GRAPH <{_V2_GRAPH}>" in first.args[0]

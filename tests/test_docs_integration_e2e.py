@@ -29,14 +29,26 @@ emulator — every test that touches a new column has to extend it.
 
 from __future__ import annotations
 
+import io
 import json
 import uuid
+import zipfile
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 from starlette.testclient import TestClient
+
+
+def _docx_bytes() -> bytes:
+    """Minimal structurally-valid .docx bytes (#858 magic/zip checks)."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", "<Types/>")
+        zf.writestr("word/document.xml", "<w:document>E2E test</w:document>")
+    return buf.getvalue()
+
 
 # ---------------------------------------------------------------------------
 # Shared identities + helpers
@@ -551,7 +563,7 @@ class TestDocsPipelineE2E:
                 files={
                     "file": (
                         "eelnou.docx",
-                        b"%PDF-test bytes",
+                        _docx_bytes(),
                         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                     )
                 },

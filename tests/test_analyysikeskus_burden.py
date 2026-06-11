@@ -316,14 +316,16 @@ class TestBurdenDeltaForDraft:
         from app.analyysikeskus.burden import burden_delta_for_draft
 
         stub_client = MagicMock()
-        # First call: affected-provisions list. Then one call per provision.
+        # First call: affected-provisions list. Second call (#858): ONE
+        # batched VALUES query covering the whole provision set.
         stub_client.query.side_effect = [
             # Affected provisions (the draft touches P1 + P2)
             [{"provision": f"{_NS}P1"}, {"provision": f"{_NS}P2"}],
-            # Burden for P1 — obligation
-            [_provision_row(provision=f"{_NS}P1", norm_type=_OBLIGATION_URI)],
-            # Burden for P2 — right
-            [_provision_row(provision=f"{_NS}P2", norm_type=_RIGHT_URI)],
+            # Burden for the whole set in a single reply
+            [
+                _provision_row(provision=f"{_NS}P1", norm_type=_OBLIGATION_URI),
+                _provision_row(provision=f"{_NS}P2", norm_type=_RIGHT_URI),
+            ],
         ]
         delta = burden_delta_for_draft(f"{_NS}Draft_1", sparql_client=stub_client)
         assert delta.affected_count == 2
@@ -332,6 +334,74 @@ class TestBurdenDeltaForDraft:
         assert delta.before.counts["obligation"] == 1
         assert delta.before.counts["right"] == 1
 
+    def test_single_values_query_for_n_provisions(self):
+        """#858 G5: the delta issues exactly ONE follow-up SPARQL query no
+        matter how many provisions the draft touches — the per-provision
+        loop (up to 500 sequential round-trips) is gone."""
+        from app.analyysikeskus.burden import burden_delta_for_draft
+
+        n = 25
+        uris = [f"{_NS}P{i}" for i in range(n)]
+        stub_client = MagicMock()
+        stub_client.query.side_effect = [
+            [{"provision": u} for u in uris],
+            [_provision_row(provision=u, norm_type=_OBLIGATION_URI) for u in uris],
+        ]
+        delta = burden_delta_for_draft(f"{_NS}Draft_1", sparql_client=stub_client)
+
+        # Call-count assertion: 1 affected-provisions lookup + 1 batched
+        # burden query. NOT 1 + N.
+        assert stub_client.query.call_count == 2
+        second_sql = stub_client.query.call_args_list[1].args[0]
+        assert "VALUES ?provision" in second_sql
+        for u in uris:
+            assert f"<{u}>" in second_sql
+        assert delta.affected_count == n
+        assert delta.before.counts["obligation"] == n
+
+    def test_batched_query_preserves_current_law_scope(self):
+        """#858/#850: the batched VALUES query keeps the temporal-scope
+        FILTER the per-provision path applied (current-law default)."""
+        from app.analyysikeskus.burden import _build_provisions_burden_values_query
+        from app.ontology.relations import PREDICATES
+
+        q = _build_provisions_burden_values_query([f"{_NS}P1", f"{_NS}P2"])
+        assert "VALUES ?provision" in q
+        assert "FILTER NOT EXISTS" in q
+        assert PREDICATES.TEMPORAL_STATUS in q
+        assert PREDICATES.REPEAL_DATE in q
+        # The ALL scope drops the filter, mirroring the act/provision paths.
+        q_all = _build_provisions_burden_values_query([f"{_NS}P1"], scope=TemporalScope.ALL)
+        assert "FILTER NOT EXISTS" not in q_all
+
+    def test_batched_query_rejects_unsafe_uri(self):
+        import pytest
+
+        from app.analyysikeskus.burden import _build_provisions_burden_values_query
+
+        with pytest.raises(ValueError, match="Unsafe URI"):
+            _build_provisions_burden_values_query(["https://x.ee/p> } DROP ALL #"])
+
+    def test_unsafe_affected_uris_are_dropped_not_queried(self):
+        """Affected entries failing the URI allowlist (e.g. literal act
+        titles) are dropped before the batched query — previously they
+        burned a doomed per-provision round-trip each."""
+        from app.analyysikeskus.burden import burden_delta_for_draft
+
+        stub_client = MagicMock()
+        stub_client.query.side_effect = [
+            [{"provision": f"{_NS}P1"}, {"provision": "Töölepingu seadus"}],
+            [_provision_row(provision=f"{_NS}P1", norm_type=_OBLIGATION_URI)],
+        ]
+        delta = burden_delta_for_draft(f"{_NS}Draft_1", sparql_client=stub_client)
+        assert stub_client.query.call_count == 2
+        second_sql = stub_client.query.call_args_list[1].args[0]
+        assert "Töölepingu seadus" not in second_sql
+        # The literal still counts as "affected" (same as the old loop,
+        # where its doomed lookup contributed zero rows).
+        assert delta.affected_count == 2
+        assert delta.before.total == 1
+
     def test_dead_jena_on_affected_query_returns_empty(self):
         from app.analyysikeskus.burden import burden_delta_for_draft
 
@@ -339,6 +409,21 @@ class TestBurdenDeltaForDraft:
         stub_client.query.side_effect = RuntimeError("jena down")
         delta = burden_delta_for_draft(f"{_NS}Draft_1", sparql_client=stub_client)
         assert delta.affected_count == 0
+        assert delta.before.total == 0
+
+    def test_dead_jena_on_batched_query_degrades_to_empty_summary(self):
+        """A failure on the batched burden query keeps affected_count but
+        yields an empty 'before' summary (mirrors the old per-provision
+        degrade path)."""
+        from app.analyysikeskus.burden import burden_delta_for_draft
+
+        stub_client = MagicMock()
+        stub_client.query.side_effect = [
+            [{"provision": f"{_NS}P1"}],
+            RuntimeError("jena down"),
+        ]
+        delta = burden_delta_for_draft(f"{_NS}Draft_1", sparql_client=stub_client)
+        assert delta.affected_count == 1
         assert delta.before.total == 0
 
 
@@ -804,3 +889,33 @@ class TestActQueryAgainstFixture:
         uris = {str(r[2]) for r in raw_rows if r[2] is not None}
         assert "Act 1 — fixture host" in labels
         assert f"{_NS}Act_1" in uris
+
+    def test_batched_values_query_runs_on_fixture(self):
+        """#858: the single batched VALUES burden query is valid SPARQL —
+        it resolves every requested provision in ONE execution.
+
+        NOTE: an *unknown* URI in the VALUES set keeps its bare row on
+        Jena/ARQ (spec-correct leftjoin → "Liigitamata" bucket, same as
+        the per-provision ``LIMIT 1`` variant), but rdflib's evaluator
+        drops VALUES rows that match no OPTIONAL pattern — so this
+        fixture test only asserts the known provisions. The unknown-row
+        aggregation contract is covered by the stub-client tests in
+        :class:`TestBurdenDeltaForDraft`.
+        """
+        from app.analyysikeskus.burden import _build_provisions_burden_values_query
+        from app.ontology.relations import norm_type_key
+
+        g = self._load_graph()
+        query = _build_provisions_burden_values_query(
+            [f"{_NS}Provision_1", f"{_NS}Provision_3", f"{_NS}Provision_does_not_exist"]
+        )
+
+        raw_rows: Any = list(g.query(query))
+        by_provision: dict[str, str] = {}
+        for r in raw_rows:
+            provision = str(r[0])
+            norm_type = str(r[4]) if r[4] is not None else ""
+            by_provision.setdefault(provision, norm_type_key(norm_type))
+
+        assert by_provision[f"{_NS}Provision_1"] == "obligation"
+        assert by_provision[f"{_NS}Provision_3"] == "prohibition"

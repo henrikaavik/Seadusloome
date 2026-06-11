@@ -47,7 +47,9 @@ ontology).
 from __future__ import annotations
 
 import logging
+import re
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -421,6 +423,81 @@ LIMIT {_MAX_BURDEN_ROWS_PER_ACT}
     )
 
 
+# Mirrors ``SparqlClient._inject_uri_bindings``'s allowlist. The
+# batched delta query (#858) interpolates the provision URIs into an
+# inline ``VALUES`` clause itself (the client helper only supports one
+# URI per variable), so every URI must pass the same strict character
+# allowlist before it touches the query text.
+_SAFE_PROVISION_URI_RE = re.compile(r"^https?://[A-Za-z0-9./:_#\-]{1,512}$")
+
+# Row ceiling for the batched delta query. The affected-provision lookup
+# already caps the VALUES set at ``_MAX_BURDEN_ROWS_PER_ACT`` (500); the
+# 4x headroom absorbs corpus provisions that multi-row on
+# ``normativeType`` / ``dutyHolder`` echoes (deduped client-side by
+# ``_rows_to_burden``) without letting a pathological graph stream an
+# unbounded result set.
+_MAX_DELTA_BURDEN_ROWS = _MAX_BURDEN_ROWS_PER_ACT * 4
+
+
+def _build_provisions_burden_values_query(
+    provision_uris: Sequence[str],
+    scope: TemporalScope = DEFAULT_SCOPE,
+) -> str:
+    """Return ONE burden SPARQL covering *provision_uris* via ``VALUES`` (#858).
+
+    Replaces the v1 per-provision loop in :func:`burden_delta_for_draft`
+    (one SPARQL round-trip per affected provision — up to 500 sequential
+    calls). The body is the same OPTIONAL fan-out as
+    :func:`_build_provision_burden_query`, including the temporal-scope
+    ``FILTER NOT EXISTS`` (#850/#872 semantics preserved: the delta's
+    "before" baseline stays current-law by default), but the provision
+    variable is bound by an inline ``VALUES ?provision { <u1> <u2> … }``
+    block so the whole set resolves in a single round-trip and is
+    aggregated client-side.
+
+    Because every VALUES row keeps at least one solution (the body is
+    all-OPTIONAL), a provision unknown to the ontology still emits a
+    bare ``?provision`` row and lands in the honest "Liigitamata"
+    bucket — exactly what the per-provision ``LIMIT 1`` variant did.
+
+    Args:
+        provision_uris: Provision URIs, each already validated against
+            :data:`_SAFE_PROVISION_URI_RE` by the caller (the function
+            re-checks defensively and raises ``ValueError`` on a miss —
+            these URIs are interpolated into the query text).
+        scope: Temporal scope; defaults to current law, matching the
+            scope the per-provision path inherited.
+    """
+    for uri in provision_uris:
+        if not _SAFE_PROVISION_URI_RE.fullmatch(uri):
+            raise ValueError(f"Unsafe URI rejected for burden VALUES binding: {uri!r}")
+    values = " ".join(f"<{u}>" for u in provision_uris)
+    return (
+        PREFIXES
+        + f"""
+SELECT ?provision ?provisionLabel ?act ?actLabel ?normType ?dutyHolder
+WHERE {{
+  VALUES ?provision {{ {values} }}
+  OPTIONAL {{ ?provision rdfs:label ?provisionLabel }}
+  OPTIONAL {{
+    ?provision estleg:sourceAct ?actLit .
+    OPTIONAL {{ ?actLit rdfs:label ?actLabelFromUri }}
+    BIND(IF(isURI(?actLit), STR(?actLit), "") AS ?act)
+    BIND(
+      IF(BOUND(?actLabelFromUri), STR(?actLabelFromUri),
+         IF(isLiteral(?actLit), STR(?actLit), ""))
+      AS ?actLabel
+    )
+  }}
+  OPTIONAL {{ ?provision <{PREDICATES.NORMATIVE_TYPE}> ?normType }}
+  OPTIONAL {{ ?provision <{PREDICATES.DUTY_HOLDER}> ?dutyHolder }}
+{temporal_scope_clause(scope, "provision")}
+}}
+LIMIT {_MAX_DELTA_BURDEN_ROWS}
+"""
+    )
+
+
 def _build_draft_affected_provisions_graph_query(graph_uri: str) -> str:
     """Return the GRAPH-scoped affected-provisions SPARQL for an uploaded draft.
 
@@ -560,9 +637,9 @@ def list_burden_for_provision(
             positively-repealed provision (or one whose owning act is
             repealed) yields an empty summary under the current-law
             scope. :attr:`TemporalScope.ALL` keeps it. The draft-delta
-            path (:func:`burden_delta_for_draft`) calls this without an
-            explicit scope and therefore inherits the current-law default
-            for its "before" baseline.
+            path (:func:`burden_delta_for_draft`) uses the batched
+            ``VALUES`` variant of this query (#858) with the same
+            current-law default for its "before" baseline.
         sparql_client: Optional :class:`SparqlClient` override.
     """
     uri = (provision_uri or "").strip()
@@ -673,15 +750,44 @@ def burden_delta_for_draft(
     if not ordered:
         return BurdenDelta(before=_empty_summary(), after=None, affected_count=0)
 
-    # For v1 we batch the per-provision lookups — one SPARQL call per
-    # affected provision. The cap inside the affected-provisions query
-    # already limits this to ``_MAX_BURDEN_ROWS_PER_ACT`` calls in the
-    # worst case; corpus drafts touch ~10-100 provisions in practice,
-    # which stays well below any timeout budget.
-    aggregated_rows: list[BurdenRow] = []
-    for p_uri in ordered:
-        sub = list_burden_for_provision(p_uri, sparql_client=client)
-        aggregated_rows.extend(sub.rows)
+    # #858: resolve the whole provision set in ONE SPARQL round-trip via
+    # an inline ``VALUES ?provision { … }`` block (the v1 loop issued one
+    # query per provision — up to ``_MAX_BURDEN_ROWS_PER_ACT`` sequential
+    # calls). URIs that fail the strict allowlist are dropped here (they
+    # would previously have errored inside the per-provision call and
+    # contributed nothing — same outcome, no query churn).
+    safe_uris = [u for u in ordered if _SAFE_PROVISION_URI_RE.fullmatch(u)]
+    dropped = len(ordered) - len(safe_uris)
+    if dropped:
+        logger.warning(
+            "burden_delta_for_draft: dropped %d non-URI affected entries for %r",
+            dropped,
+            uri,
+        )
+
+    raw_rows: list[dict[str, str]] = []
+    if safe_uris:
+        try:
+            raw_rows = client.query(_build_provisions_burden_values_query(safe_uris))
+        except Exception:
+            logger.warning(
+                "burden_delta_for_draft: batched burden query failed for %r (%d provisions)",
+                uri,
+                len(safe_uris),
+                exc_info=True,
+            )
+            raw_rows = []
+
+    # Client-side aggregation: restore the affected-provision order so
+    # the summary's row list stays deterministic across reruns (the old
+    # per-provision loop iterated ``ordered`` directly), then reuse the
+    # existing dedupe/bucketing pipeline.
+    position = {p: i for i, p in enumerate(ordered)}
+    sorted_rows = sorted(
+        raw_rows or [],
+        key=lambda r: position.get((r.get("provision") or "").strip(), len(position)),
+    )
+    aggregated_rows = _rows_to_burden(sorted_rows)
 
     before = _summary_from_burden_rows(aggregated_rows, truncated=False)
     return BurdenDelta(before=before, after=None, affected_count=len(ordered))
