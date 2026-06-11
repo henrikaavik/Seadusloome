@@ -38,9 +38,9 @@
 -- ---------------------------------------------------------------------------
 
 ALTER TABLE drafts
-    ADD COLUMN doc_type TEXT NOT NULL DEFAULT 'eelnou'
+    ADD COLUMN IF NOT EXISTS doc_type TEXT NOT NULL DEFAULT 'eelnou'
         CHECK (doc_type IN ('eelnou', 'vtk')),
-    ADD COLUMN parent_vtk_id UUID REFERENCES drafts(id) ON DELETE SET NULL;
+    ADD COLUMN IF NOT EXISTS parent_vtk_id UUID REFERENCES drafts(id) ON DELETE SET NULL;
 
 -- ---------------------------------------------------------------------------
 -- 2. VTK->VTK chain prevention
@@ -48,7 +48,7 @@ ALTER TABLE drafts
 -- A VTK cannot itself have a parent VTK; only eelnoud may carry a VTK link.
 
 ALTER TABLE drafts
-    ADD CONSTRAINT chk_vtk_has_no_parent
+    ADD CONSTRAINT IF NOT EXISTS chk_vtk_has_no_parent
         CHECK (doc_type = 'eelnou' OR parent_vtk_id IS NULL);
 
 -- ---------------------------------------------------------------------------
@@ -57,14 +57,14 @@ ALTER TABLE drafts
 -- Covers: WHERE org_id = ? [AND doc_type = ?] [AND status = ?]
 --         ORDER BY created_at DESC
 
-CREATE INDEX idx_drafts_org_doctype_status_created
+CREATE INDEX IF NOT EXISTS idx_drafts_org_doctype_status_created
     ON drafts (org_id, doc_type, status, created_at DESC);
 
 -- ---------------------------------------------------------------------------
 -- 4. Partial index for VTK child-eelnou query
 -- ---------------------------------------------------------------------------
 
-CREATE INDEX idx_drafts_parent_vtk
+CREATE INDEX IF NOT EXISTS idx_drafts_parent_vtk
     ON drafts (parent_vtk_id) WHERE parent_vtk_id IS NOT NULL;
 
 -- ---------------------------------------------------------------------------
@@ -76,11 +76,11 @@ CREATE INDEX idx_drafts_parent_vtk
 
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
-CREATE INDEX idx_drafts_title_trgm
+CREATE INDEX IF NOT EXISTS idx_drafts_title_trgm
     ON drafts USING gin (title gin_trgm_ops);
 
-CREATE INDEX idx_drafts_filename_trgm
+CREATE INDEX IF NOT EXISTS idx_drafts_filename_trgm
     ON drafts USING gin (filename gin_trgm_ops);
 
-CREATE INDEX idx_draft_entities_ref_text_trgm
+CREATE INDEX IF NOT EXISTS idx_draft_entities_ref_text_trgm
     ON draft_entities USING gin (ref_text gin_trgm_ops);
