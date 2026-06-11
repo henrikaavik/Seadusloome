@@ -1,4 +1,4 @@
-/* Export progress — WebSocket push listener (#610).
+/* Export progress — WebSocket push listener (#610, dedupe #856).
  *
  * Augments the existing 2-10s HTMX polling on the export-status
  * fragment with a WebSocket push so progress updates land within
@@ -17,6 +17,17 @@
  * also on every htmx:afterSwap so it picks up the marker the moment
  * the export form returns the spinner fragment via HTMX.
  *
+ * Dedupe (#856): the HTMX poll swaps the fragment with outerHTML every
+ * 2-10s, replacing the marker element each time. A per-element
+ * "attached" attribute therefore reset on every swap and a NEW
+ * WebSocket (plus a server-side DB-watcher loop) piled up per poll —
+ * ~15 concurrent sockets over one 30s export. The registry below is a
+ * module-level Map keyed by job id, so it survives element swaps: one
+ * job, one socket, no matter how many times the fragment re-renders.
+ * Because the marker element a socket was opened from may be long gone
+ * by the time a frame arrives, every update re-resolves the CURRENT
+ * marker for the job id from the live DOM.
+ *
  * The WS closes itself once the job reaches a terminal status
  * (success / failed) so the connection doesn't linger forever after
  * the .docx is ready.
@@ -24,19 +35,38 @@
 (function () {
   'use strict';
 
-  // Tracks markers we've already wired up so re-running init() after
-  // an HTMX swap doesn't open a second WebSocket for the same job.
-  var ATTACHED_FLAG = 'data-export-progress-attached';
+  // Module-level socket registry: jobId (string) -> WebSocket. Keyed
+  // by job id — NOT by marker element — so HTMX outerHTML swaps cannot
+  // open a duplicate socket for a job that already has a live one.
+  var socketsByJob = new Map();
+
+  function liveMarker(jobId) {
+    // Resolve the marker currently in the document for this job —
+    // the element the socket was started from may have been swapped
+    // out by HTMX polling since. jobId is a server-rendered integer,
+    // so it is safe to interpolate into the selector.
+    return document.querySelector(
+      '[data-export-progress-ws][data-job-id="' + jobId + '"]'
+    );
+  }
 
   function start(marker) {
     if (typeof WebSocket === 'undefined') return;
-    if (marker.hasAttribute(ATTACHED_FLAG)) return;
 
     var jobId = marker.getAttribute('data-job-id');
     var draftId = marker.getAttribute('data-draft-id');
     if (!jobId || !draftId) return;
 
-    marker.setAttribute(ATTACHED_FLAG, '1');
+    var existing = socketsByJob.get(jobId);
+    if (
+      existing &&
+      (existing.readyState === WebSocket.OPEN ||
+        existing.readyState === WebSocket.CONNECTING)
+    ) {
+      // A live socket already serves this job; the freshly swapped-in
+      // marker will be picked up via liveMarker() on the next frame.
+      return;
+    }
 
     var proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     var url = proto + '//' + window.location.host + '/ws/drafts/export-progress';
@@ -47,6 +77,16 @@
       // Browser blocked the connection (CSP, mixed content, etc.).
       // Existing 2-10s polling keeps the page functional.
       return;
+    }
+
+    socketsByJob.set(jobId, ws);
+
+    function forget() {
+      // Only clear the registry slot if it still points at THIS
+      // socket — a replacement may have been opened after a close.
+      if (socketsByJob.get(jobId) === ws) {
+        socketsByJob.delete(jobId);
+      }
     }
 
     ws.addEventListener('open', function () {
@@ -73,7 +113,8 @@
       if (data.type === 'ping') return;
 
       if (data.type === 'initial' || data.type === 'progress') {
-        applyProgress(marker, data.current, data.total);
+        var current = liveMarker(jobId);
+        if (current) applyProgress(current, data.current, data.total);
         return;
       }
 
@@ -104,15 +145,15 @@
 
     ws.addEventListener('close', function () {
       // No reconnect: the existing HTMX polling on the fragment
-      // continues to drive updates. Adding reconnect logic here would
-      // be redundant and could compete with the polling tick. If the
-      // user navigates away and back, this script re-runs from the
-      // new page-load init and re-opens the WS.
-      marker.removeAttribute(ATTACHED_FLAG);
+      // continues to drive updates. Releasing the registry slot lets
+      // a later poll swap re-open a socket if the job is still
+      // running (e.g. after a transient network drop).
+      forget();
     });
 
     ws.addEventListener('error', function () {
-      // Same rationale as 'close'.
+      // 'error' is always followed by 'close'; forget() is idempotent.
+      forget();
     });
   }
 
@@ -145,6 +186,7 @@
 
   function init(root) {
     var scope = root || document;
+    if (!scope.querySelectorAll) return;
     var markers = scope.querySelectorAll('[data-export-progress-ws][data-job-id]');
     for (var i = 0; i < markers.length; i++) {
       start(markers[i]);
@@ -158,8 +200,9 @@
   }
 
   // HTMX swaps in the export-status fragment after the user clicks
-  // "Laadi alla .docx", so we re-scan the swapped subtree to pick up
-  // the marker.
+  // "Laadi alla .docx" and on every poll tick, so we re-scan the
+  // swapped subtree to pick up the (possibly replaced) marker. The
+  // job-id registry above guarantees this never duplicates a socket.
   document.addEventListener('htmx:afterSwap', function (evt) {
     var target = evt && evt.target ? evt.target : null;
     init(target);

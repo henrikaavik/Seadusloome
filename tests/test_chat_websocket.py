@@ -11,11 +11,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.chat.websocket import (
-    _extract_cookie_from_headers,
     on_connect,
     on_disconnect,
     ws_chat,
@@ -42,6 +43,19 @@ class _Collector:
 
     async def __call__(self, data: str) -> None:
         self.sent.append(data)
+
+
+class _FakeWs:
+    """Minimal stand-in for the Starlette WebSocket conn that FastHTML
+    hands to WS hooks via the unannotated ``ws`` parameter. Stable
+    identity across hook dispatches — unlike ``send``, which FastHTML
+    rebuilds as a fresh partial per dispatch (#856)."""
+
+    def __init__(self) -> None:
+        self.close_calls: list[tuple[int, str]] = []
+
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        self.close_calls.append((code, reason))
 
 
 # ---------------------------------------------------------------------------
@@ -204,29 +218,9 @@ class TestWsChatDelegatesToOrchestrator:
 # ---------------------------------------------------------------------------
 # C1: WebSocket auth via JWT cookie extraction
 # ---------------------------------------------------------------------------
-
-
-class TestExtractCookieFromHeaders:
-    def test_extracts_access_token_from_cookie_header(self):
-        headers = [
-            (b"cookie", b"access_token=my-jwt-value; other=abc"),
-        ]
-        result = _extract_cookie_from_headers(headers, "access_token")
-        assert result == "my-jwt-value"
-
-    def test_returns_none_when_cookie_absent(self):
-        headers = [
-            (b"cookie", b"other=abc"),
-        ]
-        result = _extract_cookie_from_headers(headers, "access_token")
-        assert result is None
-
-    def test_returns_none_when_no_cookie_header(self):
-        headers = [
-            (b"host", b"localhost"),
-        ]
-        result = _extract_cookie_from_headers(headers, "access_token")
-        assert result is None
+# (Cookie-extraction unit coverage lives in tests/test_ws_auth.py since
+# #856 — the per-channel private copies were replaced by the shared
+# app.auth.ws_auth helpers.)
 
 
 class TestWsHandlerAuthExtraction:
@@ -397,7 +391,14 @@ class TestWsChatMaxLength:
 
 
 class TestWsChatJwtFailClosed:
-    """When JWTAuthProvider construction fails the socket must be closed with 1011."""
+    """When JWTAuthProvider construction fails the socket must be closed with 1011.
+
+    Review finding F1 (#856): the close MUST go through ``ws.close()``
+    on the raw Starlette conn. Pushing a ``{"type": "websocket.close"}``
+    dict through FastHTML's wrapped ``send`` feeds it to ``to_xml`` +
+    ``ws.send_text`` — a garbage text frame, and the connection stays
+    open. The old test asserted exactly that broken behaviour.
+    """
 
     @patch("app.chat.websocket.JWTAuthProvider")
     def test_jwt_provider_construction_failure_closes_socket(self, mock_jwt_cls):
@@ -431,6 +432,7 @@ class TestWsChatJwtFailClosed:
         async def raw_send(data: Any) -> None:
             sent_raw.append(data)
 
+        ws = _FakeWs()
         msg = json.dumps(
             {
                 "type": "send_message",
@@ -439,14 +441,17 @@ class TestWsChatJwtFailClosed:
             }
         )
 
-        asyncio.run(captured_handler(msg, raw_send, scope))
+        asyncio.run(captured_handler(msg, raw_send, scope, ws))
 
-        # We expect a close frame with code 1011 to have been attempted.
-        close_attempts = [
+        # The fail-closed path verifiably terminates the connection via
+        # the raw conn with code 1011 …
+        assert ws.close_calls == [(1011, "auth provider unavailable")]
+        # … and does NOT push an ASGI close dict through ``send`` (the
+        # F1 defect: that produces a text frame, not a close).
+        close_dicts_via_send = [
             d for d in sent_raw if isinstance(d, dict) and d.get("type") == "websocket.close"
         ]
-        assert len(close_attempts) == 1
-        assert close_attempts[0]["code"] == 1011
+        assert close_dicts_via_send == []
 
 
 class TestWsChatStopGeneration:
@@ -650,8 +655,42 @@ class TestWsChatRegenerate:
         assert any(json.loads(s).get("type") == "stopped" for s in collector.sent)
 
 
+def _capture_chat_handler_and_disconnect() -> tuple[Any, Any, dict[int, Any]]:
+    """Register the chat WS routes against a fake app; return the
+    message handler, the disconnect hook, and the per-connection task
+    registry exposed for tests."""
+    from app.chat.websocket import register_chat_ws_routes
+
+    mock_app = MagicMock()
+    captured: dict[str, Any] = {"handler": None}
+
+    def capture_ws(path, conn=None, disconn=None):
+        def decorator(fn):
+            captured["handler"] = fn
+            return fn
+
+        return decorator
+
+    mock_app.ws = capture_ws
+    register_chat_ws_routes(mock_app)
+    handler = captured["handler"]
+    assert handler is not None
+    registry = handler._per_conn_tasks  # type: ignore[attr-defined]
+    disconnect = handler._on_disconnect  # type: ignore[attr-defined]
+    return handler, disconnect, registry
+
+
 class TestWsHandlerDisconnectCleanup:
-    """Disconnect mid-stream must cancel pending tasks and drop the registry key."""
+    """Disconnect mid-stream must cancel pending tasks and drop the registry key.
+
+    Review finding F4 (#856): the registry is keyed on the stable conn
+    identity (``id(ws)``). FastHTML rebuilds ``send`` as a fresh
+    partial per hook dispatch, so this test deliberately hands the
+    disconnect hook a DIFFERENT ``send`` object than the handler saw —
+    exactly what production does. (The previous version of this test
+    passed the same ``send`` to both hooks, which is the identity
+    assumption that masked F3/F4.)
+    """
 
     @patch("app.chat.websocket.ChatOrchestrator")
     @patch("app.chat.websocket.get_default_provider")
@@ -680,31 +719,17 @@ class TestWsHandlerDisconnectCleanup:
         mock_instance.handle_message = AsyncMock(side_effect=slow_handle)
         mock_orch_cls.return_value = mock_instance
 
-        from app.chat.websocket import register_chat_ws_routes
-
-        mock_app = MagicMock()
-        captured_handler: Any = None
-
-        def capture_ws(path, conn=None, disconn=None):
-            def decorator(fn):
-                nonlocal captured_handler
-                captured_handler = fn
-                return fn
-
-            return decorator
-
-        mock_app.ws = capture_ws
-        register_chat_ws_routes(mock_app)
-        assert captured_handler is not None
-
-        registry = captured_handler._per_send_tasks  # type: ignore[attr-defined]
-        on_disconnect_hook = captured_handler._on_disconnect  # type: ignore[attr-defined]
+        handler_fn, disconnect_fn, registry = _capture_chat_handler_and_disconnect()
 
         scope = {"headers": [(b"cookie", b"access_token=irrelevant")]}
+        ws = _FakeWs()
 
-        async def send(data: Any) -> None:
-            # no-op; just needs to be a stable callable so id(send) is
-            # consistent across the start and the disconnect.
+        # Two DIFFERENT send objects for the same connection — the
+        # production shape (FastHTML rebuilds the partial per dispatch).
+        async def handler_send(data: Any) -> None:
+            return
+
+        async def disconnect_send(data: Any) -> None:
             return
 
         send_msg = json.dumps(
@@ -715,22 +740,17 @@ class TestWsHandlerDisconnectCleanup:
             }
         )
 
-        handler_fn = captured_handler  # re-bind so pyright narrows through the closure
-        assert handler_fn is not None
-        disconnect_fn = on_disconnect_hook
-        assert disconnect_fn is not None
-
         async def scenario() -> None:
-            handler_task = asyncio.create_task(handler_fn(send_msg, send, scope))
+            handler_task = asyncio.create_task(handler_fn(send_msg, handler_send, scope, ws))
             # Let the orchestrator register its per-conv task.
             await asyncio.sleep(0.05)
-            # Exactly one connection is registered.
-            assert id(send) in registry
-            assert len(registry[id(send)]) == 1
-            # Simulate the socket going away.
-            await disconnect_fn(send)
+            # Exactly one connection is registered, keyed on id(ws).
+            assert id(ws) in registry
+            assert len(registry[id(ws)]) == 1
+            # Simulate the socket going away — different send object.
+            await disconnect_fn(disconnect_send, ws)
             # Registry slot gone, tasks cancelled.
-            assert id(send) not in registry
+            assert id(ws) not in registry
             # Let the handler coroutine drain the CancelledError.
             try:
                 await handler_task
@@ -740,5 +760,155 @@ class TestWsHandlerDisconnectCleanup:
         asyncio.run(scenario())
 
         # After teardown, zero keys remain for this connection.
-        assert id(send) not in registry
-        assert all(k != id(send) for k in registry)
+        assert id(ws) not in registry
+        assert all(k != id(ws) for k in registry)
+
+
+class TestStopGenerationAcrossDispatches:
+    """The real-world F4 scenario (#856): ``stop_generation`` arrives as
+    a SECOND WS message, for which FastHTML builds a brand-new ``send``
+    partial. With the old ``id(send)``-keyed registry the stop handler
+    looked into an empty dict and silently cancelled nothing; keying on
+    ``id(ws)`` pairs the two dispatches correctly."""
+
+    @patch("app.chat.websocket.ChatOrchestrator")
+    @patch("app.chat.websocket.get_default_provider")
+    @patch("app.chat.websocket.JWTAuthProvider")
+    def test_stop_message_with_fresh_send_cancels_running_stream(
+        self, mock_jwt_cls, mock_provider, mock_orch_cls
+    ):
+        mock_jwt_instance = MagicMock()
+        mock_jwt_instance.get_current_user.return_value = {
+            "id": _USER_ID,
+            "org_id": _ORG_ID,
+            "role": "drafter",
+            "email": "t@t.ee",
+            "full_name": "T",
+        }
+        mock_jwt_cls.return_value = mock_jwt_instance
+
+        cancel_observed: dict[str, bool] = {"called": False}
+
+        async def slow_handle(conv_id, content, auth, send_event):
+            try:
+                await send_event({"type": "content_delta", "delta": "partial"})
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                cancel_observed["called"] = True
+                await send_event({"type": "stopped", "message_id": None})
+                raise
+
+        mock_instance = MagicMock()
+        mock_instance.handle_message = AsyncMock(side_effect=slow_handle)
+        mock_orch_cls.return_value = mock_instance
+
+        handler_fn, _disconnect_fn, registry = _capture_chat_handler_and_disconnect()
+
+        scope = {"headers": [(b"cookie", b"access_token=irrelevant")]}
+        ws = _FakeWs()
+        first_send = _Collector()
+        second_send = _Collector()  # fresh partial, same conn
+        assert first_send is not second_send
+
+        send_msg = json.dumps(
+            {"type": "send_message", "conversation_id": _CONV_ID, "content": "Tere"}
+        )
+        stop_msg = json.dumps({"type": "stop_generation", "conversation_id": _CONV_ID})
+
+        async def scenario() -> None:
+            streaming = asyncio.create_task(handler_fn(send_msg, first_send, scope, ws))
+            await asyncio.sleep(0.05)
+            # Second dispatch: different send object, same ws.
+            await handler_fn(stop_msg, second_send, scope, ws)
+            await streaming
+
+        asyncio.run(scenario())
+
+        assert cancel_observed["called"] is True
+        # The registry slot was drained after the stream ended.
+        assert id(ws) not in registry
+
+
+# ---------------------------------------------------------------------------
+# #856 regression — conversation authz gate on every WS path
+# ---------------------------------------------------------------------------
+
+
+class TestConversationAuthzGate:
+    """The WS layer deliberately has no authz gate of its own: every
+    chat WS path (``send_message`` AND ``regenerate``) relies on the
+    orchestrator exercising :func:`app.auth.policy.can_access_conversation`
+    before any generation. These regression tests drive the REAL
+    ``ChatOrchestrator`` (with the DB-touching phases patched) and pin
+    that the gate runs and denies on both paths."""
+
+    def _conversation(self) -> Any:
+        from app.chat.models import Conversation
+
+        now = datetime.now(UTC)
+        return Conversation(
+            id=uuid.UUID(_CONV_ID),
+            # Owned by ANOTHER user — the gate must deny our caller.
+            user_id=uuid.UUID("99999999-9999-9999-9999-999999999999"),
+            org_id=uuid.UUID(_ORG_ID),
+            title="Salajane vestlus",
+            context_draft_id=None,
+            created_at=now,
+            updated_at=now,
+        )
+
+    def _drive(self, msg_dict: dict[str, Any]) -> tuple[MagicMock, _Collector]:
+        conversation = self._conversation()
+        collector = _Collector()
+        with (
+            # Real ChatOrchestrator; only the LLM provider is stubbed.
+            patch("app.chat.websocket.get_default_provider", return_value=MagicMock()),
+            patch("app.chat.orchestrator.check_message_rate"),
+            patch("app.chat.orchestrator._load_conversation", return_value=conversation),
+            patch(
+                "app.chat.orchestrator.can_access_conversation",
+                return_value=False,
+            ) as gate,
+        ):
+            asyncio.run(ws_chat(json.dumps(msg_dict), collector, _auth_scope()))
+        return gate, collector
+
+    def test_send_message_path_exercises_can_access_conversation(self):
+        gate, collector = self._drive(
+            {
+                "type": "send_message",
+                "conversation_id": _CONV_ID,
+                "content": "Tere",
+            }
+        )
+
+        gate.assert_called_once()
+        auth_arg, conversation_arg = gate.call_args[0]
+        assert auth_arg["id"] == _USER_ID
+        assert str(conversation_arg.id) == _CONV_ID
+
+        # Denial surfaces as the orchestrator's error event — no stream.
+        events = [json.loads(s) for s in collector.sent]
+        assert any(
+            e.get("type") == "error" and "õigus" in e.get("message", "").lower() for e in events
+        ), f"expected an access-denied error event, got: {events}"
+        assert not any(e.get("type") == "content_delta" for e in events)
+
+    def test_regenerate_path_exercises_can_access_conversation(self):
+        gate, collector = self._drive(
+            {
+                "type": "regenerate",
+                "conversation_id": _CONV_ID,
+            }
+        )
+
+        gate.assert_called_once()
+        auth_arg, conversation_arg = gate.call_args[0]
+        assert auth_arg["id"] == _USER_ID
+        assert str(conversation_arg.id) == _CONV_ID
+
+        events = [json.loads(s) for s in collector.sent]
+        assert any(
+            e.get("type") == "error" and "õigus" in e.get("message", "").lower() for e in events
+        ), f"expected an access-denied error event, got: {events}"
+        assert not any(e.get("type") == "content_delta" for e in events)

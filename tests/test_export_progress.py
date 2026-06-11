@@ -612,6 +612,99 @@ class TestWebSocketProgressPush:
         assert any(e.get("current") == 6 and e.get("total") == 10 for e in progress_events)
 
 
+class _FakeWs:
+    """Minimal stand-in for the Starlette WebSocket conn (#856)."""
+
+    def __init__(self) -> None:
+        self.close_calls: list[tuple[int, str]] = []
+
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        self.close_calls.append((code, reason))
+
+
+class TestTerminalCloseGoesThroughWs:
+    def test_already_terminal_job_closes_via_ws_close(self):
+        """F1-class contract (#856): the self-close on a terminal job
+        must go through ``ws.close()`` on the raw conn (forwarded by
+        the registration wrapper), never through FastHTML's wrapped
+        ``send`` as an ASGI dict."""
+        draft = _make_draft_obj()
+        ws = _FakeWs()
+
+        async def _run() -> list[Any]:
+            received: list[Any] = []
+
+            async def send(p: Any) -> None:
+                received.append(p)
+
+            with (
+                patch("app.docs.ws_export_progress.fetch_draft", return_value=draft),
+                patch("app.docs.ws_export_progress.can_view_draft", return_value=True),
+                patch(
+                    "app.docs.ws_export_progress._validate_job_belongs_to_draft",
+                    return_value=True,
+                ),
+                patch(
+                    "app.docs.ws_export_progress._read_job_progress",
+                    return_value=("success", {"current": 12, "total": 12}),
+                ),
+            ):
+                await ws_module.ws_export_progress(
+                    json.dumps(
+                        {
+                            "type": "subscribe",
+                            "draft_id": str(draft.id),
+                            "job_id": 7,
+                        }
+                    ),
+                    send,
+                    scope={"auth": {"id": "u1", "org_id": "org-1"}},
+                    ws=ws,
+                )
+            return received
+
+        received = asyncio.run(_run())
+
+        assert ws.close_calls == [(1000, "terminal-status")]
+        # No ASGI close dict pushed through send (the F1 defect shape).
+        assert not any(
+            isinstance(p, dict) and p.get("type") == "websocket.close" for p in received
+        )
+
+    def test_wrapper_provider_outage_closes_via_ws_with_1011(self):
+        """The registered wrapper fails closed via ``ws.close(1011)``
+        when the JWT provider cannot be constructed."""
+        captured: dict[str, Any] = {}
+
+        class _StubApp:
+            def ws(self, path: str, *args: Any, **kwargs: Any):
+                def _decorator(handler: Any) -> Any:
+                    captured["handler"] = handler
+                    return handler
+
+                return _decorator
+
+        with patch(
+            "app.docs.ws_export_progress.JWTAuthProvider",
+            side_effect=RuntimeError("cannot init JWT provider"),
+        ):
+            ws_module.register_export_progress_ws_routes(_StubApp())
+            handler = captured["handler"]
+
+            ws = _FakeWs()
+            sent: list[Any] = []
+
+            async def send(p: Any) -> None:
+                sent.append(p)
+
+            scope = {"headers": [(b"cookie", b"access_token=anything")]}
+            msg = json.dumps({"type": "subscribe", "draft_id": str(uuid.uuid4()), "job_id": 1})
+            asyncio.run(handler(msg, send, scope, ws))
+
+        assert ws.close_calls == [(1011, "auth provider unavailable")]
+        assert not any(isinstance(p, dict) and p.get("type") == "websocket.close" for p in sent)
+
+
 # ---------------------------------------------------------------------------
 # 4. Polling fallback still works
 # ---------------------------------------------------------------------------
