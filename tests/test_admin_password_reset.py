@@ -1,5 +1,7 @@
 """Admin reset password tests — system and org variants."""
 
+import base64
+import json
 import os
 import uuid
 
@@ -7,6 +9,21 @@ import bcrypt
 import psycopg
 import pytest
 from starlette.testclient import TestClient
+
+
+def _decode_session_cookie(client: TestClient) -> dict:
+    """Decode the Starlette session cookie payload (base64 JSON, signed).
+
+    The cookie value is ``b64(json).timestamp.signature`` — the payload is
+    readable by ANYONE holding the cookie (it is signed, not encrypted),
+    which is exactly why #857 forbids credentials inside it.
+    """
+    raw = client.cookies.get("session_")
+    if not raw:
+        return {}
+    payload = raw.split(".")[0]
+    payload += "=" * (-len(payload) % 4)
+    return json.loads(base64.urlsafe_b64decode(payload))
 
 
 def _connect() -> psycopg.Connection:
@@ -215,6 +232,94 @@ def test_org_admin_temp_password_reveal_uses_session_not_url(org_with_users):
     assert page.status_code == 200
     assert "Tempnew1Z" in page.text
     assert page.headers.get("cache-control") == "no-store"
+
+
+def test_temp_password_never_appears_in_session_cookie(org_with_users):
+    """#857 — the session cookie is signed but NOT encrypted, so the live
+    credential must never enter its payload. The cookie may carry only an
+    opaque single-use token referencing the server-side stash.
+    """
+    sa = org_with_users["sysadmin_id"]
+    sa_email = f"sa-{sa}@example.com"
+    target = org_with_users["drafter_id"]
+    c = _client_as(sa, sa_email)
+
+    set_resp = c.post(
+        f"/admin/users/{target}/reset_temp",
+        data={"new_password": "Tempnew1Z"},
+        follow_redirects=False,
+    )
+    assert set_resp.status_code == 303
+
+    # Decode the cookie payload exactly like an attacker with cookie access
+    # would: the password must not be there, the opaque reference must be.
+    session_payload = _decode_session_cookie(c)
+    assert "Tempnew1Z" not in json.dumps(session_payload)
+    reveal_ref = session_payload.get("pw_reset_reveal")
+    assert isinstance(reveal_ref, dict)
+    assert reveal_ref.get("user_id") == str(target)
+    assert isinstance(reveal_ref.get("token"), str) and reveal_ref["token"]
+    assert "password" not in reveal_ref
+
+    # The reveal flow still works end-to-end off that reference…
+    page = c.get(set_resp.headers["location"])
+    assert "Tempnew1Z" in page.text
+    # …and afterwards no trace of the credential remains anywhere client-side.
+    assert "Tempnew1Z" not in json.dumps(_decode_session_cookie(c))
+
+
+def test_admin_created_user_forced_to_change_password_on_first_login(org_with_users):
+    """#857 — accounts provisioned via POST /admin/users carry
+    ``must_change_password=TRUE``; the first login bounces to
+    ``/profile/password`` before any other page is reachable.
+    """
+    sa = org_with_users["sysadmin_id"]
+    sa_email = f"sa-{sa}@example.com"
+    c = _client_as(sa, sa_email)
+
+    new_email = f"uus-{uuid.uuid4()}@example.com"
+    try:
+        created = c.post(
+            "/admin/users",
+            data={
+                "email": new_email,
+                "password": "Algne1Parool",
+                "full_name": "Uus Ametnik",
+                "role": "drafter",
+                "org_id": org_with_users["org_id"],
+            },
+            follow_redirects=False,
+        )
+        assert created.status_code == 303
+
+        with _connect() as conn:
+            row = conn.execute(
+                "SELECT must_change_password FROM users WHERE email = %s",
+                (new_email,),
+            ).fetchone()
+        assert row is not None and row[0] is True
+
+        # First login: authenticate works, but navigation is forced to the
+        # password-change page by the must-change middleware.
+        from app.auth.jwt_provider import JWTAuthProvider
+        from app.main import app
+
+        p = JWTAuthProvider()
+        user = p.authenticate(new_email, "Algne1Parool")
+        assert user is not None
+        assert user["must_change_password"] is True
+
+        access, refresh = p.create_tokens(user)
+        nc = TestClient(app)
+        nc.cookies.set("access_token", access)
+        nc.cookies.set("refresh_token", refresh)
+        resp = nc.get("/dashboard", follow_redirects=False)
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/profile/password"
+    finally:
+        with _connect() as conn:
+            conn.execute("DELETE FROM users WHERE email = %s", (new_email,))
+            conn.commit()
 
 
 def test_org_admin_cannot_temp_password_org_admin(org_with_users):

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets
+import threading
+import time
 
 from fasthtml.common import *
 from fasthtml.common import to_xml
@@ -130,7 +133,16 @@ def create_user(
     role: str,
     org_id: str | None = None,
 ) -> dict | None:  # type: ignore[type-arg]
-    """Create a new user. Returns the user dict or None on failure."""
+    """Create a new user. Returns the user dict or None on failure.
+
+    Every account created through this function is admin- or
+    org-admin-provisioned (there is no self-registration), so the
+    initial password is by definition known to a second party.
+    ``must_change_password`` is therefore set ``TRUE`` (#857): the
+    middleware bounces the user to ``/profile/password`` on first
+    login, exactly like the admin temp-password reset flow
+    (:func:`app.auth.password.change_password` with ``must_change=True``).
+    """
     if role not in VALID_ROLES:
         logger.error("Invalid role: %s", role)
         return None
@@ -138,8 +150,9 @@ def create_user(
         password_hash = hash_password(password)
         with _connect() as conn:
             row = conn.execute(
-                "INSERT INTO users (email, password_hash, full_name, role, org_id) "
-                "VALUES (%s, %s, %s, %s, %s) "
+                "INSERT INTO users "
+                "(email, password_hash, full_name, role, org_id, must_change_password) "
+                "VALUES (%s, %s, %s, %s, %s, TRUE) "
                 "RETURNING id, email, full_name, role, org_id, is_active",
                 (email, password_hash, full_name, role, org_id or None),
             ).fetchone()
@@ -766,14 +779,30 @@ def org_user_deactivate(req: Request, user_id: str):
 # Admin password reset — shared helpers and handlers
 # ---------------------------------------------------------------------------
 
-# Session key holding a freshly-set admin temporary password awaiting its
-# one-time reveal on the next ``GET …/reset`` page load. The value is
-# ``{"user_id": <str>, "password": <str>}`` — keyed by user so a reveal can
-# never be shown against the wrong target after a redirect. The credential
-# travels in the signed *session cookie* (server-side state for our
-# purposes), never in the URL, so it can't leak via browser history,
-# proxy/access logs, referrers, or copied links (#740).
+# Session key holding a one-time REFERENCE to a freshly-set admin temporary
+# password awaiting its reveal on the next ``GET …/reset`` page load. The
+# value is ``{"user_id": <str>, "token": <str>}`` — keyed by user so a
+# reveal can never be shown against the wrong target after a redirect.
+#
+# #857 (supersedes the #740 design): the credential itself NEVER enters the
+# session cookie. Starlette's SessionMiddleware cookie is signed but NOT
+# encrypted — its payload is plain base64(JSON), readable by anything that
+# can see the cookie (browser extensions, devtools, request-header capture,
+# disk backups of the cookie jar). The session now carries only an opaque
+# single-use token; the password lives in the in-process stash below until
+# the reveal page consumes it (or the TTL expires). The no-credential-in-URL
+# guarantee of #740 (history / proxy logs / referrers) is unchanged.
 _PW_RESET_REVEAL_KEY = "pw_reset_reveal"
+
+# token -> (user_id, password, monotonic_expiry). Single-process state, same
+# deployment assumption as the in-proc job worker: one uvicorn process per
+# container. A multi-replica deployment would need a DB- or cache-backed
+# stash; until then this avoids both a schema migration and the cookie leak.
+# Worst case on process restart between POST and GET: the admin simply sets
+# a new temp password (idempotent flow).
+_PW_REVEAL_TTL_SECONDS = 600.0
+_pw_reveal_stash: dict[str, tuple[str, str, float]] = {}
+_pw_reveal_lock = threading.Lock()
 
 
 def _session_dict(req: Request) -> dict | None:  # type: ignore[type-arg]
@@ -790,18 +819,31 @@ def _session_dict(req: Request) -> dict | None:  # type: ignore[type-arg]
 
 
 def _stash_temp_password_reveal(req: Request, user_id: str, password: str) -> None:
-    """Stash *password* in the session for a one-time reveal on the reset page."""
+    """Stash *password* server-side; put only an opaque token in the session.
+
+    The token is single-use and expires after ``_PW_REVEAL_TTL_SECONDS``.
+    Expired entries are swept on every stash so an abandoned reveal cannot
+    keep a credential in memory indefinitely.
+    """
     sess = _session_dict(req)
     if sess is None:
         return
-    sess[_PW_RESET_REVEAL_KEY] = {"user_id": str(user_id), "password": password}
+    token = secrets.token_urlsafe(32)
+    now = time.monotonic()
+    with _pw_reveal_lock:
+        expired = [t for t, (_, _, exp) in _pw_reveal_stash.items() if exp <= now]
+        for t in expired:
+            del _pw_reveal_stash[t]
+        _pw_reveal_stash[token] = (str(user_id), password, now + _PW_REVEAL_TTL_SECONDS)
+    sess[_PW_RESET_REVEAL_KEY] = {"user_id": str(user_id), "token": token}
 
 
 def _pop_temp_password_reveal(req: Request, user_id: str) -> str | None:
     """Return and clear the stashed temp password if it matches *user_id*.
 
     Drains the session key unconditionally so a stale reveal queued for a
-    different user never lingers across navigations.
+    different user never lingers across navigations, and removes the
+    server-side entry on first read (single-use), whether or not it matches.
     """
     sess = _session_dict(req)
     if sess is None:
@@ -809,10 +851,21 @@ def _pop_temp_password_reveal(req: Request, user_id: str) -> str | None:
     raw = sess.pop(_PW_RESET_REVEAL_KEY, None)
     if not isinstance(raw, dict):
         return None
-    if str(raw.get("user_id")) != str(user_id):
+    token = raw.get("token")
+    if not isinstance(token, str) or not token:
         return None
-    pw = raw.get("password")
-    return pw if isinstance(pw, str) and pw else None
+    with _pw_reveal_lock:
+        entry = _pw_reveal_stash.pop(token, None)
+    if entry is None:
+        return None
+    stashed_user_id, password, expires_at = entry
+    if time.monotonic() > expires_at:
+        return None
+    # Both the session reference and the stash entry must agree on the
+    # target user — a mismatch means a stale reference, never a reveal.
+    if str(raw.get("user_id")) != str(user_id) or stashed_user_id != str(user_id):
+        return None
+    return password if password else None
 
 
 def _admin_reset_page(req: Request, user_id: str, *, base_path: str, active_nav: str):
@@ -832,7 +885,8 @@ def _admin_reset_page(req: Request, user_id: str, *, base_path: str, active_nav:
                 active_nav,
             )
 
-    # One-time temp-pw reveal — read from the (signed) session, never the URL.
+    # One-time temp-pw reveal — resolved from the server-side stash via the
+    # opaque session token (#857), never from the URL (#740).
     revealed_password = _pop_temp_password_reveal(req, user_id)
 
     page = PageShell(
@@ -953,9 +1007,11 @@ def _admin_reset_temp(
         {"target_user_id": user_id, "mode": "temp"},
     )
 
-    # Hand the credential to the reveal page via the signed session — NOT
-    # the redirect URL — so it can't leak through history/logs/referrers
-    # (#740). The reset page consumes it exactly once.
+    # Hand the credential to the reveal page via a server-side one-time
+    # stash (#857) — the session cookie carries only an opaque token and
+    # the URL carries nothing (#740), so the password can't leak through
+    # history/logs/referrers or the (signed-but-unencrypted) cookie
+    # payload. The reset page consumes it exactly once.
     _stash_temp_password_reveal(req, user_id, new_password)
     return RedirectResponse(
         url=f"{base_path}/{user_id}/reset",

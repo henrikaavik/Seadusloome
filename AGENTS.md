@@ -55,7 +55,7 @@ The architecture plan is in `estonian-legal-ontology-plan.md`. The ontology sour
 - **Internal service functions** should have clean signatures that can be wrapped as both REST endpoints and MCP tools (Phase 5 readiness)
 - **Estonian legal NLP:** Start with rule-based regex for §-references and law names; layer ML (EstBERT) later
 - **D3 performance:** Never render 90k+ nodes at once — use SPARQL LIMIT/OFFSET lazy-loading, category-level overview with drill-down
-- **Draft sensitivity:** Pre-publication drafts are politically sensitive. Drafts persist until explicitly deleted by the owner; compensating controls are mandatory: AES-256-GCM file encryption, encrypted JSONB for parsed text, strict org-scoped access control, audit logging of every access, 90-day auto-archive warning with user action required, and explicit delete cascade that removes file + named graph + DB rows
+- **Draft sensitivity:** Pre-publication drafts are politically sensitive. Drafts persist until explicitly deleted by the owner; compensating controls are mandatory: Fernet file encryption (AES-128-CBC + HMAC-SHA256, authenticated; MultiFernet key rotation via comma-separated `STORAGE_ENCRYPTION_KEY` — first key encrypts, all decrypt; runbook in `app/storage/encrypted.py`), encrypted JSONB for parsed text, strict org-scoped access control, audit logging of every access, 90-day auto-archive warning with user action required, and explicit delete cascade that removes file + named graph + DB rows
 
 ## Development Phases
 

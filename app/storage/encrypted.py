@@ -1,12 +1,48 @@
-"""Fernet-based encrypted file storage.
+"""Fernet-based encrypted file storage with MultiFernet key rotation.
 
-Every uploaded draft file is encrypted with a single application-wide
-Fernet key (``STORAGE_ENCRYPTION_KEY``) before landing on disk. Fernet
+Every uploaded draft file is encrypted with an application-wide Fernet
+key set (``STORAGE_ENCRYPTION_KEY``) before landing on disk. Fernet
 uses AES-128-CBC + HMAC-SHA256 (authenticated encryption) and is the
 recommended high-level symmetric primitive from ``cryptography``.
 
+``STORAGE_ENCRYPTION_KEY`` accepts a **comma-separated list** of keys
+wrapped in :class:`cryptography.fernet.MultiFernet` (#857): the FIRST
+key encrypts every new write, ALL keys are tried for decryption. A
+single key (the historical format) keeps working unchanged.
+
+Key rotation runbook (#857)
+---------------------------
+1. Generate a fresh key::
+
+       uv run python -c "from app.storage import generate_encryption_key; \\
+           print(generate_encryption_key())"
+
+2. **Prepend** it to the existing value in the Coolify environment for
+   ``seadusloome-app`` (new key first — it becomes the encryption key;
+   the old key stays so existing ciphertexts remain readable)::
+
+       STORAGE_ENCRYPTION_KEY=<new-key>,<old-key>
+
+3. Redeploy. New uploads / ``encrypt_text`` writes now use ``<new-key>``;
+   files and BYTEA columns written under ``<old-key>`` still decrypt.
+
+4. (Optional, to fully retire a leaked key) Re-encrypt at rest: for each
+   stored artifact run ``read_file`` + re-write, or use
+   ``MultiFernet.rotate(token)`` on the raw ciphertext — ``rotate``
+   re-encrypts under the first key without exposing the plaintext.
+   The same applies to ``parsed_text_encrypted`` /
+   ``draft_content_encrypted`` BYTEA columns via
+   ``decrypt_text`` + ``encrypt_text``.
+
+5. Only after every ciphertext has been re-encrypted (or expired) drop
+   ``<old-key>`` from the list. **Never remove a key that still has
+   live ciphertexts** — those files become permanently unreadable
+   (``DecryptionError``).
+
 Env vars:
-    STORAGE_ENCRYPTION_KEY   url-safe base64 Fernet key (32 bytes decoded)
+    STORAGE_ENCRYPTION_KEY   one or more url-safe base64 Fernet keys
+                             (32 bytes decoded each), comma-separated;
+                             first key encrypts, all keys decrypt
     STORAGE_DIR              root directory for encrypted files
     APP_ENV                  'development' (default) or 'production'
 
@@ -34,7 +70,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from cryptography.fernet import Fernet, InvalidToken
+from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 
 from app.config import is_stub_allowed
 
@@ -67,7 +103,7 @@ class StoredFile:
 # ---------------------------------------------------------------------------
 
 
-_fernet: Fernet | None = None
+_fernet: MultiFernet | None = None
 _warned_dev_ephemeral = False
 # #453: protect _fernet singleton init from concurrent worker threads.
 _fernet_lock = threading.Lock()
@@ -82,17 +118,49 @@ def generate_encryption_key() -> str:
     return Fernet.generate_key().decode()
 
 
-def _load_encryption_key() -> bytes:
-    """Return the Fernet key bytes, enforcing an explicit value in prod.
+def _load_fernets() -> list[Fernet]:
+    """Return the configured Fernet instances, enforcing explicit keys in prod.
 
-    The dev/test/staging ephemeral-key path is gated through
+    ``STORAGE_ENCRYPTION_KEY`` may hold a single key (historical format)
+    or a comma-separated list (#857). Whitespace around segments and a
+    trailing comma are tolerated; the segment ORDER is significant —
+    the first key is the one new ciphertexts are written with.
+
+    A *set-but-unusable* value (empty after parsing, or any segment
+    that is not a valid Fernet key) raises ``RuntimeError`` in every
+    environment, including dev/stub mode: an explicitly configured key
+    that silently fell back to an ephemeral one would write files
+    nobody can ever read back after a restart.
+
+    The unset-key dev/test/staging ephemeral path is gated through
     :func:`app.config.is_stub_allowed` so all three Phase 2 stubs
-    (Tika, Claude, Fernet) follow the same APP_ENV rule (#449).
+    (Tika, Claude, Fernet) follow the same APP_ENV rule (#449, #865).
     """
     global _warned_dev_ephemeral
     value = os.environ.get("STORAGE_ENCRYPTION_KEY")
     if value:
-        return value.encode()
+        segments = [seg.strip() for seg in value.split(",")]
+        keys = [seg for seg in segments if seg]
+        if not keys:
+            raise RuntimeError(
+                "STORAGE_ENCRYPTION_KEY is set but contains no keys. "
+                "Provide one or more comma-separated url-safe base64 "
+                "Fernet keys (first key encrypts, all keys decrypt)."
+            )
+        fernets: list[Fernet] = []
+        for position, key in enumerate(keys, start=1):
+            try:
+                fernets.append(Fernet(key.encode()))
+            except (ValueError, TypeError) as exc:
+                # Never echo the key material itself into logs/tracebacks.
+                raise RuntimeError(
+                    f"STORAGE_ENCRYPTION_KEY entry #{position} of {len(keys)} "
+                    "is not a valid Fernet key (expected url-safe base64, "
+                    "32 bytes decoded). Generate one with `uv run python -c "
+                    '"from app.storage import generate_encryption_key; '
+                    'print(generate_encryption_key())"`.'
+                ) from exc
+        return fernets
     if is_stub_allowed():
         if not _warned_dev_ephemeral:
             logger.warning(
@@ -101,7 +169,7 @@ def _load_encryption_key() -> bytes:
                 "Set STORAGE_ENCRYPTION_KEY in your environment for persistent storage."
             )
             _warned_dev_ephemeral = True
-        return Fernet.generate_key()
+        return [Fernet(Fernet.generate_key())]
     raise RuntimeError(
         "STORAGE_ENCRYPTION_KEY must be set when APP_ENV=production. "
         'Generate one with `uv run python -c "from app.storage import '
@@ -110,19 +178,23 @@ def _load_encryption_key() -> bytes:
     )
 
 
-def _get_fernet() -> Fernet:
-    """Lazily construct and cache the module-level Fernet instance.
+def _get_fernet() -> MultiFernet:
+    """Lazily construct and cache the module-level MultiFernet instance.
 
     Double-checked locking (#453) so concurrent worker threads racing
     to encrypt the first upload after process start don't end up
-    constructing two Fernet instances with two different ephemeral
-    keys (which would corrupt the round-trip).
+    constructing two instances with two different ephemeral keys
+    (which would corrupt the round-trip).
+
+    ``MultiFernet`` encrypts with the FIRST configured key and tries
+    every key (in order) on decrypt — the rotation contract of #857.
+    A single-key configuration behaves exactly like plain ``Fernet``.
     """
     global _fernet
     if _fernet is None:
         with _fernet_lock:
             if _fernet is None:
-                _fernet = Fernet(_load_encryption_key())
+                _fernet = MultiFernet(_load_fernets())
     return _fernet
 
 

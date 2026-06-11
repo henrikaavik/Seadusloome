@@ -20,11 +20,32 @@ from app.db import get_connection
 # silently sign tokens with a well-known value.
 _DEV_SECRET_KEY = "dev-secret-do-not-use-in-production"
 
+# #857: HS256 security rests entirely on the secret's entropy. RFC 7518
+# §3.2 requires HMAC-SHA256 keys of at least 256 bits (32 bytes); a
+# shorter SECRET_KEY makes every issued JWT brute-forceable offline, so
+# startup fails closed instead of signing weak tokens.
+MIN_SECRET_KEY_BYTES = 32
+
 
 def _load_secret_key() -> str:
-    """Return the JWT signing secret, enforcing an explicit value off-dev."""
+    """Return the JWT signing secret, enforcing an explicit value off-dev.
+
+    An explicitly set ``SECRET_KEY`` shorter than
+    :data:`MIN_SECRET_KEY_BYTES` (UTF-8 bytes) refuses startup in EVERY
+    environment (#857) — a weak secret is a misconfiguration whether it
+    happens on a laptop or in Coolify, and dev already has the (long)
+    :data:`_DEV_SECRET_KEY` fallback when the variable is simply unset.
+    """
     value = os.environ.get("SECRET_KEY")
     if value:
+        if len(value.encode("utf-8")) < MIN_SECRET_KEY_BYTES:
+            raise RuntimeError(
+                f"SECRET_KEY is too short: {len(value.encode('utf-8'))} bytes, "
+                f"minimum is {MIN_SECRET_KEY_BYTES} bytes (RFC 7518 §3.2 for "
+                "HS256). Generate a strong value with `uv run python -c "
+                '"import secrets; print(secrets.token_urlsafe(48))"` and set '
+                "it in the environment."
+            )
         return value
     if os.environ.get("APP_ENV", "development") == "development":
         return _DEV_SECRET_KEY
