@@ -373,7 +373,7 @@ def _release_sync_lock(conn) -> None:  # type: ignore[no-untyped-def]
             logger.debug("Closing sync lock connection failed", exc_info=True)
 
 
-def _record_skipped_sync(started_at: datetime) -> None:
+def _record_skipped_sync(started_at: datetime, *, rerun_queued: bool = True) -> None:
     """Write a terminal ``failed`` sync_log note for a skipped (locked-out) run.
 
     When a sync can't acquire the advisory lock another run owns the
@@ -381,17 +381,26 @@ def _record_skipped_sync(started_at: datetime) -> None:
     ``sync_log`` breadcrumb (status='failed' with an explanatory message)
     so operators can see in the admin history that a concurrent trigger
     was correctly skipped rather than silently dropped.
+
+    Round-3 review (#853): every lock-loser now queues a rerun, so the note
+    states whether that resync was durably scheduled — the admin UI must
+    not imply the trigger was dropped when in fact a rerun is pending.
     """
+    note = (
+        "Skipped: another sync holds the advisory lock — resync queued."
+        if rerun_queued
+        else (
+            "Skipped: another sync holds the advisory lock; "
+            "FAILED to queue resync (will retry on next trigger)."
+        )
+    )
     try:
         with get_connection() as conn:
             conn.execute(
                 """INSERT INTO sync_log
                    (started_at, finished_at, status, error_message)
                    VALUES (%s, now(), 'failed', %s)""",  # type: ignore[arg-type]
-                (
-                    started_at,
-                    "Skipped: another sync holds the advisory lock (concurrent trigger).",
-                ),
+                (started_at, note),
             )
             conn.commit()
     except Exception:
@@ -566,31 +575,37 @@ def run_sync(
     lock_conn = _acquire_sync_lock()
     if lock_conn is None:
         logger.info("Sync skipped — another sync holds the advisory lock")
-        if _is_rerun:
-            # Round-2 review (#853): we were spawned to drain a pending
-            # rerun, but a fresh sync grabbed the lock in the window since
-            # the flag was consumed. Re-set the flag so the run that now
-            # holds the lock drains it on completion — otherwise the
-            # mid-sync push that scheduled this rerun would be stranded.
-            # We deliberately do NOT drain again from this invocation's
-            # finally (the lock wasn't acquired), so this can't busy-loop.
-            from app.sync.webhook_deliveries import request_rerun
+        # Round-2 + round-3 review (#853): EVERY lock-loser durably queues a
+        # rerun, not just ``_is_rerun`` ones. A non-rerun loser is a real
+        # trigger (a racing webhook push, or an admin clicking "sync now")
+        # whose tree the current lock-holder may already have cloned past —
+        # if we only recorded a skip note, that commit would be stranded.
+        # The uniform rule is also the right admin semantics: a manual sync
+        # fired while another runs should still produce fresh data, which is
+        # exactly what the queued rerun delivers. The flag is drained by
+        # whoever holds the lock; we return BEFORE the try/finally below so
+        # this branch never drains and therefore cannot busy-loop.
+        from app.sync.webhook_deliveries import request_rerun
 
-            request_rerun("rerun-relock-failed")
+        rerun_label = "rerun-relock-failed" if _is_rerun else "lock-loser-rerun"
+        rerun_queued = request_rerun(rerun_label)
         if log_id is not None:
             # A caller (admin handler) pre-inserted a 'running' row before
-            # spawning us. Close it out as failed so the UI doesn't show a
-            # phantom in-flight sync forever.
-            _finalize_row(
-                log_id,
-                "failed",
-                started_at,
-                error_message=(
-                    "Skipped: another sync holds the advisory lock (concurrent trigger)."
-                ),
+            # spawning us. Close it out so the UI doesn't show a phantom
+            # in-flight sync forever — and tell the truth about the rerun.
+            note = (
+                "Skipped: another sync holds the advisory lock — resync queued."
+                if rerun_queued
+                else (
+                    "Skipped: another sync holds the advisory lock; "
+                    "FAILED to queue resync (will retry on next trigger)."
+                )
             )
+            _finalize_row(log_id, "failed", started_at, error_message=note)
         elif not _is_rerun:
-            _record_skipped_sync(started_at)
+            # Webhook/CLI-spawned loser (no pre-inserted row): leave a
+            # breadcrumb in sync_log reflecting the queued rerun.
+            _record_skipped_sync(started_at, rerun_queued=rerun_queued)
         return False
 
     # Insert 'running' row up front so the admin UI can show live progress.

@@ -279,12 +279,13 @@ class TestSyncAdvisoryLock:
         assert second is None
 
     def test_run_sync_bails_when_lock_not_acquired(self):
-        """When the lock is held, run_sync must NOT touch Jena and must
-        record a skipped note, returning False."""
-        from app.sync import orchestrator
+        """When the lock is held, run_sync must NOT touch Jena, must queue a
+        rerun (round-3 Finding 1), and record a skipped note, returning False."""
+        from app.sync import orchestrator, webhook_deliveries
 
         with (
             patch.object(orchestrator, "_acquire_sync_lock", return_value=None),
+            patch.object(webhook_deliveries, "request_rerun", return_value=True) as mock_req,
             patch.object(orchestrator, "_record_skipped_sync") as mock_skip,
             patch.object(orchestrator, "clone_or_pull") as mock_clone,
             patch.object(orchestrator, "drop_graph") as mock_drop,
@@ -293,6 +294,8 @@ class TestSyncAdvisoryLock:
             result = orchestrator.run_sync(repo_dir=Path("/tmp/does-not-matter"))
 
         assert result is False
+        # Round-3 Finding 1: every lock-loser durably queues a rerun.
+        mock_req.assert_called_once()
         mock_skip.assert_called_once()
         # No pipeline work happened.
         mock_clone.assert_not_called()
@@ -301,23 +304,27 @@ class TestSyncAdvisoryLock:
 
     def test_run_sync_finalizes_preinserted_row_when_locked(self):
         """If a caller pre-inserted a running row (admin path) and the lock
-        is held, run_sync must finalize THAT row as failed, not insert a
-        skip note."""
-        from app.sync import orchestrator
+        is held, run_sync must finalize THAT row as failed (no skip note) and
+        still queue a rerun so the admin's trigger isn't lost."""
+        from app.sync import orchestrator, webhook_deliveries
 
         with (
             patch.object(orchestrator, "_acquire_sync_lock", return_value=None),
+            patch.object(webhook_deliveries, "request_rerun", return_value=True) as mock_req,
             patch.object(orchestrator, "_record_skipped_sync") as mock_skip,
             patch.object(orchestrator, "_finalize_row") as mock_finalize,
         ):
             result = orchestrator.run_sync(repo_dir=Path("/tmp/x"), log_id=99)
 
         assert result is False
+        mock_req.assert_called_once()
         mock_skip.assert_not_called()
         args, kwargs = mock_finalize.call_args
         assert args[0] == 99
         assert args[1] == "failed"
         assert "advisory lock" in kwargs["error_message"].lower()
+        # The note tells the truth: a resync is queued.
+        assert "resync queued" in kwargs["error_message"].lower()
 
     def test_lock_released_in_finally_on_success(self):
         """A successful run must release the lock connection."""
@@ -750,52 +757,250 @@ class TestRerunFlagStore:
             assert webhook_deliveries.consume_rerun_request() is False
 
 
-class TestWebhookInProgressQueuesResync:
-    """(a) A delivery during a running sync → 2xx queued semantics, delivery
-    recorded, rerun flag set."""
+class TestRecordDeliveryAndRequestRerun:
+    """(3) Atomic record+rerun helper for the in-progress path (Finding 2).
 
-    def test_in_progress_records_delivery_and_queues_resync(self):
+    Both writes must land on ONE connection in ONE transaction: a new
+    delivery → both committed (RECORDED); a duplicate → nothing committed
+    (DUPLICATE, rolled back); a DB error → nothing committed (FAILED), so
+    the delivery is NOT consumed and a redelivery can retry.
+    """
+
+    def test_new_delivery_records_and_arms_in_one_commit(self):
+        from app.sync import webhook_deliveries
+        from app.sync.webhook_deliveries import DeliveryRerunResult
+
+        conn = MagicMock()
+        # DELETE (sweep) → INSERT delivery RETURNING (new row) → INSERT rerun.
+        conn.execute.return_value.fetchone.return_value = ("d-1",)
+        cm = MagicMock()
+        cm.__enter__.return_value = conn
+        cm.__exit__.return_value = False
+        with patch.object(webhook_deliveries, "get_connection", return_value=cm):
+            result = webhook_deliveries.record_delivery_and_request_rerun("d-1", "push")
+        assert result is DeliveryRerunResult.RECORDED
+        sqls = [str(c.args[0]) for c in conn.execute.call_args_list]
+        joined = " ".join(sqls)
+        assert "INSERT INTO webhook_deliveries" in joined
+        assert "INSERT INTO sync_rerun_request" in joined
+        # Exactly one commit makes BOTH writes durable together; no rollback.
+        conn.commit.assert_called_once()
+        conn.rollback.assert_not_called()
+
+    def test_duplicate_delivery_rolls_back_and_does_not_arm(self):
+        from app.sync import webhook_deliveries
+        from app.sync.webhook_deliveries import DeliveryRerunResult
+
+        conn = MagicMock()
+        # INSERT delivery RETURNING yields no row → duplicate.
+        conn.execute.return_value.fetchone.return_value = None
+        cm = MagicMock()
+        cm.__enter__.return_value = conn
+        cm.__exit__.return_value = False
+        with patch.object(webhook_deliveries, "get_connection", return_value=cm):
+            result = webhook_deliveries.record_delivery_and_request_rerun("d-dup", "push")
+        assert result is DeliveryRerunResult.DUPLICATE
+        # Must NOT arm a rerun for a duplicate, and must roll back (no commit).
+        sqls = " ".join(str(c.args[0]) for c in conn.execute.call_args_list)
+        assert "INSERT INTO sync_rerun_request" not in sqls
+        conn.rollback.assert_called_once()
+        conn.commit.assert_not_called()
+
+    def test_blank_delivery_id_fails_closed(self):
+        from app.sync import webhook_deliveries
+        from app.sync.webhook_deliveries import DeliveryRerunResult
+
+        with patch.object(webhook_deliveries, "get_connection") as mock_conn:
+            result = webhook_deliveries.record_delivery_and_request_rerun("", "push")
+        assert result is DeliveryRerunResult.FAILED
+        mock_conn.assert_not_called()
+
+    def test_db_error_fails_closed_nothing_durable(self):
+        """A failure anywhere → FAILED and nothing committed, so the delivery
+        is NOT consumed (redelivery works)."""
+        from app.sync import webhook_deliveries
+        from app.sync.webhook_deliveries import DeliveryRerunResult
+
+        with patch.object(webhook_deliveries, "get_connection", side_effect=RuntimeError("db")):
+            result = webhook_deliveries.record_delivery_and_request_rerun("d-1", "push")
+        assert result is DeliveryRerunResult.FAILED
+
+    def test_failure_between_the_two_writes_leaves_neither_durable(self):
+        """Induced failure AFTER the delivery insert but BEFORE/DURING the
+        rerun insert: no commit happens, so neither write is durable."""
+        from app.sync import webhook_deliveries
+        from app.sync.webhook_deliveries import DeliveryRerunResult
+
+        conn = MagicMock()
+        # First execute = retention DELETE (ok). Second = INSERT delivery
+        # RETURNING (new row). Third = INSERT rerun → raise.
+        new_row = MagicMock()
+        new_row.fetchone.return_value = ("d-1",)
+        sweep = MagicMock()
+        results = iter([sweep, new_row])
+
+        def _execute(sql, *a, **k):
+            if "INSERT INTO sync_rerun_request" in str(sql):
+                raise RuntimeError("rerun write blew up")
+            return next(results)
+
+        conn.execute.side_effect = _execute
+        cm = MagicMock()
+        cm.__enter__.return_value = conn
+        cm.__exit__.return_value = False
+        with patch.object(webhook_deliveries, "get_connection", return_value=cm):
+            result = webhook_deliveries.record_delivery_and_request_rerun("d-1", "push")
+        assert result is DeliveryRerunResult.FAILED
+        # The delivery insert was issued, but no commit → not durable.
+        conn.commit.assert_not_called()
+
+
+class TestTwoWebhookRace:
+    """(1) Simulated two-webhook race PAST the fast path: both deliveries are
+    new and no running row is visible yet, both spawn run_sync; the advisory
+    lock loser (a non-rerun run) durably queues a rerun and does not
+    busy-loop. Exercised at the run_sync level (the spawn target)."""
+
+    def test_lock_winner_runs_loser_queues_rerun(self):
+        from rdflib import Graph
+
+        from app.sync import orchestrator, webhook_deliveries
+
+        # Winner: acquires the lock (sentinel conn); Loser: gets None.
+        acquire_results = iter([object(), None])
+
+        drained: list = []
+
+        def _fake_drain():
+            drained.append(True)
+
+        with (
+            patch.object(
+                orchestrator, "_acquire_sync_lock", side_effect=lambda: next(acquire_results)
+            ),
+            patch.object(orchestrator, "_release_sync_lock"),
+            patch.object(orchestrator, "_drain_rerun_requests", side_effect=_fake_drain),
+            patch.object(webhook_deliveries, "request_rerun", return_value=True) as mock_req,
+            patch.object(orchestrator, "_record_skipped_sync") as mock_skip,
+            # Winner pipeline mocks (so the winner reaches its finally/drain).
+            patch.object(orchestrator, "_insert_running_row", return_value=1),
+            patch.object(orchestrator, "_update_step"),
+            patch.object(orchestrator, "_finalize_row"),
+            patch.object(orchestrator, "clone_or_pull"),
+            patch.object(orchestrator, "convert_ontology", return_value=Graph()),
+            patch.object(orchestrator, "load_shapes", return_value=Graph()),
+            patch.object(orchestrator, "validate_graph", return_value=(True, "")),
+            patch.object(orchestrator, "serialize_to_turtle", return_value="# t"),
+            patch.object(orchestrator, "drop_graph", return_value=True),
+            patch.object(orchestrator, "upload_turtle_to_named_graph", return_value=True),
+            patch.object(orchestrator, "copy_graph_to_default", return_value=True),
+            patch.object(orchestrator, "graph_triple_count", return_value=2_000_000),
+            patch.object(orchestrator, "_get_notify_fn", return_value=None),
+        ):
+            winner = orchestrator.run_sync(repo_dir=Path("/tmp/winner"))
+            loser = orchestrator.run_sync(repo_dir=Path("/tmp/loser"))
+
+        # Winner ran to success and drained; loser bailed and queued a rerun.
+        assert winner is True
+        assert loser is False
+        assert drained == [True]  # only the winner (lock-holder) drains
+        mock_req.assert_called_once()  # the loser queued the rerun
+        mock_skip.assert_called_once()  # loser left a breadcrumb
+
+
+class TestWebhookInProgressQueuesResync:
+    """(a) A delivery during a running sync → 2xx queued semantics, via the
+    ATOMIC record+rerun helper (round-3 Finding 2)."""
+
+    def test_in_progress_records_and_queues_atomically(self):
+        from app.sync.webhook_deliveries import DeliveryRerunResult
+
         with (
             patch.object(webhook, "WEBHOOK_SECRET", "test-secret"),
-            patch.object(webhook, "record_delivery", return_value=True) as mock_record,
-            patch.object(webhook, "trigger_sync_background", return_value=False),
-            patch.object(webhook, "request_rerun", return_value=True) as mock_rerun,
+            patch.object(webhook, "has_recent_running_row", return_value=True),
+            patch.object(
+                webhook,
+                "record_delivery_and_request_rerun",
+                return_value=DeliveryRerunResult.RECORDED,
+            ) as mock_atomic,
+            patch.object(webhook, "trigger_sync_background") as mock_trigger,
         ):
             req = _make_webhook_request(body=_PUSH_BODY, delivery="mid-1")
             resp = _run(webhook.webhook_handler(req))
         assert resp.status_code == 200
         assert _json_body(resp)["status"] == "resync_queued"
-        # Delivery recorded (dedupe stays correct) AND rerun flag set.
-        mock_record.assert_called_once_with("mid-1", "push")
-        mock_rerun.assert_called_once_with("mid-1")
+        # Single atomic write; no fresh sync spawned (the running one drains).
+        mock_atomic.assert_called_once_with("mid-1", "push")
+        mock_trigger.assert_not_called()
 
-    def test_in_progress_flag_failure_surfaces_503(self):
-        """If the durable flag write fails, we must NOT pretend the resync
-        was scheduled — surface 503."""
+    def test_in_progress_duplicate_is_409(self):
+        from app.sync.webhook_deliveries import DeliveryRerunResult
+
         with (
             patch.object(webhook, "WEBHOOK_SECRET", "test-secret"),
-            patch.object(webhook, "record_delivery", return_value=True),
-            patch.object(webhook, "trigger_sync_background", return_value=False),
-            patch.object(webhook, "request_rerun", return_value=False),
+            patch.object(webhook, "has_recent_running_row", return_value=True),
+            patch.object(
+                webhook,
+                "record_delivery_and_request_rerun",
+                return_value=DeliveryRerunResult.DUPLICATE,
+            ),
+        ):
+            req = _make_webhook_request(body=_PUSH_BODY, delivery="dup-mid")
+            resp = _run(webhook.webhook_handler(req))
+        assert resp.status_code == 409
+        assert _json_body(resp)["status"] == "duplicate"
+
+    def test_in_progress_atomic_failure_surfaces_503_and_does_not_consume(self):
+        """(2) Flag/delivery write failure → 503 AND delivery NOT consumed:
+        the atomic helper returns FAILED (nothing committed), so the SAME
+        delivery id retried afterward succeeds and schedules."""
+        from app.sync.webhook_deliveries import DeliveryRerunResult
+
+        with (
+            patch.object(webhook, "WEBHOOK_SECRET", "test-secret"),
+            patch.object(webhook, "has_recent_running_row", return_value=True),
+            patch.object(
+                webhook,
+                "record_delivery_and_request_rerun",
+                return_value=DeliveryRerunResult.FAILED,
+            ),
         ):
             req = _make_webhook_request(body=_PUSH_BODY, delivery="mid-2")
             resp = _run(webhook.webhook_handler(req))
         assert resp.status_code == 503
         assert _json_body(resp)["status"] == "resync_queue_failed"
 
-    def test_no_contention_path_unaffected(self):
-        """(e) Normal no-contention push still starts sync, no rerun flag."""
+    def test_no_contention_path_spawns_directly(self):
+        """(e) Normal no-contention push records for dedupe then spawns
+        run_sync directly (no rerun arm on the common path)."""
         with (
             patch.object(webhook, "WEBHOOK_SECRET", "test-secret"),
-            patch.object(webhook, "record_delivery", return_value=True),
-            patch.object(webhook, "trigger_sync_background", return_value=True),
-            patch.object(webhook, "request_rerun") as mock_rerun,
+            patch.object(webhook, "has_recent_running_row", return_value=False),
+            patch.object(webhook, "record_delivery", return_value=True) as mock_record,
+            patch.object(webhook, "trigger_sync_background") as mock_trigger,
+            patch.object(webhook, "record_delivery_and_request_rerun") as mock_atomic,
         ):
             req = _make_webhook_request(body=_PUSH_BODY, delivery="solo-1")
             resp = _run(webhook.webhook_handler(req))
         assert resp.status_code == 200
         assert _json_body(resp)["status"] == "sync_triggered"
-        mock_rerun.assert_not_called()
+        mock_record.assert_called_once_with("solo-1", "push")
+        mock_trigger.assert_called_once()
+        # The common path must NOT pre-arm a rerun (would cause a redundant
+        # full reload after every push).
+        mock_atomic.assert_not_called()
+
+    def test_no_contention_duplicate_is_409_no_spawn(self):
+        with (
+            patch.object(webhook, "WEBHOOK_SECRET", "test-secret"),
+            patch.object(webhook, "has_recent_running_row", return_value=False),
+            patch.object(webhook, "record_delivery", return_value=False),
+            patch.object(webhook, "trigger_sync_background") as mock_trigger,
+        ):
+            req = _make_webhook_request(body=_PUSH_BODY, delivery="dup-solo")
+            resp = _run(webhook.webhook_handler(req))
+        assert resp.status_code == 409
+        mock_trigger.assert_not_called()
 
 
 class TestRunSyncDrainsRerun:
@@ -908,21 +1113,66 @@ class TestRunSyncDrainsRerun:
         mock_skip.assert_not_called()
         mock_drain.assert_not_called()
 
-    def test_normal_skip_is_not_a_rerun_and_does_not_reset(self):
-        """A plain (non-rerun) lock-miss records a skip note and does NOT
-        touch the rerun flag."""
+    def test_nonrerun_lock_loser_queues_rerun_and_records_skip(self):
+        """(1) Round-3 Finding 1: a plain (non-rerun) lock-loser — e.g. the
+        second of two webhooks that both raced past the fast path — MUST
+        durably queue a rerun (so its commit isn't stranded), record a skip
+        note, and NOT busy-loop (no drain from a bailed run)."""
         from app.sync import orchestrator, webhook_deliveries
 
         with (
             patch.object(orchestrator, "_acquire_sync_lock", return_value=None),
-            patch.object(webhook_deliveries, "request_rerun") as mock_req,
+            patch.object(webhook_deliveries, "request_rerun", return_value=True) as mock_req,
+            patch.object(orchestrator, "_record_skipped_sync") as mock_skip,
+            patch.object(orchestrator, "_drain_rerun_requests") as mock_drain,
+        ):
+            result = orchestrator.run_sync(repo_dir=Path("/tmp/x"))
+
+        assert result is False
+        mock_req.assert_called_once()
+        mock_skip.assert_called_once()
+        # Skip note reflects the queued rerun (rerun_queued=True path).
+        _args, kwargs = mock_skip.call_args
+        assert kwargs.get("rerun_queued") is True
+        # No drain → no busy-loop (the lock-holder drains the flag).
+        mock_drain.assert_not_called()
+
+    def test_skip_note_states_failure_when_rerun_queue_fails(self):
+        """If even the rerun-flag write fails, the skip note must say so
+        (rerun_queued=False) rather than implying a resync is pending."""
+        from app.sync import orchestrator, webhook_deliveries
+
+        with (
+            patch.object(orchestrator, "_acquire_sync_lock", return_value=None),
+            patch.object(webhook_deliveries, "request_rerun", return_value=False),
             patch.object(orchestrator, "_record_skipped_sync") as mock_skip,
         ):
             result = orchestrator.run_sync(repo_dir=Path("/tmp/x"))
 
         assert result is False
-        mock_skip.assert_called_once()
-        mock_req.assert_not_called()
+        _args, kwargs = mock_skip.call_args
+        assert kwargs.get("rerun_queued") is False
+
+    def test_admin_triggered_lock_loser_queues_rerun(self):
+        """(4) Pin admin-manual-sync semantics: an admin 'sync now' that loses
+        the lock (log_id pre-inserted) finalizes its row as failed AND queues
+        a rerun — the uniform 'lock-loser queues a rerun' rule applies to
+        admin triggers too, which is what the admin wants (fresh data after)."""
+        from app.sync import orchestrator, webhook_deliveries
+
+        with (
+            patch.object(orchestrator, "_acquire_sync_lock", return_value=None),
+            patch.object(webhook_deliveries, "request_rerun", return_value=True) as mock_req,
+            patch.object(orchestrator, "_finalize_row") as mock_finalize,
+            patch.object(orchestrator, "_drain_rerun_requests") as mock_drain,
+        ):
+            result = orchestrator.run_sync(repo_dir=Path("/tmp/x"), log_id=77)
+
+        assert result is False
+        mock_req.assert_called_once()
+        _args, kwargs = mock_finalize.call_args
+        assert kwargs["error_message"] and "resync queued" in kwargs["error_message"].lower()
+        mock_drain.assert_not_called()
 
 
 # ===========================================================================

@@ -51,6 +51,14 @@
 --     race, only the one that actually removes the row "wins" and triggers the
 --     single rerun.
 --   - No retention needed: the table holds 0 or 1 row by construction.
+--   - Round-3 review (#853): for a push that arrives mid-sync, the dedupe
+--     INSERT into ``webhook_deliveries`` and this rerun-flag UPSERT are done
+--     in ONE transaction on ONE connection
+--     (``app.sync.webhook_deliveries.record_delivery_and_request_rerun``), so a
+--     flag-write failure rolls back the delivery too — the delivery id is NOT
+--     consumed and a GitHub manual redelivery can retry. The two tables are
+--     therefore written together for that path even though they are separate
+--     relations.
 --
 -- Idempotency:
 --   - ``CREATE TABLE IF NOT EXISTS`` + ``CREATE INDEX IF NOT EXISTS`` make the

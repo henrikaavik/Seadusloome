@@ -26,11 +26,34 @@ Two concerns, both backed by ``migrations/039_webhook_deliveries.sql``:
 
 from __future__ import annotations
 
+import enum
 import logging
 
 from app.db import get_connection
 
 logger = logging.getLogger(__name__)
+
+
+class DeliveryRerunResult(enum.Enum):
+    """Outcome of :func:`record_delivery_and_request_rerun`.
+
+    Three mutually exclusive states the in-progress webhook path must
+    distinguish so it can fail closed correctly (round-3 review of #853):
+
+    * ``RECORDED`` — the delivery was new AND the rerun flag is set, both
+      committed in one transaction. The push is durably scheduled.
+    * ``DUPLICATE`` — the delivery id was already processed; nothing was
+      written. The caller returns 409.
+    * ``FAILED`` — a DB error rolled everything back; NEITHER the delivery
+      nor the flag is durable. The caller returns 503 and, crucially, the
+      delivery id is NOT consumed, so a GitHub manual redelivery (the only
+      recovery path for pushes) can retry and succeed.
+    """
+
+    RECORDED = "recorded"
+    DUPLICATE = "duplicate"
+    FAILED = "failed"
+
 
 # GitHub redelivers within a short window; 7 days is a generous superset
 # that still keeps the table tiny given delivery ids are low-volume.
@@ -158,3 +181,84 @@ def consume_rerun_request() -> bool:
     except Exception:
         logger.exception("Failed to consume sync rerun flag")
         return False
+
+
+def record_delivery_and_request_rerun(
+    delivery_id: str, event: str | None = None
+) -> DeliveryRerunResult:
+    """Record a delivery AND set the rerun flag atomically (one transaction).
+
+    Round-3 review (#853): the webhook in-progress path used to record the
+    delivery (one transaction) and THEN set the rerun flag (a second
+    transaction). If the flag write failed, the delivery was already
+    consumed, so a GitHub manual redelivery — the only recovery path for
+    pushes — hit the dedupe 409 and never scheduled the rerun. This helper
+    closes that hole: both writes happen on ONE connection with a SINGLE
+    ``commit`` (and the retention sweep), so either both are durable or
+    neither is.
+
+    Ordering inside the transaction: the dedupe INSERT runs FIRST. If it
+    finds the delivery already present (``RETURNING`` yields no row) we
+    short-circuit to ``DUPLICATE`` WITHOUT setting the rerun flag and
+    without committing any write — a duplicate must not (re)arm a rerun.
+    Only a genuinely-new delivery proceeds to UPSERT the rerun flag, after
+    which the single commit makes both durable together.
+
+    Args:
+        delivery_id: The ``X-GitHub-Delivery`` header value. A blank id
+            fails closed to ``FAILED`` (cannot dedupe → must not consume).
+        event: The ``X-GitHub-Event`` header, stored for forensics.
+
+    Returns:
+        :class:`DeliveryRerunResult` — ``RECORDED`` (both durable),
+        ``DUPLICATE`` (already seen, nothing written), or ``FAILED``
+        (DB error, nothing durable — caller must surface 503 and leave the
+        delivery un-consumed so redelivery works).
+    """
+    if not delivery_id:
+        logger.warning("Webhook delivery missing X-GitHub-Delivery id — rejecting")
+        return DeliveryRerunResult.FAILED
+
+    try:
+        with get_connection() as conn:
+            # Opportunistic retention sweep (same as record_delivery). Part
+            # of the same transaction; harmless if the delivery turns out to
+            # be a duplicate (we roll back by not committing in that path).
+            conn.execute(
+                "DELETE FROM webhook_deliveries "
+                "WHERE received_at < now() - (%s || ' days')::interval",
+                (str(_RETENTION_DAYS),),
+            )
+            row = conn.execute(
+                "INSERT INTO webhook_deliveries (delivery_id, event) "
+                "VALUES (%s, %s) "
+                "ON CONFLICT (delivery_id) DO NOTHING "
+                "RETURNING delivery_id",
+                (delivery_id, event),
+            ).fetchone()
+            if row is None:
+                # Duplicate: do NOT arm a rerun, do NOT commit the retention
+                # delete either — roll back so a replay is a pure no-op.
+                conn.rollback()
+                logger.info(
+                    "Webhook delivery %s already processed — rejecting replay", delivery_id
+                )
+                return DeliveryRerunResult.DUPLICATE
+            # New delivery: arm the coalescing rerun flag in the SAME txn.
+            conn.execute(
+                "INSERT INTO sync_rerun_request (id, requested_at, requested_by) "
+                "VALUES (TRUE, now(), %s) "
+                "ON CONFLICT (id) DO UPDATE "
+                "SET requested_at = now(), requested_by = EXCLUDED.requested_by",
+                (delivery_id,),
+            )
+            conn.commit()
+        return DeliveryRerunResult.RECORDED
+    except Exception:
+        # Nothing committed → neither the delivery nor the flag is durable.
+        # The caller surfaces 503 and leaves the delivery un-consumed so a
+        # manual GitHub redelivery can retry.
+        logger.exception(
+            "Atomic delivery+rerun write failed for %s — nothing durable", delivery_id
+        )
+        return DeliveryRerunResult.FAILED
