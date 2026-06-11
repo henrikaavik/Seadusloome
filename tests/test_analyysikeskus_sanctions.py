@@ -24,6 +24,8 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+from app.ontology.temporal_scope import TemporalScope
+
 # ---------------------------------------------------------------------------
 # Test fixtures — shared SanctionRow instances and SPARQL row stubs
 # ---------------------------------------------------------------------------
@@ -747,7 +749,7 @@ def test_sanctions_resolved_provision_renders_full_result(
 
     # The provision branch was called, similar query was NOT called
     # (no vordle_sarnaste_aktidega param on this request).
-    mock_list.assert_called_once_with(_KARS_P211_URI)
+    mock_list.assert_called_once_with(_KARS_P211_URI, scope=TemporalScope.CURRENT)
     mock_similar.assert_not_called()
 
 
@@ -806,7 +808,7 @@ def test_sanctions_resolved_law_uses_act_query(
     resp = client.get("/analyysikeskus/sanktsioonid?sisend=KarS+%C2%A7+211")
     assert resp.status_code == 200
     # The route passes the literal act title via partial_match.
-    mock_list_act.assert_called_once_with("Karistusseadustik")
+    mock_list_act.assert_called_once_with("Karistusseadustik", scope=TemporalScope.CURRENT)
 
 
 @patch("app.analyysikeskus.routes.find_similar_sanctions", return_value=[])
@@ -842,7 +844,7 @@ def test_sanctions_bare_law_input_routes_to_for_act(
     body = resp.text
 
     # The act-level helper was called with the literal title.
-    mock_list_act.assert_called_once_with("Karistusseadustik")
+    mock_list_act.assert_called_once_with("Karistusseadustik", scope=TemporalScope.CURRENT)
     # The RAG fallback was NOT consulted.
     mock_rag.assert_not_called()
     # The "Ei tuvastanud" warning is absent — we resolved (partially).

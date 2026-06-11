@@ -26,6 +26,8 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+from app.ontology.temporal_scope import TemporalScope
+
 # ---------------------------------------------------------------------------
 # Test fixtures — shared CourtDecisionRow instances and SPARQL row stubs
 # ---------------------------------------------------------------------------
@@ -749,7 +751,7 @@ def test_kohtupraktika_resolved_provision_multi_court_grouping(
     assert "Aastate kaupa" in body
 
     # The provision branch was called (not the act branch).
-    mock_list.assert_called_once_with(_AVTS_P35_URI)
+    mock_list.assert_called_once_with(_AVTS_P35_URI, scope=TemporalScope.CURRENT)
 
 
 @patch("app.analyysikeskus.routes.list_decisions_for_act")
@@ -774,7 +776,7 @@ def test_kohtupraktika_resolved_law_uses_act_query(
     assert resp.status_code == 200
     # The act-level helper accepts a literal title; the route passes
     # the title from ``partial_match["act_title"]``.
-    mock_list_act.assert_called_once_with("Avaliku teabe seadus")
+    mock_list_act.assert_called_once_with("Avaliku teabe seadus", scope=TemporalScope.CURRENT)
 
 
 @patch("app.analyysikeskus.routes.list_decisions_for_act")
@@ -803,7 +805,7 @@ def test_kohtupraktika_bare_law_input_routes_to_for_act(
     assert resp.status_code == 200
     body = resp.text
 
-    mock_list_act.assert_called_once_with("Avaliku teabe seadus")
+    mock_list_act.assert_called_once_with("Avaliku teabe seadus", scope=TemporalScope.CURRENT)
     mock_rag.assert_not_called()
     assert "Ei tuvastanud õiguslikku viidet" not in body
 

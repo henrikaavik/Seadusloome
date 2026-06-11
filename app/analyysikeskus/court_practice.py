@@ -40,6 +40,11 @@ from typing import Any, Literal
 from app.ontology.queries import PREFIXES
 from app.ontology.relations import PREDICATES
 from app.ontology.sparql_client import SparqlClient
+from app.ontology.temporal_scope import (
+    DEFAULT_SCOPE,
+    TemporalScope,
+    temporal_scope_clause,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -288,9 +293,21 @@ class CourtPracticeGroup:
 # the URI constants are module-level :data:`~typing.Final` strings —
 # never user input.
 
-_PROVISION_DECISIONS_QUERY = (
-    PREFIXES
-    + f"""
+# Temporal scope (#850): both decision queries bind ``?provision`` (the
+# interpreted ``LegalProvision``), so the current-law filter from
+# :mod:`app.ontology.temporal_scope` drops court practice that
+# interprets provisions of a positively-repealed act — keeping the
+# provision/legal-basis join on the same temporal policy as the other
+# engines (the DoD's "uses the same temporal/version policy" item). The
+# templates are builder functions so the scope clause splices per call;
+# default-scope module constants are kept below for back-compat.
+
+
+def _build_provision_decisions_query(scope: TemporalScope = DEFAULT_SCOPE) -> str:
+    """Decisions interpreting a single provision, scoped by *scope* (#850)."""
+    return (
+        PREFIXES
+        + f"""
 SELECT DISTINCT ?decision ?decisionLabel ?caseNumber ?decisionDate
                 ?court ?courtLabel ?type
                 ?provision ?provisionLabel
@@ -308,11 +325,13 @@ WHERE {{
   OPTIONAL {{ ?decision a ?type .
              FILTER(STRSTARTS(STR(?type), "https://data.riik.ee/ontology/estleg#")) }}
   OPTIONAL {{ ?provision rdfs:label ?provisionLabel }}
+{temporal_scope_clause(scope, "provision")}
 }}
 ORDER BY DESC(?decisionDate)
 LIMIT {_MAX_DECISIONS_PER_QUERY}
 """
-)
+    )
+
 
 # The act-level query joins provisions to the act via the literal
 # ``estleg:sourceAct`` title (the only join path that carries rows in
@@ -323,9 +342,13 @@ LIMIT {_MAX_DECISIONS_PER_QUERY}
 # The act-binding is therefore a string-literal — ``?actLit`` — not a
 # URI, and the caller injects it via :meth:`SparqlClient._inject_bindings`
 # (the string-literal variant of ``_inject_uri_bindings``).
-_ACT_DECISIONS_QUERY = (
-    PREFIXES
-    + f"""
+
+
+def _build_act_decisions_query(scope: TemporalScope = DEFAULT_SCOPE) -> str:
+    """Decisions interpreting any provision of an act, scoped by *scope* (#850)."""
+    return (
+        PREFIXES
+        + f"""
 SELECT DISTINCT ?decision ?decisionLabel ?caseNumber ?decisionDate
                 ?court ?courtLabel ?type
                 ?provision ?provisionLabel
@@ -344,11 +367,19 @@ WHERE {{
   OPTIONAL {{ ?decision a ?type .
              FILTER(STRSTARTS(STR(?type), "https://data.riik.ee/ontology/estleg#")) }}
   OPTIONAL {{ ?provision rdfs:label ?provisionLabel }}
+{temporal_scope_clause(scope, "provision")}
 }}
 ORDER BY DESC(?decisionDate)
 LIMIT {_MAX_DECISIONS_PER_QUERY}
 """
-)
+    )
+
+
+# Default-scope (current-law) snapshots kept for backwards compatibility
+# with callers / tests that referenced the pre-#850 ``_*_QUERY`` strings;
+# new code should call the builder functions with an explicit scope.
+_PROVISION_DECISIONS_QUERY = _build_provision_decisions_query()
+_ACT_DECISIONS_QUERY = _build_act_decisions_query()
 
 
 # Lightweight URI → literal-title reverse lookup. The corpus has no
@@ -378,6 +409,7 @@ LIMIT 1
 def list_decisions_for_provision(
     provision_uri: str,
     *,
+    scope: TemporalScope = DEFAULT_SCOPE,
     sparql_client: SparqlClient | None = None,
 ) -> list[CourtDecisionRow]:
     """Return every CourtDecision interpreting *provision_uri*.
@@ -387,6 +419,10 @@ def list_decisions_for_provision(
             ``estleg:interpretsLaw`` / subject of
             ``estleg:interpretedBy``). Empty / whitespace input yields
             ``[]`` without hitting Jena.
+        scope: Temporal scope (#850). Default current law drops court
+            practice interpreting a positively-repealed provision / act;
+            :attr:`TemporalScope.ALL` keeps the full history (e.g. for a
+            historical-research view).
         sparql_client: Optional :class:`SparqlClient` override (tests
             inject one whose ``.query`` is mocked).
 
@@ -403,7 +439,7 @@ def list_decisions_for_provision(
     client = sparql_client if sparql_client is not None else SparqlClient()
     try:
         rows = client.query(
-            _PROVISION_DECISIONS_QUERY,
+            _build_provision_decisions_query(scope),
             uri_bindings={"provision": uri},
         )
     except Exception:
@@ -420,6 +456,7 @@ def list_decisions_for_provision(
 def list_decisions_for_act(
     act_identifier: str,
     *,
+    scope: TemporalScope = DEFAULT_SCOPE,
     sparql_client: SparqlClient | None = None,
 ) -> list[CourtDecisionRow]:
     """Return every CourtDecision interpreting any provision of an act.
@@ -439,6 +476,13 @@ def list_decisions_for_act(
             does a one-shot ``rdfs:label`` reverse-lookup and uses
             that label as the literal. Empty / whitespace yields
             ``[]``.
+        scope: Temporal scope (#850). Default current law drops court
+            practice interpreting provisions of a positively-repealed
+            act; :attr:`TemporalScope.ALL` keeps the full history. Note:
+            if the act *itself* is repealed, every member provision is
+            excluded under current law and the result is empty — which is
+            the honest answer for "current court practice on a repealed
+            act".
         sparql_client: Optional :class:`SparqlClient` override.
 
     Returns:
@@ -457,7 +501,7 @@ def list_decisions_for_act(
 
     try:
         rows = client.query(
-            _ACT_DECISIONS_QUERY,
+            _build_act_decisions_query(scope),
             bindings={"actLit": act_literal},
         )
     except Exception:
