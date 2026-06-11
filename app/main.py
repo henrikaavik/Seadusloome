@@ -5,9 +5,11 @@ import time
 from pathlib import Path
 
 from fasthtml.common import *
+from starlette.datastructures import MutableHeaders
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.requests import Request
 from starlette.staticfiles import StaticFiles
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app.admin import register_admin_routes
@@ -21,6 +23,7 @@ from app.auth.routes import register_auth_routes
 from app.auth.users import register_user_routes
 from app.chat.routes import register_chat_routes
 from app.chat.websocket import register_chat_ws_routes
+from app.config import get_app_env
 from app.docs.report_routes import register_report_routes
 from app.docs.routes import register_draft_routes
 from app.docs.websocket import register_draft_ws_routes
@@ -249,6 +252,120 @@ _HDRS = (
     Script(src="/static/js/annotation_mentions.js", defer=True),
 )
 
+# ---------------------------------------------------------------------------
+# Security headers (#857, review D4/D5)
+# ---------------------------------------------------------------------------
+#
+# Content-Security-Policy — directives derived EMPIRICALLY from what the app
+# ships today (grep date 2026-06-11):
+#
+#   script-src
+#     'self'                          /static/js/* (global_search, explorer, chat…)
+#     'unsafe-inline'                 ~30 inline Script() islands (theme init in
+#                                     <head>, explorer bridge payloads, chat/docs
+#                                     modal+status scripts, dashboard capability
+#                                     map) AND inline onclick= handlers (explorer
+#                                     toolbar, toasts, cost dashboard). A nonce or
+#                                     hash here would make CSP2+ browsers IGNORE
+#                                     'unsafe-inline' and break all of those —
+#                                     several payloads are per-request dynamic, so
+#                                     static hashes cannot cover them, and nonces
+#                                     cannot authorize event-handler attributes at
+#                                     all. Tightening requires first externalizing
+#                                     those islands (follow-up; out of #857 scope).
+#                                     tests/test_security_headers.py carries a
+#                                     tripwire that fails if a nonce/hash sneaks in
+#                                     while 'unsafe-inline' is still load-bearing.
+#     'unsafe-eval'                   htmx evaluates hx-trigger event filters
+#                                     (e.g. keyup[key=='Enter'] in the draft list)
+#                                     via Function(); without this the filter
+#                                     throws under CSP and Enter-to-search dies.
+#     https://cdn.jsdelivr.net        FastHTML default hdrs (htmx, fasthtml-js,
+#                                     surreal, css-scope-inline) + chat (marked,
+#                                     dompurify)
+#     https://cdnjs.cloudflare.com    explorer D3 7.9.0
+#
+#   style-src 'self' 'unsafe-inline'  style= attributes (cost-dashboard progress
+#                                     bars, explorer legend dots / display:none
+#                                     toggles) and css-scope-inline <style> blocks
+#   img-src 'self' data:              data:image/svg+xml select-chevron in ui.css
+#   font-src 'self'                   Aino woff2 under /static/fonts
+#   connect-src 'self' ws: wss:       HTMX XHR is same-origin; chat/explorer/
+#                                     notifications WebSockets are built from
+#                                     location.host — explicit ws:/wss: schemes
+#                                     because Safari's 'self'-matches-ws upgrade
+#                                     handling has been unreliable
+#   object-src 'none', base-uri 'self', form-action 'self',
+#   frame-ancestors 'none'            no plugins, no <base> pivots, no cross-site
+#                                     form posts, no framing (+ X-Frame-Options
+#                                     DENY for pre-CSP2 agents)
+_CSP_POLICY = "; ".join(
+    (
+        "default-src 'self'",
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval' "
+        "https://cdn.jsdelivr.net https://cdnjs.cloudflare.com",
+        "style-src 'self' 'unsafe-inline'",
+        "img-src 'self' data:",
+        "font-src 'self'",
+        "connect-src 'self' ws: wss:",
+        "object-src 'none'",
+        "base-uri 'self'",
+        "form-action 'self'",
+        "frame-ancestors 'none'",
+    )
+)
+
+# One year, no preload. ``includeSubDomains`` is safe: the app owns
+# seadusloome.sixtyfour.ee and nothing is served from below it.
+_HSTS_VALUE = "max-age=31536000; includeSubDomains"
+
+
+def _is_prod_env() -> bool:
+    """True when the normalized APP_ENV is ``production``.
+
+    Evaluated PER REQUEST (env reads are cheap) so tests can flip
+    ``APP_ENV`` with monkeypatch and observe HSTS without re-importing
+    this module. Production is the only TLS-fronted environment
+    (Traefik); emitting Strict-Transport-Security over plain-http local
+    dev would poison the browser's HSTS cache for localhost for the
+    whole max-age.
+    """
+    return get_app_env() == "production"
+
+
+class SecurityHeadersMiddleware:
+    """Stamp defensive headers on every HTTP response (#857).
+
+    Pure ASGI (no BaseHTTPMiddleware) so streaming responses are not
+    buffered and WebSocket scopes pass through untouched. Registered
+    LAST → outermost, so even short-circuit responses from inner
+    middleware (TrustedHost 400, OriginCheck 403) carry the headers.
+    ``setdefault`` semantics: a route that needs a different value for
+    a specific response can set its own header and win.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_headers(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                headers.setdefault("Content-Security-Policy", _CSP_POLICY)
+                headers.setdefault("X-Content-Type-Options", "nosniff")
+                headers.setdefault("X-Frame-Options", "DENY")
+                headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+                if _is_prod_env():
+                    headers.setdefault("Strict-Transport-Security", _HSTS_VALUE)
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
+
+
 # Initialize Sentry before the ASGI app is created so that the Starlette
 # integration can wrap the app and capture unhandled exceptions. No-op when
 # SENTRY_DSN is unset.
@@ -263,12 +380,20 @@ bware = Beforeware(auth_before, skip=SKIP_PATHS)
 # htmlkw={"lang": "et"}: set the document language to Estonian so
 # Chrome's native validation bubbles, screen readers, and translation
 # tools all use the correct locale (P1 from the 2026-04-29 UI review).
+# sess_https_only (#857): mark the session cookie ``Secure`` in
+# production — the only TLS-fronted environment. A hard ``True`` would
+# break local http dev and the test suite outright: httpx/TestClient
+# (http://testserver) and browsers both refuse to return ``Secure``
+# cookies over plain http, which silently kills flash messages, the
+# temp-password reveal, and the chat seed. Evaluated at import time
+# because Starlette's SessionMiddleware fixes the flag at construction.
 app, rt = fast_app(
     before=bware,
     pico=False,
     hdrs=_HDRS,
     lifespan=lifespan,
     htmlkw={"lang": "et"},
+    sess_https_only=_is_prod_env(),
 )
 
 # Middleware order matters: Starlette's `add_middleware` prepends to the
@@ -326,6 +451,12 @@ app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=get_trusted_proxy_hosts
 from app.metrics import MetricsMiddleware  # noqa: E402
 
 app.add_middleware(MetricsMiddleware)
+
+# #857: security headers on EVERY HTTP response. Added LAST so it is the
+# OUTERMOST middleware (add_middleware prepends) — responses produced by
+# any inner middleware short-circuit (TrustedHost 400, OriginCheck 403,
+# session redirects) are stamped too, as are /static files.
+app.add_middleware(SecurityHeadersMiddleware)
 
 # FastHTML adds a default static-file route at `/{fname:path}.{ext:static}`
 # that serves from the current working directory. Our assets live under

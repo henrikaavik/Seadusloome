@@ -339,8 +339,8 @@ class TestStorageEncryptionConsumer:
         _set_app_env(monkeypatch, value)
         monkeypatch.delenv("STORAGE_ENCRYPTION_KEY", raising=False)
 
-        key = encrypted._load_encryption_key()
-        assert isinstance(key, bytes) and key
+        fernets = encrypted._load_fernets()
+        assert len(fernets) == 1  # ephemeral fallback is a single fresh key
 
     @pytest.mark.parametrize("value", ["production", "prod", "Production ", "live"])
     def test_missing_key_raises_when_stubs_disallowed(
@@ -352,7 +352,7 @@ class TestStorageEncryptionConsumer:
         monkeypatch.delenv("STORAGE_ENCRYPTION_KEY", raising=False)
 
         with pytest.raises(RuntimeError, match="STORAGE_ENCRYPTION_KEY"):
-            encrypted._load_encryption_key()
+            encrypted._load_fernets()
 
     def test_explicit_key_wins_in_any_env(self, monkeypatch: pytest.MonkeyPatch):
         from cryptography.fernet import Fernet
@@ -363,7 +363,11 @@ class TestStorageEncryptionConsumer:
         monkeypatch.setenv("APP_ENV", "prod")  # even an unknown env
         monkeypatch.setenv("STORAGE_ENCRYPTION_KEY", explicit)
 
-        assert encrypted._load_encryption_key() == explicit.encode()
+        fernets = encrypted._load_fernets()
+        assert len(fernets) == 1
+        # The configured key is the one in use: a token encrypted by the
+        # loaded Fernet decrypts under a Fernet built from the env value.
+        assert Fernet(explicit.encode()).decrypt(fernets[0].encrypt(b"x")) == b"x"
 
 
 class TestTikaConsumer:
