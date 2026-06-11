@@ -63,6 +63,13 @@
   // Track widget instances by textarea so we don't double-bind.
   const INSTANCES = new WeakMap();
 
+  // A parallel, *iterable* registry of every textarea that currently holds a
+  // live instance. The WeakMap above can't be walked, but HTMX cleanup needs
+  // to find-and-destroy instances whose textarea is being swapped out — each
+  // attach() registers 3 global listeners + a <ul> appended to <body> that
+  // would otherwise leak on every popover swap (issue #861-D).
+  const LIVE_TEXTAREAS = new Set();
+
   /** Remove every child of an element without using innerHTML. */
   function clearChildren(el) {
     while (el.firstChild) el.removeChild(el.firstChild);
@@ -431,10 +438,44 @@
         window.removeEventListener("scroll", onScrollOrResize, true);
         list.remove();
         INSTANCES.delete(textarea);
+        LIVE_TEXTAREAS.delete(textarea);
       },
     };
     INSTANCES.set(textarea, instance);
+    LIVE_TEXTAREAS.add(textarea);
     return instance;
+  }
+
+  /** Tear down the instance bound to a single textarea, if any. */
+  function destroyOne(textarea) {
+    const instance = INSTANCES.get(textarea);
+    if (instance) instance.destroy();
+  }
+
+  /**
+   * Destroy every live instance whose textarea sits inside *root* (inclusive).
+   * Used on HTMX swap/cleanup so popovers removed from the DOM also drop their
+   * global listeners + the orphan list element they appended to <body>.
+   */
+  function destroyWithin(root) {
+    if (!root || typeof root.contains !== "function") return;
+    // Snapshot first — destroy() mutates LIVE_TEXTAREAS during iteration.
+    for (const textarea of Array.from(LIVE_TEXTAREAS)) {
+      if (root === textarea || root.contains(textarea)) {
+        destroyOne(textarea);
+      }
+    }
+  }
+
+  /**
+   * Sweep for instances whose textarea has been detached from the document
+   * (a swap that replaced an ancestor we never saw a cleanup event for).
+   * Belt-and-braces backstop alongside the targeted destroyWithin() calls.
+   */
+  function destroyDetached() {
+    for (const textarea of Array.from(LIVE_TEXTAREAS)) {
+      if (!textarea.isConnected) destroyOne(textarea);
+    }
   }
 
   function attachAll(root) {
@@ -449,11 +490,28 @@
     attachAll(document);
   }
 
-  // Re-scan after every HTMX swap so newly-rendered popovers get bound.
+  // HTMX is about to remove a specific element from the DOM — tear down any
+  // instance bound to it (or to a descendant textarea) so its global
+  // listeners + orphan <body> list don't leak (issue #861-D).
+  document.body.addEventListener("htmx:beforeCleanupElement", (ev) => {
+    destroyWithin(ev.target);
+  });
+
+  // HTMX is about to replace a swap target's contents — destroy instances
+  // living inside the outgoing markup before it's discarded. Pairs with the
+  // afterSwap re-scan below, which re-binds the incoming markup.
+  document.body.addEventListener("htmx:beforeSwap", (ev) => {
+    destroyWithin(ev.target);
+  });
+
+  // Re-scan after every HTMX swap so newly-rendered popovers get bound. Also
+  // sweep for any instance whose textarea ended up detached without a
+  // cleanup event firing (belt-and-braces).
   document.body.addEventListener("htmx:afterSwap", (ev) => {
+    destroyDetached();
     attachAll(ev.target || document);
   });
 
   // Expose for manual rebinds / debugging.
-  window.AnnotationMentions = { attach, attachAll };
+  window.AnnotationMentions = { attach, attachAll, destroyWithin, destroyDetached };
 })();

@@ -301,6 +301,10 @@
       // re-sends manually if they want another attempt.
       if (brokenMidStream) {
         brokenMidStream = false;
+        // Stop the orphaned thinking ticker/watchdog timers and drop the
+        // animated "Mõtlen..." visuals — the turn they belonged to died with
+        // the old socket, so they must not survive the reconnect.
+        clearThinking();
         if (pendingBubble) {
           const chatBubble = pendingBubble.querySelector('.chat-bubble');
           const note = document.createElement('p');
@@ -669,7 +673,10 @@
     const spinner = '<span class="chat-tool-spinner" aria-hidden="true"></span>';
 
     const summary = document.createElement('summary');
-    summary.innerHTML = spinner + label;
+    // ``label`` falls back to the raw server-supplied tool name for unknown
+    // tools (see toolLabel), so it MUST be escaped before going into
+    // innerHTML — only the static spinner span is trusted markup.
+    summary.innerHTML = spinner + escapeHtml(label);
     details.appendChild(summary);
 
     const pre = document.createElement('pre');
@@ -801,7 +808,11 @@
         if (inputEl) inputEl.value = suggestion;
         // Remove chip container after use
         if (chipsDiv.parentNode) chipsDiv.parentNode.removeChild(chipsDiv);
-        sendMessage();
+        // Gate on the streaming flag like every other send path — clicking
+        // a follow-up while a reply is still streaming would otherwise
+        // interleave two turns. sendMessage() also re-checks below, but
+        // guarding here keeps the chip text in the input for the user.
+        if (!streaming) sendMessage();
       });
       chipsDiv.appendChild(btn);
     }
@@ -1026,6 +1037,13 @@
 
   function sendMessage() {
     if (!inputEl) return;
+    // Hard gate on the streaming flag: a second turn started while one is
+    // still in flight interleaves deltas and corrupts the bubble buffers.
+    // Call sites also guard with ``if (!streaming)``; this is the
+    // defence-in-depth backstop so no path can bypass it. Composes with
+    // stop-generation — the user must stop the live reply (Stop button /
+    // Esc) before a new turn is accepted.
+    if (streaming) return;
     const text = inputEl.value.trim();
     if (!text) return;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
@@ -1375,6 +1393,17 @@
    *   (the regenerate flow).
    */
   function replayFromPivot(pivotMsgId, newUserText) {
+    // Gate on the streaming flag BEFORE any DOM mutation: this function
+    // destructively trims sibling bubbles and resets the buffers, which
+    // would corrupt a reply that is still streaming. Composes with
+    // stop-generation — the user must stop the live turn first. We surface
+    // a toast rather than silently dropping, since regenerate/edit are
+    // explicit user actions.
+    if (streaming) {
+      showToast('Oodake, kuni praegune vastus on valmis', 'warning');
+      return;
+    }
+
     const pivotEl = messagesEl
       ? messagesEl.querySelector('[data-message-id="' + pivotMsgId + '"]')
       : null;
