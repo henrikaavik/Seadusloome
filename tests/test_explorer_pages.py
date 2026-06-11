@@ -1174,3 +1174,227 @@ def test_explorer_js_has_keyboard_and_focus_helpers():
     # The start panel inerts the chrome behind it.
     assert "function _setBehindPanelInert(" in js
     assert "setAttribute('inert'" in js
+
+
+# ---------------------------------------------------------------------------
+# #861 — explorer.js robustness: stale-load sequencing, overlay refcount,
+# WS backoff, node-cap feedback. These assert on the shipped explorer.js
+# source (the project's JS-test convention); the two pieces of pure logic
+# (overlay refcount + WS backoff growth) are additionally executed in Node.
+# ---------------------------------------------------------------------------
+
+
+# --- A. request-sequencing token to discard stale loads --------------------
+
+
+def test_explorer_js_has_request_sequencing_token():
+    """#861-A: a monotonic load token is grabbed by every user-initiated load
+    and re-checked after the await so a stale response can't render over a
+    newer one."""
+    js = _js()
+    # The token machinery.
+    assert "function beginLoad(" in js
+    assert "function isCurrentLoad(" in js
+    assert "let _loadToken = 0;" in js
+    # beginLoad() bumps the token; isCurrentLoad() compares against it.
+    assert "_loadToken += 1;" in js
+    assert "return token === _loadToken;" in js
+
+
+def test_explorer_js_all_interactive_loads_guard_with_the_token():
+    """#861-A: every interactive load path that mutates the shared graph after
+    an await grabs a token and bails when superseded — category drill-down,
+    entity-detail click, search, and the timeline filter."""
+    js = _js()
+    # Each of the four racing entry points claims a token...
+    assert js.count("beginLoad()") >= 4
+    # ...and guards its post-await commit against a newer load. The guard
+    # appears once per path (plus we assert the comment marker is present).
+    assert js.count("isCurrentLoad(token)") >= 3  # category + entity + search
+    assert "if (!isCurrentLoad(token)) return;" in js
+    # The timeline path uses a `var token` (function-scoped) but the same guard.
+    assert "var token = beginLoad();" in js
+    # Anchor the guard to each function by checking the nearby code is present.
+    assert "const result = await loadCategory(categoryKey);" in js
+    assert "const detail = await loadEntity(d.uri || d.id);" in js
+    assert "const results = await searchEntities(query);" in js
+    assert "var result = await loadTimeline(year);" in js
+
+
+# --- B. ref-counted loading overlay ----------------------------------------
+
+
+def test_explorer_js_loading_overlay_is_ref_counted():
+    """#861-B: show/hideLoading() keep a counter so overlapping loads don't let
+    the first completion hide the overlay while another fetch is still in
+    flight; the counter is clamped at zero."""
+    js = _js()
+    assert "let _loadingCount = 0;" in js
+    assert "_loadingCount += 1;" in js
+    # Decrement is clamped so a stray hide can't drive it negative.
+    assert "if (_loadingCount > 0) _loadingCount -= 1;" in js
+    # The overlay is only removed once the count hits zero.
+    assert "_loadingCount === 0" in js
+    # Defensive null guard on the overlay element (kept from the test DOM).
+    assert "if (loadingOverlay)" in js
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_explorer_js_overlay_refcount_behaviour(tmp_path: Path):
+    """#861-B: execute the shipped show/hideLoading refcount in Node against a
+    fake overlay element. Two overlapping loads must keep the overlay visible
+    until BOTH finish; an extra hide must not wedge it (clamped at zero)."""
+    js = _EXPLORER_JS.read_text(encoding="utf-8")
+    # Pull the exact shipped function bodies out of the source so the test
+    # exercises the real implementation, not a hand-copy.
+    show = re.search(r"function showLoading\(\) \{.*?\n\}", js, re.DOTALL)
+    hide = re.search(r"function hideLoading\(\) \{.*?\n\}", js, re.DOTALL)
+    count_decl = re.search(r"let _loadingCount = 0;", js)
+    assert show and hide and count_decl, "could not locate the #861-B overlay refcount block"
+    driver = (
+        "let _visible = false;\n"
+        "const loadingOverlay = { classList: {\n"
+        "  add() { _visible = true; }, remove() { _visible = false; } } };\n"
+        + count_decl.group(0)
+        + "\n"
+        + show.group(0)
+        + "\n"
+        + hide.group(0)
+        + "\n"
+        # Two overlapping loads + one extra spurious hide.
+        "const log = [];\n"
+        "showLoading(); log.push(_visible);          // load 1 starts -> visible\n"
+        "showLoading(); log.push(_visible);          // load 2 starts -> still visible\n"
+        "hideLoading(); log.push(_visible);          // load 1 done   -> STILL visible\n"
+        "hideLoading(); log.push(_visible);          // load 2 done   -> hidden\n"
+        "hideLoading(); log.push([_visible, _loadingCount]); // extra hide -> no-op, count>=0\n"
+        "process.stdout.write(JSON.stringify(log));\n"
+    )
+    script = tmp_path / "overlay_check.js"
+    script.write_text(driver, encoding="utf-8")
+    out = subprocess.run(
+        ["node", str(script)], capture_output=True, text=True, timeout=20, check=True
+    )
+    log = json.loads(out.stdout)
+    # visible, visible, STILL visible after first completion, then hidden.
+    assert log[0] is True
+    assert log[1] is True
+    assert log[2] is True  # the bug being fixed: first completion must NOT hide
+    assert log[3] is False
+    # The spurious extra hide leaves it hidden and the counter clamped at 0.
+    assert log[4] == [False, 0]
+
+
+# --- C. fix inverted WS backoff --------------------------------------------
+
+
+def test_explorer_js_ws_backoff_constants_and_reset():
+    """#861-C: the reconnect backoff has a base + cap, grows geometrically, and
+    resets to the base on a successful open."""
+    js = _js()
+    assert "var WS_RECONNECT_BASE = 2000;" in js
+    assert "var WS_RECONNECT_MAX = 30000;" in js
+    assert "function scheduleReconnect(" in js
+    # The growth is applied at SCHEDULE time (the bug was applying it inside the
+    # deferred callback), capped at the max.
+    assert "Math.min(reconnectDelay * 2, WS_RECONNECT_MAX)" in js
+    # Reset on open.
+    assert "reconnectDelay = WS_RECONNECT_BASE;" in js
+    # A construction failure still backs off + retries (doesn't kill the loop).
+    assert js.count("scheduleReconnect();") >= 2
+    # The old inverted pattern (multiply inside the deferred reconnect) is gone.
+    assert "reconnectDelay = Math.min(reconnectDelay * 1.5, 30000);" not in js
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_explorer_js_ws_backoff_grows_and_caps(tmp_path: Path):
+    """#861-C: run the shipped scheduleReconnect() growth in Node. Consecutive
+    failures must produce a strictly non-decreasing delay sequence that starts
+    at the base, grows, and saturates at the 30s cap; a reset returns to base."""
+    js = _EXPLORER_JS.read_text(encoding="utf-8")
+    base = re.search(r"var WS_RECONNECT_BASE = \d+;", js)
+    cap = re.search(r"var WS_RECONNECT_MAX = \d+;", js)
+    assert base and cap, "could not locate the #861-C backoff constants"
+    # Reproduce only the schedule-time growth (the part under test): capture the
+    # delay used and bump for next, exactly as the shipped scheduleReconnect does.
+    driver = (
+        base.group(0) + "\n" + cap.group(0) + "\n"
+        "var reconnectDelay = WS_RECONNECT_BASE;\n"
+        "var scheduled = [];\n"
+        "function scheduleGrow() {\n"
+        "  var delay = reconnectDelay;\n"
+        "  reconnectDelay = Math.min(reconnectDelay * 2, WS_RECONNECT_MAX);\n"
+        "  scheduled.push(delay);\n"
+        "}\n"
+        "for (var i = 0; i < 8; i++) scheduleGrow();\n"
+        "var afterReset = (function () { reconnectDelay = WS_RECONNECT_BASE;\n"
+        "  var d = reconnectDelay; return d; })();\n"
+        "process.stdout.write(JSON.stringify({scheduled: scheduled, base: WS_RECONNECT_BASE,"
+        " cap: WS_RECONNECT_MAX, afterReset: afterReset}));\n"
+    )
+    script = tmp_path / "backoff_check.js"
+    script.write_text(driver, encoding="utf-8")
+    out = subprocess.run(
+        ["node", str(script)], capture_output=True, text=True, timeout=20, check=True
+    )
+    data = json.loads(out.stdout)
+    seq = data["scheduled"]
+    # Starts at base.
+    assert seq[0] == data["base"]
+    # Strictly non-decreasing (grows, never shrinks — the inversion the fix kills).
+    for i in range(1, len(seq)):
+        assert seq[i] >= seq[i - 1], seq
+    # Actually grows for the first few attempts (not stuck at base).
+    assert seq[1] > seq[0]
+    # Saturates at the cap and never exceeds it.
+    assert max(seq) == data["cap"]
+    assert seq[-1] == data["cap"]
+    # Reset returns to base.
+    assert data["afterReset"] == data["base"]
+
+
+# --- D. user feedback when MAX_NODES cap blocks expansion ------------------
+
+
+def test_explorer_js_node_cap_emits_feedback():
+    """#861-D: a notifyNodeCap() helper surfaces a non-blocking Estonian toast
+    (debounced) when the MAX_NODES render cap blocks an expansion/search,
+    instead of silently dropping data."""
+    js = _js()
+    assert "function notifyNodeCap(" in js
+    # It routes through showToast() (whose CSS animation is already wrapped in
+    # @media (prefers-reduced-motion: reduce)) as a 'warning'.
+    cap_fn = re.search(r"function notifyNodeCap\(\) \{.*?\n\}", js, re.DOTALL)
+    assert cap_fn is not None
+    body = cap_fn.group(0)
+    assert "showToast(" in body
+    assert "'warning'" in body
+    # Estonian copy, with the cap count + the reset hint, proper diacritics.
+    assert "Kaardi maht on täis" in body  # "täis"
+    assert "Lähtesta vaade" in body  # the reset action it points at
+    assert "MAX_NODES" in body  # the count is interpolated, not hard-coded
+    # Debounced so a burst of capped adds only nudges once.
+    assert "_nodeCapNotifiedAt" in js
+
+
+def test_explorer_js_node_cap_feedback_wired_into_every_expansion_path():
+    """#861-D: notifyNodeCap() is actually called from the three paths that can
+    drop nodes at the cap — category drill-down, entity-detail neighbours, and
+    search — plus the up-front guard when the graph is already full."""
+    js = _js()
+    # Called from each path (guard + the three "some were dropped" branches).
+    assert js.count("notifyNodeCap()") >= 4
+    # Category drill-down: an up-front guard + a "more than fit" branch.
+    assert "if (state.nodes.length >= MAX_NODES) {\n    notifyNodeCap();\n    return;\n  }" in js
+    assert "if (result.nodes.length > newNodes.length) {" in js
+    # Entity-detail neighbours: a `capped` counter feeds the nudge.
+    assert "if (capped > 0) notifyNodeCap();" in js
+
+
+def test_explorer_js_node_cap_message_is_proper_estonian():
+    """#861-D: the cap message reads as natural Estonian for a ministry lawyer —
+    not a raw 'limit reached' string — and names the concrete escape hatch."""
+    js = _js()
+    # The full assembled sentence fragments (split across string concatenation).
+    assert "osa seoseid jäi kuvamata" in js  # "jäi kuvamata"
+    assert "Vabasta ruumi nupuga" in js

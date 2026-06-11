@@ -652,12 +652,42 @@ function _initRegionSelect() {
 // API helpers
 // ---------------------------------------------------------------------------
 
+// #861-B: ref-counted loading overlay. Several data loads can be in flight at
+// once (e.g. a category drill-down fired while a search is still resolving). A
+// plain add/remove of the `.visible` class lets the first completion hide the
+// overlay while another fetch is still running. Count outstanding fetches and
+// only hide once the last one settles. The counter is clamped at zero so a
+// stray extra hideLoading() can never drive it negative (which would wedge the
+// overlay open on the next load).
+let _loadingCount = 0;
+
 function showLoading() {
-  loadingOverlay.classList.add('visible');
+  _loadingCount += 1;
+  if (loadingOverlay) loadingOverlay.classList.add('visible');
 }
 
 function hideLoading() {
-  loadingOverlay.classList.remove('visible');
+  if (_loadingCount > 0) _loadingCount -= 1;
+  if (_loadingCount === 0 && loadingOverlay) loadingOverlay.classList.remove('visible');
+}
+
+// #861-A: request-sequencing token. Concurrent or slow graph-data fetches can
+// resolve out of order; without a guard a slow `loadCategory` could render its
+// nodes over a fresher `performSearch` result. Each user-initiated load grabs a
+// token via beginLoad() and re-checks isCurrentLoad(token) after every await,
+// before it commits to `state` / render(). Starting a newer load bumps the
+// token and silently invalidates the older one's deferred work. (The overlay
+// refcount above is independent — a superseded load still releases its own
+// overlay reference in `finally`.)
+let _loadToken = 0;
+
+function beginLoad() {
+  _loadToken += 1;
+  return _loadToken;
+}
+
+function isCurrentLoad(token) {
+  return token === _loadToken;
 }
 
 async function apiFetch(url) {
@@ -1244,6 +1274,19 @@ function updateLegend() {
 async function expandCategory(categoryKey) {
   if (state.expandedCategory === categoryKey) return;
 
+  // #861-D: surface a non-blocking message instead of silently no-op'ing when
+  // the render cap is already reached (the category data would be dropped
+  // wholesale below). The user has to free up room (reset the view) first.
+  if (state.nodes.length >= MAX_NODES) {
+    notifyNodeCap();
+    return;
+  }
+
+  // #861-A: claim a sequencing token so a slow category fetch can't render
+  // over a newer load (search / focus / another category) that started while
+  // this one was in flight.
+  const token = beginLoad();
+
   // Collapse previously expanded entities (keep overview nodes + new category)
   collapseToOverview(false);
 
@@ -1252,6 +1295,8 @@ async function expandCategory(categoryKey) {
   updateBreadcrumb();
 
   const result = await loadCategory(categoryKey);
+  // A newer load superseded us while the fetch was in flight — discard.
+  if (!isCurrentLoad(token)) return;
   if (!result) return;
 
   // Cap total nodes
@@ -1276,6 +1321,12 @@ async function expandCategory(categoryKey) {
     }
   });
 
+  // #861-D: the category had more entities than the cap allowed — tell the user
+  // some were left off rather than letting the drill-down look complete.
+  if (result.nodes.length > newNodes.length) {
+    notifyNodeCap();
+  }
+
   render();
 }
 
@@ -1288,8 +1339,16 @@ async function showEntityDetail(d) {
   state.view = 'entity';
   updateBreadcrumb();
 
+  // #861-A: claim a sequencing token. Two rapid node clicks each fire a detail
+  // fetch; the slower one must not splice its neighbours into the graph (or
+  // re-render) after the newer click already did.
+  const token = beginLoad();
+
   // Try to load detail from API
   const detail = await loadEntity(d.uri || d.id);
+  // A newer detail/search/category load superseded this click — abandon it
+  // before touching the panel or the shared graph state.
+  if (!isCurrentLoad(token)) return;
 
   // Populate panel
   const panelTitle = document.getElementById('panel-title');
@@ -1333,13 +1392,19 @@ async function showEntityDetail(d) {
     // Also add them to the graph
     const existingIds = new Set(state.nodes.map(n => n.id));
     let added = 0;
+    // #861-D: count neighbours we couldn't add because the render cap was hit
+    // (vs. ones already on the graph, which aren't a loss) so we can flag it.
+    let capped = 0;
     detail.neighbors.forEach(nb => {
-      if (!existingIds.has(nb.id) && state.nodes.length < MAX_NODES) {
+      if (existingIds.has(nb.id)) return;
+      if (state.nodes.length < MAX_NODES) {
         nb.x = d.x + (Math.random() - 0.5) * 60;
         nb.y = d.y + (Math.random() - 0.5) * 60;
         state.nodes.push(nb);
         existingIds.add(nb.id);
         added++;
+      } else {
+        capped++;
       }
     });
 
@@ -1360,6 +1425,12 @@ async function showEntityDetail(d) {
     });
 
     if (added > 0) render();
+
+    // #861-D: some neighbours couldn't be drawn because the cap was reached —
+    // the panel's neighbour list below still shows them all, but the graph is
+    // incomplete, so nudge the user. (The full list in the panel is the
+    // mitigation; the toast just explains why the graph didn't grow.)
+    if (capped > 0) notifyNodeCap();
 
     // Populate neighbor list in panel
     detail.neighbors.forEach(nb => {
@@ -2001,7 +2072,14 @@ async function performSearch() {
   const query = input.value.trim();
   if (!query) return;
 
+  // #861-A: claim a sequencing token so a slow search can't render its results
+  // over a newer load (a fresh search the user typed, a category drill-down,
+  // etc.) that started while this request was in flight.
+  const token = beginLoad();
+
   const results = await searchEntities(query);
+  // Superseded by a newer load — drop this stale result set.
+  if (!isCurrentLoad(token)) return;
   if (!results || results.length === 0) return;
 
   // Start from overview
@@ -2010,28 +2088,36 @@ async function performSearch() {
 
   // Add search result nodes
   const existingIds = new Set(state.nodes.map(n => n.id));
+  // #861-D: count results dropped because the render cap was reached.
+  let capped = 0;
   results.forEach(r => {
-    if (!existingIds.has(r.id) && state.nodes.length < MAX_NODES) {
-      r.x = (Math.random() - 0.5) * 200;
-      r.y = (Math.random() - 0.5) * 200;
-      state.nodes.push(r);
-      existingIds.add(r.id);
+    if (existingIds.has(r.id)) return;
+    if (state.nodes.length >= MAX_NODES) {
+      capped++;
+      return;
+    }
+    r.x = (Math.random() - 0.5) * 200;
+    r.y = (Math.random() - 0.5) * 200;
+    state.nodes.push(r);
+    existingIds.add(r.id);
 
-      // Link to matching category node
-      const catNodeId = `cat:${r.category}`;
-      if (existingIds.has(catNodeId)) {
-        state.links.push({
-          source: catNodeId,
-          target: r.id,
-          label: 'otsing',
-          isCross: false,
-        });
-      }
+    // Link to matching category node
+    const catNodeId = `cat:${r.category}`;
+    if (existingIds.has(catNodeId)) {
+      state.links.push({
+        source: catNodeId,
+        target: r.id,
+        label: 'otsing',
+        isCross: false,
+      });
     }
   });
 
   updateBreadcrumb();
   render();
+
+  // #861-D: some matches couldn't be plotted because the cap was hit.
+  if (capped > 0) notifyNodeCap();
 }
 
 // ---------------------------------------------------------------------------
@@ -2418,26 +2504,74 @@ function showToast(message, type) {
   }, 3200);
 }
 
+// #861-D: feedback when the MAX_NODES render cap blocks an expansion / search.
+// Previously expandCategory / showEntityDetail / performSearch just stopped
+// adding nodes once the cap was hit, so the graph looked complete while
+// silently dropping data. Surface a non-blocking Estonian toast pointing the
+// user at "Lähtesta vaade" (the reset that frees the budget). Debounced so a
+// burst of capped adds (e.g. a neighbour expansion) only nudges once; the
+// toast reuses showToast(), whose CSS animation is already wrapped in
+// @media (prefers-reduced-motion: reduce).
+var _nodeCapNotifiedAt = 0;
+function notifyNodeCap() {
+  var now = Date.now();
+  if (now - _nodeCapNotifiedAt < 4000) return;
+  _nodeCapNotifiedAt = now;
+  showToast(
+    'Kaardi maht on täis (kuni ' + MAX_NODES + ' üksust) — '
+      + 'osa seoseid jäi kuvamata. Vabasta ruumi nupuga „Lähtesta vaade”.',
+    'warning'
+  );
+}
+
 // ---------------------------------------------------------------------------
 // WebSocket — real-time sync notifications
 // ---------------------------------------------------------------------------
+
+// #861-C: reconnect backoff bounds. Start at 2s, grow geometrically, cap at 30s.
+var WS_RECONNECT_BASE = 2000;
+var WS_RECONNECT_MAX = 30000;
 
 function initWebSocket() {
   var protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   var wsUrl = protocol + '//' + window.location.host + '/ws/explorer';
   var ws = null;
-  var reconnectDelay = 2000;
+  // The delay for the *next* reconnect attempt. Grows on each failed attempt
+  // and is reset to the base once a connection actually opens.
+  var reconnectDelay = WS_RECONNECT_BASE;
+
+  // #861-C: the backoff was effectively inverted before — the *1.5 growth was
+  // applied inside the deferred reconnect callback (after the wait), so the
+  // delay scheduled for each attempt never reflected the failure count the way
+  // it should, and the reset-on-open / multiply-on-fire ordering could let the
+  // wait collapse back toward the base. Schedule a single reconnect using the
+  // *current* delay, then bump `reconnectDelay` (capped) right away so the
+  // *next* failure waits strictly longer. Guarded so only one timer is pending.
+  var reconnectTimer = null;
+  function scheduleReconnect() {
+    if (reconnectTimer !== null) return; // a reconnect is already queued
+    var delay = reconnectDelay;
+    // Grow geometrically for the next attempt, clamped to the cap.
+    reconnectDelay = Math.min(reconnectDelay * 2, WS_RECONNECT_MAX);
+    reconnectTimer = setTimeout(function() {
+      reconnectTimer = null;
+      connect();
+    }, delay);
+  }
 
   function connect() {
     try {
       ws = new WebSocket(wsUrl);
     } catch (e) {
-      // WebSocket construction can fail in test environments; ignore.
+      // WebSocket construction can fail in test environments; back off and
+      // retry rather than silently giving up the reconnect loop.
+      scheduleReconnect();
       return;
     }
 
     ws.onopen = function() {
-      reconnectDelay = 2000;
+      // Connected — reset the backoff so a future drop starts from the base.
+      reconnectDelay = WS_RECONNECT_BASE;
     };
 
     ws.onmessage = function(event) {
@@ -2461,11 +2595,8 @@ function initWebSocket() {
     };
 
     ws.onclose = function() {
-      // Attempt to reconnect with exponential backoff (max 30s).
-      setTimeout(function() {
-        reconnectDelay = Math.min(reconnectDelay * 1.5, 30000);
-        connect();
-      }, reconnectDelay);
+      // Attempt to reconnect with exponential backoff (capped at WS_RECONNECT_MAX).
+      scheduleReconnect();
     };
 
     ws.onerror = function() {
@@ -2496,7 +2627,13 @@ async function applyTimelineFilter(year) {
   var valueEl = document.getElementById('timeline-value');
   if (valueEl) valueEl.textContent = year;
 
+  // #861-A: claim a sequencing token. The slider is debounced, but a slow
+  // timeline fetch could still resolve after the user moved on to another load;
+  // don't let it overwrite the newer graph.
+  var token = beginLoad();
+
   var result = await loadTimeline(year);
+  if (!isCurrentLoad(token)) return;
   if (!result) return;
 
   // Replace current graph with timeline-filtered entities
