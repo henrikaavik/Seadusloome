@@ -1,11 +1,12 @@
 """PII / secret scrubbing for LLM prompt payloads.
 
-NFR §7.1 requires emails, phone numbers, UUIDs, and secret-like tokens
-to be redacted *before* prompts are sent to third-party LLM providers
-such as Anthropic. This module is the single source of truth for that
-regex set — ``app.observability._scrub_pii`` (Sentry ``before_send``)
-also consumes :data:`SCRUB_PATTERNS` so we never drift between the two
-egress paths.
+NFR §7.1 requires emails, phone numbers, UUIDs, Estonian personal
+identification codes (isikukood), Estonian IBANs, and secret-like
+tokens to be redacted *before* prompts are sent to third-party LLM
+providers such as Anthropic. This module is the single source of truth
+for that regex set — ``app.observability._scrub_pii`` (Sentry
+``before_send`` / ``before_send_transaction``) also consumes
+:data:`SCRUB_PATTERNS` so we never drift between the two egress paths.
 
 Public surface
 ==============
@@ -76,13 +77,32 @@ _PEM_RE = re.compile(r"-----BEGIN [A-Z0-9 ]+-----[\s\S]+?-----END [A-Z0-9 ]+----
 _JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b")
 _TOKEN_RE = re.compile(r"\b(?:sk|pk)[-_][A-Za-z0-9_-]{16,}\b")
 
+# Estonian personal identification code (isikukood): GYYMMDDSSSC —
+# first digit 1-6 encodes century + sex, then birth date (YYMMDD),
+# 3-digit serial, 1 checksum digit. 11 digits total. The month/day
+# constraints ([01]\d and [0-3]\d) keep random 11-digit numbers from
+# matching. For a system processing Estonian legal text this is the
+# primary PII class reaching third parties (issue #846).
+_ISIKUKOOD_RE = re.compile(r"\b[1-6]\d{2}[01]\d[0-3]\d{5}\b")
+
+# Estonian IBAN: ``EE`` + 2 check digits + 16-digit BBAN (20 chars).
+# Tolerates the conventional 4-digit grouping (``EE38 2200 2210 2014
+# 5685``) as well as the compact form required by issue #846.
+_EE_IBAN_RE = re.compile(r"\bEE\d{2}(?:\s?\d{4}){4}\b")
+
 
 SCRUB_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # PEM first so inner lines aren't nibbled by other patterns.
     (_PEM_RE, "[REDACTED_KEY]"),
     (_JWT_RE, "[REDACTED_TOKEN]"),
     (_TOKEN_RE, "[REDACTED_TOKEN]"),
+    # Email before isikukood so ``38501010002@example.com`` collapses
+    # to a single [REDACTED_EMAIL] instead of a half-redacted local part.
     (_EMAIL_RE, "[REDACTED_EMAIL]"),
+    (_EE_IBAN_RE, "[REDACTED_IBAN]"),
+    # Isikukood before phone: a bare ``372…``-prefixed isikukood would
+    # otherwise be mislabelled as an Estonian phone number.
+    (_ISIKUKOOD_RE, "[REDACTED_ISIKUKOOD]"),
     (_PHONE_RE, "[REDACTED_PHONE]"),
     (_UUID_RE, "[REDACTED_UUID]"),
 ]
