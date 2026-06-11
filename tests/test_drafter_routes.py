@@ -1380,18 +1380,28 @@ class TestPostStep6Review:
         mock_trigger.return_value = draft_id
 
         mock_conn = MagicMock()
+        # #852 E3: the route re-checks ``integrated_draft_id`` under a
+        # per-session advisory lock before triggering — (None,) means
+        # "not yet claimed", so the trigger must run.
+        mock_conn.execute.return_value.fetchone.return_value = (None,)
+        mock_conn.execute.return_value.rowcount = 1
         mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
         mock_connect.return_value.__exit__ = MagicMock(return_value=False)
 
-        with patch("app.drafter.routes.update_session"):
-            client = _authed_client()
-            resp = client.post(
-                f"/drafter/{_SESSION_ID}/step/6",
-                data={},
-            )
+        client = _authed_client()
+        resp = client.post(
+            f"/drafter/{_SESSION_ID}/step/6",
+            data={},
+        )
 
         assert resp.status_code == 200
         mock_trigger.assert_called_once()
+        # The claim must be the atomic conditional UPDATE (#852 E3).
+        executed_sql = " ".join(
+            " ".join(str(c.args[0]).split()) for c in mock_conn.execute.call_args_list
+        )
+        assert "pg_advisory_xact_lock" in executed_sql
+        assert "integrated_draft_id IS NULL" in executed_sql
 
 
 class TestGetExport:

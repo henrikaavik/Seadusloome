@@ -12,9 +12,13 @@ Flow:
     6. Update ``drafts.status = 'analyzing'`` and enqueue the next
        pipeline step (``analyze_impact``).
 
-Any exception along the way flips the draft to ``failed`` with a
-truncated error message and re-raises so the job queue retry loop
-picks it up.
+Any exception along the way — including the load/decrypt/empty-text
+preconditions (#852 E6) — re-raises so the job queue retry loop picks
+it up, and flips the draft to ``failed`` with a truncated error
+message once the retry budget is exhausted. Keeping the preconditions
+inside the gated region matters: a ``DecryptionError`` on the final
+attempt must surface as a failed draft with a retry button, not a
+draft stuck in ``extracting`` forever.
 
 The handler registers itself via ``@register_handler`` when this
 module is imported; ``app/docs/__init__.py`` pulls it in so the
@@ -73,23 +77,33 @@ def extract_entities(
         raise ValueError("extract_entities payload missing draft_id")
     draft_id = UUID(str(draft_id_raw))
 
-    # -- 1. Load draft + preconditions ---------------------------------
-    with get_connection() as conn:
-        draft = get_draft(conn, draft_id)
-    if draft is None:
-        raise ValueError(f"Draft {draft_id} not found")
-    if draft.parsed_text_encrypted is None:
-        raise ValueError(f"Draft {draft_id} has no parsed text — was parse_draft skipped?")
-    parsed_text = decrypt_text(draft.parsed_text_encrypted)
-    if not parsed_text.strip():
-        raise ValueError(f"Draft {draft_id} has no parsed text — was parse_draft skipped?")
-
-    # -- 2. Mark 'extracting' ------------------------------------------
-    with get_connection() as conn:
-        update_draft_status(conn, draft_id, "extracting")
-        conn.commit()
-
     try:
+        # -- 1. Load draft + preconditions -----------------------------
+        #
+        # #852 E6: these run INSIDE the retry-gated try. A decrypt
+        # failure (or missing parsed text) used to raise before the
+        # gated region, so the draft never flipped to ``failed`` even
+        # on the final attempt — it sat in ``extracting`` with no retry
+        # button. Now every precondition failure consumes the retry
+        # budget like any other handler error and marks the draft
+        # failed on the last attempt. (If the draft row itself is gone,
+        # the failure UPDATE in the except branch simply matches zero
+        # rows — harmless.)
+        with get_connection() as conn:
+            draft = get_draft(conn, draft_id)
+        if draft is None:
+            raise ValueError(f"Draft {draft_id} not found")
+        if draft.parsed_text_encrypted is None:
+            raise ValueError(f"Draft {draft_id} has no parsed text — was parse_draft skipped?")
+        parsed_text = decrypt_text(draft.parsed_text_encrypted)
+        if not parsed_text.strip():
+            raise ValueError(f"Draft {draft_id} has no parsed text — was parse_draft skipped?")
+
+        # -- 2. Mark 'extracting' --------------------------------------
+        with get_connection() as conn:
+            update_draft_status(conn, draft_id, "extracting")
+            conn.commit()
+
         # -- 3. Extract refs via LLM -----------------------------------
         extracted = extract_refs_from_text(parsed_text)
         logger.info(

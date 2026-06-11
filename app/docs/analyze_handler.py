@@ -92,95 +92,101 @@ def analyze_impact(
 
     logger.info("analyze_impact: starting pipeline for draft %s", draft_id)
 
-    # ------------------------------------------------------------------
-    # 1. Load draft + resolved references
-    # ------------------------------------------------------------------
-    #
-    # Step 5 of docs/2026-05-18-bugfix-plan.md: widen the SELECT to
-    # include ``partial_match`` (jsonb column from migration 034).
-    # Previously the WHERE clause filtered ``entity_uri is not null``
-    # which silently dropped every act-level partial match the resolver
-    # wrote. Those rows now surface so the graph builder can emit an
-    # act-level annotation triple and the impact engine can include the
-    # partial-match reference in the report (as an act-level finding,
-    # not as a synthetic provision URI).
-    with get_connection() as conn:
-        draft = get_draft(conn, draft_id)
-        if draft is None:
-            raise ValueError(f"Draft {draft_id} not found")
-        # #815: fetch fully-unresolved EU references BEFORE the resolved
-        # SELECT below filters them out. The downstream analyzer never
-        # sees these rows (entity_uri IS NULL AND partial_match IS NULL),
-        # but the impact-report renderer + .docx export use them to
-        # surface a "we detected EU refs but couldn't map them" warning
-        # so the user knows the analysis is missing coverage rather
-        # than silently treating "no EU findings" as "no EU impact".
-        unresolved_eu_rows = conn.execute(
-            """
-            select ref_text, confidence
-            from draft_entities
-            where draft_id = %s
-              and ref_type = 'eu_act'
-              and entity_uri is null
-              and partial_match is null
-            order by confidence desc
-            """,
-            (str(draft_id),),
-        ).fetchall()
-        entity_rows = conn.execute(
-            """
-            select ref_text, entity_uri, confidence, ref_type, location,
-                   partial_match
-            from draft_entities
-            where draft_id = %s
-              and (entity_uri is not null or partial_match is not null)
-            """,
-            (str(draft_id),),
-        ).fetchall()
-        # #844 A3b: resolve the org's owned draft UUIDs on the *same*
-        # connection so the conflict pass can mask cross-org draft rows
-        # (foreign draft URIs / titles are never persisted into the
-        # report). Best-effort — a lookup failure yields an empty set,
-        # which masks every cross-draft row (the safe default). Done here,
-        # inside the already-open connection, so we add no extra
-        # ``get_connection()`` round-trip.
-        owned_draft_ids = _owned_draft_ids_on_conn(conn, draft.org_id)
-
-    # Normalise the unresolved rows into the JSON-friendly shape that
-    # gets persisted in ``report_data["unresolved_eu_refs"]``.
-    # Tolerates both tuple-style rows (psycopg default) and dict-style
-    # rows (rare; some test fixtures use DictRow).
-    unresolved_eu_refs: list[dict[str, Any]] = []
-    for row in unresolved_eu_rows or []:
-        if isinstance(row, dict):
-            ref_text = row.get("ref_text")
-            confidence = row.get("confidence")
-        else:
-            ref_text = row[0] if len(row) > 0 else None
-            confidence = row[1] if len(row) > 1 else None
-        ref_text_str = str(ref_text or "").strip()
-        if not ref_text_str:
-            continue
-        try:
-            conf = float(confidence) if confidence is not None else 0.0
-        except (TypeError, ValueError):
-            conf = 0.0
-        unresolved_eu_refs.append({"ref_text": ref_text_str, "confidence": conf})
-
-    resolved_refs = [_row_to_resolved_ref(row) for row in entity_rows]
-    logger.info(
-        "analyze_impact: draft %s has %d resolved references "
-        "(%d full URI, %d act-level partial match)",
-        draft_id,
-        len(resolved_refs),
-        sum(1 for r in resolved_refs if r.entity_uri),
-        sum(1 for r in resolved_refs if r.partial_match is not None),
-    )
-
-    # ------------------------------------------------------------------
-    # 2-7. Build graph, load to Jena, analyse, persist, flip status
-    # ------------------------------------------------------------------
+    # #852 E6: the whole pipeline — INCLUDING the draft/entity load below —
+    # runs inside the retry-gated try. The load used to sit before the
+    # gated region, so a DB hiccup (or missing draft) there never flipped
+    # the draft to ``failed`` even on the final attempt and the pipeline
+    # appeared stuck in ``analyzing``. (When the draft row itself is gone,
+    # ``_mark_draft_failed`` simply updates zero rows — harmless.)
     try:
+        # ------------------------------------------------------------------
+        # 1. Load draft + resolved references
+        # ------------------------------------------------------------------
+        #
+        # Step 5 of docs/2026-05-18-bugfix-plan.md: widen the SELECT to
+        # include ``partial_match`` (jsonb column from migration 034).
+        # Previously the WHERE clause filtered ``entity_uri is not null``
+        # which silently dropped every act-level partial match the resolver
+        # wrote. Those rows now surface so the graph builder can emit an
+        # act-level annotation triple and the impact engine can include the
+        # partial-match reference in the report (as an act-level finding,
+        # not as a synthetic provision URI).
+        with get_connection() as conn:
+            draft = get_draft(conn, draft_id)
+            if draft is None:
+                raise ValueError(f"Draft {draft_id} not found")
+            # #815: fetch fully-unresolved EU references BEFORE the resolved
+            # SELECT below filters them out. The downstream analyzer never
+            # sees these rows (entity_uri IS NULL AND partial_match IS NULL),
+            # but the impact-report renderer + .docx export use them to
+            # surface a "we detected EU refs but couldn't map them" warning
+            # so the user knows the analysis is missing coverage rather
+            # than silently treating "no EU findings" as "no EU impact".
+            unresolved_eu_rows = conn.execute(
+                """
+                select ref_text, confidence
+                from draft_entities
+                where draft_id = %s
+                  and ref_type = 'eu_act'
+                  and entity_uri is null
+                  and partial_match is null
+                order by confidence desc
+                """,
+                (str(draft_id),),
+            ).fetchall()
+            entity_rows = conn.execute(
+                """
+                select ref_text, entity_uri, confidence, ref_type, location,
+                       partial_match
+                from draft_entities
+                where draft_id = %s
+                  and (entity_uri is not null or partial_match is not null)
+                """,
+                (str(draft_id),),
+            ).fetchall()
+            # #844 A3b: resolve the org's owned draft UUIDs on the *same*
+            # connection so the conflict pass can mask cross-org draft rows
+            # (foreign draft URIs / titles are never persisted into the
+            # report). Best-effort — a lookup failure yields an empty set,
+            # which masks every cross-draft row (the safe default). Done here,
+            # inside the already-open connection, so we add no extra
+            # ``get_connection()`` round-trip.
+            owned_draft_ids = _owned_draft_ids_on_conn(conn, draft.org_id)
+
+        # Normalise the unresolved rows into the JSON-friendly shape that
+        # gets persisted in ``report_data["unresolved_eu_refs"]``.
+        # Tolerates both tuple-style rows (psycopg default) and dict-style
+        # rows (rare; some test fixtures use DictRow).
+        unresolved_eu_refs: list[dict[str, Any]] = []
+        for row in unresolved_eu_rows or []:
+            if isinstance(row, dict):
+                ref_text = row.get("ref_text")
+                confidence = row.get("confidence")
+            else:
+                ref_text = row[0] if len(row) > 0 else None
+                confidence = row[1] if len(row) > 1 else None
+            ref_text_str = str(ref_text or "").strip()
+            if not ref_text_str:
+                continue
+            try:
+                conf = float(confidence) if confidence is not None else 0.0
+            except (TypeError, ValueError):
+                conf = 0.0
+            unresolved_eu_refs.append({"ref_text": ref_text_str, "confidence": conf})
+
+        resolved_refs = [_row_to_resolved_ref(row) for row in entity_rows]
+        logger.info(
+            "analyze_impact: draft %s has %d resolved references "
+            "(%d full URI, %d act-level partial match)",
+            draft_id,
+            len(resolved_refs),
+            sum(1 for r in resolved_refs if r.entity_uri),
+            sum(1 for r in resolved_refs if r.partial_match is not None),
+        )
+
+        # ------------------------------------------------------------------
+        # 2-7. Build graph, load to Jena, analyse, persist, flip status
+        # ------------------------------------------------------------------
         turtle = build_draft_graph(draft, resolved_refs)
         loaded = put_named_graph(draft.graph_uri, turtle)
         if not loaded:

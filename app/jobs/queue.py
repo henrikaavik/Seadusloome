@@ -25,6 +25,18 @@ the worker no longer parks failed jobs there. Re-queued jobs go
 straight back to ``pending`` with a future ``scheduled_for``, so the
 ``claim_next`` SELECT (which only looks at ``status='pending'``)
 picks them up automatically once the backoff window passes (#441).
+
+Orphan recovery (#852 E1): ``claim_next`` only ever looks at
+``status='pending'``, so a worker that dies (crash, OOM, deploy
+SIGKILL) between claim and completion used to strand its row in
+``claimed``/``running`` forever. :meth:`JobQueue.reap_stale_jobs`
+implements a visibility timeout: rows stuck in ``claimed`` or
+``running`` past a threshold are treated as one lost attempt and fed
+through the SAME retry policy as :meth:`JobQueue.mark_failed` —
+re-pended while budget remains, flipped to ``failed`` once the budget
+is exhausted (including the domain-row consequence for draft-pipeline
+jobs). The worker loop runs a pass at startup and periodically; see
+``app/jobs/worker.py``.
 """
 
 from __future__ import annotations
@@ -40,6 +52,63 @@ from psycopg.types.json import Jsonb
 from app.db import get_connection
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Reaper policy (#852 E1)
+# ---------------------------------------------------------------------------
+#
+# Threshold rationale:
+#   * ``claimed`` → ``running`` is a single UPDATE issued immediately after
+#     the claim (see ``JobWorker._tick``), so a row sitting in ``claimed``
+#     for 10 minutes can only mean the worker died in between. 10 min is
+#     pure safety margin over the realistic worst case of milliseconds.
+#   * ``running`` jobs hold no DB lock while the handler executes, so age
+#     is the only stall signal. The threshold must exceed the LONGEST
+#     legitimate handler runtime or a slow-but-alive job gets double-run.
+#     Worst case today is ``drafter_draft`` (one LLM call per section;
+#     a VTK/full-law structure can mean tens of sequential calls), which
+#     can legitimately run for many minutes — 30 min clears it with room
+#     while still bounding the stuck-pipeline window to one reaper pass.
+# Both are overridable via env (``JOB_REAPER_CLAIMED_TIMEOUT_S`` /
+# ``JOB_REAPER_RUNNING_TIMEOUT_S``, read in ``app/jobs/worker.py``) so an
+# operator can tighten or relax them without a release.
+DEFAULT_REAPER_CLAIMED_TIMEOUT_S = 600
+DEFAULT_REAPER_RUNNING_TIMEOUT_S = 1800
+
+# Upper bound per reaper pass — keeps a pathological backlog from turning
+# one pass into a long transaction. The next pass picks up the remainder.
+_REAP_BATCH_LIMIT = 100
+
+# Draft statuses the reaper may flip to ``failed`` when a draft-pipeline
+# job loses its retry budget. Terminal states (``ready``/``failed``) are
+# never touched — e.g. an orphaned ``export_report`` job must not fail a
+# draft that already finished analysis.
+_REAPABLE_DRAFT_STATUSES = frozenset({"uploaded", "parsing", "extracting", "analyzing"})
+
+# ``background_jobs.error_message`` surfaces in the admin job monitor and
+# in the drafter step-status alert, so the strings are Estonian.
+_REAPED_RETRY_MSG_ET = (
+    "Töötlus katkes ootamatult (tööprotsess seiskus); "
+    "töö pandi automaatselt uuesti järjekorda (katse {attempts}/{max_attempts})."
+)
+_REAPED_EXHAUSTED_MSG_ET = (
+    "Töötlus katkes ootamatult ja katsete limiit on ammendatud ({attempts}/{max_attempts})."
+)
+_REAPED_DRAFT_MSG_ET = (
+    "Töötlemine katkes ootamatult (näiteks süsteemi taaskäivituse tõttu). Palun proovige uuesti."
+)
+
+
+@dataclass
+class ReapStats:
+    """Outcome counts of one :meth:`JobQueue.reap_stale_jobs` pass."""
+
+    recovered: int = 0
+    """Orphaned jobs re-pended for another attempt."""
+
+    exhausted: int = 0
+    """Orphaned jobs whose retry budget ran out — flipped to ``failed``."""
 
 
 @dataclass
@@ -333,6 +402,147 @@ class JobQueue:
                 )
             conn.commit()
 
+    # -- orphan recovery (#852 E1) -------------------------------------------
+
+    def reap_stale_jobs(
+        self,
+        *,
+        claimed_timeout_s: int = DEFAULT_REAPER_CLAIMED_TIMEOUT_S,
+        running_timeout_s: int = DEFAULT_REAPER_RUNNING_TIMEOUT_S,
+    ) -> ReapStats:
+        """Recover ``claimed``/``running`` rows orphaned by a dead worker.
+
+        A worker killed mid-job (crash, OOM, deploy SIGKILL) leaves its row
+        in ``claimed`` or ``running``; ``claim_next`` only selects
+        ``pending`` so the row would otherwise be stuck forever. Each stale
+        row counts as ONE lost attempt and follows the same retry policy as
+        :meth:`mark_failed`:
+
+        * budget remaining → back to ``pending`` with ``scheduled_for=now``
+          (no backoff — the failure was not the job's fault, so the retry
+          runs as soon as a worker is free),
+        * budget exhausted → ``failed``, plus the domain-row consequence
+          for draft-pipeline jobs (the draft is flipped to ``failed`` so
+          the user sees the error and the retry button instead of a
+          pipeline stuck in ``extracting``/``analyzing``).
+
+        Bounded (``LIMIT {batch}``) and concurrency-safe: the candidate
+        SELECT uses ``FOR UPDATE SKIP LOCKED`` so multiple reapers (web
+        replicas + standalone worker) never double-process a row.
+
+        Returns:
+            :class:`ReapStats` with recovered/exhausted counts so callers
+            can log and meter the pass.
+        """
+        now = datetime.now(UTC)
+        claimed_cutoff = now - timedelta(seconds=claimed_timeout_s)
+        running_cutoff = now - timedelta(seconds=running_timeout_s)
+        stats = ReapStats()
+        # (job_id, job_type, payload) of permanently-failed jobs; domain
+        # finalisation runs AFTER the queue transaction commits so a
+        # domain-side error cannot roll back the queue bookkeeping.
+        exhausted_jobs: list[tuple[int, str, dict[str, Any]]] = []
+
+        with get_connection() as conn:
+            # COALESCE keeps the predicate total even if an operator
+            # hand-edited a row and nulled the timestamps — such rows age
+            # out via created_at instead of being stranded forever.
+            rows = conn.execute(
+                """
+                SELECT id, job_type, payload, status, attempts, max_attempts, claimed_by
+                FROM background_jobs
+                WHERE (status = 'claimed' AND COALESCE(claimed_at, created_at) < %s)
+                   OR (status = 'running'
+                       AND COALESCE(started_at, claimed_at, created_at) < %s)
+                ORDER BY id
+                LIMIT %s
+                FOR UPDATE SKIP LOCKED
+                """,
+                (claimed_cutoff, running_cutoff, _REAP_BATCH_LIMIT),
+            ).fetchall()
+
+            for row in rows:
+                job_id, job_type, payload, status, attempts, max_attempts, claimed_by = row
+                next_attempts = int(attempts or 0) + 1
+                budget = int(max_attempts or 1)
+
+                if next_attempts < budget:
+                    conn.execute(
+                        """
+                        UPDATE background_jobs
+                        SET status = 'pending',
+                            attempts = %s,
+                            error_message = %s,
+                            scheduled_for = %s,
+                            claimed_by = NULL,
+                            claimed_at = NULL,
+                            started_at = NULL
+                        WHERE id = %s
+                        """,
+                        (
+                            next_attempts,
+                            _REAPED_RETRY_MSG_ET.format(
+                                attempts=next_attempts, max_attempts=budget
+                            ),
+                            now,
+                            job_id,
+                        ),
+                    )
+                    stats.recovered += 1
+                    logger.warning(
+                        "Reaper: recovered orphaned job id=%s type=%s status=%s "
+                        "worker=%s — re-pended (attempt %d/%d)",
+                        job_id,
+                        job_type,
+                        status,
+                        claimed_by,
+                        next_attempts,
+                        budget,
+                    )
+                else:
+                    conn.execute(
+                        """
+                        UPDATE background_jobs
+                        SET status = 'failed',
+                            attempts = %s,
+                            error_message = %s,
+                            finished_at = %s
+                        WHERE id = %s
+                        """,
+                        (
+                            next_attempts,
+                            _REAPED_EXHAUSTED_MSG_ET.format(
+                                attempts=next_attempts, max_attempts=budget
+                            ),
+                            now,
+                            job_id,
+                        ),
+                    )
+                    stats.exhausted += 1
+                    logger.error(
+                        "Reaper: orphaned job id=%s type=%s status=%s worker=%s "
+                        "exhausted its retry budget (%d/%d) — marked failed",
+                        job_id,
+                        job_type,
+                        status,
+                        claimed_by,
+                        next_attempts,
+                        budget,
+                    )
+                    exhausted_jobs.append((int(job_id), str(job_type), _parse_json(payload) or {}))
+            conn.commit()
+
+        for job_id, job_type, payload in exhausted_jobs:
+            _finalize_draft_for_lost_job(job_id, job_type, payload)
+
+        if stats.recovered or stats.exhausted:
+            logger.info(
+                "Reaper pass complete: recovered=%d exhausted=%d",
+                stats.recovered,
+                stats.exhausted,
+            )
+        return stats
+
     # -- query helpers ------------------------------------------------------
 
     def get(self, job_id: int) -> Job | None:
@@ -361,3 +571,90 @@ class JobQueue:
                 (status, limit),
             ).fetchall()
         return [_row_to_job(row) for row in rows]
+
+
+# ---------------------------------------------------------------------------
+# Reaper domain finalisation (#852 E1)
+# ---------------------------------------------------------------------------
+
+
+def _finalize_draft_for_lost_job(job_id: int, job_type: str, payload: dict[str, Any]) -> None:
+    """Apply the domain-row consequence when the reaper permanently fails a job.
+
+    Handlers normally flip their domain row to ``failed`` on the final
+    attempt (#448), but a reaped job never got to run its final attempt —
+    without this hook the draft would sit in ``parsing``/``extracting``/
+    ``analyzing`` forever with no retry button.
+
+    Only draft-pipeline jobs (payloads carrying ``draft_id``) need this:
+    the drafter wizard reads the JOB row's status/error directly (see
+    ``step_status_fragment``), so ``session_id`` payloads already surface
+    the failure without touching the session row (abandoning a session for
+    an infrastructure failure would destroy user work).
+
+    Best-effort by design — every error is logged and swallowed so a
+    domain-side hiccup never breaks the reaper pass. The imports are local
+    to avoid an ``app.jobs`` → ``app.docs`` import cycle at module load
+    (``app.docs`` handlers import ``app.jobs.worker`` for registration).
+    """
+    draft_id = (payload or {}).get("draft_id")
+    if not draft_id:
+        return
+
+    try:
+        from app.docs.status import update_draft_status
+
+        with get_connection() as conn:
+            row = conn.execute(
+                "SELECT status FROM drafts WHERE id = %s",
+                (str(draft_id),),
+            ).fetchone()
+            if row is None:
+                return
+            current = str(row[0])
+            if current not in _REAPABLE_DRAFT_STATUSES:
+                return
+            # ``expected_status`` guards against a concurrent transition
+            # between our SELECT and the UPDATE.
+            update_draft_status(
+                conn,
+                draft_id,
+                "failed",
+                _REAPED_DRAFT_MSG_ET,
+                error_debug=(
+                    f"Reaper: background job id={job_id} type={job_type} was orphaned "
+                    f"(worker lost) and its retry budget is exhausted"
+                ),
+                expected_status=current,
+            )
+            conn.commit()
+        logger.warning(
+            "Reaper: marked draft %s failed after orphaned job id=%s type=%s "
+            "exhausted its retry budget",
+            draft_id,
+            job_id,
+            job_type,
+        )
+    except Exception:  # noqa: BLE001 — domain flip must never break the reaper
+        logger.exception(
+            "Reaper: failed to mark draft %s failed for lost job id=%s",
+            draft_id,
+            job_id,
+        )
+        return
+
+    # Push the failure to WS subscribers so an open draft page updates
+    # without a manual refresh (#608 pattern). Best-effort.
+    try:
+        from uuid import UUID
+
+        from app.docs.status_events import emit_threadsafe
+
+        emit_threadsafe(
+            UUID(str(draft_id)),
+            type="status",
+            status="failed",
+            error_message=_REAPED_DRAFT_MSG_ET,
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("Reaper: WS status emit failed for draft %s", draft_id, exc_info=True)

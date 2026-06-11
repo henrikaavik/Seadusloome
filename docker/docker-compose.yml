@@ -55,6 +55,15 @@ services:
         condition: service_healthy
       tika:
         condition: service_healthy
+    # #852: the lifespan shutdown joins worker + scheduler threads against a
+    # shared 30s deadline (app/main.py); Docker's default SIGTERM grace is
+    # 10s, which SIGKILLed mid-job workers on every deploy and orphaned
+    # claimed/running rows. 35s = 30s join budget + margin. Production
+    # (Coolify) does not read this file — set the equivalent stop-grace
+    # there too (Coolify UI: application "Advanced" → custom docker options
+    # `--stop-timeout 35`, or the docker-compose `stop_grace_period` field
+    # for compose-based apps).
+    stop_grace_period: 35s
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------

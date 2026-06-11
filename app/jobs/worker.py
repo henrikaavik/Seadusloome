@@ -40,6 +40,7 @@ There are no stubs left in this module.
 from __future__ import annotations
 
 import logging
+import os
 import socket
 import threading
 import time
@@ -48,10 +49,35 @@ import uuid
 from collections.abc import Callable
 from typing import Any
 
-from app.jobs.queue import JobQueue
+from app.jobs.queue import (
+    DEFAULT_REAPER_CLAIMED_TIMEOUT_S,
+    DEFAULT_REAPER_RUNNING_TIMEOUT_S,
+    JobQueue,
+)
 from app.metrics import record_metric
 
 logger = logging.getLogger(__name__)
+
+# How often the worker loop runs an orphan-recovery pass (#852 E1).
+# Cheap (one indexed SELECT when nothing is stale), so once a minute keeps
+# the stuck-job window small without measurable load.
+DEFAULT_REAP_INTERVAL_S = 60.0
+
+
+def _env_seconds(name: str, default: float) -> float:
+    """Read a positive seconds value from the environment, else *default*."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("Ignoring non-numeric %s=%r; using %s", name, raw, default)
+        return default
+    if value <= 0:
+        logger.warning("Ignoring non-positive %s=%r; using %s", name, raw, default)
+        return default
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -108,11 +134,35 @@ class JobWorker:
             same box do not collide.
         poll_interval: Seconds to sleep when the queue is empty. Kept low
             (2s) because ``stop_event.wait`` wakes immediately on shutdown.
+        reap_interval: Seconds between orphan-recovery passes (#852 E1).
+            The FIRST pass runs immediately on startup so jobs orphaned by
+            the previous process (deploy kill, crash) are recovered before
+            any new work is claimed. ``None`` reads
+            ``JOB_REAPER_INTERVAL_S`` from the environment (default 60s).
     """
 
-    def __init__(self, worker_id: str | None = None, poll_interval: float = 2.0) -> None:
+    def __init__(
+        self,
+        worker_id: str | None = None,
+        poll_interval: float = 2.0,
+        reap_interval: float | None = None,
+    ) -> None:
         self.worker_id = worker_id or _default_worker_id()
         self.poll_interval = poll_interval
+        self.reap_interval = (
+            reap_interval
+            if reap_interval is not None
+            else _env_seconds("JOB_REAPER_INTERVAL_S", DEFAULT_REAP_INTERVAL_S)
+        )
+        self.claimed_timeout_s = int(
+            _env_seconds("JOB_REAPER_CLAIMED_TIMEOUT_S", DEFAULT_REAPER_CLAIMED_TIMEOUT_S)
+        )
+        self.running_timeout_s = int(
+            _env_seconds("JOB_REAPER_RUNNING_TIMEOUT_S", DEFAULT_REAPER_RUNNING_TIMEOUT_S)
+        )
+        # Monotonic deadline of the next reaper pass. 0.0 means "reap on
+        # the first loop iteration" — that IS the startup recovery pass.
+        self._next_reap_at = 0.0
 
     def run_forever(self, stop_event: threading.Event) -> None:
         """Main loop. Runs until *stop_event* is set.
@@ -124,10 +174,14 @@ class JobWorker:
         propagate out of the loop.
         """
         logger.info(
-            "JobWorker %s starting (poll_interval=%ss)", self.worker_id, self.poll_interval
+            "JobWorker %s starting (poll_interval=%ss reap_interval=%ss)",
+            self.worker_id,
+            self.poll_interval,
+            self.reap_interval,
         )
         while not stop_event.is_set():
             try:
+                self._maybe_reap()
                 self._tick(stop_event)
             except Exception:  # noqa: BLE001 — top-level guard, must never die
                 logger.exception(
@@ -139,6 +193,38 @@ class JobWorker:
         logger.info("JobWorker %s stopped", self.worker_id)
 
     # -- internal -----------------------------------------------------------
+
+    def _maybe_reap(self) -> None:
+        """Run an orphan-recovery pass when the reap interval has elapsed.
+
+        The deadline advances BEFORE the pass so a failing reaper (DB
+        down, etc.) backs off to the next interval instead of hot-looping;
+        normal job dispatch continues regardless. Counts are logged inside
+        :meth:`JobQueue.reap_stale_jobs`; here they are also metered so the
+        admin dashboard can chart recovery volume.
+        """
+        now = time.monotonic()
+        if now < self._next_reap_at:
+            return
+        self._next_reap_at = now + self.reap_interval
+
+        try:
+            stats = JobQueue().reap_stale_jobs(
+                claimed_timeout_s=self.claimed_timeout_s,
+                running_timeout_s=self.running_timeout_s,
+            )
+        except Exception:  # noqa: BLE001 — reaper failures must not stop dispatch
+            logger.exception("JobWorker %s: reaper pass failed", self.worker_id)
+            return
+
+        recovered = getattr(stats, "recovered", 0)
+        exhausted = getattr(stats, "exhausted", 0)
+        # isinstance guards keep the metric write type-safe even when a
+        # test substitutes JobQueue with a mock.
+        if isinstance(recovered, int) and recovered > 0:
+            record_metric("jobs_reaped", float(recovered), {"outcome": "recovered"})
+        if isinstance(exhausted, int) and exhausted > 0:
+            record_metric("jobs_reaped", float(exhausted), {"outcome": "exhausted"})
 
     def _tick(self, stop_event: threading.Event) -> None:
         """Claim at most one job and dispatch it. May sleep if idle."""
