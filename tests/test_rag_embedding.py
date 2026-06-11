@@ -124,7 +124,7 @@ class TestVoyageRealMode:
             ["hello", "world"],
             model="voyage-multilingual-2",
         )
-        mock_log_cost.assert_called_once_with(100)
+        mock_log_cost.assert_called_once_with(100, user_id=None, org_id=None, feature="embedding")
 
     @patch("app.rag.embedding.VoyageProvider._log_cost")
     def test_embed_no_total_tokens_skips_cost_log(
@@ -169,3 +169,145 @@ class TestFactory:
 
         # Cleanup
         _reset_default_embedding_provider()
+
+
+# ---------------------------------------------------------------------------
+# #854: embedding cost attribution (kwargs + contextvar override)
+# ---------------------------------------------------------------------------
+
+
+class TestEmbeddingCostAttribution:
+    """Voyage spend must land in llm_usage with user/org/feature labels."""
+
+    def _make_real_mode_provider(self, monkeypatch: pytest.MonkeyPatch) -> VoyageProvider:
+        monkeypatch.setenv("VOYAGE_API_KEY", "fake-key")
+        provider = VoyageProvider()
+        mock_client = MagicMock()
+        mock_client.embed = AsyncMock(
+            return_value=SimpleNamespace(embeddings=[[0.1] * 1024], total_tokens=42)
+        )
+        provider._client = mock_client
+        return provider
+
+    @patch("app.llm.cost_tracker.log_usage")
+    def test_embed_kwargs_reach_log_usage(
+        self, mock_log_usage: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ):
+        provider = self._make_real_mode_provider(monkeypatch)
+
+        asyncio.run(
+            provider.embed(
+                ["tekst"],
+                user_id="user-1",
+                org_id="org-1",
+                feature="chat_embedding",
+            )
+        )
+
+        mock_log_usage.assert_called_once_with(
+            user_id="user-1",
+            org_id="org-1",
+            provider="voyage",
+            model="voyage-multilingual-2",
+            feature="chat_embedding",
+            tokens_input=42,
+            tokens_output=0,
+        )
+
+    @patch("app.llm.cost_tracker.log_usage")
+    def test_embed_defaults_remain_unattributed(
+        self, mock_log_usage: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Legacy callers without kwargs keep the old anonymous shape."""
+        provider = self._make_real_mode_provider(monkeypatch)
+
+        asyncio.run(provider.embed(["tekst"]))
+
+        mock_log_usage.assert_called_once_with(
+            user_id=None,
+            org_id=None,
+            provider="voyage",
+            model="voyage-multilingual-2",
+            feature="embedding",
+            tokens_input=42,
+            tokens_output=0,
+        )
+
+    @patch("app.llm.cost_tracker.log_usage")
+    def test_attribution_context_overrides_kwargs(
+        self, mock_log_usage: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The outermost business caller (drafter) wins over plumbing
+        defaults threaded through the retriever."""
+        from app.rag.embedding import embedding_attribution
+
+        provider = self._make_real_mode_provider(monkeypatch)
+
+        with embedding_attribution(
+            user_id="drafter-user",
+            org_id="drafter-org",
+            feature="drafter_research_embedding",
+        ):
+            asyncio.run(
+                provider.embed(
+                    ["tekst"],
+                    user_id=None,
+                    org_id=None,
+                    feature="analyysikeskus_similarity_embedding",
+                )
+            )
+
+        mock_log_usage.assert_called_once_with(
+            user_id="drafter-user",
+            org_id="drafter-org",
+            provider="voyage",
+            model="voyage-multilingual-2",
+            feature="drafter_research_embedding",
+            tokens_input=42,
+            tokens_output=0,
+        )
+
+    @patch("app.llm.cost_tracker.log_usage")
+    def test_attribution_context_survives_asyncio_run_bridge(
+        self, mock_log_usage: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ):
+        """``find_embedding_similar`` bridges sync→async via
+        ``asyncio.run``; the contextvar must survive that hop (it does —
+        ``asyncio.run`` copies the ambient context)."""
+        from app.rag.embedding import embedding_attribution
+
+        provider = self._make_real_mode_provider(monkeypatch)
+
+        def _sync_chain() -> None:
+            # Mimics similarity.find_embedding_similar's bridge shape.
+            async def _run() -> None:
+                await provider.embed(["tekst"])
+
+            asyncio.run(_run())
+
+        with embedding_attribution(
+            user_id="u-9", org_id="o-9", feature="drafter_research_embedding"
+        ):
+            _sync_chain()
+
+        kwargs = mock_log_usage.call_args.kwargs
+        assert kwargs["user_id"] == "u-9"
+        assert kwargs["org_id"] == "o-9"
+        assert kwargs["feature"] == "drafter_research_embedding"
+
+    @patch("app.llm.cost_tracker.log_usage")
+    def test_attribution_context_resets_after_block(
+        self, mock_log_usage: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ):
+        from app.rag.embedding import embedding_attribution
+
+        provider = self._make_real_mode_provider(monkeypatch)
+
+        with embedding_attribution(user_id="u-1", feature="drafter_research_embedding"):
+            pass  # context opened and closed without embedding
+
+        asyncio.run(provider.embed(["tekst"]))
+
+        kwargs = mock_log_usage.call_args.kwargs
+        assert kwargs["user_id"] is None
+        assert kwargs["feature"] == "embedding"

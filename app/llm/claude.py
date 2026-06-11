@@ -17,6 +17,7 @@ set) calls the Anthropic Messages API and logs token usage via
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -100,7 +101,11 @@ class ClaudeProvider(LLMProvider):
                 "ClaudeProvider: the 'anthropic' package is not installed. "
                 "Run `uv add anthropic` to add it."
             ) from exc
-        self._client = anthropic.Anthropic(api_key=self._api_key)
+        # #854: max_retries=0 — app/llm/retry.py is the single retry
+        # authority. The SDK default of 2 internal retries would stack
+        # under the outer wrapper's 4 attempts (up to 12 HTTP calls and
+        # a multi-minute blocking worst case).
+        self._client = anthropic.Anthropic(api_key=self._api_key, max_retries=0)
         return self._client
 
     def _log_cost(
@@ -312,7 +317,9 @@ class ClaudeProvider(LLMProvider):
                 "ClaudeProvider: the 'anthropic' package is not installed. "
                 "Run `uv add anthropic` to add it."
             ) from exc
-        self._async_client = anthropic.AsyncAnthropic(api_key=self._api_key)
+        # #854: max_retries=0 — see _get_client; the outer retry wrapper
+        # in app/llm/retry.py is the single retry authority.
+        self._async_client = anthropic.AsyncAnthropic(api_key=self._api_key, max_retries=0)
         return self._async_client
 
     # -- async LLMProvider interface -------------------------------------------
@@ -478,8 +485,27 @@ class ClaudeProvider(LLMProvider):
             stream_obj.__stream_ctx__ = ctx  # type: ignore[attr-defined]
             return stream_obj
 
+        # #854: cost logging happens in the OUTER ``finally`` at the bottom
+        # of this method. Previously ``_log_cost`` ran in a ``finally``
+        # attached to the trailing ``yield stop``, which a mid-stream
+        # upstream error or a client-disconnect cancel (GeneratorExit via
+        # ``aclose()``) skipped entirely — already-billed output tokens
+        # never reached ``llm_usage``. Once the stream has *opened*,
+        # Anthropic bills the input tokens (and any streamed output), so
+        # we record whatever usage the events delivered. The counts are
+        # event-derived: on an early abort ``message_delta`` may not have
+        # arrived yet, so partial-but-honest numbers (often output=0) are
+        # logged rather than nothing.
+        stream_opened = False
         try:
-            stream = await retry_async(_open_stream, context="astream-open")
+            try:
+                stream = await retry_async(_open_stream, context="astream-open")
+            except Exception:
+                # Open never succeeded → nothing was billed; skip the
+                # usage row entirely (stream_opened stays False).
+                stream_status = "error"
+                raise
+            stream_opened = True
             ctx = stream.__stream_ctx__  # type: ignore[attr-defined]
             try:
                 async for event in stream:
@@ -548,13 +574,35 @@ class ClaudeProvider(LLMProvider):
                             usage = getattr(msg, "usage", None)
                             if usage:
                                 tokens_input = getattr(usage, "input_tokens", 0)
+            except (GeneratorExit, asyncio.CancelledError):
+                # Consumer cancelled mid-stream — client disconnect
+                # (``aclose()`` → GeneratorExit) or an enclosing
+                # ``wait_for`` timeout (CancelledError). The tokens
+                # streamed so far are still billed; the outer finally
+                # records them (#854).
+                stream_status = "cancelled"
+                raise
+            except Exception:
+                stream_status = "error"
+                raise
             finally:
                 # Close the context we manually entered above so the
-                # underlying httpx stream is released even on errors.
+                # underlying httpx stream is released on every path —
+                # clean stop, upstream error, and GeneratorExit from a
+                # consumer ``aclose()``.
                 await ctx.__aexit__(None, None, None)
-        except Exception:
-            stream_status = "error"
-            raise
+
+            # #662 / post-review fix: yield the stop event so the
+            # orchestrator can read the per-turn tokens off it and persist
+            # them on the assistant message row. The llm_usage row is
+            # recorded in the OUTER finally below, so a consumer cancel
+            # immediately after receiving the stop frame (or at any
+            # earlier point) still produces exactly one usage row.
+            yield StreamEvent(
+                type="stop",
+                tokens_input=tokens_input,
+                tokens_output=tokens_output,
+            )
         finally:
             _stream_duration_ms = (time.perf_counter() - _stream_start) * 1000
             record_metric(
@@ -567,29 +615,18 @@ class ClaudeProvider(LLMProvider):
                     "status": stream_status,
                 },
             )
-
-        # #662 / post-review fix: yield the stop event FIRST so the
-        # orchestrator can read the per-turn tokens off it and persist
-        # them on the assistant message row, then log_cost in a finally
-        # block so the llm_usage row is recorded even if the consumer
-        # cancels the generator immediately after receiving the stop
-        # frame. Previously cost was logged before the yield, so a
-        # cancel between the two left llm_usage incremented but the
-        # message row had NULL tokens — analytics drift across cancel.
-        try:
-            yield StreamEvent(
-                type="stop",
-                tokens_input=tokens_input,
-                tokens_output=tokens_output,
-            )
-        finally:
-            self._log_cost(
-                feature=feature,
-                tokens_input=tokens_input,
-                tokens_output=tokens_output,
-                user_id=user_id,
-                org_id=org_id,
-            )
+            if stream_opened:
+                # #854: meter the stream no matter how it ended — clean
+                # stop, mid-stream upstream error, or consumer cancel.
+                # ``log_usage`` swallows its own failures, so this never
+                # masks the in-flight exception.
+                self._log_cost(
+                    feature=feature,
+                    tokens_input=tokens_input,
+                    tokens_output=tokens_output,
+                    user_id=user_id,
+                    org_id=org_id,
+                )
 
 
 _default_provider: ClaudeProvider | None = None

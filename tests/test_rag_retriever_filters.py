@@ -23,7 +23,7 @@ def _make_stub_embedder():
     """Mock embedding provider returning deterministic 1024d vectors."""
     embedder = MagicMock()
 
-    async def fake_embed(texts):
+    async def fake_embed(texts, **kwargs):
         return [[0.1] * 1024 for _ in texts]
 
     embedder.embed = fake_embed
@@ -491,5 +491,7 @@ class TestEmptyListShortCircuit:
 
         asyncio.run(retriever.retrieve("test", filters={"source_type": "draft"}))
 
-        embedder.embed.assert_called_once_with(["test"])
+        embedder.embed.assert_called_once_with(
+            ["test"], user_id=None, org_id=None, feature="embedding"
+        )
         mock_conn.execute.assert_called_once()

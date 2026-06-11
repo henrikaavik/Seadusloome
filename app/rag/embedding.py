@@ -17,11 +17,15 @@ with ``ON CONFLICT DO UPDATE``).
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import os
 import random
 import threading
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Any
 
 from app.config import STUB_ALLOWED_ENVS, get_app_env, is_stub_allowed
@@ -32,15 +36,80 @@ DEFAULT_MODEL = "voyage-multilingual-2"
 DEFAULT_DIMENSIONS = 1024
 
 
+# ---------------------------------------------------------------------------
+# Embedding cost attribution (#854)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _EmbeddingAttribution:
+    """User/org/feature labels to stamp on embedding ``llm_usage`` rows."""
+
+    user_id: Any = None
+    org_id: Any = None
+    feature: str | None = None
+
+
+_attribution_ctx: contextvars.ContextVar[_EmbeddingAttribution | None] = contextvars.ContextVar(
+    "embedding_attribution", default=None
+)
+
+
+@contextmanager
+def embedding_attribution(
+    *,
+    user_id: Any = None,
+    org_id: Any = None,
+    feature: str | None = None,
+) -> Iterator[None]:
+    """Attribute embedding spend made anywhere inside the ``with`` block.
+
+    Some call chains cross modules whose signatures we can't extend
+    (e.g. drafter research → ``app.analyysikeskus.similarity.find_similar``
+    → :class:`app.rag.retriever.Retriever` → :meth:`VoyageProvider.embed`),
+    so the attribution rides a :mod:`contextvars` context variable
+    instead of explicit kwargs. Values set here take precedence over the
+    kwargs threaded into :meth:`VoyageProvider.embed`, because the
+    outermost caller knows the business context best.
+
+    ContextVars propagate into ``asyncio.run`` / tasks started inside
+    the block, which covers the sync→async bridge in
+    ``find_embedding_similar``. They do NOT propagate into worker
+    threads — in that fallback path the spend is logged with whatever
+    the explicit kwargs carried (never wrongly attributed, at worst
+    unattributed).
+    """
+    token = _attribution_ctx.set(
+        _EmbeddingAttribution(user_id=user_id, org_id=org_id, feature=feature)
+    )
+    try:
+        yield
+    finally:
+        _attribution_ctx.reset(token)
+
+
 class EmbeddingProvider(ABC):
     """Abstract base class for text embedding providers."""
 
     @abstractmethod
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(
+        self,
+        texts: list[str],
+        *,
+        user_id: Any = None,
+        org_id: Any = None,
+        feature: str = "embedding",
+    ) -> list[list[float]]:
         """Embed a batch of texts into dense vectors.
 
         Args:
             texts: List of text strings to embed.
+            user_id: Optional user to attribute the embedding spend to
+                in ``llm_usage`` (#854). ``None`` = unattributed.
+            org_id: Optional org to attribute the embedding spend to —
+                this is what per-org budget enforcement keys on.
+            feature: Cost-attribution label for the ``llm_usage`` row
+                (e.g. ``"chat_embedding"``, ``"drafter_research_embedding"``).
 
         Returns:
             List of embedding vectors, one per input text. Each vector
@@ -118,19 +187,47 @@ class VoyageProvider(EmbeddingProvider):
                 "VoyageProvider: the 'voyageai' package is not installed. "
                 "Run `uv add voyageai` to add it."
             ) from exc
-        self._client = voyageai.AsyncClient(api_key=self._api_key)  # type: ignore[attr-defined]
+        # #854: pin max_retries=0 (it IS the voyageai 0.3.7 default, but
+        # pinning guards against an SDK default bump) — app/llm/retry.py
+        # is the single retry authority; tenacity-internal retries would
+        # stack under the outer wrapper's 4 attempts.
+        self._client = voyageai.AsyncClient(  # type: ignore[attr-defined]
+            api_key=self._api_key, max_retries=0
+        )
         return self._client
 
-    def _log_cost(self, token_count: int) -> None:
-        """Log embedding usage via cost_tracker."""
+    def _log_cost(
+        self,
+        token_count: int,
+        *,
+        user_id: Any = None,
+        org_id: Any = None,
+        feature: str = "embedding",
+    ) -> None:
+        """Log embedding usage via cost_tracker.
+
+        Attribution precedence (#854): an active
+        :func:`embedding_attribution` context overrides the explicit
+        kwargs field-by-field — the outermost business caller (e.g. the
+        drafter research handler) wins over generic plumbing defaults.
+        """
         from app.llm.cost_tracker import log_usage
 
+        ctx = _attribution_ctx.get()
+        if ctx is not None:
+            if ctx.user_id is not None:
+                user_id = ctx.user_id
+            if ctx.org_id is not None:
+                org_id = ctx.org_id
+            if ctx.feature:
+                feature = ctx.feature
+
         log_usage(
-            user_id=None,
-            org_id=None,
+            user_id=user_id,
+            org_id=org_id,
             provider="voyage",
             model=self._model,
-            feature="embedding",
+            feature=feature,
             tokens_input=token_count,
             tokens_output=0,
         )
@@ -142,11 +239,22 @@ class VoyageProvider(EmbeddingProvider):
         """Return the dimensionality of Voyage embeddings."""
         return self._dimensions
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(
+        self,
+        texts: list[str],
+        *,
+        user_id: Any = None,
+        org_id: Any = None,
+        feature: str = "embedding",
+    ) -> list[list[float]]:
         """Embed a batch of texts using Voyage AI.
 
         Stub mode returns random vectors of the correct dimensionality
         seeded from the text content for reproducibility in tests.
+
+        ``user_id`` / ``org_id`` / ``feature`` flow to the ``llm_usage``
+        cost row (#854); see :meth:`_log_cost` for how an active
+        :func:`embedding_attribution` context interacts with them.
         """
         if not texts:
             return []
@@ -175,7 +283,7 @@ class VoyageProvider(EmbeddingProvider):
         # Log cost (Voyage charges per token)
         total_tokens = getattr(response, "total_tokens", 0)
         if total_tokens:
-            self._log_cost(total_tokens)
+            self._log_cost(total_tokens, user_id=user_id, org_id=org_id, feature=feature)
 
         return response.embeddings  # type: ignore[no-any-return]
 

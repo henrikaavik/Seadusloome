@@ -670,7 +670,22 @@ def drafter_research(
     # Step 3 (the legacy act-label fallback in
     # :func:`_similar_provisions_text_for_prompt` keeps Step 4 working).
     try:
-        research["similar_provisions"] = _find_similar_provisions(research, sparql_client=client)
+        # #854: the similarity lookup may fire a Voyage embedding call
+        # deep inside ``analyysikeskus.similarity`` → ``Retriever`` —
+        # a chain we can't thread kwargs through. The contextvar-based
+        # attribution stamps that spend with this session's owner and a
+        # drafter-specific feature label instead of the old anonymous
+        # ``feature="embedding"`` / user_id=org_id=NULL rows.
+        from app.rag.embedding import embedding_attribution
+
+        with embedding_attribution(
+            user_id=session.user_id,
+            org_id=session.org_id,
+            feature="drafter_research_embedding",
+        ):
+            research["similar_provisions"] = _find_similar_provisions(
+                research, sparql_client=client
+            )
     except Exception:
         logger.warning(
             "drafter_research: similar-provision enrichment failed for session %s",
