@@ -43,6 +43,11 @@ PRICING: dict[tuple[str, str], dict[str, float]] = {
     # ``calculate_cost`` formula works for both providers.
     ("voyage", "voyage-multilingual-2"): {"input": 0.12, "output": 0.0},
     ("voyage", "voyage-law-2"): {"input": 0.12, "output": 0.0},
+    # Voyage 4 series (current generation) — plausible VOYAGE_MODEL upgrades;
+    # verified against docs.voyageai.com/docs/pricing 2026-06-11 (review P3).
+    ("voyage", "voyage-4-large"): {"input": 0.12, "output": 0.0},
+    ("voyage", "voyage-4"): {"input": 0.06, "output": 0.0},
+    ("voyage", "voyage-4-lite"): {"input": 0.02, "output": 0.0},
     ("voyage", "voyage-3-large"): {"input": 0.18, "output": 0.0},
     ("voyage", "voyage-3.5"): {"input": 0.06, "output": 0.0},
     ("voyage", "voyage-3.5-lite"): {"input": 0.02, "output": 0.0},
