@@ -35,6 +35,13 @@ lookups. Three helpers mediate the boundary:
 The original URI stays the round-trip identity; only the URL path
 segment and the DOM id use the encoded / hashed form.
 
+``target_dom_id`` is a UI-layer concern and now lives in
+:mod:`app.ui.dom_ids` so that the :mod:`app.ui` annotation primitives can
+import it without reaching into this feature package (the disallowed
+ui→feature direction, #860). It is re-exported here for the feature's own
+internal callers — the round-trip identity story above still reads as a
+single contract.
+
 Why base64url instead of percent-encoding (#781 follow-up):
 
 Percent-encoding only round-trips if the raw value contains no
@@ -55,6 +62,24 @@ import base64
 import hashlib
 import json
 from typing import Any
+
+# #860: ``target_dom_id`` is a UI-layer helper (app.ui.dom_ids). Re-exported
+# here for annotations-internal callers so the feature→ui import direction is
+# the only edge — the app.ui annotation primitives import it from app.ui.dom_ids
+# directly rather than reaching back into this feature module.
+from app.ui.dom_ids import target_dom_id
+
+__all__ = [
+    "collect_row_specs",
+    "decode_row_key",
+    "row_key_for_conflict",
+    "row_key_for_entity",
+    "row_key_for_eu",
+    "row_key_for_gap",
+    "safe_row_key",
+    "stable_hash",
+    "target_dom_id",
+]
 
 
 def stable_hash(parts: list[str]) -> str:
@@ -179,24 +204,3 @@ def decode_row_key(encoded: str) -> str:
         return ""
     padded = encoded + "=" * (-len(encoded) % 4)
     return base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
-
-
-def target_dom_id(target_kind: str, target_id: str) -> str:
-    """Return a CSS-safe DOM id for an annotation container.
-
-    The id must be selectable via ``getElementById`` AND via CSS
-    selectors / HTMX ``hx-target="#..."`` queries.  Raw ontology URIs
-    contain ``/``, ``:``, ``#``, and ``%`` (after percent-encoding) —
-    all of which are CSS structural characters that need backslash
-    escapes inside a selector.  Hashing the raw ``target_id`` into a
-    sha256-truncated hex digest sidesteps the problem entirely: the
-    result is ``[0-9a-f]+`` and therefore always a valid CSS identifier.
-
-    The 16-char digest gives ~64 bits of collision resistance which is
-    plenty for one report page worth of rows.  Data attributes still
-    carry the original URI for round-trip identification — only the
-    DOM id is the hashed form.
-    """
-    raw = f"{target_kind}:{target_id or ''}"
-    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
-    return f"annotation-popover-{target_kind}-{digest}"

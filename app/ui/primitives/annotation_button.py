@@ -10,7 +10,7 @@ from urllib.parse import urlencode
 
 from fasthtml.common import *  # noqa: F403
 
-from app.annotations.row_keys import target_dom_id
+from app.ui.dom_ids import target_dom_id
 from app.ui.primitives.badge import Badge
 
 
