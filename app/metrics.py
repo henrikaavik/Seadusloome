@@ -95,7 +95,16 @@ def _retention_days() -> int:
 def _maybe_prune(conn: Any) -> None:
     """Delete metrics older than the retention window, throttled per interval.
 
-    Runs on the existing flush connection so retention never opens its own.
+    Runs on the existing flush connection (its own committed transaction — see
+    ``_flush_buffer``) so retention never opens its own and a prune failure
+    cannot roll back the metric rows that were just flushed.
+
+    Concurrency + retry shape: the sweep slot is *claimed* eagerly under
+    ``_lock`` (so two concurrent flushers never both issue the DELETE), but the
+    timestamp is only allowed to *stick* once the DELETE commits. On failure the
+    claim is rolled back to its previous value so the next flush retries instead
+    of waiting a whole ``_RETENTION_SWEEP_INTERVAL``.
+
     Note the ``%s::interval`` cast: Postgres rejects the bare ``interval %s``
     placeholder form, so the parameter is bound as text and cast server-side.
     """
@@ -112,12 +121,31 @@ def _maybe_prune(conn: Any) -> None:
             now - _last_retention_sweep < _RETENTION_SWEEP_INTERVAL
         ):
             return
+        # Claim the slot so a concurrent flusher skips, remembering the prior
+        # value so we can roll the claim back if the DELETE fails.
+        previous_sweep = _last_retention_sweep
         _last_retention_sweep = now
 
-    conn.execute(
-        "DELETE FROM metrics WHERE recorded_at < now() - %s::interval",
-        (f"{days} days",),
-    )
+    try:
+        conn.execute(
+            "DELETE FROM metrics WHERE recorded_at < now() - %s::interval",
+            (f"{days} days",),
+        )
+        conn.commit()
+    except Exception:
+        # Clear the aborted transaction so the caller's connection is reusable
+        # (a failed statement leaves it in InFailedSqlTransaction until rollback).
+        try:
+            conn.rollback()
+        except Exception:
+            logger.debug("metrics retention rollback failed", exc_info=True)
+        # The prune didn't happen — release the claim (restore the prior value,
+        # which is either None == "due now" or a valid earlier timestamp, both
+        # correct on any monotonic epoch) so the next flush retries.
+        with _lock:
+            if _last_retention_sweep == now:
+                _last_retention_sweep = previous_sweep
+        raise
 
 
 def _flush_suppressed() -> bool:
@@ -150,14 +178,23 @@ def _flush_buffer() -> None:
                 "INSERT INTO metrics (name, value, labels) VALUES (%s, %s, %s::jsonb)",
                 items,
             )
-            _maybe_prune(conn)
+            # Commit the INSERT *before* attempting retention so the metric rows
+            # are durable regardless of what the prune does next.
             conn.commit()
+            # Prune is best-effort and isolated: a retention failure must not
+            # lose the just-committed rows nor trip the flush-failure backoff
+            # below (the INSERT succeeded — the DB is clearly reachable).
+            try:
+                _maybe_prune(conn)
+            except Exception:
+                logger.debug("metrics retention prune failed", exc_info=True)
         # Clear any prior cooldown on a successful round-trip.
         with _lock:
             _flush_suppressed_until = 0.0
     except Exception:
-        # Re-buffer what we couldn't write (newest entries win if the deque is
-        # full) and open the cooldown so we stop hammering an unavailable DB.
+        # The INSERT itself failed: re-buffer what we couldn't write (newest
+        # entries win if the deque is full) and open the cooldown so we stop
+        # hammering an unavailable DB.
         with _lock:
             _BUFFER.extendleft(reversed(items))
             _flush_suppressed_until = time.monotonic() + _FLUSH_BACKOFF

@@ -53,6 +53,10 @@ def _authenticated_user() -> dict[str, Any]:
 
 
 class TestRecordMetric:
+    # Retention disabled in the INSERT-batching tests so the only commit is the
+    # batch commit (retention runs a *second* committed transaction otherwise —
+    # exercised separately in TestRetention).
+    @patch.dict("os.environ", {"METRICS_RETENTION_DAYS": "0"})
     @patch("app.metrics._connect")
     def test_buffers_then_flushes(self, mock_connect: MagicMock):
         import app.metrics as m
@@ -106,6 +110,7 @@ class TestRecordMetric:
         # Flush should not raise even though the DB is down
         m._flush_buffer()
 
+    @patch.dict("os.environ", {"METRICS_RETENTION_DAYS": "0"})
     @patch("app.metrics._connect")
     def test_bulk_flushes_multiple_rows(self, mock_connect: MagicMock):
         import app.metrics as m
@@ -126,7 +131,7 @@ class TestRecordMetric:
         assert rows[0][0] == "m1"
         assert rows[1][0] == "m2"
         assert rows[2][0] == "m3"
-        # Single commit for the whole batch
+        # Single commit for the whole batch (retention disabled here).
         mock_conn.commit.assert_called_once()
 
 
@@ -158,6 +163,8 @@ class TestRetention:
         assert "%s::interval" in sql
         assert "interval %s" not in sql
         assert params == ("7 days",)
+        # A successful prune engages the throttle (timestamp recorded).
+        assert m._last_retention_sweep is not None
 
     @patch.dict("os.environ", {"METRICS_RETENTION_DAYS": "0"})
     @patch("app.metrics._connect")
@@ -204,6 +211,166 @@ class TestRetention:
             c for c in mock_conn.execute.call_args_list if "DELETE FROM metrics" in c[0][0]
         ]
         assert delete_calls == []
+
+    @patch.dict("os.environ", {"METRICS_RETENTION_DAYS": "7"})
+    @patch("app.metrics._connect")
+    def test_prune_failure_keeps_rows_and_allows_retry(self, mock_connect: MagicMock):
+        """A failed DELETE must not lose the flushed rows nor block the next sweep.
+
+        The metric rows are committed *before* the prune, so even though the
+        DELETE raises the INSERT survives; and the sweep claim is rolled back so
+        retention is still "due" on the next flush (no hour-long throttle on a
+        prune that never happened) — and the flush backoff is NOT engaged.
+        """
+        import app.metrics as m
+
+        m._last_retention_sweep = None
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+
+        # The INSERT (executemany) succeeds; the retention DELETE raises.
+        def execute_side_effect(sql: str, *args: Any):
+            if "DELETE FROM metrics" in sql:
+                raise RuntimeError("prune boom")
+            return MagicMock()
+
+        mock_conn.execute.side_effect = execute_side_effect
+        mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        m.record_metric("ret_metric", 1.0)
+        m._flush_buffer()
+
+        # Rows were flushed (executemany ran and the INSERT was committed).
+        mock_cursor.executemany.assert_called_once()
+        assert mock_conn.commit.call_count >= 1
+        # The DELETE was attempted exactly once and failed.
+        delete_calls = [
+            c for c in mock_conn.execute.call_args_list if "DELETE FROM metrics" in c[0][0]
+        ]
+        assert len(delete_calls) == 1
+        # Claim rolled back -> retention is still due on the next flush.
+        assert m._last_retention_sweep is None
+        # The aborted DELETE transaction was rolled back so the connection is
+        # left reusable (no InFailedSqlTransaction leaking to the with-exit).
+        mock_conn.rollback.assert_called_once()
+        # A prune failure must NOT trip the flush-failure backoff (the DB and
+        # the INSERT were fine), and must NOT re-buffer the flushed rows.
+        assert not m._flush_suppressed()
+        assert len(m._BUFFER) == 0
+
+    @patch.dict("os.environ", {"METRICS_RETENTION_DAYS": "7"})
+    @patch("app.metrics._connect")
+    def test_prune_abort_does_not_break_flush_with_realistic_conn(self, mock_connect: MagicMock):
+        """End-to-end: a DELETE that aborts the txn must not crash the flush.
+
+        Mimics psycopg: a failed statement poisons the transaction so any later
+        command (including the with-exit commit) raises until rollback. The
+        flush must roll back the prune and exit cleanly with rows committed.
+        """
+        import app.db as db
+        import app.metrics as m
+
+        m._last_retention_sweep = None
+
+        class _FakeConn:
+            def __init__(self) -> None:
+                self.aborted = False
+                self.committed_batches = 0
+                self._cursor = MagicMock()
+
+            def cursor(self) -> MagicMock:
+                return self._cursor
+
+            def execute(self, sql: str, *args: Any):
+                if "DELETE FROM metrics" in sql:
+                    self.aborted = True
+                    raise RuntimeError("prune boom")
+                return MagicMock()
+
+            def commit(self) -> None:
+                if self.aborted:
+                    raise RuntimeError("InFailedSqlTransaction")
+                self.committed_batches += 1
+
+            def rollback(self) -> None:
+                self.aborted = False
+
+            @property
+            def closed(self) -> bool:
+                return False
+
+        conn = _FakeConn()
+        # Wrap in the REAL _PooledConnection so the genuine __exit__ runs: it
+        # commits on clean exit, which would raise InFailedSqlTransaction if the
+        # aborted prune transaction had not been rolled back by _maybe_prune.
+        fake_pool = MagicMock(name="pool")
+        mock_connect.return_value = db._PooledConnection(fake_pool, conn)  # type: ignore[arg-type]
+
+        m.record_metric("ret_metric", 1.0)
+        m._flush_buffer()  # must not raise
+
+        # INSERT committed once + the with-exit commit (both succeeded because
+        # the aborted prune was rolled back); retention is still due; rows were
+        # not re-buffered; backoff not engaged; connection returned to the pool.
+        assert conn.committed_batches >= 1
+        assert conn.aborted is False
+        assert m._last_retention_sweep is None
+        assert len(m._BUFFER) == 0
+        assert not m._flush_suppressed()
+        fake_pool.putconn.assert_called_once_with(conn)
+
+    def test_concurrent_flush_attempts_issue_single_prune(self):
+        """Two flushes overlapping the prune window issue exactly one DELETE."""
+        import threading
+
+        import app.metrics as m
+
+        m._last_retention_sweep = None
+
+        delete_attempts: list[str] = []
+        # Gate so the second _maybe_prune runs while the first holds the claim.
+        first_in_delete = threading.Event()
+        release_first = threading.Event()
+
+        def fake_conn_factory(blocking: bool) -> MagicMock:
+            conn = MagicMock()
+
+            def execute(sql: str, *args: Any):
+                if "DELETE FROM metrics" in sql:
+                    delete_attempts.append(sql)
+                    if blocking:
+                        first_in_delete.set()
+                        release_first.wait(timeout=2)
+                return MagicMock()
+
+            conn.execute.side_effect = execute
+            return conn
+
+        with patch.dict("os.environ", {"METRICS_RETENTION_DAYS": "7"}):
+            errors: list[BaseException] = []
+
+            def run(blocking: bool):
+                try:
+                    m._maybe_prune(fake_conn_factory(blocking))
+                except Exception as exc:  # pragma: no cover - defensive
+                    errors.append(exc)
+
+            t1 = threading.Thread(target=run, args=(True,))
+            t1.start()
+            assert first_in_delete.wait(timeout=2), "first prune never reached DELETE"
+
+            # Second flush runs while the first still holds the claim: it must
+            # observe the (just-claimed) sweep timestamp and skip the DELETE.
+            run(False)
+
+            release_first.set()
+            t1.join(timeout=2)
+
+        assert errors == []
+        assert len(delete_attempts) == 1
 
 
 class TestScheduleFlush:
