@@ -15,6 +15,7 @@ from app.analyysikeskus import register_analyysikeskus_routes
 from app.annotations.routes import register_annotation_routes
 from app.auth.middleware import SKIP_PATHS, auth_before
 from app.auth.organizations import register_org_routes
+from app.auth.perimeter import OriginCheckMiddleware, get_trusted_proxy_hosts
 from app.auth.profile import register_profile_routes
 from app.auth.routes import register_auth_routes
 from app.auth.users import register_user_routes
@@ -300,10 +301,24 @@ if os.environ.get("APP_ENV", "development") != "development":
         ],
     )
 
+# #851 (D2 + WS comment): CSRF origin verification for unsafe-method HTTP
+# requests and an Origin allowlist for every /ws/* handshake. Added BEFORE
+# ProxyHeadersMiddleware so it executes AFTER it (add_middleware prepends):
+# by the time the check runs, scope['scheme'] and scope['client'] have been
+# rewritten from X-Forwarded-* iff the peer is a trusted proxy — rejection
+# logs therefore carry the validated client IP, and the request's own
+# origin is computed from the real external scheme.
+app.add_middleware(OriginCheckMiddleware)
+
 # Trust X-Forwarded-* headers from the reverse proxy (Traefik/Coolify) so
 # that request.url.scheme, request.client.host, etc. reflect the original
 # client request rather than the proxy hop.
-app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
+#
+# #851 (D3): trust is restricted to TRUSTED_PROXY_HOSTS (default: loopback
+# + RFC1918/Docker ranges, which cover the Coolify/Traefik bridge network).
+# Previously trusted_hosts="*" let ANY direct client spoof X-Forwarded-For,
+# bypassing IP rate limits and forging audit-log IPs.
+app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=get_trusted_proxy_hosts())
 
 # Record per-request latency into the metrics table for the admin
 # performance dashboard.  Added after ProxyHeadersMiddleware so that

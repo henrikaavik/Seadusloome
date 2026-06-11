@@ -9,9 +9,28 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
 from starlette.testclient import TestClient
 
+from app.auth import throttle
 from app.main import app
+
+
+@pytest.fixture(autouse=True)
+def _stub_throttle_and_audit(monkeypatch: pytest.MonkeyPatch):
+    """#851: keep these cookie/redirect contract tests DB-free.
+
+    login/logout now consult the login throttle and write audit rows
+    (both Postgres-backed, both fail-safe). Stub them so the contract
+    tests stay deterministic regardless of whether a local DB — with or
+    without migration 040 — happens to be running. Throttle/audit
+    behaviour has dedicated coverage in tests/test_auth_throttle.py.
+    """
+    monkeypatch.setattr(throttle, "is_login_throttled", lambda *_a: False)
+    monkeypatch.setattr(throttle, "record_login_failure", lambda *_a: None)
+    monkeypatch.setattr(throttle, "clear_login_failures", lambda *_a: None)
+    monkeypatch.setattr("app.auth.routes.log_action", lambda *_a, **_k: None)
+    monkeypatch.setattr("app.auth.middleware.log_action", lambda *_a, **_k: None)
 
 
 def _user_dict() -> dict:

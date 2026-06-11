@@ -9,6 +9,7 @@ from fasthtml.common import *
 from starlette.requests import Request
 from starlette.responses import RedirectResponse
 
+from app.auth import throttle
 from app.auth.audit import log_action
 from app.auth.cookies import clear_auth_cookie, set_auth_cookie
 from app.auth.jwt_provider import JWTAuthProvider
@@ -20,6 +21,7 @@ from app.auth.password import (
     issue_reset_token,
     validate_password,
 )
+from app.auth.perimeter import client_ip
 from app.db import get_connection
 from app.email.service import get_email_provider
 from app.email.templates import password_reset
@@ -49,7 +51,7 @@ def _login_form(email: str = "", error: str | None = None):
     return Card(
         CardHeader(H2("Sisselogimine", cls="card-title")),
         CardBody(
-            Alert("Vale e-post või parool.", variant="danger") if error else None,
+            Alert(error, variant="danger") if error else None,
             AppForm(
                 FormField(
                     name="email",
@@ -99,9 +101,47 @@ def login_page(req: Request):
 
 
 def login_post(req: Request, email: str, password: str):
-    """POST /auth/login — authenticate and set cookies."""
+    """POST /auth/login — authenticate and set cookies.
+
+    #851 (D1): per-email AND per-IP failure throttling backed by the
+    ``login_attempts`` table (migration 040), mirroring the
+    forgot-password pattern. The throttle is keyed on the *normalized*
+    email hash before any user lookup, so unknown emails are throttled
+    identically to known ones — neither the response body nor the
+    throttle behaviour leaks account existence (the underlying bcrypt
+    timing leak is closed in ``JWTAuthProvider.authenticate``). All
+    auth lifecycle events are audit-logged with the validated client IP
+    (validated because ProxyHeaders only trusts ``TRUSTED_PROXY_HOSTS``).
+    """
+    ip = client_ip(req)
+    email_h = hash_email(email or "")
+
+    if throttle.is_login_throttled(email_h, ip):
+        logger.info("login throttled email_hash=%s ip=%s", email_h, ip)
+        log_action(None, "auth.login_throttled", {"ip": ip, "email_hash": email_h})
+        return FtResponse(
+            PageShell(
+                _login_form(
+                    email=email,
+                    error=(
+                        "Liiga palju sisselogimiskatseid. "
+                        "Palun oodake 15 minutit ja proovige uuesti."
+                    ),
+                ),
+                title="Sisselogimine",
+                user=None,
+                theme=get_theme_from_request(req),
+                container_size="sm",
+            ),
+            status_code=429,
+        )
+
     user = _provider.authenticate(email, password)
     if user is None:
+        throttle.record_login_failure(email_h, ip)
+        # email_hash, not the raw submitted address: failed attempts may
+        # carry arbitrary non-user strings we should not persist as PII.
+        log_action(None, "auth.login_failed", {"ip": ip, "email_hash": email_h})
         theme = get_theme_from_request(req)
         return PageShell(
             _login_form(email=email, error="Vale e-post või parool."),
@@ -110,6 +150,9 @@ def login_post(req: Request, email: str, password: str):
             theme=theme,
             container_size="sm",
         )
+
+    throttle.clear_login_failures(email_h)
+    log_action(user["id"], "auth.login", {"ip": ip, "email": user["email"]})
 
     access_token, refresh_token = _provider.create_tokens(user)
     response = RedirectResponse(url="/", status_code=303)
@@ -123,6 +166,9 @@ def logout_post(req: Request):
     refresh_token = req.cookies.get("refresh_token")
     if refresh_token:
         _provider.delete_refresh_token(refresh_token)
+
+    auth = req.scope.get("auth") or {}
+    log_action(auth.get("id"), "auth.logout", {"ip": client_ip(req)})
 
     response = RedirectResponse(url="/auth/login", status_code=303)
     clear_auth_cookie(response, "access_token")
@@ -206,7 +252,9 @@ def forgot_post(req: Request, email: str):
         return forgot_page(req)
 
     email_h = hash_email(email)
-    ip = (req.client.host if req.client else "unknown") or "unknown"
+    # #851 D3: validated client IP (X-Forwarded-For honoured only from
+    # trusted proxies) so this rate limit can no longer be spoofed away.
+    ip = client_ip(req)
 
     with get_connection() as conn:
         conn.execute(
