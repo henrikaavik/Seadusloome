@@ -56,6 +56,12 @@ MSG_TIKA_CAPACITY = (
 )
 """Tika OOM, timeout, or generic 5xx — usually means the document is too large."""
 
+MSG_TIKA_TEXT_TOO_LARGE = (
+    "Dokumendist eraldatud tekst on automaatseks analüüsiks liiga mahukas. "
+    "Palun jagage eelnõu väiksemateks failideks."
+)
+"""Tika's extracted-text response crossed the byte ceiling (#858 zip-bomb guard)."""
+
 MSG_SPARQL_BUSY = "Ontoloogia teenus on ajutiselt hõivatud. Proovige mõne minuti pärast uuesti."
 """Jena Fuseki timed out or returned a SPARQL/HTTP error."""
 
@@ -93,6 +99,13 @@ _TIKA_CAPACITY_MARKERS = (
     "java heap",
     "outofmemoryerror",
     "read timed out",
+)
+
+# Matches the sentinel phrase ``TikaClient._oversize_error`` embeds when
+# the extracted-text response crosses ``TIKA_MAX_TEXT_BYTES`` (#858).
+_TIKA_OVERSIZE_MARKERS = (
+    "response exceeded",
+    "text extraction cap",
 )
 
 _SPARQL_MARKERS = (
@@ -167,6 +180,13 @@ def map_failure_to_user_message(exc: BaseException, stage: str) -> tuple[str, st
     # -- SPARQL / Fuseki busy ------------------------------------------
     if _contains_any(msg_lower, _SPARQL_MARKERS):
         return MSG_SPARQL_BUSY, debug_detail
+
+    # -- Tika extracted-text over the byte ceiling (#858) --------------
+    # Must run BEFORE the generic capacity check: the oversize message is
+    # the more actionable one ("split the file") and carries its own
+    # sentinel phrase, so a match here is unambiguous.
+    if _contains_any(msg_lower, _TIKA_OVERSIZE_MARKERS):
+        return MSG_TIKA_TEXT_TOO_LARGE, debug_detail
 
     # -- Tika capacity (OOM / timeout) ---------------------------------
     if isinstance(exc, MemoryError):

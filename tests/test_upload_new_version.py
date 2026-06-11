@@ -30,7 +30,9 @@ Key invariants asserted here:
 from __future__ import annotations
 
 import asyncio
+import io
 import uuid
+import zipfile
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -138,8 +140,22 @@ def _uploader(*, org_id: Any = _UNSET) -> UserDict:
     }
 
 
+def _docx_bytes(payload: str = "v2 contents") -> bytes:
+    """Minimal structurally-valid .docx bytes (#858 magic/zip checks)."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", "<Types/>")
+        zf.writestr("word/document.xml", f"<w:document>{payload}</w:document>")
+    return buf.getvalue()
+
+
 class _StubUpload:
-    """Minimal stand-in for Starlette's ``UploadFile``."""
+    """Minimal stand-in for Starlette's ``UploadFile``.
+
+    Implements the incremental ``read(size)`` contract the #858 bounded
+    reader uses, and defaults to structurally-valid .docx bytes so the
+    magic-byte / zip checks pass for tests that don't care about content.
+    """
 
     def __init__(
         self,
@@ -148,7 +164,7 @@ class _StubUpload:
         content_type: str = (
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         ),
-        contents: bytes = b"v2 contents",
+        contents: bytes | None = None,
     ):
         # Annotated as ``... | None`` so pyright treats the stub as a
         # structural match for ``app.docs.upload._UploadLike`` (which
@@ -156,11 +172,17 @@ class _StubUpload:
         # nullable).
         self.filename: str | None = filename
         self.content_type: str | None = content_type
-        self.size: int | None = len(contents)
-        self._contents = contents
+        self._contents = contents if contents is not None else _docx_bytes()
+        self.size: int | None = len(self._contents)
+        self._offset = 0
 
-    async def read(self) -> bytes:
-        return self._contents
+    async def read(self, size: int = -1) -> bytes:
+        if size < 0:
+            chunk = self._contents[self._offset :]
+        else:
+            chunk = self._contents[self._offset : self._offset + size]
+        self._offset += len(chunk)
+        return chunk
 
 
 class _ConnectCM:
@@ -312,7 +334,7 @@ class TestNewVersionHappyPath:
                 handle_upload(
                     _uploader(),
                     "ignored title",  # versions inherit parent title
-                    _StubUpload(contents=b"v2 contents"),
+                    _StubUpload(),
                     parent_draft_id=_PARENT_DRAFT_ID,
                     job_queue=mock_queue,
                     conn_factory=_make_conn_factory(conn),
@@ -364,7 +386,7 @@ class TestNewVersionHappyPath:
                 handle_upload(
                     _uploader(),
                     "",
-                    _StubUpload(contents=b"v3"),
+                    _StubUpload(),
                     parent_draft_id=_PARENT_DRAFT_ID,
                     job_queue=MagicMock(),
                     conn_factory=_make_conn_factory(conn),
@@ -390,9 +412,10 @@ class TestNewVersionHappyPath:
             parent_row=_make_parent_row(status="ready"),
             next_version_max=1,
         )
+        payload = _docx_bytes("v2!!")
         stored = MagicMock(
             storage_path="/storage/v2.enc",
-            size_bytes=4,
+            size_bytes=len(payload),
             filename="version-two.docx",
         )
 
@@ -403,7 +426,7 @@ class TestNewVersionHappyPath:
                     "",
                     _StubUpload(
                         filename="version-two.docx",
-                        contents=b"v2!!",
+                        contents=payload,
                     ),
                     parent_draft_id=_PARENT_DRAFT_ID,
                     job_queue=MagicMock(),
@@ -422,7 +445,7 @@ class TestNewVersionHappyPath:
         #  graph_uri, draft_id)
         assert params[0] == "uploaded"
         assert params[1] == "version-two.docx"
-        assert params[3] == 4  # file_size
+        assert params[3] == len(payload)  # file_size = real byte count
         assert params[4] == "/storage/v2.enc"
         assert params[6] == str(_PARENT_DRAFT_ID)
 
@@ -444,7 +467,7 @@ class TestNewVersionHappyPath:
                 handle_upload(
                     _uploader(),
                     "",
-                    _StubUpload(contents=b"v"),
+                    _StubUpload(),
                     parent_draft_id=_PARENT_DRAFT_ID,
                     job_queue=MagicMock(),
                     conn_factory=_make_conn_factory(conn),
@@ -477,7 +500,7 @@ class TestNewVersionHappyPath:
                 handle_upload(
                     _uploader(),
                     "",
-                    _StubUpload(contents=b"v"),
+                    _StubUpload(),
                     parent_draft_id=_PARENT_DRAFT_ID,
                     job_queue=mock_queue,
                     conn_factory=_make_conn_factory(conn),
@@ -523,7 +546,7 @@ class TestNewVersionRejections:
                     handle_upload(
                         _uploader(),
                         "",
-                        _StubUpload(contents=b"x"),
+                        _StubUpload(),
                         parent_draft_id=_PARENT_DRAFT_ID,
                         job_queue=MagicMock(),
                         conn_factory=_make_conn_factory(conn),
@@ -547,7 +570,7 @@ class TestNewVersionRejections:
                     handle_upload(
                         _uploader(),
                         "",
-                        _StubUpload(contents=b"x"),
+                        _StubUpload(),
                         parent_draft_id=_PARENT_DRAFT_ID,
                         job_queue=MagicMock(),
                         conn_factory=_make_conn_factory(conn),
@@ -576,7 +599,7 @@ class TestNewVersionRejections:
                     handle_upload(
                         _uploader(),
                         "",
-                        _StubUpload(contents=b"x"),
+                        _StubUpload(),
                         parent_draft_id=_PARENT_DRAFT_ID,
                         job_queue=MagicMock(),
                         conn_factory=_make_conn_factory(conn),
@@ -595,7 +618,7 @@ class TestNewVersionRejections:
                     handle_upload(
                         _uploader(org_id=None),  # type: ignore[arg-type]
                         "",
-                        _StubUpload(contents=b"x"),
+                        _StubUpload(),
                         parent_draft_id=_PARENT_DRAFT_ID,
                         job_queue=MagicMock(),
                         conn_factory=_make_conn_factory(MagicMock()),
@@ -617,7 +640,7 @@ class TestNewVersionRejections:
                     handle_upload(
                         _uploader(),
                         "",
-                        _StubUpload(contents=b"x"),
+                        _StubUpload(),
                         parent_draft_id="not-a-uuid",
                         job_queue=MagicMock(),
                         conn_factory=_make_conn_factory(MagicMock()),
@@ -665,7 +688,7 @@ class TestReturnedDraftReflectsNewVersion:
                 handle_upload(
                     _uploader(),
                     "",
-                    _StubUpload(contents=b"v"),
+                    _StubUpload(),
                     parent_draft_id=_PARENT_DRAFT_ID,
                     job_queue=MagicMock(),
                     conn_factory=_make_conn_factory(conn),
@@ -751,7 +774,7 @@ class TestConcurrentVersionAllocation:
                 handle_upload(
                     _uploader(),
                     "",
-                    _StubUpload(contents=b"v2"),
+                    _StubUpload(),
                     parent_draft_id=_PARENT_DRAFT_ID,
                     job_queue=mock_queue,
                     conn_factory=_factory_sequence([attempt1, attempt2]),
@@ -789,7 +812,7 @@ class TestConcurrentVersionAllocation:
                     handle_upload(
                         _uploader(),
                         "",
-                        _StubUpload(contents=b"v"),
+                        _StubUpload(),
                         parent_draft_id=_PARENT_DRAFT_ID,
                         job_queue=MagicMock(),
                         conn_factory=_factory_sequence(conns),
@@ -817,7 +840,7 @@ class TestConcurrentVersionAllocation:
                     handle_upload(
                         _uploader(),
                         "Uus eelnõu",  # new-draft branch: no parent_draft_id
-                        _StubUpload(contents=b"x"),
+                        _StubUpload(),
                         job_queue=MagicMock(),
                         conn_factory=_make_conn_factory(mock_conn),
                     )

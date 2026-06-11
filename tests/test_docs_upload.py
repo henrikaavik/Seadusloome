@@ -9,7 +9,9 @@ lock down the validation and cleanup contract — the happy path
 
 from __future__ import annotations
 
+import io
 import uuid
+import zipfile
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -36,8 +38,32 @@ def _user(org_id: str | None = "org-1") -> UserDict:
     }
 
 
+def _docx_bytes(payload: str = "Test sisu") -> bytes:
+    """Build a minimal structurally-valid .docx (OOXML ZIP) for tests.
+
+    #858 added magic-byte sniffing + ZIP central-directory validation to
+    the upload path, so test uploads must be real ZIP containers — raw
+    junk bytes are now (correctly) rejected.
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", "<Types/>")
+        zf.writestr("word/document.xml", f"<w:document>{payload}</w:document>")
+    return buf.getvalue()
+
+
+#: Minimal bytes carrying the ``%PDF-`` magic header (#858).
+_PDF_BYTES = b"%PDF-1.4\n1 0 obj\n<< >>\nendobj\ntrailer\n<< >>\n%%EOF\n"
+
+
 class _StubUpload:
-    """Minimal stand-in for ``starlette.datastructures.UploadFile``."""
+    """Minimal stand-in for ``starlette.datastructures.UploadFile``.
+
+    Mirrors Starlette's incremental ``read(size)`` contract (#858) and
+    records read traffic so tests can assert the handler's bounded-read
+    behaviour: ``read_calls`` collects the requested window sizes and
+    ``bytes_served`` the total bytes handed out.
+    """
 
     def __init__(
         self,
@@ -46,15 +72,25 @@ class _StubUpload:
         content_type: str
         | None = "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         size: int | None = 1024,
-        contents: bytes = b"Test sisu",
+        contents: bytes | None = None,
     ):
         self.filename = filename
         self.content_type = content_type
         self.size = size
-        self._contents = contents
+        self._contents = contents if contents is not None else _docx_bytes()
+        self._offset = 0
+        self.read_calls: list[int] = []
+        self.bytes_served = 0
 
-    async def read(self) -> bytes:
-        return self._contents
+    async def read(self, size: int = -1) -> bytes:
+        self.read_calls.append(size)
+        if size < 0:
+            chunk = self._contents[self._offset :]
+        else:
+            chunk = self._contents[self._offset : self._offset + size]
+        self._offset += len(chunk)
+        self.bytes_served += len(chunk)
+        return chunk
 
 
 def _make_draft(draft_id: uuid.UUID | None = None, **overrides: Any) -> Draft:
@@ -230,7 +266,7 @@ class TestHandleUploadHappyPath:
                 handle_upload(
                     _user(),
                     "Test eelnõu",
-                    _StubUpload(contents=b"Test sisu"),
+                    _StubUpload(contents=_docx_bytes()),
                     job_queue=mock_queue,
                     conn_factory=_make_conn_factory(mock_conn),
                 )
@@ -284,7 +320,7 @@ class TestHandleUploadValidation:
         filename: str | None = "eelnou.docx",
         content_type: str
         | None = "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        contents: bytes = b"Sisu",
+        contents: bytes | None = None,
         size: int | None = None,
         user: UserDict | None = None,
     ) -> Draft:
@@ -300,7 +336,7 @@ class TestHandleUploadValidation:
             contents=contents,
         )
         with patch("app.docs.upload.store_file") as mock_store:
-            stored = MagicMock(storage_path="/tmp/x.enc", size_bytes=len(contents))
+            stored = MagicMock(storage_path="/tmp/x.enc", size_bytes=len(contents or b""))
             mock_store.return_value = stored
             return asyncio.run(
                 handle_upload(
@@ -376,7 +412,7 @@ class TestHandleUploadValidation:
                     _StubUpload(
                         filename="eelnou.pdf",
                         content_type="application/pdf",
-                        contents=b"%PDF",
+                        contents=_PDF_BYTES,
                     ),
                     job_queue=MagicMock(),
                     conn_factory=_make_conn_factory(conn),
@@ -416,6 +452,131 @@ class TestHandleUploadValidation:
 
 
 # ---------------------------------------------------------------------------
+# #858 — resource bounds + content sniffing
+# ---------------------------------------------------------------------------
+
+
+class TestUploadResourceBounds:
+    """Declared-size rejection, bounded incremental read, magic bytes,
+    and .docx zip-bomb caps (#858).
+    """
+
+    def _attempt(self, upload: _StubUpload, *, title: str = "Test eelnõu") -> Draft:
+        import asyncio
+
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = None
+        with patch("app.docs.upload.store_file") as mock_store:
+            mock_store.return_value = MagicMock(storage_path="/tmp/x.enc")
+            return asyncio.run(
+                handle_upload(
+                    _user(),
+                    title,
+                    upload,
+                    job_queue=MagicMock(),
+                    conn_factory=_make_conn_factory(conn),
+                )
+            )
+
+    def test_declared_size_rejected_before_any_read(self, monkeypatch: pytest.MonkeyPatch):
+        """An over-limit ``upload.size`` declaration is rejected BEFORE the
+        handler reads a single byte of the body."""
+        monkeypatch.setenv("MAX_UPLOAD_SIZE_MB", "1")
+        upload = _StubUpload(size=2 * 1024 * 1024, contents=_docx_bytes())
+        with pytest.raises(DraftUploadError, match="Fail on liiga suur"):
+            self._attempt(upload)
+        assert upload.read_calls == [], "oversized declared size must reject pre-read"
+
+    def test_bounded_read_never_buffers_past_cap(self, monkeypatch: pytest.MonkeyPatch):
+        """A lying / absent size declaration still cannot make the handler
+        slurp the full body: the incremental reader stops at limit+1 bytes
+        (the no-memory-spike contract)."""
+        monkeypatch.setenv("MAX_UPLOAD_SIZE_MB", "1")
+        limit = 1024 * 1024
+        upload = _StubUpload(size=None, contents=b"x" * (5 * limit))
+        with pytest.raises(DraftUploadError, match="Fail on liiga suur"):
+            self._attempt(upload)
+        # Bounded-read assertions: at most limit+1 bytes ever pulled, and
+        # every read used an explicit window (never a read(-1) full slurp).
+        assert upload.bytes_served <= limit + 1
+        assert upload.read_calls, "expected incremental reads"
+        assert all(window >= 0 for window in upload.read_calls)
+
+    def test_renamed_executable_docx_rejected(self):
+        """A PE executable renamed to .docx fails magic-byte sniffing with
+        an Estonian message."""
+        exe = b"MZ\x90\x00" + b"\x00" * 64
+        with pytest.raises(DraftUploadError, match="ei vasta .docx vormingule"):
+            self._attempt(_StubUpload(contents=exe))
+
+    def test_renamed_executable_pdf_rejected(self):
+        exe = b"MZ\x90\x00" + b"\x00" * 64
+        with pytest.raises(DraftUploadError, match="ei vasta .pdf vormingule"):
+            self._attempt(
+                _StubUpload(
+                    filename="eelnou.pdf",
+                    content_type="application/pdf",
+                    contents=exe,
+                )
+            )
+
+    def test_corrupt_docx_zip_rejected(self):
+        """Correct ZIP magic but a broken central directory → Estonian
+        'corrupt file' rejection (not a stack trace)."""
+        junk = b"PK\x03\x04" + b"\x00" * 128
+        with pytest.raises(DraftUploadError, match="vigane või rikutud"):
+            self._attempt(_StubUpload(contents=junk))
+
+    def test_docx_zip_bomb_rejected_by_absolute_cap(self, monkeypatch: pytest.MonkeyPatch):
+        """A tiny upload claiming a huge uncompressed payload trips the
+        absolute uncompressed-size cap (10 × upload limit)."""
+        monkeypatch.setenv("MAX_UPLOAD_SIZE_MB", "1")  # absolute cap = 10 MiB
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("[Content_Types].xml", "<Types/>")
+            zf.writestr("word/document.xml", b"\x00" * (16 * 1024 * 1024))
+        bomb = buf.getvalue()
+        assert len(bomb) < 1024 * 1024, "fixture must stay under the upload cap"
+        with pytest.raises(DraftUploadError, match="pakitud sisu on lubatust"):
+            self._attempt(_StubUpload(contents=bomb))
+
+    def test_docx_zip_bomb_rejected_by_ratio_cap(self):
+        """At the default 50 MB limit the absolute cap is 500 MB, so a
+        12 MiB-claiming / ~12 KiB-compressed bomb must be caught by the
+        expansion-ratio cap instead."""
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("[Content_Types].xml", "<Types/>")
+            zf.writestr("word/document.xml", b"\x00" * (12 * 1024 * 1024))
+        bomb = buf.getvalue()
+        assert len(bomb) * 100 < 12 * 1024 * 1024, "fixture must exceed the ratio cap"
+        with pytest.raises(DraftUploadError, match="pakitud sisu on lubatust"):
+            self._attempt(_StubUpload(contents=bomb))
+
+    def test_valid_docx_passes_content_checks(self):
+        """The minimal valid .docx sails through sniffing + zip caps and
+        reaches the storage layer (failure here would be a regression in
+        the checks, not the fixture)."""
+        upload = _StubUpload(contents=_docx_bytes())
+        with patch("app.docs.upload.store_file") as mock_store:
+            mock_store.side_effect = RuntimeError("stop after validation")
+            import asyncio
+
+            conn = MagicMock()
+            with pytest.raises(RuntimeError, match="stop after validation"):
+                asyncio.run(
+                    handle_upload(
+                        _user(),
+                        "Test eelnõu",
+                        upload,
+                        job_queue=MagicMock(),
+                        conn_factory=_make_conn_factory(conn),
+                    )
+                )
+        mock_store.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
 # Rollback on DB failure
 # ---------------------------------------------------------------------------
 
@@ -444,7 +605,7 @@ class TestHandleUploadRollback:
                     handle_upload(
                         _user(),
                         "Test eelnõu",
-                        _StubUpload(contents=b"data"),
+                        _StubUpload(contents=_docx_bytes()),
                         job_queue=MagicMock(),
                         conn_factory=_make_conn_factory(mock_conn),
                     )
@@ -514,7 +675,7 @@ class TestHandleUploadRollback:
                     _StubUpload(
                         filename="eelnou.pdf",
                         content_type="application/pdf",
-                        contents=b"%PDF",
+                        contents=_PDF_BYTES,
                     ),
                     job_queue=mock_queue,
                     conn_factory=_make_conn_factory(mock_conn),
