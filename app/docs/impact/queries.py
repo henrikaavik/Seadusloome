@@ -250,16 +250,24 @@ SELECT DISTINCT ?draftRef ?conflictEntity ?conflictLabel ?reason ?relation ?othe
   GRAPH <{graph_uri}> {{ ?draft estleg:references ?draftRef . }}
   {{
     # Another draft references the same entity.
+    #
+    # #855: the other draft's ``rdfs:label`` triple lives INSIDE its own
+    # named graph (the draft graph builder writes ``<g>#self rdfs:label
+    # "<title>"`` into ``<g>``). On Fuseki there is no ``unionDefaultGraph``
+    # so the label OPTIONAL must sit INSIDE ``GRAPH ?otherGraph`` — when it
+    # was outside, ``?conflictEntity rdfs:label ?conflictLabel`` matched
+    # only the default graph, never bound, and the UI fell back to raw
+    # draft URIs. Keeping it inside the GRAPH block binds the title.
     GRAPH ?otherGraph {{
       ?otherDraft a estleg:DraftLegislation ;
                   estleg:references ?draftRef .
+      BIND(?otherDraft AS ?conflictEntity)
+      OPTIONAL {{ ?conflictEntity rdfs:label ?conflictLabel }}
     }}
     # A5: exclude this draft's own (current + prior-version) graphs.
     FILTER(!STRSTARTS(str(?otherGraph), "{draft_prefix}"))
     # A3(c): exclude ephemeral adhoc probe graphs.
     FILTER(!STRSTARTS(str(?otherGraph), "{adhoc_prefix}"))
-    BIND(?otherDraft AS ?conflictEntity)
-    OPTIONAL {{ ?conflictEntity rdfs:label ?conflictLabel }}
     BIND("Teine eelnõu viitab juba sellele sättele" AS ?reason)
     BIND(estleg:references AS ?relation)
   }} UNION {{

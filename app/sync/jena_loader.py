@@ -107,13 +107,38 @@ def _admin_auth() -> tuple[str, str]:
 # this regex (the UUID is server-generated), but the allowlist stays a
 # defence-in-depth guard against any future code path assembling a URI
 # from user-supplied data.
+#
+# #849: draft *versions* mint per-version graph URIs of the shape
+# ``…/estleg/drafts/<uuid>/v<n>`` (see ``app.docs.upload`` §9.5 — v1 is
+# the bare ``…/drafts/<uuid>``, v2+ append ``/v<n>``). Before this fix the
+# allowlist only admitted the bare-UUID form, so every v2+ upload's
+# analyze + cleanup tripped ``ValueError("Unsafe graph URI")``, retries
+# exhausted, and the draft flipped to ``failed``. The optional
+# ``(?:/v\d+)?`` arm is attached to the **drafts** alternative only — the
+# adhoc probe graphs are single-shot and never versioned, so they keep the
+# bare-UUID shape. This is the ONE canonical regex (re-exported from
+# ``app.docs.impact.queries``); the version widening therefore lands in
+# the GSP transport, the lineage writer, and the impact query builders
+# simultaneously, with no second definition to drift. We deliberately do
+# NOT widen the character class or admit ``#``/``?`` — the version segment
+# is a literal ``/v`` followed by one-or-more ASCII digits, nothing else.
 _SAFE_GRAPH_URI = re.compile(
-    r"^https://data\.riik\.ee/ontology/estleg/(?:drafts|adhoc)/[0-9a-f-]{36}$"
+    r"^https://data\.riik\.ee/ontology/estleg/"
+    r"(?:drafts/[0-9a-f-]{36}(?:/v\d+)?|adhoc/[0-9a-f-]{36})$"
 )
 
 
 def _validate_graph_uri(uri: str) -> str:
     """Return *uri* unchanged after asserting it matches the allowlist.
+
+    Accepted shapes (#849):
+
+    * ``…/estleg/drafts/<uuid>`` — a draft's v1 graph;
+    * ``…/estleg/drafts/<uuid>/v<n>`` — a draft's v2+ version graph;
+    * ``…/estleg/adhoc/<uuid>`` — an ephemeral Normi-mõjuahel probe.
+
+    Anything else (non-estleg host, malformed UUID, a stray suffix, an
+    injection-shaped string) is rejected.
 
     Raises:
         ValueError: When *uri* doesn't fit the safe pattern. Callers

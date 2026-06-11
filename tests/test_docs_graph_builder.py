@@ -596,3 +596,41 @@ class TestWriteDocLineageGraphScope:
         text = mock_update.call_args.args[0]
         # Both the DELETE WHERE and INSERT DATA blocks must be GRAPH-scoped.
         assert text.count(f"GRAPH <{draft.graph_uri}>") == 2
+
+
+class TestWriteDocLineageVersionedGraph:
+    """#849: the lineage writer must accept a draft's ``/v<n>`` version graph.
+
+    v2+ uploads mint ``…/drafts/<uuid>/v<n>`` graph URIs. ``write_doc_lineage``
+    runs in the analyze pipeline right after the Turtle PUT, so a v2+ upload
+    would raise ``ValueError("Unsafe graph URI")`` here before the fix —
+    one of the paths that flipped v2 drafts to ``failed``.
+    """
+
+    def _make_v2_eelnou(self) -> Draft:
+        draft = _make_eelnou(parent_vtk_id=None)
+        draft.graph_uri = f"https://data.riik.ee/ontology/estleg/drafts/{_EELNOU_ID}/v2"
+        return draft
+
+    def test_accepts_v2_graph_uri_and_writes_self_subject(self):
+        draft = self._make_v2_eelnou()
+        with patch("app.docs.graph_builder._sparql_update", return_value=True) as mock_update:
+            write_doc_lineage(draft, None)
+
+        assert mock_update.call_count == 1
+        text = mock_update.call_args.args[0]
+        draft_iri = f"{draft.graph_uri}#self"
+        # The class assertion lands on the versioned ``#self`` subject…
+        assert f"<{draft_iri}> a <https://data.riik.ee/ontology/estleg#DraftLegislation> ." in text
+        # …GRAPH-scoped to the versioned graph URI (both DELETE + INSERT).
+        assert text.count(f"GRAPH <{draft.graph_uri}>") == 2
+
+    def test_accepts_versioned_parent_vtk_graph(self):
+        """A versioned parent VTK graph must also pass validation."""
+        draft = self._make_v2_eelnou()
+        parent = _make_vtk()
+        parent.graph_uri = f"https://data.riik.ee/ontology/estleg/drafts/{_VTK_A_ID}/v2"
+        with patch("app.docs.graph_builder._sparql_update", return_value=True) as mock_update:
+            write_doc_lineage(draft, parent)
+        text = mock_update.call_args.args[0]
+        assert f"<{parent.graph_uri}#self>" in text

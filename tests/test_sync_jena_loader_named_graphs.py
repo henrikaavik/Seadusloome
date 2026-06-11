@@ -199,6 +199,137 @@ class TestGraphUriValidation:
         assert queries._SAFE_GRAPH_URI is jena_loader._SAFE_GRAPH_URI
 
 
+class TestVersionedGraphUriValidation:
+    """#849: the allowlist must accept ``drafts/<uuid>/v<n>`` version graphs.
+
+    v1 uploads mint ``…/drafts/<uuid>``; v2+ uploads mint
+    ``…/drafts/<uuid>/v<n>`` (``app.docs.upload`` §9.5). Before this fix the
+    allowlist rejected the versioned shape, so every v2+ upload's analyze
+    + cleanup raised ``ValueError("Unsafe graph URI")``, retries
+    exhausted, and the draft flipped to ``failed``.
+    """
+
+    _UUID = "11111111-1111-1111-1111-111111111111"
+    _PREFIX = "https://data.riik.ee/ontology/estleg/"
+    _V1 = f"{_PREFIX}drafts/{_UUID}"
+    _V2 = f"{_PREFIX}drafts/{_UUID}/v2"
+    _V10 = f"{_PREFIX}drafts/{_UUID}/v10"
+    _ADHOC = f"{_PREFIX}adhoc/22222222-2222-2222-2222-222222222222"
+
+    # --- acceptance matrix -------------------------------------------------
+
+    def test_accepts_v1_bare_uuid(self):
+        assert jena_loader._validate_graph_uri(self._V1) == self._V1
+
+    def test_accepts_v2_version_graph(self):
+        assert jena_loader._validate_graph_uri(self._V2) == self._V2
+        assert jena_loader._SAFE_GRAPH_URI.fullmatch(self._V2)
+
+    def test_accepts_v10_double_digit_version_graph(self):
+        assert jena_loader._validate_graph_uri(self._V10) == self._V10
+
+    def test_accepts_adhoc(self):
+        assert jena_loader._validate_graph_uri(self._ADHOC) == self._ADHOC
+
+    # --- rejection matrix (malformed / external / injection) ---------------
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "urn:not-a-draft",
+            "http://jena.apache.org/Default",
+            # non-estleg host with an otherwise valid-looking path
+            "https://evil.com/ontology/estleg/drafts/11111111-1111-1111-1111-111111111111",
+            # bad uuid
+            "https://data.riik.ee/ontology/estleg/drafts/not-a-uuid",
+            # version arm with no digits
+            "https://data.riik.ee/ontology/estleg/drafts/11111111-1111-1111-1111-111111111111/v",
+            # extra path segment after the version
+            "https://data.riik.ee/ontology/estleg/drafts/11111111-1111-1111-1111-111111111111/v2/extra",
+            # adhoc graphs are never versioned
+            "https://data.riik.ee/ontology/estleg/adhoc/22222222-2222-2222-2222-222222222222/v2",
+            # fragment at the graph level is not allowed
+            "https://data.riik.ee/ontology/estleg/drafts/11111111-1111-1111-1111-111111111111#self",
+            # query-string injection
+            f"{_PREFIX}drafts/{_UUID}/v2?x=1",
+            # SPARQL-injection-shaped tail (angle-bracket break-out attempt)
+            f"{_PREFIX}drafts/{_UUID}/v2> }} GRAPH ?g {{",
+        ],
+    )
+    def test_rejects_malformed_external_and_injection(self, bad: str):
+        with pytest.raises(ValueError, match="Unsafe graph URI"):
+            jena_loader._validate_graph_uri(bad)
+
+    # --- transport accepts the versioned URI end to end --------------------
+
+    @patch("app.sync.jena_loader.httpx.put")
+    def test_put_accepts_v2_graph(self, mock_put: MagicMock):
+        response = MagicMock()
+        response.status_code = 204
+        mock_put.return_value = response
+        assert jena_loader.put_named_graph(self._V2, "# turtle") is True
+        mock_put.assert_called_once()
+        # The versioned URI is URL-encoded into the ?graph= param.
+        called_url = mock_put.call_args.args[0]
+        assert "graph=" in called_url
+
+    @patch("app.sync.jena_loader.httpx.delete")
+    def test_delete_accepts_v2_graph(self, mock_delete: MagicMock):
+        """#849: version-graph cleanup deletes must pass validation."""
+        response = MagicMock()
+        response.status_code = 204
+        mock_delete.return_value = response
+        assert jena_loader.delete_named_graph(self._V2) is True
+        mock_delete.assert_called_once()
+
+    @patch("app.sync.jena_loader.httpx.post")
+    def test_named_graph_exists_accepts_v2_graph(self, mock_post: MagicMock):
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {"head": {}, "boolean": True}
+        response.raise_for_status.return_value = None
+        mock_post.return_value = response
+        assert jena_loader.named_graph_exists(self._V2) is True
+
+    # --- impact builders + lineage writer share the one regula -------------
+
+    def test_impact_builders_accept_v2_graph(self):
+        """All four impact query builders must accept a versioned graph URI.
+
+        They re-use the canonical ``_validate_graph_uri`` (re-exported in
+        ``app.docs.impact.queries``), so the #849 widening must reach them
+        without a second edit. A versioned URI that previously raised must
+        now build a query string containing the GRAPH clause.
+        """
+        from app.docs.impact.queries import (
+            build_affected_entities_query,
+            build_conflicts_query,
+            build_eu_compliance_query,
+            build_gaps_query,
+        )
+
+        for builder in (
+            build_affected_entities_query,
+            build_gaps_query,
+            build_eu_compliance_query,
+            build_conflicts_query,
+        ):
+            q = builder(self._V2)
+            assert f"GRAPH <{self._V2}>" in q
+
+    def test_conflicts_builder_excludes_own_prior_versions_for_v2(self):
+        """#849 + #868 (A5): a v2 graph's conflict query must exclude the
+        whole ``…/drafts/<uuid>`` namespace so it never self-conflicts
+        against its own v1."""
+        from app.docs.impact.queries import build_conflicts_query
+
+        q = build_conflicts_query(self._V2)
+        # The version-agnostic prefix (no ``/v2``) is what the exclusion
+        # keys on, so v1 and any other version are excluded.
+        assert f'!STRSTARTS(str(?otherGraph), "{self._V1}")' in q
+        assert "/v2" not in q.split("!STRSTARTS")[1].split("\n")[0]
+
+
 class TestNamedGraphExists:
     @patch("app.sync.jena_loader.httpx.post")
     def test_named_graph_exists_true(self, mock_post: MagicMock):
