@@ -220,7 +220,7 @@ class TestLoadImpactSummary:
     """Issue #809 — the loader must read the headline metric columns plus
     ``report_data`` JSON (which has NO ``summary`` key — that key never
     existed; the impact-analyze handler writes
-    :class:`app.docs.impact.analyzer.ImpactFindings` as a flat dict of
+    :class:`app.impact.analyzer.ImpactFindings` as a flat dict of
     counts + entity lists). Before the fix the loader looked up
     ``report_data["summary"]`` and always returned ``None``, leaving the
     chat system prompt with "Mõjuanalüüsi aruanne pole saadaval." even

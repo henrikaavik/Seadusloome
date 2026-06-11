@@ -1,6 +1,6 @@
 """Tests for the act-level EU-transposition query + runner (#723).
 
-Covers :mod:`app.docs.impact.eu_transposition`:
+Covers :mod:`app.impact.eu_transposition`:
 
 * :func:`build_eu_transposition_query` — mentions the right predicates
   (``transposesDirective`` / ``transposedBy`` / ``transpositionStatus``
@@ -23,7 +23,7 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock
 
-from app.docs.impact.eu_transposition import (
+from app.impact.eu_transposition import (
     build_eu_transposition_query,
     normalise_transposition_status,
     run_eu_transposition,

@@ -88,12 +88,12 @@ def _admin_auth() -> tuple[str, str]:
     return (JENA_ADMIN_USER, _resolve_admin_password())
 
 
-# #480: the same allowlist that ``app.docs.impact.queries`` uses for
+# #480: the same allowlist that ``app.impact.queries`` uses for
 # SPARQL interpolation applies at the Graph Store Protocol layer too —
 # ``put_named_graph`` / ``delete_named_graph`` must reject any URI that
 # isn't one of our generated ``drafts/<uuid>`` / ``adhoc/<uuid>`` shapes
 # before the HTTP request even goes out. Keeping the canonical definition
-# here (and re-exporting from ``app.docs.impact.queries``) means the
+# here (and re-exporting from ``app.impact.queries``) means the
 # validator lives next to the GSP transport, which is conceptually where
 # the named-graph contract is enforced.
 #
@@ -117,7 +117,7 @@ def _admin_auth() -> tuple[str, str]:
 # ``(?:/v\d+)?`` arm is attached to the **drafts** alternative only — the
 # adhoc probe graphs are single-shot and never versioned, so they keep the
 # bare-UUID shape. This is the ONE canonical regex (re-exported from
-# ``app.docs.impact.queries``); the version widening therefore lands in
+# ``app.impact.queries``); the version widening therefore lands in
 # the GSP transport, the lineage writer, and the impact query builders
 # simultaneously, with no second definition to drift. We deliberately do
 # NOT widen the character class or admit ``#``/``?`` — the version segment

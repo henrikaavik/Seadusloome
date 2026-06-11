@@ -36,8 +36,8 @@ from app.analyysikeskus.intent_analysis import (
 )
 from app.analyysikeskus.intent_extractor import IntentCandidate
 from app.docs.entity_extractor import ExtractedRef
-from app.docs.impact import ImpactFindings
 from app.docs.reference_resolver import ResolvedRef
+from app.impact import ImpactFindings
 
 # ---------------------------------------------------------------------------
 # Form context

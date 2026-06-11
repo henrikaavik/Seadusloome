@@ -36,7 +36,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from app.docs.impact.analyzer import ImpactFindings
+from app.impact.analyzer import ImpactFindings
 
 #: Impact band identifier — the four severity tiers described in the module
 #: docstring.  Surfaced to the UI as Estonian labels via :data:`IMPACT_BAND_LABELS_ET`.

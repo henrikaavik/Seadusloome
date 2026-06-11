@@ -2,7 +2,7 @@
 
 Epic #714, design doc ``docs/2026-05-11-ministry-lawyer-ui-structure.md``
 ("Workflow 2: EL Ülevõtt ja Harmoneerimine"). Unlike the impact
-analyser's :data:`app.docs.impact.queries.EU_COMPLIANCE` — which is a
+analyser's :data:`app.impact.queries.EU_COMPLIANCE` — which is a
 *provision-level, graph-scoped* query pivoting off a draft's
 ``estleg:references`` edges inside a named graph — this module answers
 a different question: **given an EU legal act URI, which Estonian acts
@@ -67,7 +67,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from app.docs.impact.queries import PREFIXES
+from app.impact.queries import PREFIXES
 from app.ontology.sparql_client import SparqlClient
 
 logger = logging.getLogger(__name__)
@@ -75,7 +75,7 @@ logger = logging.getLogger(__name__)
 # Cap the row count — an EU act with hundreds of harmonised provisions
 # would otherwise return a large cartesian product; the workflow renders
 # at most a few dozen rows anyway. Mirrors the LIMITs in
-# :mod:`app.docs.impact.queries`.
+# :mod:`app.impact.queries`.
 _EU_TRANSPOSITION_LIMIT = 500
 
 #: The four Estonian status buckets the EL ülevõtt workflow renders.

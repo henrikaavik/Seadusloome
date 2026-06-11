@@ -30,18 +30,18 @@ from fasthtml.common import to_xml
 
 from app.docs.docx_export import _REPORT_COLUMN_INDEX, build_impact_report_docx
 from app.docs.draft_model import Draft
-from app.docs.impact.queries import (
-    AFFECTED_ENTITIES,
-    CONFLICTS,
-    EU_COMPLIANCE,
-    GAPS,
-)
 from app.docs.report_routes import (
     _affected_entities_section,
     _conflicts_section,
     _eu_compliance_section,
     _gaps_section,
     _relation_cell_text,
+)
+from app.impact.queries import (
+    AFFECTED_ENTITIES,
+    CONFLICTS,
+    EU_COMPLIANCE,
+    GAPS,
 )
 from app.ontology.relations import PREDICATES
 

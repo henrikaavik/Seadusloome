@@ -19,8 +19,8 @@ import pytest
 
 from app.docs.analyze_handler import analyze_impact
 from app.docs.draft_model import Draft
-from app.docs.impact.analyzer import ImpactFindings
 from app.docs.version_model import DraftVersion
+from app.impact.analyzer import ImpactFindings
 
 _DRAFT_ID = uuid.UUID("77777777-7777-7777-7777-777777777777")
 _VERSION_ID = uuid.UUID("88888888-8888-8888-8888-888888888888")

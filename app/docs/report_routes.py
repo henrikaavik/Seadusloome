@@ -456,14 +456,14 @@ def _mask_findings_conflicts(findings: dict[str, Any], auth: Any) -> dict[str, A
 
     Reports persisted before tenant scoping landed can carry FOREIGN org
     draft URIs/labels in ``conflicts`` (and a stale adhoc-probe row). Run
-    the stored rows through :func:`app.docs.impact.masking.
+    the stored rows through :func:`app.impact.masking.
     mask_stored_conflict_rows` so adhoc rows are dropped and cross-org
     draft identities are blanked before any report consumer renders them.
     The viewer's org comes from *auth*; ``conflict_count`` is recomputed
     from the surviving rows so the count stays consistent with what is
     shown. Returns a shallow copy — the input dict is not mutated.
     """
-    from app.docs.impact.masking import mask_stored_conflict_rows
+    from app.impact.masking import mask_stored_conflict_rows
 
     conflicts = list(findings.get("conflicts") or [])
     viewer_org_id = auth.get("org_id") if auth else None

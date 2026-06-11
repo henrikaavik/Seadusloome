@@ -493,7 +493,7 @@ class TestDocsPipelineE2E:
             location={"chunk": 0},
         )
 
-        from app.docs.impact.analyzer import ImpactFindings
+        from app.impact.analyzer import ImpactFindings
 
         fake_findings = ImpactFindings(
             affected_entities=[{"uri": "urn:x", "label": "X", "type": "urn:t"}],

@@ -20,11 +20,11 @@ of the plan, row A6):
   (canonical direction).
 * ``estleg:transposedBy``          — ``EULegislation`` → Estonian ``Act``
   (the inverse; the query ``UNION``-s both directions, mirroring
-  :mod:`app.docs.impact.eu_transposition`).
+  :mod:`app.impact.eu_transposition`).
 * ``estleg:transpositionStatus``   — literal on the transposing Estonian
   act (raw values like ``"complete"`` / ``"partial"`` / ``"osaline"`` /
   ``"pending"`` — normalised via
-  :func:`app.docs.impact.eu_transposition.normalise_transposition_status`).
+  :func:`app.impact.eu_transposition.normalise_transposition_status`).
 
 The query filters directives where:
 
@@ -50,11 +50,11 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any
 
-from app.docs.impact.eu_transposition import (
+from app.impact.eu_transposition import (
     TranspositionStatus,
     normalise_transposition_status,
 )
-from app.docs.impact.queries import PREFIXES
+from app.impact.queries import PREFIXES
 from app.ontology.sparql_client import SparqlClient
 
 logger = logging.getLogger(__name__)
@@ -74,7 +74,7 @@ DEFAULT_TRANSPOSITION_HORIZON_DAYS = 90
 _DEADLINES_QUERY_LIMIT = 50
 
 
-# The four status buckets are the same as :mod:`app.docs.impact.eu_transposition`.
+# The four status buckets are the same as :mod:`app.impact.eu_transposition`.
 # We surface only the three that mean "Estonia has not finished":
 _INCOMPLETE_STATUSES: frozenset[TranspositionStatus] = frozenset({"puudub", "osaline", "ebaselge"})
 
@@ -129,7 +129,7 @@ class TranspositionDeadlineRow:
 # We do NOT filter by transpositionStatus in SPARQL — we project the raw
 # literal and apply :func:`normalise_transposition_status` in Python, then
 # drop rows whose bucket is ``"kaetud"``. That keeps the status-bucket logic
-# in exactly one place (the :mod:`app.docs.impact.eu_transposition`
+# in exactly one place (the :mod:`app.impact.eu_transposition`
 # module that already owns the vocabulary).
 
 

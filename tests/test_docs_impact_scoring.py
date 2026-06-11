@@ -1,4 +1,4 @@
-"""Unit tests for ``app.docs.impact.scoring.calculate_impact_score``.
+"""Unit tests for ``app.impact.scoring.calculate_impact_score``.
 
 The scoring function is pure — no dependencies, no mocks. Every test
 hand-builds an :class:`ImpactFindings` and asserts the numeric output
@@ -7,8 +7,8 @@ against the formula documented in ``scoring.py`` (spec §8.5).
 
 from __future__ import annotations
 
-from app.docs.impact.analyzer import ImpactFindings
-from app.docs.impact.scoring import calculate_impact_score
+from app.impact.analyzer import ImpactFindings
+from app.impact.scoring import calculate_impact_score
 
 
 def _findings(

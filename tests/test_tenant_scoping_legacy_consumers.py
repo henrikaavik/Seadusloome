@@ -27,7 +27,7 @@ from starlette.testclient import TestClient
 
 from app.chat.tools import execute_tool
 from app.docs.draft_model import Draft
-from app.docs.impact.masking import _MASKED_CONFLICT_LABEL
+from app.impact.masking import _MASKED_CONFLICT_LABEL
 from app.ontology.sparql_client import SparqlClient
 
 # ---------------------------------------------------------------------------
@@ -309,7 +309,7 @@ _CHAT_AUTH = {"id": _USER_ID, "org_id": _ORG_ID}
 
 
 class TestChatGetDraftImpactMasking:
-    @patch("app.docs.impact.masking.fetch_owned_draft_ids")
+    @patch("app.impact.masking.fetch_owned_draft_ids")
     @patch("app.chat.tools.get_connection")
     def test_tool_result_masks_foreign_conflict(
         self,
@@ -342,7 +342,7 @@ class TestChatGetDraftImpactMasking:
         assert _MASKED_CONFLICT_LABEL in labels
         assert "Meie teine eelnõu" in labels
 
-    @patch("app.docs.impact.masking.fetch_owned_draft_ids")
+    @patch("app.impact.masking.fetch_owned_draft_ids")
     @patch("app.chat.tools.get_connection")
     def test_same_org_conflicts_pass_through(
         self,

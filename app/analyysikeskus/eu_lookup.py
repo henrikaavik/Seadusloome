@@ -24,7 +24,7 @@ import logging
 import re
 from typing import Any
 
-from app.docs.impact.queries import PREFIXES
+from app.impact.queries import PREFIXES
 from app.ontology.sparql_client import SparqlClient
 
 logger = logging.getLogger(__name__)

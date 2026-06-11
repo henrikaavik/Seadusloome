@@ -586,7 +586,7 @@ async def _exec_get_draft_impact(
             # report goes back into the model context — masked output is
             # exactly what the LLM should see.
             if isinstance(report_data, dict):
-                from app.docs.impact.masking import mask_stored_conflict_rows
+                from app.impact.masking import mask_stored_conflict_rows
 
                 conflicts = list(report_data.get("conflicts") or [])
                 if conflicts:

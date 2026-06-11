@@ -1,4 +1,4 @@
-"""Unit tests for ``app.docs.impact.analyzer.ImpactAnalyzer``.
+"""Unit tests for ``app.impact.analyzer.ImpactAnalyzer``.
 
 The analyzer only talks to a :class:`SparqlClient`, so every test
 patches the client to return canned rows and asserts on the shape of
@@ -9,10 +9,10 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from app.docs.impact.analyzer import ImpactAnalyzer, ImpactFindings
+from app.impact.analyzer import ImpactAnalyzer, ImpactFindings
 
 # #476: the URI must match the tightened ``_SAFE_GRAPH_URI`` allowlist
-# in ``app.docs.impact.queries`` — any string outside the production
+# in ``app.impact.queries`` — any string outside the production
 # ``drafts/<uuid>`` shape is now rejected as an injection guard.
 _GRAPH_URI = "https://data.riik.ee/ontology/estleg/drafts/11111111-1111-1111-1111-111111111111"
 
