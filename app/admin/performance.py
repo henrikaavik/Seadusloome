@@ -431,13 +431,11 @@ def _slowest_routes_card(routes: list[dict[str, object]], window: str = _DEFAULT
 def admin_performance_page(req: Request):
     """GET /admin/performance — jõudluse jälgimine: kõik viis ajaridu.
 
-    Helpers are imported as locals inside the function body so the page
-    works correctly when rebound by the ``app.templates.admin_dashboard``
-    shim — that shim swaps ``__globals__`` to its own module dict, which
-    means private card builders cannot be resolved via the function's
-    global namespace. The whole body is wrapped in a try/except so any
-    backend failure (missing ``metrics`` table, transient DB error)
-    renders a styled error banner instead of bubbling up as a raw 500.
+    Module-private card builders are imported as locals inside the
+    function body so tests can patch them on this module's real path.
+    The whole body is wrapped in a try/except so any backend failure
+    (missing ``metrics`` table, transient DB error) renders a styled
+    error banner instead of bubbling up as a raw 500.
     """
     auth = req.scope.get("auth")
     theme = get_theme_from_request(req)

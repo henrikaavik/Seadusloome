@@ -35,7 +35,15 @@ PAGE_MODULES = [
     "app.auth.organizations",
     "app.auth.users",
     "app.templates.dashboard",
-    "app.templates.admin_dashboard",
+    # Admin page modules each do ``from fasthtml.common import *`` (which
+    # re-exports an HTML ``Button`` builder) and then re-import the
+    # design-system ``Button`` to win the shadow guard (#419). Cover the
+    # real ``app.admin.*`` handlers directly — the old
+    # ``app.templates.admin_dashboard`` re-export shim is gone (#860).
+    "app.admin.dashboard",
+    "app.admin.audit",
+    "app.admin.analytics",
+    "app.admin.cost_dashboard",
     "app.explorer.pages",
 ]
 

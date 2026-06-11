@@ -538,14 +538,11 @@ def _empty_state() -> object:
 def admin_cost_page(req: Request):
     """GET /admin/costs -- LLM cost dashboard page.
 
-    Helpers are imported as locals inside the function body so the page
-    works correctly when rebound by the ``app.templates.admin_dashboard``
-    shim — that shim swaps ``__globals__`` to its own module dict, which
-    means private helpers (``_progress_bar``, ``_FEATURE_LABELS``,
-    ``_tooltip``, etc.) cannot be resolved via the function's global
-    namespace. The whole body is wrapped in a try/except so any backend
-    failure renders a styled error banner instead of bubbling up as a
-    raw 500.
+    Module-private helpers (``_progress_bar``, ``_FEATURE_LABELS``,
+    ``_tooltip``, etc.) are imported as locals inside the function body
+    so tests can patch them on this module's real path. The whole body
+    is wrapped in a try/except so any backend failure renders a styled
+    error banner instead of bubbling up as a raw 500.
     """
     auth = req.scope.get("auth")
     theme = get_theme_from_request(req)
@@ -885,9 +882,9 @@ def admin_cost_export(req: Request):
     ``window`` and ``org`` filters as the page. Non-system-admins are
     pinned to their own org regardless of the query string.
 
-    Helpers are imported as locals so this handler works correctly when
-    rebound by the admin_dashboard shim. On error returns a plain
-    500 response rather than letting the exception bubble up.
+    Module-private helpers are imported as locals so tests can patch
+    them on this module's real path. On error returns a plain 500
+    response rather than letting the exception bubble up.
     """
     try:
         from app.admin.cost_dashboard import (
@@ -961,7 +958,7 @@ def admin_cost_export(req: Request):
         )
 
 
-# Names re-exported for callers (the admin_dashboard shim, tests, etc.).
+# Names re-exported for callers (tests, sibling modules, etc.).
 __all__ = [
     "_FEATURE_LABELS",
     "_WINDOW_CHOICES",

@@ -674,9 +674,9 @@ def admin_sync_history_page(req: Request):
     can't (which only shows the last 5). Empty state and DB errors both
     render a calm muted message instead of a stack trace.
 
-    Helpers are imported as locals inside the function body so the page
-    works correctly when the function is rebound by the admin_dashboard
-    shim (matches the pattern in ``admin_audit_page``).
+    Module-private helpers are imported as locals inside the function
+    body so tests can patch them on this module's real path (matches the
+    pattern in ``admin_audit_page``).
     """
     auth = req.scope.get("auth")
     theme = get_theme_from_request(req)

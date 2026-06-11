@@ -877,9 +877,9 @@ def _job_monitor_content(req: Request | None = None) -> object:
 def admin_jobs_page(req: Request):
     """GET /admin/jobs -- full job monitor page.
 
-    Helpers are imported as locals so this handler works correctly when
-    rebound by the admin_dashboard shim (which swaps ``__globals__`` to
-    its own module dict). On error renders a styled error banner.
+    Module-private helpers are imported as locals so tests can patch
+    them on this module's real path. On error renders a styled error
+    banner.
     """
     auth = req.scope.get("auth")
     theme = get_theme_from_request(req)

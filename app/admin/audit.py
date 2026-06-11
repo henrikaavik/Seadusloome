@@ -851,18 +851,16 @@ def admin_audit_page(req: Request):
     (missing materialized view, transient DB error, malformed row) renders
     a styled error banner instead of bubbling up as a raw 500.
 
-    Helpers are imported as locals inside the function body so the page
-    works correctly when the function is rebound by the
-    ``app.templates.admin_dashboard`` shim — that shim swaps
-    ``__globals__`` to its own module dict, which means private helpers
-    that live in this module cannot be resolved via the function's
-    global namespace.
+    Module-private helpers are imported as locals inside the function
+    body so tests can patch them on this module's real path
+    (``@patch("app.admin.audit._get_audit_log_page")``) and the patch
+    takes effect at call time.
     """
     auth = req.scope.get("auth")
     theme = get_theme_from_request(req)
     try:
-        # Bind module-private helpers as locals so __globals__ rebinding
-        # by the admin_dashboard shim does not break name resolution.
+        # Bind module-private helpers as locals so test patches on this
+        # module's real path resolve at call time.
         from app.admin.audit import (
             _audit_filter_form,
             _audit_results_content,
@@ -1028,13 +1026,13 @@ def admin_audit_detail(req: Request):
 def admin_audit_export(req: Request):
     """GET /admin/audit/export -- download filtered audit log as CSV.
 
-    Helpers are imported as locals so this handler works correctly when
-    rebound by the admin_dashboard shim. On error returns a styled
-    error response rather than a raw 500.
+    Module-private helpers are imported as locals so tests can patch
+    them on this module's real path. On error returns a styled error
+    response rather than a raw 500.
     """
     try:
-        # Bind module-private helpers as locals so __globals__ rebinding
-        # by the admin_dashboard shim does not break name resolution.
+        # Bind module-private helpers as locals so test patches on this
+        # module's real path resolve at call time.
         from app.admin.audit import (
             _extract_filters,
             _get_all_filtered_entries,
