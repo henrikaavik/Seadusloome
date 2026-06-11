@@ -838,6 +838,37 @@ class TestExport:
             # .docx files are ZIP archives — check the magic number.
             assert resp.content[:2] == b"PK"
 
+    def test_export_md_audits_transcript_export(self, provider_patch, mock_conn):
+        conv = _make_conversation(title="Vestlus AI-ga")
+        msg = _make_message(role="user", content="Tere")
+        with (
+            patch("app.chat.handlers.get_conversation", return_value=conv),
+            patch("app.chat.handlers.list_messages", return_value=[msg]),
+            patch("app.chat.handlers.log_chat_transcript_export") as mock_audit,
+        ):
+            client = _authed_client()
+            resp = client.get(f"/chat/{_CONV_ID}/export.md")
+            assert resp.status_code == 200
+            mock_audit.assert_called_once()
+            args = mock_audit.call_args.args
+            assert args[0] == _USER_ID
+            assert args[1] == _CONV_ID
+            assert args[2] == "md"
+
+    def test_export_docx_audits_transcript_export(self, provider_patch, mock_conn):
+        conv = _make_conversation(title="Testvestlus")
+        msg = _make_message(role="user", content="Tere")
+        with (
+            patch("app.chat.handlers.get_conversation", return_value=conv),
+            patch("app.chat.handlers.list_messages", return_value=[msg]),
+            patch("app.chat.handlers.log_chat_transcript_export") as mock_audit,
+        ):
+            client = _authed_client()
+            resp = client.get(f"/chat/{_CONV_ID}/export.docx")
+            assert resp.status_code == 200
+            mock_audit.assert_called_once()
+            assert mock_audit.call_args.args[2] == "docx"
+
     def test_export_md_cross_org_404(self, provider_patch, mock_conn):
         conv = _make_conversation(org_id=_OTHER_ORG_ID, user_id=_OTHER_USER_ID)
         with patch("app.chat.handlers.get_conversation", return_value=conv):

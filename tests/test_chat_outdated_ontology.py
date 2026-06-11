@@ -813,7 +813,7 @@ class TestForkPreservesOntologyVersion:
         )
 
         conn.execute.return_value.fetchone.side_effect = [
-            (boundary_created_at, source_conv_id),
+            (boundary_created_at, boundary_msg_id, source_conv_id),
             source_conv_row,
             new_conv_row,
         ]
@@ -868,7 +868,7 @@ class TestForkPreservesOntologyVersion:
         # 5: pre-037 INSERT (succeeds).
         fetchone_results = iter(
             [
-                (boundary_created_at, source_conv_id),
+                (boundary_created_at, boundary_msg_id, source_conv_id),
                 source_conv_row,
                 new_conv_row,
             ]

@@ -608,27 +608,30 @@ class TestListPinnedMessages:
 
 
 class TestDeleteMessagesAfter:
-    def test_delete_uses_strict_greater_than(self):
-        """Messages *at* the boundary created_at must NOT be deleted."""
+    def test_delete_uses_compound_strict_greater_than(self):
+        """Rows after the compound ``(created_at, id)`` boundary are deleted;
+        the boundary row and same-tick predecessors are kept (#861)."""
         conn = MagicMock()
         cursor = MagicMock()
         cursor.rowcount = 3
         conn.execute.return_value = cursor
         boundary = datetime(2026, 4, 14, 10, 0, 0, tzinfo=UTC)
+        boundary_id = uuid.uuid4()
 
-        result = delete_messages_after(conn, uuid.uuid4(), boundary)
+        result = delete_messages_after(conn, uuid.uuid4(), boundary, boundary_id)
 
         assert result == 3
         sql, params = conn.execute.call_args.args
         assert "DELETE" in sql
-        assert "created_at > %s" in sql
+        assert "(created_at, id) > (%s, %s)" in sql
         assert params[1] == boundary
+        assert params[2] == str(boundary_id)
 
     def test_returns_zero_on_db_error(self):
         conn = MagicMock()
         conn.execute.side_effect = RuntimeError("boom")
 
-        result = delete_messages_after(conn, uuid.uuid4(), datetime.now(UTC))
+        result = delete_messages_after(conn, uuid.uuid4(), datetime.now(UTC), uuid.uuid4())
         assert result == 0
 
 
@@ -638,28 +641,31 @@ class TestDeleteMessagesAfter:
 
 
 class TestDeleteMessagesFrom:
-    def test_delete_uses_inclusive_greater_or_equal(self):
+    def test_delete_uses_compound_inclusive_greater_or_equal(self):
         """Unlike :func:`delete_messages_after`, the boundary row IS deleted —
-        used by the regenerate flow's orphan-assistant fallback (#737)."""
+        used by the regenerate flow's orphan-assistant fallback (#737). The
+        comparison is the compound ``(created_at, id)`` tuple (#861)."""
         conn = MagicMock()
         cursor = MagicMock()
         cursor.rowcount = 4
         conn.execute.return_value = cursor
         boundary = datetime(2026, 4, 14, 10, 0, 0, tzinfo=UTC)
+        boundary_id = uuid.uuid4()
 
-        result = delete_messages_from(conn, uuid.uuid4(), boundary)
+        result = delete_messages_from(conn, uuid.uuid4(), boundary, boundary_id)
 
         assert result == 4
         sql, params = conn.execute.call_args.args
         assert "DELETE" in sql
-        assert "created_at >= %s" in sql
+        assert "(created_at, id) >= (%s, %s)" in sql
         assert params[1] == boundary
+        assert params[2] == str(boundary_id)
 
     def test_returns_zero_on_db_error(self):
         conn = MagicMock()
         conn.execute.side_effect = RuntimeError("boom")
 
-        result = delete_messages_from(conn, uuid.uuid4(), datetime.now(UTC))
+        result = delete_messages_from(conn, uuid.uuid4(), datetime.now(UTC), uuid.uuid4())
         assert result == 0
 
 
@@ -682,7 +688,7 @@ class TestForkConversation:
         new_row = _make_conversation_row(conv_id=new_conv_id, title="Jätk: Algvestlus")
 
         fetchone_results = [
-            (boundary_created_at, source_conv_id),  # boundary lookup
+            (boundary_created_at, boundary_msg_id, source_conv_id),  # boundary lookup
             source_row,  # get_conversation(source)
             new_row,  # create_conversation(new)
         ]
@@ -699,12 +705,13 @@ class TestForkConversation:
         assert new_conv.id == new_conv_id
         assert new_conv.title == "Jätk: Algvestlus"
 
-        # Final call should be the INSERT ... SELECT with created_at bound.
+        # Final call should be the INSERT ... SELECT bound on the compound
+        # ``(created_at, id)`` key (#861).
         final_call = conn.execute.call_args_list[-1]
         sql = final_call.args[0]
         params = final_call.args[1]
         assert "INSERT INTO messages" in sql
-        assert "created_at <= %s" in sql
+        assert "(created_at, id) <= (%s, %s)" in sql
         assert "content_encrypted" in sql
         assert "tool_input_encrypted" in sql
         assert "tool_output_encrypted" in sql
@@ -713,6 +720,7 @@ class TestForkConversation:
             str(new_conv_id),
             str(source_conv_id),
             boundary_created_at,
+            str(boundary_msg_id),
         )
 
     def test_fork_title_prefixes_jatk(self):
@@ -725,7 +733,7 @@ class TestForkConversation:
         new_row = _make_conversation_row(title="Jätk: Maksureform")
 
         conn.execute.return_value.fetchone.side_effect = [
-            (created_at, source_conv_id),
+            (created_at, boundary_msg_id, source_conv_id),
             source_row,
             new_row,
         ]
@@ -767,6 +775,7 @@ class TestForkConversation:
 
         conn.execute.return_value.fetchone.return_value = (
             datetime.now(UTC),
+            uuid.uuid4(),
             other_conv_id,
         )
 

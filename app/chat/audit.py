@@ -62,3 +62,24 @@ def log_chat_conversation_delete(
             "conversation_id": str(conv_id),
         },
     )
+
+
+def log_chat_transcript_export(
+    user_id: str | uuid.UUID | None,
+    conv_id: str | uuid.UUID,
+    export_format: str,
+) -> None:
+    """Record a transcript export (download) of a chat conversation.
+
+    Chat transcripts may contain pre-publication draft content, so taking a
+    copy out of the system is an access event we audit alongside creation
+    and deletion. *export_format* is the file extension (``"md"`` / ``"docx"``).
+    """
+    log_action(
+        str(user_id) if user_id else None,
+        "chat.conversation.export",
+        {
+            "conversation_id": str(conv_id),
+            "format": export_format,
+        },
+    )
