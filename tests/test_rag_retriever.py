@@ -19,7 +19,7 @@ def _make_stub_embedder():
     """Create a mock embedding provider that returns deterministic vectors."""
     embedder = MagicMock()
 
-    async def fake_embed(texts):
+    async def fake_embed(texts, **kwargs):
         return [[0.1] * 1024 for _ in texts]
 
     embedder.embed = fake_embed
@@ -222,3 +222,67 @@ class TestRetrievedChunkDataclass:
         a = RetrievedChunk(content="test", metadata={"k": "v"}, score=0.9)
         b = RetrievedChunk(content="test", metadata={"k": "v"}, score=0.9)
         assert a == b
+
+
+# ---------------------------------------------------------------------------
+# #854: retriever threads cost attribution into the embedding call
+# ---------------------------------------------------------------------------
+
+
+class TestRetrieverEmbeddingAttribution:
+    @staticmethod
+    def _mock_db(mock_get_conn: MagicMock) -> None:
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = []
+        mock_conn.execute.return_value = mock_cursor
+        mock_conn.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn.__exit__ = MagicMock(return_value=False)
+        mock_get_conn.return_value = mock_conn
+
+    @patch("app.rag.retriever.get_connection")
+    def test_user_org_feature_threaded_to_embed(self, mock_get_conn: MagicMock):
+        """retrieve(feature="chat", ...) logs the Voyage spend as
+        ``chat_embedding`` with the caller's user/org."""
+        from unittest.mock import AsyncMock
+
+        self._mock_db(mock_get_conn)
+        embedder = MagicMock()
+        embedder.embed = AsyncMock(return_value=[[0.1] * 1024])
+        retriever = Retriever(embedding_provider=embedder)
+
+        asyncio.run(
+            retriever.retrieve(
+                "test query",
+                org_id="org-1",
+                user_id="user-1",
+                feature="chat",
+            )
+        )
+
+        embedder.embed.assert_awaited_once_with(
+            ["test query"],
+            user_id="user-1",
+            org_id="org-1",
+            feature="chat_embedding",
+        )
+
+    @patch("app.rag.retriever.get_connection")
+    def test_unknown_feature_falls_back_to_plain_embedding_label(self, mock_get_conn: MagicMock):
+        """Legacy callers with the default feature don't get the awkward
+        ``unknown_embedding`` label."""
+        from unittest.mock import AsyncMock
+
+        self._mock_db(mock_get_conn)
+        embedder = MagicMock()
+        embedder.embed = AsyncMock(return_value=[[0.1] * 1024])
+        retriever = Retriever(embedding_provider=embedder)
+
+        asyncio.run(retriever.retrieve("test query"))
+
+        embedder.embed.assert_awaited_once_with(
+            ["test query"],
+            user_id=None,
+            org_id=None,
+            feature="embedding",
+        )

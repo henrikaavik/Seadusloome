@@ -48,13 +48,64 @@ class TestRetryClassification:
         exc = SimpleNamespace(status_code=status)
         assert _is_retryable(exc) is False  # type: ignore[arg-type]
 
-    @pytest.mark.parametrize("status", [404, 409, 422])
+    @pytest.mark.parametrize("status", [404, 410, 422])
     def test_other_4xx_is_not_retryable(self, status: int):
-        """Errors like 404/409/422 mean a bad request payload — not retryable."""
+        """Errors like 404/410/422 mean a bad request payload — not retryable."""
         from app.llm.retry import _is_retryable
 
         exc = SimpleNamespace(status_code=status)
         assert _is_retryable(exc) is False  # type: ignore[arg-type]
+
+    # -- #854: expanded transient set + voyageai ``http_status`` shape ------
+
+    def test_529_overloaded_is_retryable(self):
+        """529 is Anthropic's ``overloaded_error`` — its most common
+        transient failure; it must be retried."""
+        from app.llm.retry import _is_retryable
+
+        exc = SimpleNamespace(status_code=529)
+        assert _is_retryable(exc) is True  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("status", [408, 409])
+    def test_408_and_409_are_retryable(self, status: int):
+        """408 (request timeout) and 409 (conflict) are transient — both
+        SDKs treat them as retryable (#854)."""
+        from app.llm.retry import _is_retryable
+
+        exc = SimpleNamespace(status_code=status)
+        assert _is_retryable(exc) is True  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("status", [429, 500, 503, 529])
+    def test_voyage_http_status_transient_is_retryable(self, status: int):
+        """voyageai exceptions carry ``http_status`` (not ``status_code``).
+
+        Before #854 the extractor never read it, so a single Voyage 429
+        aborted a whole ingest with zero retries.
+        """
+        from app.llm.retry import _is_retryable
+
+        exc = SimpleNamespace(http_status=status)
+        assert _is_retryable(exc) is True  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("status", [400, 401, 403])
+    def test_voyage_http_status_permanent_is_not_retryable(self, status: int):
+        from app.llm.retry import _is_retryable
+
+        exc = SimpleNamespace(http_status=status)
+        assert _is_retryable(exc) is False  # type: ignore[arg-type]
+
+    def test_voyage_http_status_numeric_string_is_handled(self):
+        """voyageai stores the status verbatim; tolerate numeric strings."""
+        from app.llm.retry import _http_status
+
+        assert _http_status(SimpleNamespace(http_status="429")) == 429  # type: ignore[arg-type]
+
+    def test_status_code_takes_precedence_over_http_status(self):
+        """Anthropic-shaped ``status_code`` wins when both attrs exist."""
+        from app.llm.retry import _http_status
+
+        exc = SimpleNamespace(status_code=401, http_status=429)
+        assert _http_status(exc) == 401  # type: ignore[arg-type]
 
     def test_connection_error_is_retryable(self):
         from app.llm.retry import _is_retryable
@@ -697,3 +748,137 @@ class TestVoyageEmbeddingRetry:
 
         mock_client.embed.assert_called_once()
         sleep_mock.assert_not_called()
+
+    def test_embed_retries_on_voyage_http_status_429(self, monkeypatch: pytest.MonkeyPatch):
+        """#854: the real voyageai error shape carries ``http_status``
+        (not ``status_code``) — a 429 must now retry instead of aborting
+        the whole ingest on the first rate-limit hit."""
+        from app.rag.embedding import VoyageProvider
+
+        sleep_mock = AsyncMock()
+        monkeypatch.setattr("app.llm.retry.asyncio.sleep", sleep_mock)
+        monkeypatch.setenv("VOYAGE_API_KEY", "fake-key")
+
+        provider = VoyageProvider()
+        mock_client = MagicMock()
+        provider._client = mock_client
+
+        class _FakeVoyageRateLimitError(Exception):
+            """Mimics voyageai.error.RateLimitError's attribute shape."""
+
+            http_status = 429
+
+        response = MagicMock(embeddings=[[0.1] * 1024], total_tokens=10)
+        mock_client.embed = AsyncMock(side_effect=[_FakeVoyageRateLimitError(), response])
+
+        with patch("app.rag.embedding.VoyageProvider._log_cost"):
+            result = asyncio.run(provider.embed(["hello"]))
+
+        assert result == [[0.1] * 1024]
+        assert mock_client.embed.call_count == 2
+        sleep_mock.assert_awaited_once_with(1.0)
+
+    def test_embed_fails_fast_on_voyage_http_status_401(self, monkeypatch: pytest.MonkeyPatch):
+        from app.rag.embedding import VoyageProvider
+
+        sleep_mock = AsyncMock()
+        monkeypatch.setattr("app.llm.retry.asyncio.sleep", sleep_mock)
+        monkeypatch.setenv("VOYAGE_API_KEY", "fake-key")
+
+        provider = VoyageProvider()
+        mock_client = MagicMock()
+        provider._client = mock_client
+
+        class _FakeVoyageAuthError(Exception):
+            http_status = 401
+
+        mock_client.embed = AsyncMock(side_effect=_FakeVoyageAuthError())
+
+        with pytest.raises(_FakeVoyageAuthError):
+            asyncio.run(provider.embed(["hello"]))
+
+        mock_client.embed.assert_called_once()
+        sleep_mock.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# #854: 529 (Anthropic overloaded) retries end-to-end through the helpers.
+# ---------------------------------------------------------------------------
+
+
+class TestOverloaded529Retry:
+    @patch("app.llm.retry.time.sleep")
+    def test_sync_529_then_success(self, mock_sleep: MagicMock):
+        from app.llm.retry import retry_sync
+
+        class _OverloadedError(Exception):
+            status_code = 529
+
+        fn = MagicMock(side_effect=[_OverloadedError(), "ok"])
+        assert retry_sync(fn, context="test") == "ok"
+        assert fn.call_count == 2
+        mock_sleep.assert_called_once_with(1.0)
+
+    def test_async_529_then_success(self, monkeypatch: pytest.MonkeyPatch):
+        from app.llm.retry import retry_async
+
+        sleep_mock = AsyncMock()
+        monkeypatch.setattr("app.llm.retry.asyncio.sleep", sleep_mock)
+
+        class _OverloadedError(Exception):
+            status_code = 529
+
+        fn = AsyncMock(side_effect=[_OverloadedError(), "ok"])
+
+        result = asyncio.run(retry_async(fn, context="test"))
+
+        assert result == "ok"
+        assert fn.call_count == 2
+        sleep_mock.assert_awaited_once_with(1.0)
+
+
+# ---------------------------------------------------------------------------
+# #854: SDK-internal retries are disabled — the outer wrapper is the single
+# retry authority. SDK default (anthropic max_retries=2) would stack under
+# the wrapper's 4 attempts → up to 12 HTTP calls.
+# ---------------------------------------------------------------------------
+
+
+class TestSdkRetryStackingDisabled:
+    def test_sync_anthropic_client_built_with_zero_retries(self, monkeypatch: pytest.MonkeyPatch):
+        from app.llm.claude import ClaudeProvider
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+        provider = ClaudeProvider()
+
+        fake_anthropic = MagicMock()
+        with patch.dict("sys.modules", {"anthropic": fake_anthropic}):
+            provider._get_client()
+
+        fake_anthropic.Anthropic.assert_called_once_with(api_key="sk-ant-test", max_retries=0)
+
+    def test_async_anthropic_client_built_with_zero_retries(self, monkeypatch: pytest.MonkeyPatch):
+        from app.llm.claude import ClaudeProvider
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+        provider = ClaudeProvider()
+
+        fake_anthropic = MagicMock()
+        with patch.dict("sys.modules", {"anthropic": fake_anthropic}):
+            provider._get_async_client()
+
+        fake_anthropic.AsyncAnthropic.assert_called_once_with(api_key="sk-ant-test", max_retries=0)
+
+    def test_voyage_client_built_with_zero_retries(self, monkeypatch: pytest.MonkeyPatch):
+        """voyageai's tenacity-based retries default to 0; pin it so an
+        SDK default bump can never reintroduce stacking."""
+        from app.rag.embedding import VoyageProvider
+
+        monkeypatch.setenv("VOYAGE_API_KEY", "fake-key")
+        provider = VoyageProvider()
+
+        fake_voyageai = MagicMock()
+        with patch.dict("sys.modules", {"voyageai": fake_voyageai}):
+            provider._get_client()
+
+        fake_voyageai.AsyncClient.assert_called_once_with(api_key="fake-key", max_retries=0)

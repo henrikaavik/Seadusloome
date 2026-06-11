@@ -26,7 +26,18 @@ Cost-tracking caveat
 Retries here wrap the SDK call only. ``log_usage`` is invoked *after*
 the wrapped call returns successfully (in the existing call sites in
 ``app.llm.claude``), so a retried-then-succeeded request still logs
-exactly one usage row, and a fully failed request logs none.
+exactly one usage row, and a fully failed non-streaming request logs
+none. Streams are different (#854): once the stream *opened*, tokens
+are billed even if it dies or is cancelled mid-flight, so
+``ClaudeProvider.astream`` logs whatever usage it captured in an outer
+``finally`` instead of only on clean completion.
+
+SDK-internal retries are disabled
+---------------------------------
+This module is the *single* retry authority (#854). The Anthropic
+clients are constructed with ``max_retries=0`` (SDK default is 2, which
+would stack under our 4 attempts → up to 12 HTTP calls) and the Voyage
+client pins its tenacity-based ``max_retries=0`` likewise.
 """
 
 from __future__ import annotations
@@ -39,7 +50,11 @@ from collections.abc import Awaitable, Callable
 logger = logging.getLogger(__name__)
 
 # Status codes that warrant retry — transient server / rate-limit conditions.
-_RETRYABLE_HTTP: frozenset[int] = frozenset({429, 500, 502, 503, 504})
+# #854: includes the full transient set both SDKs treat as retryable —
+# 408 (request timeout), 409 (conflict; Anthropic's SDK retries it),
+# 429 (rate limit), 5xx, and 529 (Anthropic ``overloaded_error``, its
+# most common transient failure).
+_RETRYABLE_HTTP: frozenset[int] = frozenset({408, 409, 429, 500, 502, 503, 504, 529})
 
 # Status codes that must fail fast — broken request / auth / permissions.
 _NON_RETRYABLE_HTTP: frozenset[int] = frozenset({400, 401, 403})
@@ -55,13 +70,23 @@ def _http_status(exc: BaseException) -> int | None:
     """Best-effort extraction of an HTTP status code from an exception.
 
     Anthropic SDK ``APIStatusError`` subclasses expose ``.status_code``
-    directly; we also check ``.response.status_code`` for httpx-shaped
-    errors. Returns ``None`` when the exception isn't tied to an HTTP
-    response (e.g. ``ConnectionError``, ``TimeoutError``).
+    directly; voyageai's ``VoyageError`` hierarchy exposes ``.http_status``
+    (#854 — previously missed, so Voyage 429/5xx never retried and a
+    single rate-limit hit aborted a whole ingest); we also check
+    ``.response.status_code`` for httpx-shaped errors. Returns ``None``
+    when the exception isn't tied to an HTTP response (e.g.
+    ``ConnectionError``, ``TimeoutError``).
     """
     status = getattr(exc, "status_code", None)
     if isinstance(status, int):
         return status
+    # voyageai stores the response status verbatim on ``http_status``;
+    # it is normally an int but tolerate numeric strings defensively.
+    status = getattr(exc, "http_status", None)
+    if isinstance(status, int):
+        return status
+    if isinstance(status, str) and status.isdigit():
+        return int(status)
     response = getattr(exc, "response", None)
     if response is not None:
         status = getattr(response, "status_code", None)
@@ -74,10 +99,10 @@ def _is_retryable(exc: BaseException) -> bool:
     """Decide whether *exc* represents a transient failure worth retrying.
 
     Policy:
-    * HTTP status in ``_RETRYABLE_HTTP`` → retry.
+    * HTTP status in ``_RETRYABLE_HTTP`` (408/409/429/5xx/529) → retry.
     * HTTP status in ``_NON_RETRYABLE_HTTP`` → never retry.
     * No HTTP status (network/timeout) → retry.
-    * Other HTTP statuses (e.g. 404, 409, 422) → don't retry; the caller's
+    * Other HTTP statuses (e.g. 404, 422) → don't retry; the caller's
       payload is wrong, not the server.
     """
     # Network / timeout errors carry no status code.

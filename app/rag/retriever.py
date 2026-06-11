@@ -160,6 +160,7 @@ class Retriever:
         k: int = 10,
         source_type: str | None = None,
         org_id: str | None = None,
+        user_id: str | None = None,
         filters: dict[str, Any] | None = None,
         feature: str = "unknown",
     ) -> list[RetrievedChunk]:
@@ -183,6 +184,10 @@ class Retriever:
                 and only public chunks are returned. Callers must pass
                 the authenticated user's ``org_id`` — failing to do so is
                 a data-leak bug, not a convenience.
+            user_id: Optional authenticated user id, used purely for
+                cost attribution of the query-embedding call in
+                ``llm_usage`` (#854). Unlike ``org_id`` it has no effect
+                on which chunks are visible.
             filters: Optional metadata filter dict. Allowed keys are
                 ``source_type``, ``source_uri``, ``entity_type``. Values
                 may be a scalar (``=``), a list/tuple/set (``= ANY``),
@@ -194,6 +199,9 @@ class Retriever:
                 ``"drafter"``, ``"analyysikeskus_similarity"``). Defaults
                 to ``"unknown"`` so legacy callers still record metrics;
                 new callers should always pass an explicit label. (#323)
+                Also drives the cost-attribution label on the embedding
+                call: a known feature ``X`` logs the Voyage spend as
+                ``X_embedding`` (#854).
 
         Returns:
             List of :class:`RetrievedChunk` ordered by descending
@@ -222,7 +230,9 @@ class Retriever:
                 k=k,
                 source_type=source_type,
                 org_id=org_id,
+                user_id=user_id,
                 filters=filters,
+                feature=feature,
             )
         except Exception:
             status = "error"
@@ -242,7 +252,9 @@ class Retriever:
         k: int,
         source_type: str | None,
         org_id: str | None,
+        user_id: str | None,
         filters: dict[str, Any] | None,
+        feature: str,
     ) -> list[RetrievedChunk]:
         """Body of :meth:`retrieve`, kept separate so the metric wrapper
         is the only place that needs the try/except scaffolding."""
@@ -276,8 +288,19 @@ class Retriever:
         if any(clause == "FALSE" for clause in extra_clauses):
             return []
 
-        # 1. Embed the query
-        embeddings = await self.embedder.embed([query])
+        # 1. Embed the query. Thread the caller's identity + feature into
+        # the embedding cost row (#854) so Voyage spend lands in per-org
+        # budget enforcement instead of an unattributed "embedding"
+        # bucket. A known feature ``X`` becomes ``X_embedding`` to keep
+        # the provider="claude" feature labels distinct from the Voyage
+        # spend they trigger.
+        embed_feature = "embedding" if feature == "unknown" else f"{feature}_embedding"
+        embeddings = await self.embedder.embed(
+            [query],
+            user_id=user_id,
+            org_id=org_id,
+            feature=embed_feature,
+        )
         if not embeddings:
             return []
         query_embedding = embeddings[0]

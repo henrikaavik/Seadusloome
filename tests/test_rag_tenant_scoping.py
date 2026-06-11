@@ -33,7 +33,7 @@ from app.rag.retriever import Retriever, delete_chunks_for_draft
 def _make_stub_embedder():
     embedder = MagicMock()
 
-    async def fake_embed(texts):
+    async def fake_embed(texts, **kwargs):
         return [[0.1] * 1024 for _ in texts]
 
     embedder.embed = fake_embed

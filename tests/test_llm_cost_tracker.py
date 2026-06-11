@@ -27,9 +27,10 @@ class TestCalculateCost:
         assert opus > sonnet
 
     def test_calculate_cost_haiku(self):
-        """Haiku pricing: 0.80 input / 4.00 output per 1M tokens."""
+        """Haiku 4.5 pricing: 1.00 input / 5.00 output per 1M tokens (#854 —
+        the old 0.80/4.00 figures were Haiku 3.5 rates)."""
         cost = calculate_cost("claude", "claude-haiku-4-5", 1_000_000, 0)
-        assert abs(cost - 0.80) < 1e-9
+        assert abs(cost - 1.00) < 1e-9
 
     def test_calculate_cost_zero_tokens(self):
         """Zero tokens should produce zero cost."""
