@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
 import time
 
 import httpx
@@ -16,6 +17,71 @@ logger = logging.getLogger(__name__)
 # Default connection settings (from jena_loader.py conventions)
 _DEFAULT_JENA_URL = "http://localhost:3030"
 _DEFAULT_JENA_DATASET = "ontology"
+
+
+# ---------------------------------------------------------------------------
+# Shared httpx.Client (connection pooling)
+# ---------------------------------------------------------------------------
+#
+# Every ``SparqlClient`` instance (there are ~30 short-lived ones across the
+# app — one per analyysikeskus helper call, etc.) routes its HTTP through a
+# single process-wide ``httpx.Client``.  A bare ``httpx.post`` opens and tears
+# down a fresh TCP+TLS connection on every call; a pooled client keeps
+# keep-alive connections to Fuseki warm, which matters under the 5–50
+# concurrent-user load and the multi-query Analüüsikeskus pages.
+#
+# Lazy-init singleton (mirrors the ``ClaudeProvider`` / ``VoyageProvider`` /
+# resolver pattern documented in CLAUDE.md): the client is constructed on the
+# first real request behind a thread-safe lock, so importing this module never
+# opens sockets and tests that never hit the network never pay for one.
+
+# Bound the pool so a burst of concurrent SPARQL calls can't exhaust file
+# descriptors against a single Fuseki host.  ``max_connections`` is the hard
+# ceiling; ``max_keepalive_connections`` is how many idle connections we keep
+# warm between requests.
+_HTTP_LIMITS = httpx.Limits(max_connections=20, max_keepalive_connections=10)
+
+# Overall ceiling for a single request when a caller does not pass its own
+# per-instance timeout.  Individual ``SparqlClient`` instances override this
+# per-request via ``self.timeout`` (see :meth:`SparqlClient._execute`).
+_DEFAULT_TIMEOUT = 30.0
+
+_shared_client: httpx.Client | None = None
+_shared_client_lock = threading.Lock()
+
+
+def _get_shared_http_client() -> httpx.Client:
+    """Return the process-wide pooled :class:`httpx.Client`, building it once.
+
+    Double-checked locking so the first concurrent burst of SPARQL calls
+    constructs exactly one client.  The client carries connection-pool
+    limits and a default timeout; per-request timeouts still win when a
+    caller passes one to :meth:`httpx.Client.post`.
+    """
+    global _shared_client
+    if _shared_client is not None:
+        return _shared_client
+    with _shared_client_lock:
+        if _shared_client is None:
+            _shared_client = httpx.Client(
+                limits=_HTTP_LIMITS,
+                timeout=httpx.Timeout(_DEFAULT_TIMEOUT),
+            )
+    return _shared_client
+
+
+def close_shared_http_client() -> None:
+    """Close and drop the shared client (process shutdown / test teardown).
+
+    Safe to call when no client was ever built — it is a no-op in that
+    case.  The next call to :func:`_get_shared_http_client` rebuilds a
+    fresh pool.
+    """
+    global _shared_client
+    with _shared_client_lock:
+        client, _shared_client = _shared_client, None
+    if client is not None:
+        client.close()
 
 
 def _sanitize_sparql_value(value: str) -> str:
@@ -125,7 +191,7 @@ class SparqlClient:
         start = time.perf_counter()
         status = "error"
         try:
-            response = httpx.post(
+            response = _get_shared_http_client().post(
                 self.endpoint,
                 data={"query": sparql},
                 headers={"Accept": "application/sparql-results+json"},
@@ -269,12 +335,28 @@ class SparqlClient:
         data = self._execute(sparql, on_error="swallow", operation="ask")
         return bool(data.get("boolean", False))
 
-    def count(self, sparql: str) -> int:
+    def count(self, sparql: str, *, on_error: str = "swallow") -> int:
         """Execute a SPARQL SELECT query that returns a single count value.
 
         Expects the query to project a ``?count`` variable.
+
+        Parameters
+        ----------
+        on_error:
+            Forwarded to :meth:`query` / :meth:`_execute`.  ``"swallow"``
+            (the default, legacy behaviour) means a dead Jena yields
+            ``0`` — convenient for display paths that can tolerate a
+            zero count.  ``"raise"`` re-raises the underlying
+            :class:`httpx.HTTPError` so a caller can tell "Jena says
+            there are 0 rows" apart from "Jena was unreachable" and
+            avoid rendering an outage as a truthful ``total: 0`` (which
+            misleads pagination — see ``app/explorer/routes.py``).
+
+        Note that a genuine empty result (Jena reachable, zero rows)
+        still returns ``0`` under ``on_error="raise"`` — only transport
+        failures propagate, never an empty binding set.
         """
-        rows = self.query(sparql, operation="count")
+        rows = self.query(sparql, operation="count", on_error=on_error)
         if rows and "count" in rows[0]:
             try:
                 return int(rows[0]["count"])
