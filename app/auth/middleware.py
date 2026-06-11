@@ -44,6 +44,13 @@ def _get_provider() -> JWTAuthProvider:
 # the page were public the overlay would always come back empty. The
 # explorer JSON APIs under ``/api/explorer/...`` also require auth so
 # that ontology data queries are not publicly accessible.
+#
+# Note (#856): NO ``/ws/*`` path belongs in this list. The WS handshake
+# never goes through this HTTP Beforeware (FastHTML ``app.ws()`` routes
+# bypass it), so listing one here is at best a no-op and at worst
+# documentation that the channel is public. Every WS channel —
+# including ``/ws/explorer`` since #856 — authenticates its handshake
+# itself via the shared cookie-JWT helper (``app/auth/ws_auth.py``).
 SKIP_PATHS: list[str] = [
     r"/auth/login",
     r"/auth/forgot",
@@ -52,7 +59,6 @@ SKIP_PATHS: list[str] = [
     r"/favicon\.ico",
     r"/api/health",
     r"/api/ping",
-    r"/ws/explorer",
     r"/webhooks/github",
     r"/api/validate/.*",
 ]

@@ -100,17 +100,11 @@ def _reset_registry():
     """Wipe the module-level connection + heartbeat registries between tests."""
     with notif_ws._registry_lock:
         notif_ws._connections.clear()
-    with notif_ws._heartbeats_lock:
-        for task in list(notif_ws._heartbeats.values()):
-            task.cancel()
-        notif_ws._heartbeats.clear()
+    notif_ws._heartbeats.cancel_clear()
     yield
     with notif_ws._registry_lock:
         notif_ws._connections.clear()
-    with notif_ws._heartbeats_lock:
-        for task in list(notif_ws._heartbeats.values()):
-            task.cancel()
-        notif_ws._heartbeats.clear()
+    notif_ws._heartbeats.cancel_clear()
 
 
 # ---------------------------------------------------------------------------
@@ -377,10 +371,11 @@ class TestConnectLifecycle:
 
             asyncio.run(on_conn(collector, _scope_with_cookie(), ws))
 
-        # Socket is registered under the authenticated user.
+        # Socket is registered under the authenticated user, keyed on
+        # the stable conn identity (#856 F3).
         with notif_ws._registry_lock:
             assert _USER_A in notif_ws._connections
-            assert collector in notif_ws._connections[_USER_A]
+            assert notif_ws._connections[_USER_A].get(id(ws)) is collector
 
         # The greet event was sent.
         assert any(
@@ -407,9 +402,8 @@ class TestConnectLifecycle:
 
         async def _run() -> None:
             await on_conn(collector, _scope_with_cookie(), ws)
-            with notif_ws._heartbeats_lock:
-                captured["registered_id"] = id(ws) in notif_ws._heartbeats
-                captured["task"] = notif_ws._heartbeats.get(id(ws))
+            captured["registered_id"] = id(ws) in notif_ws._heartbeats
+            captured["task"] = notif_ws._heartbeats.get(id(ws))
 
         with patch("app.notifications.websocket.JWTAuthProvider") as mock_jwt_cls:
             mock_jwt = MagicMock()
@@ -454,8 +448,7 @@ class TestConnectLifecycle:
         # No connection was registered and no heartbeat was spawned.
         with notif_ws._registry_lock:
             assert notif_ws._connections == {}
-        with notif_ws._heartbeats_lock:
-            assert id(ws) not in notif_ws._heartbeats
+        assert id(ws) not in notif_ws._heartbeats
 
     def test_invalid_jwt_closes_socket_and_skips_registration(self):
         on_conn, _on_disconn, _handler = _capture_handlers()
@@ -479,6 +472,13 @@ class TestConnectLifecycle:
 
 
 class TestDisconnectLifecycle:
+    """Disconnect cleanup is keyed on the stable conn identity
+    (``id(ws)``). FastHTML rebuilds the ``send`` partial on every hook
+    dispatch, so each test below deliberately hands ``_on_disconnect``
+    a DIFFERENT send object than ``_on_connect`` registered — the
+    production shape. (The previous tests reused the same object,
+    which is the identity assumption that masked review finding F3.)"""
+
     def test_disconnect_removes_socket_from_user_pool(self):
         on_conn, on_disconn, _handler = _capture_handlers()
         collector = _Collector()
@@ -492,10 +492,11 @@ class TestDisconnectLifecycle:
             asyncio.run(on_conn(collector, _scope_with_cookie(), ws))
 
         with notif_ws._registry_lock:
-            assert collector in notif_ws._connections[_USER_A]
+            assert collector in notif_ws._connections[_USER_A].values()
 
-        # Now disconnect — pass the same ws so the heartbeat lookup hits.
-        asyncio.run(on_disconn(collector, ws))
+        # Disconnect with a FRESH send object — same conn (ws). The
+        # F3 defect made this a silent no-op.
+        asyncio.run(on_disconn(_Collector(), ws))
 
         # The user's entry should be gone entirely (it was the only tab).
         with notif_ws._registry_lock:
@@ -515,17 +516,16 @@ class TestDisconnectLifecycle:
 
             async def _run() -> asyncio.Task[None]:
                 await on_conn(collector, _scope_with_cookie(), ws)
-                with notif_ws._heartbeats_lock:
-                    task = notif_ws._heartbeats[id(ws)]
-                await on_disconn(collector, ws)
+                task = notif_ws._heartbeats.get(id(ws))
+                assert task is not None
+                await on_disconn(_Collector(), ws)
                 return task
 
             task = asyncio.run(_run())
 
         # The heartbeat task was cancelled and removed from the registry.
         assert task.cancelled() or task.done()
-        with notif_ws._heartbeats_lock:
-            assert id(ws) not in notif_ws._heartbeats
+        assert id(ws) not in notif_ws._heartbeats
 
     def test_disconnect_only_removes_the_specific_tab(self):
         """When the user has two tabs and one disconnects, the other
@@ -545,18 +545,59 @@ class TestDisconnectLifecycle:
             asyncio.run(on_conn(tab1, _scope_with_cookie(), ws1))
             asyncio.run(on_conn(tab2, _scope_with_cookie(), ws2))
 
-        # Disconnect only tab1.
-        asyncio.run(on_disconn(tab1, ws1))
+        # Disconnect only tab1 — fresh send object, tab1's conn.
+        asyncio.run(on_disconn(_Collector(), ws1))
 
         with notif_ws._registry_lock:
             assert _USER_A in notif_ws._connections
-            assert tab1 not in notif_ws._connections[_USER_A]
-            assert tab2 in notif_ws._connections[_USER_A]
+            assert tab1 not in notif_ws._connections[_USER_A].values()
+            assert tab2 in notif_ws._connections[_USER_A].values()
 
         # Tab2's heartbeat is still alive.
-        with notif_ws._heartbeats_lock:
-            assert id(ws2) in notif_ws._heartbeats
-            assert id(ws1) not in notif_ws._heartbeats
+        assert id(ws2) in notif_ws._heartbeats
+        assert id(ws1) not in notif_ws._heartbeats
+
+    def test_heartbeat_failure_deregisters_connection(self, monkeypatch):
+        """F3 contract (#856): when the connection-lifetime heartbeat
+        hits a dead socket, the connection is dropped from the user
+        pool AND the heartbeat registry immediately — not left for the
+        next broadcast to trip over."""
+        from app.auth import ws_auth
+
+        monkeypatch.setattr(ws_auth, "WS_HEARTBEAT_INTERVAL_SECONDS", 0.01)
+        on_conn, _on_disconn, _handler = _capture_handlers()
+        ws = _FakeWs()
+
+        class _GreetThenDie:
+            """Send that delivers the greet, then starts failing."""
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def __call__(self, data: Any) -> None:
+                self.calls += 1
+                if self.calls > 1:
+                    raise RuntimeError("socket dead")
+
+        dying = _GreetThenDie()
+
+        with patch("app.notifications.websocket.JWTAuthProvider") as mock_jwt_cls:
+            mock_jwt = MagicMock()
+            mock_jwt.get_current_user.return_value = _build_user(_USER_A)
+            mock_jwt_cls.return_value = mock_jwt
+
+            async def _run() -> None:
+                await on_conn(dying, _scope_with_cookie(), ws)
+                with notif_ws._registry_lock:
+                    assert _USER_A in notif_ws._connections
+                # Let the heartbeat tick, fail, and deregister.
+                await asyncio.sleep(0.1)
+
+            asyncio.run(_run())
+
+        with notif_ws._registry_lock:
+            assert _USER_A not in notif_ws._connections
+        assert id(ws) not in notif_ws._heartbeats
 
 
 # ---------------------------------------------------------------------------
@@ -588,20 +629,6 @@ class TestWsNotificationsHandler:
         assert collector.sent == []
 
 
-# ---------------------------------------------------------------------------
-# Cookie extraction (mirrors chat/draft-status pattern)
-# ---------------------------------------------------------------------------
-
-
-class TestExtractCookieFromHeaders:
-    def test_extracts_access_token(self):
-        headers = [(b"cookie", b"access_token=my-token; other=abc")]
-        assert notif_ws._extract_cookie_from_headers(headers, "access_token") == "my-token"
-
-    def test_returns_none_when_cookie_absent(self):
-        headers = [(b"cookie", b"other=abc")]
-        assert notif_ws._extract_cookie_from_headers(headers, "access_token") is None
-
-    def test_returns_none_when_no_cookie_header(self):
-        headers = [(b"host", b"localhost")]
-        assert notif_ws._extract_cookie_from_headers(headers, "access_token") is None
+# Cookie-extraction coverage lives in tests/test_ws_auth.py since #856
+# — the per-channel private copies were replaced by the shared
+# app.auth.ws_auth helpers.

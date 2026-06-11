@@ -48,23 +48,22 @@ import asyncio
 import json
 import logging
 import uuid
-from http.cookies import SimpleCookie
 from typing import Any
 
 from app.auth.jwt_provider import JWTAuthProvider
 from app.auth.policy import can_view_draft
+from app.auth.ws_auth import WSCookieAuth, close_ws, start_heartbeat
 from app.db import get_connection
 from app.docs.draft_model import fetch_draft
 
 logger = logging.getLogger(__name__)
 
 
-# Heartbeat — same shape as the chat module's per-handler heartbeat
-# (post-review fix to #684). Keeps NAT idle timeouts from dropping the
-# socket during long .docx renders (large reports can spend a minute
-# rendering tables without a status change).
-_WS_HEARTBEAT_INTERVAL_SECONDS = 25.0
-_WS_HEARTBEAT_SEND_TIMEOUT_SECONDS = 5.0
+# Heartbeat / cookie-auth / close plumbing is shared across every WS
+# channel since #856 — see app/auth/ws_auth.py. The heartbeat keeps
+# NAT idle timeouts from dropping the socket during long .docx renders
+# (large reports can spend a minute rendering tables without a status
+# change).
 
 # Poll cadence for the worker-side progress column. Fast enough to feel
 # live in the browser without hammering Postgres; the column itself is
@@ -80,58 +79,6 @@ _WS_MAX_LIFETIME_SECONDS = 360.0
 # Background-job statuses that mean the export is done (success or
 # permanent failure). Reaching one of these closes the WS cleanly.
 _TERMINAL_STATUSES = frozenset({"success", "failed"})
-
-
-def _start_heartbeat(send: Any) -> asyncio.Task[None]:
-    """Spawn a periodic ``{"type": "ping"}`` task for the lifetime of
-    the WS handler invocation. Self-terminates on first send error."""
-
-    async def _beat() -> None:
-        while True:
-            try:
-                await asyncio.sleep(_WS_HEARTBEAT_INTERVAL_SECONDS)
-                await asyncio.wait_for(
-                    send(json.dumps({"type": "ping"})),
-                    timeout=_WS_HEARTBEAT_SEND_TIMEOUT_SECONDS,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.debug(
-                    "export-progress WS heartbeat send failed; terminating",
-                    exc_info=True,
-                )
-                return
-
-    return asyncio.create_task(_beat())
-
-
-def _extract_cookie_from_headers(headers: list[tuple[bytes, bytes]], name: str) -> str | None:
-    """Parse a single named cookie out of raw ASGI ``Cookie`` headers."""
-    for hdr_name, hdr_value in headers:
-        if hdr_name.lower() == b"cookie":
-            cookie: SimpleCookie = SimpleCookie()
-            cookie.load(hdr_value.decode("latin-1"))
-            morsel = cookie.get(name)
-            if morsel is not None:
-                return morsel.value
-    return None
-
-
-async def _ws_close(send: Any, code: int, reason: str) -> None:
-    """Best-effort WS close. Mirrors the chat module's helper.
-
-    The ASGI ``websocket.close`` envelope is the canonical close path;
-    if the runtime prefers a different shape we fall back to sending a
-    JSON error event before exiting.
-    """
-    try:
-        await send({"type": "websocket.close", "code": code, "reason": reason})
-    except Exception:
-        try:
-            await send(json.dumps({"type": "error", "message": reason, "code": code}))
-        except Exception:
-            logger.debug("export-progress WS close fallback failed", exc_info=True)
 
 
 def _read_job_progress(job_id: int) -> tuple[str | None, dict[str, Any] | None]:
@@ -215,6 +162,7 @@ async def ws_export_progress(
     msg: str,
     send: Any,
     scope: dict[str, Any] | None = None,
+    ws: Any = None,
 ) -> None:
     """Handle one client message on ``/ws/drafts/export-progress``.
 
@@ -237,7 +185,10 @@ async def ws_export_progress(
        since the last push.
     5. Closes the socket when the job reaches a terminal status
        (``success`` / ``failed``) or when ``_WS_MAX_LIFETIME_SECONDS``
-       elapses (defence-in-depth against a stuck worker).
+       elapses (defence-in-depth against a stuck worker). The close
+       goes through ``ws.close()`` on the raw Starlette conn (*ws*,
+       forwarded by the registration wrapper) — FastHTML's wrapped
+       ``send`` cannot close a socket (F1, #856).
     """
     try:
         data = json.loads(msg)
@@ -313,7 +264,7 @@ async def ws_export_progress(
 
     # Already terminal? Close immediately.
     if status in _TERMINAL_STATUSES:
-        await _ws_close(send, 1000, "terminal-status")
+        await close_ws(ws, 1000, "terminal-status", channel="export-progress")
         return
 
     # Poll loop. Each iteration is offloaded via ``asyncio.to_thread``
@@ -378,7 +329,7 @@ async def ws_export_progress(
                     "export-progress WS: terminal send failed",
                     exc_info=True,
                 )
-            await _ws_close(send, 1000, "terminal-status")
+            await close_ws(ws, 1000, "terminal-status", channel="export-progress")
             return
 
     # Lifetime budget exhausted. Tell the client politely; the HTTP
@@ -395,7 +346,7 @@ async def ws_export_progress(
         )
     except Exception:
         logger.debug("export-progress WS: timeout send failed", exc_info=True)
-    await _ws_close(send, 1000, "lifetime-exceeded")
+    await close_ws(ws, 1000, "lifetime-exceeded", channel="export-progress")
 
 
 def register_export_progress_ws_routes(app: Any) -> None:
@@ -406,26 +357,18 @@ def register_export_progress_ws_routes(app: Any) -> None:
     the message body is delegated to :func:`ws_export_progress`. The
     heartbeat scope is also per invocation (post-#684 pattern).
     """
-    _jwt_provider: list[JWTAuthProvider | None] = [None]
-
-    def _get_jwt_provider() -> JWTAuthProvider | None:
-        if _jwt_provider[0] is None:
-            try:
-                _jwt_provider[0] = JWTAuthProvider()
-            except Exception:
-                logger.error(
-                    "export-progress WS: failed to construct JWTAuthProvider",
-                    exc_info=True,
-                )
-                return None
-        return _jwt_provider[0]
+    # Shared cookie-JWT authenticator (#856). The factory lambda
+    # resolves ``JWTAuthProvider`` from THIS module's globals at call
+    # time so tests can patch
+    # ``app.docs.ws_export_progress.JWTAuthProvider``.
+    authenticator = WSCookieAuth("export-progress", provider_factory=lambda: JWTAuthProvider())
 
     # IMPORTANT — FastHTML param resolution (root cause of #802):
-    #   * ``send`` / ``scope`` MUST be unannotated. ``_find_p`` only
-    #     resolves these WS special names inside its ``if anno is empty:``
-    #     branch (``fasthtml/core.py:_find_p``). Annotating them (even
-    #     with ``Any``) makes FastHTML fall through to the generic
-    #     path/cookies/headers/query/data resolver and raise
+    #   * ``send`` / ``scope`` / ``ws`` MUST be unannotated. ``_find_p``
+    #     only resolves these WS special names inside its ``if anno is
+    #     empty:`` branch (``fasthtml/core.py:_find_p``). Annotating
+    #     them (even with ``Any``) makes FastHTML fall through to the
+    #     generic path/cookies/headers/query/data resolver and raise
     #     ``ValueError: Missing required field: <name>``.
     #   * ``msg`` MUST be annotated ``dict``. The ``if anno is dict:``
     #     branch of ``_find_p`` returns the parsed JSON ``data`` payload.
@@ -435,44 +378,24 @@ def register_export_progress_ws_routes(app: Any) -> None:
     #     dict at the boundary below so the inner handler's existing
     #     ``msg: str`` contract — and its unit tests — stay unchanged.
     # See ``docs/2026-05-18-bugfix-plan.md`` Wave 3.
-    async def _ws_handler(msg: dict, send, scope=None) -> None:
+    async def _ws_handler(msg: dict, send, scope=None, ws=None) -> None:
         auth_scope: dict[str, Any] = {}
 
-        if scope is not None:
-            raw_headers: list[tuple[bytes, bytes]] = scope.get("headers", [])
-            access_token = _extract_cookie_from_headers(raw_headers, "access_token")
-            refresh_token = _extract_cookie_from_headers(raw_headers, "refresh_token")
-
-            if access_token or refresh_token:
-                provider = _get_jwt_provider()
-                if provider is None:
-                    await _ws_close(send, 1011, "auth provider unavailable")
-                    return
-
-                user: dict[str, Any] | None = None
-                if access_token:
-                    verified = provider.get_current_user(access_token)
-                    if verified is not None:
-                        user = dict(verified)
-
-                if user is None and refresh_token:
-                    # Same silent-refresh shape as the chat WS (#637).
-                    from app.auth.middleware import verify_refresh_token_user
-
-                    refreshed_user = verify_refresh_token_user(refresh_token, provider=provider)
-                    if refreshed_user is not None:
-                        user = refreshed_user
-
-                if user is not None:
-                    auth_scope["auth"] = user
+        result = authenticator.resolve_user(scope)
+        if result.provider_unavailable:
+            # Fail-closed (#594.4) via the raw conn (F1, #856).
+            await close_ws(ws, 1011, "auth provider unavailable", channel="export-progress")
+            return
+        if result.user is not None:
+            auth_scope["auth"] = result.user
 
         # Heartbeat scoped to this handler invocation (post-#684 pattern).
-        heartbeat = _start_heartbeat(send)
+        heartbeat = start_heartbeat(send, channel="export-progress")
         try:
             # See app/chat/websocket.py: accept both dict (FastHTML resolver)
             # and string (legacy direct-call tests).
             msg_str = json.dumps(msg) if isinstance(msg, dict) else msg
-            await ws_export_progress(msg_str, send, auth_scope if auth_scope else None)
+            await ws_export_progress(msg_str, send, auth_scope if auth_scope else None, ws=ws)
         finally:
             heartbeat.cancel()
             try:

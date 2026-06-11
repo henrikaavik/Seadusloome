@@ -14,7 +14,9 @@ This is primarily a **push-only** channel: the server emits a
 :func:`app.notifications.notify.notify` inserts a new row for the
 connected user. Multiple browser tabs translate into multiple sockets
 per user (the same physical user receives one push per tab), so the
-connection registry is a ``dict[user_id, set[send]]``.
+connection registry is a ``dict[user_id, dict[conn_key, send]]`` keyed
+on the stable conn identity (``id(ws)`` — see
+:func:`app.auth.ws_auth.conn_key` and review finding F3 in #856).
 
 Client messages are silently ignored other than the ``ping`` →
 ``pong`` keepalive hook (kept for symmetry with the other modules);
@@ -51,57 +53,39 @@ import asyncio
 import json
 import logging
 import threading
-from http.cookies import SimpleCookie
 from typing import Any
 
 from app.auth.jwt_provider import JWTAuthProvider
+from app.auth.ws_auth import (
+    HeartbeatRegistry,
+    WSCookieAuth,
+    close_ws,
+    conn_key,
+    start_heartbeat,
+)
 
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Heartbeat (same shape as chat/draft-status WS handlers — see #684 review)
-# ---------------------------------------------------------------------------
-
-_WS_HEARTBEAT_INTERVAL_SECONDS = 25.0
-_WS_HEARTBEAT_SEND_TIMEOUT_SECONDS = 5.0
-
-
-def _start_heartbeat(send: Any) -> asyncio.Task[None]:
-    """Spawn a periodic ``{"type": "ping"}`` task for the lifetime of the
-    WS handler invocation. Self-terminates on the first send failure."""
-
-    async def _beat() -> None:
-        while True:
-            try:
-                await asyncio.sleep(_WS_HEARTBEAT_INTERVAL_SECONDS)
-                await asyncio.wait_for(
-                    send(json.dumps({"type": "ping"})),
-                    timeout=_WS_HEARTBEAT_SEND_TIMEOUT_SECONDS,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.debug(
-                    "notifications WS heartbeat send failed; terminating",
-                    exc_info=True,
-                )
-                return
-
-    return asyncio.create_task(_beat())
+# Heartbeat / cookie-auth / close plumbing is shared across every WS
+# channel since #856 — see app/auth/ws_auth.py.
 
 
 # ---------------------------------------------------------------------------
 # Connection registry — module-level so notify() can push from anywhere
 # ---------------------------------------------------------------------------
 
-# ``user_id (str)`` → set of bound ``send`` callables. Multiple tabs for
-# the same user produce multiple entries. The registry is protected by
-# ``_registry_lock`` because :func:`push_to_user` may be invoked from a
-# background worker thread (notify is called fire-and-forget from job
-# handlers and synchronous domain code), so we need thread-safe access
-# to the set.
-_connections: dict[str, set[Any]] = {}
+# ``user_id (str)`` → ``{conn_key: send}``. Multiple tabs for the same
+# user produce multiple entries. Keyed on the stable conn identity
+# (:func:`app.auth.ws_auth.conn_key` — ``id(ws)``) rather than on the
+# ``send`` object: FastHTML rebuilds ``partial(_send_ws, conn)`` on
+# every hook dispatch, so the ``send`` the disconnect hook receives is
+# NEVER the one the connect hook registered and identity-based cleanup
+# could not remove anything (review finding F3, #856). The registry is
+# protected by ``_registry_lock`` because :func:`push_to_user` may be
+# invoked from a background worker thread (notify is called
+# fire-and-forget from job handlers and synchronous domain code).
+_connections: dict[str, dict[int, Any]] = {}
 _registry_lock = threading.Lock()
 
 # The event loop running the FastHTML ASGI app. Captured by
@@ -122,34 +106,58 @@ def register_event_loop(loop: asyncio.AbstractEventLoop) -> None:
     _event_loop = loop
 
 
-def _add_connection(user_id: str, send: Any) -> None:
-    """Register *send* as an active socket for *user_id*."""
+def _add_connection(user_id: str, send: Any, key: int | None = None) -> None:
+    """Register *send* as an active socket for *user_id* under *key*.
+
+    *key* is the stable conn identity (``id(ws)``); it defaults to
+    ``id(send)`` for direct-invocation tests that have no conn object.
+    """
+    if key is None:
+        key = id(send)
     with _registry_lock:
-        _connections.setdefault(user_id, set()).add(send)
+        _connections.setdefault(user_id, {})[key] = send
 
 
-def _remove_connection(user_id: str, send: Any) -> None:
-    """Drop *send* from *user_id*'s socket set; drop the entry when empty."""
+def _remove_connection(user_id: str, key: int) -> None:
+    """Drop conn *key* from *user_id*'s socket pool; drop the entry when empty."""
     with _registry_lock:
-        sends = _connections.get(user_id)
-        if sends is None:
+        conns = _connections.get(user_id)
+        if conns is None:
             return
-        sends.discard(send)
-        if not sends:
+        conns.pop(key, None)
+        if not conns:
             _connections.pop(user_id, None)
 
 
-def _snapshot_connections(user_id: str) -> list[Any]:
-    """Return a snapshot of *user_id*'s current sockets.
+def _remove_connection_any_user(key: int) -> None:
+    """Drop conn *key* from whichever user pool holds it.
+
+    The disconnect hook and the heartbeat-failure path know the conn
+    identity but not the user id; with at most a few hundred concurrent
+    users the scan is negligible.
+    """
+    with _registry_lock:
+        empty_users: list[str] = []
+        for user_id, conns in _connections.items():
+            if key in conns:
+                conns.pop(key, None)
+                if not conns:
+                    empty_users.append(user_id)
+        for user_id in empty_users:
+            _connections.pop(user_id, None)
+
+
+def _snapshot_connections(user_id: str) -> list[tuple[int, Any]]:
+    """Return a ``(key, send)`` snapshot of *user_id*'s current sockets.
 
     Snapshotting under the lock lets the caller iterate without
     blocking other connect/disconnect mutations.
     """
     with _registry_lock:
-        sends = _connections.get(user_id)
-        if not sends:
+        conns = _connections.get(user_id)
+        if not conns:
             return []
-        return list(sends)
+        return list(conns.items())
 
 
 async def _broadcast_async(user_id: str, payload: dict[str, Any]) -> None:
@@ -158,12 +166,12 @@ async def _broadcast_async(user_id: str, payload: dict[str, Any]) -> None:
     Dead sockets are removed from the registry on send failure so the
     next broadcast does not re-attempt them.
     """
-    sends = _snapshot_connections(user_id)
-    if not sends:
+    conns = _snapshot_connections(user_id)
+    if not conns:
         return
 
     serialised = json.dumps(payload, default=str)
-    for send in sends:
+    for key, send in conns:
         try:
             await send(serialised)
         except Exception:
@@ -172,7 +180,7 @@ async def _broadcast_async(user_id: str, payload: dict[str, Any]) -> None:
                 user_id,
                 exc_info=True,
             )
-            _remove_connection(user_id, send)
+            _remove_connection(user_id, key)
 
 
 def push_to_user(user_id: Any, payload: dict[str, Any]) -> None:
@@ -232,75 +240,17 @@ def push_to_user(user_id: Any, payload: dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Cookie helpers (same shape as chat/draft-status WS)
-# ---------------------------------------------------------------------------
-
-
-def _extract_cookie_from_headers(headers: list[tuple[bytes, bytes]], name: str) -> str | None:
-    """Parse the ``Cookie`` header from raw ASGI *headers* and return the value for *name*."""
-    for hdr_name, hdr_value in headers:
-        if hdr_name.lower() == b"cookie":
-            cookie: SimpleCookie = SimpleCookie()
-            cookie.load(hdr_value.decode("latin-1"))
-            morsel = cookie.get(name)
-            if morsel is not None:
-                return morsel.value
-    return None
-
-
-async def _ws_close(ws: Any, code: int, reason: str) -> None:
-    """Best-effort WS close that actually closes the underlying ASGI socket.
-
-    FastHTML's ``send`` parameter exposed to WS hooks is
-    ``partial(_send_ws, conn)`` — i.e. the dict gets fed through
-    ``to_xml`` and ultimately ``ws.send_text``. Trying to close by
-    sending ``{"type": "websocket.close", ...}`` through ``send``
-    therefore produces a regular text frame and leaves the connection
-    open. We have to call ``ws.close()`` on the raw Starlette
-    WebSocket conn (exposed by FastHTML via the unannotated ``ws``
-    parameter on WS hooks).
-    """
-    if ws is None:
-        # Defensive: the caller forgot to pass the conn. Nothing we can
-        # do here other than log so a future regression is visible.
-        logger.debug("notifications WS close requested without ws conn")
-        return
-    try:
-        await ws.close(code=code, reason=reason)
-    except Exception:
-        logger.debug("notifications WS close failed", exc_info=True)
-
-
-# ---------------------------------------------------------------------------
 # Per-connection heartbeat registry
 # ---------------------------------------------------------------------------
-# We key by ``id(ws)`` (the Starlette WebSocket conn) rather than
-# ``id(send)`` because FastHTML rebuilds the ``send`` partial on every
-# WS hook invocation (``partial(_send_ws, conn)`` inside ``_find_p``),
-# so ``id(send)`` differs between ``_on_connect`` and ``_on_disconnect``
-# even though the underlying physical connection is the same. The
-# ``ws`` (conn) IS the same object across all hooks for one socket
-# (see Starlette's ``WebSocketEndpoint.dispatch`` which forwards the
-# same ``WebSocket`` to ``on_connect``/``on_disconnect``/``on_receive``).
+# Keyed by ``conn_key`` (``id(ws)`` — the Starlette WebSocket conn)
+# rather than ``id(send)`` because FastHTML rebuilds the ``send``
+# partial on every WS hook invocation (``partial(_send_ws, conn)``
+# inside ``_find_p``), so ``id(send)`` differs between ``_on_connect``
+# and ``_on_disconnect`` even though the underlying physical connection
+# is the same. The ``ws`` (conn) IS the same object across all hooks
+# for one socket (see Starlette's ``WebSocketEndpoint.dispatch``).
 
-_heartbeats: dict[int, asyncio.Task[None]] = {}
-_heartbeats_lock = threading.Lock()
-
-
-def _register_heartbeat(ws_id: int, task: asyncio.Task[None]) -> None:
-    with _heartbeats_lock:
-        # Cancel any pre-existing task under this key (defensive — a
-        # mis-ordered conn/disconn could leave a stale task).
-        old = _heartbeats.pop(ws_id, None)
-    if old is not None and not old.done():
-        old.cancel()
-    with _heartbeats_lock:
-        _heartbeats[ws_id] = task
-
-
-def _pop_heartbeat(ws_id: int) -> asyncio.Task[None] | None:
-    with _heartbeats_lock:
-        return _heartbeats.pop(ws_id, None)
+_heartbeats = HeartbeatRegistry()
 
 
 # ---------------------------------------------------------------------------
@@ -366,62 +316,12 @@ def register_notifications_ws_routes(app: Any) -> None:
     Beforeware. Auth is handled inline by extracting the
     ``access_token`` cookie from the raw ASGI headers below.
     """
-    _jwt_provider: list[JWTAuthProvider | None] = [None]
-
-    def _get_jwt_provider() -> JWTAuthProvider | None:
-        """Lazily construct the shared JWT provider.
-
-        Returns ``None`` on construction failure so callers can
-        fail-closed (#594.4).
-        """
-        if _jwt_provider[0] is None:
-            try:
-                _jwt_provider[0] = JWTAuthProvider()
-            except Exception:
-                logger.error(
-                    "notifications WS: failed to construct JWTAuthProvider",
-                    exc_info=True,
-                )
-                return None
-        return _jwt_provider[0]
-
-    def _auth_from_scope(scope: dict[str, Any] | None) -> dict[str, Any] | None:
-        """Verify the JWT cookie carried on the WS handshake.
-
-        Returns the user dict on success, ``None`` when the request
-        is unauthenticated. Mirrors the silent-refresh contract used
-        by ``/ws/chat`` (see #637).
-        """
-        if scope is None:
-            return None
-        raw_headers: list[tuple[bytes, bytes]] = scope.get("headers", [])
-        access_token = _extract_cookie_from_headers(raw_headers, "access_token")
-        refresh_token = _extract_cookie_from_headers(raw_headers, "refresh_token")
-
-        if not (access_token or refresh_token):
-            return None
-
-        provider = _get_jwt_provider()
-        if provider is None:
-            return None
-
-        user: dict[str, Any] | None = None
-        if access_token:
-            verified = provider.get_current_user(access_token)
-            if verified is not None:
-                user = dict(verified)
-
-        if user is None and refresh_token:
-            # Verify-only refresh — same shape as chat/draft-status
-            # (#637). The WS upgrade response cannot persist rotated
-            # cookies; the next HTTP request will rotate atomically.
-            from app.auth.middleware import verify_refresh_token_user
-
-            refreshed_user = verify_refresh_token_user(refresh_token, provider=provider)
-            if refreshed_user is not None:
-                user = refreshed_user
-
-        return user
+    # Shared cookie-JWT authenticator (#856). The factory lambda
+    # resolves ``JWTAuthProvider`` from THIS module's globals at call
+    # time so the established test patch path
+    # (``patch("app.notifications.websocket.JWTAuthProvider")``) keeps
+    # working.
+    authenticator = WSCookieAuth("notifications", provider_factory=lambda: JWTAuthProvider())
 
     # IMPORTANT: do NOT annotate ``send``/``scope``/``ws``. See #802
     # / chat module for the FastHTML ``_find_p`` trap — only the
@@ -439,24 +339,31 @@ def register_notifications_ws_routes(app: Any) -> None:
         inbound messages) never runs in production. If we deferred
         auth or heartbeat to that path, neither would ever execute.
 
-        An unauthenticated handshake is closed with code 1008. The
-        close MUST go through ``ws.close()`` (not ``send`` — see
-        :func:`_ws_close` for why) so the underlying ASGI socket is
-        actually terminated rather than receiving a stray text frame.
+        An unauthenticated handshake is closed with code 1008; a
+        provider outage fails closed with 1011. The close MUST go
+        through ``ws.close()`` (not ``send`` — see
+        :func:`app.auth.ws_auth.close_ws` for why) so the underlying
+        ASGI socket is actually terminated rather than receiving a
+        stray text frame.
         """
-        user = _auth_from_scope(scope)
+        result = authenticator.resolve_user(scope)
+        if result.provider_unavailable:
+            await close_ws(ws, 1011, "auth provider unavailable", channel="notifications")
+            return
+        user = result.user
         if user is None or not user.get("id"):
-            await _ws_close(ws, 1008, "authentication required")
+            await close_ws(ws, 1008, "authentication required", channel="notifications")
             return
 
         user_id = str(user["id"])
-        _add_connection(user_id, send)
+        key = conn_key(send, ws)
+        _add_connection(user_id, send, key)
         try:
             await send(json.dumps({"type": "connected"}))
         except Exception:
             # Failed to emit the greet event — drop the freshly-added
             # socket so we don't leak it in the registry.
-            _remove_connection(user_id, send)
+            _remove_connection(user_id, key)
             logger.debug("notifications WS greet send failed", exc_info=True)
             return
 
@@ -464,40 +371,38 @@ def register_notifications_ws_routes(app: Any) -> None:
         # ``_ws_handler`` (the only place a per-message heartbeat
         # could live) never runs — without spawning here the 25 s
         # NAT-keepalive contract documented in the module header
-        # would silently never fire.
-        if ws is not None:
-            task = _start_heartbeat(send)
-            _register_heartbeat(id(ws), task)
+        # would silently never fire. On send failure the heartbeat
+        # self-terminates AND deregisters this connection so a dead
+        # socket can't linger in the pool until the next broadcast
+        # trips over it (F3 contract, #856).
+        def _heartbeat_failed() -> None:
+            _remove_connection(user_id, key)
+            _heartbeats.pop(key)
+
+        task = start_heartbeat(send, channel="notifications", on_fail=_heartbeat_failed)
+        _heartbeats.register(key, task)
 
     async def _on_disconnect(send, ws=None) -> None:
         """Cancel the heartbeat and remove the socket from every
         user pool it might belong to.
 
-        We don't have direct access to the user_id at disconnect
-        time (FastHTML's disconnect hook only receives ``send`` and
-        ``ws``), so we scan the registry for any entry containing
-        this ``send``. With at most a few hundred concurrent users
-        this is negligible; if the user count grows we can swap in
-        a reverse index (``send -> user_id``) without changing the
-        wire protocol.
+        Keyed on the stable conn identity (``id(ws)``): the ``send``
+        this hook receives is a freshly-built partial, never the
+        object ``_on_connect`` registered, so identity-matching on
+        ``send`` could not clean anything up (F3, #856). We don't
+        have direct access to the user_id here, so we scan the
+        registry for the conn key. With at most a few hundred
+        concurrent users this is negligible.
         """
-        if ws is not None:
-            task = _pop_heartbeat(id(ws))
-            if task is not None:
-                task.cancel()
-                try:
-                    await task
-                except (asyncio.CancelledError, Exception):
-                    pass
-        with _registry_lock:
-            empty_users: list[str] = []
-            for user_id, sends in _connections.items():
-                if send in sends:
-                    sends.discard(send)
-                    if not sends:
-                        empty_users.append(user_id)
-            for user_id in empty_users:
-                _connections.pop(user_id, None)
+        key = conn_key(send, ws)
+        task = _heartbeats.pop(key)
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        _remove_connection_any_user(key)
 
     # IMPORTANT — FastHTML param resolution:
     #   * ``send`` / ``scope`` MUST be unannotated (see chat module).

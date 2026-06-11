@@ -30,7 +30,6 @@ PUBLIC_PATHS = [
     "/favicon.ico",
     "/api/health",
     "/api/ping",
-    "/ws/explorer",
     "/webhooks/github",
     "/api/validate/email",
     "/api/validate/password",
@@ -52,6 +51,15 @@ PROTECTED_PATHS = [
     # should not be publicly accessible.
     "/api/explorer/overview",
     "/api/explorer/category/ABC",
+    # #856 (F2): /ws/explorer is no longer in SKIP_PATHS. No /ws/* path
+    # belongs there — the WS handshake bypasses the HTTP Beforeware
+    # entirely, and every channel authenticates its handshake itself
+    # via the shared cookie-JWT helper (app/auth/ws_auth.py).
+    "/ws/explorer",
+    "/ws/chat",
+    "/ws/notifications",
+    "/ws/drafts/status",
+    "/ws/drafts/export-progress",
 ]
 
 

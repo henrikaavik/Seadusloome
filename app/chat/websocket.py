@@ -34,10 +34,10 @@ import asyncio
 import json
 import logging
 import uuid
-from http.cookies import SimpleCookie
 from typing import Any
 
 from app.auth.jwt_provider import JWTAuthProvider
+from app.auth.ws_auth import WSCookieAuth, close_ws, conn_key, start_heartbeat
 from app.chat.orchestrator import ChatOrchestrator
 from app.llm.claude import get_default_provider
 
@@ -45,54 +45,13 @@ logger = logging.getLogger(__name__)
 
 _MAX_MESSAGE_LENGTH = 10_000
 
-# #658 — server-side WS heartbeat. Emit a tiny ping every N seconds
-# during message handling so NAT idle timeouts / proxy idle-cuts can't
-# silently kill the socket during long RAG / LLM rounds.
-_WS_HEARTBEAT_INTERVAL_SECONDS = 25.0
-
-# Bound the heartbeat ``send()`` call so a hung TCP send buffer (the
-# exact scenario the heartbeat is meant to detect) can't itself hang
-# the heartbeat task forever. Post-review fix to #684.
-_WS_HEARTBEAT_SEND_TIMEOUT_SECONDS = 5.0
-
-
-def _start_heartbeat(send: Any) -> asyncio.Task[None]:
-    """Spawn a background task that emits ``{"type": "ping"}`` every
-    ``_WS_HEARTBEAT_INTERVAL_SECONDS``.
-
-    Returns the task so the caller can cancel it when message handling
-    completes. Self-terminates on the first send failure (post-review
-    fix to #684): once the socket is dead, every subsequent ``send``
-    will fail forever, so the loop is pointless. Each ``send`` is also
-    bounded by ``_WS_HEARTBEAT_SEND_TIMEOUT_SECONDS`` so a hung TCP
-    buffer cannot hang the heartbeat indefinitely.
-
-    Lifetime is scoped to a single ``_ws_handler`` invocation
-    (per-message-handling) rather than to the whole WS connection.
-    NAT/proxy idle-cuts are only a concern *during* a long server-side
-    operation; an idle connection sends nothing in either direction and
-    is functionally unaffected by an absent heartbeat.
-    """
-
-    async def _beat() -> None:
-        while True:
-            try:
-                await asyncio.sleep(_WS_HEARTBEAT_INTERVAL_SECONDS)
-                await asyncio.wait_for(
-                    send(json.dumps({"type": "ping"})),
-                    timeout=_WS_HEARTBEAT_SEND_TIMEOUT_SECONDS,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                # Self-terminate: the socket is dead or the buffer is
-                # hung. Continuing the loop would just re-fail every
-                # 25s and accumulate noisy DEBUG logs forever.
-                logger.debug("WS heartbeat send failed; terminating", exc_info=True)
-                return
-
-    task = asyncio.create_task(_beat())
-    return task
+# Heartbeat plumbing is shared across every WS channel since #856 —
+# see app/auth/ws_auth.py. The chat heartbeat is scoped to a single
+# ``_ws_handler`` invocation (per-message-handling) rather than to the
+# whole WS connection: NAT/proxy idle-cuts are only a concern *during*
+# a long server-side operation; an idle connection sends nothing in
+# either direction and is functionally unaffected by an absent
+# heartbeat (#658 / #684).
 
 
 # IMPORTANT: do NOT annotate ``send`` on FastHTML connect/disconnect
@@ -413,38 +372,6 @@ async def _handle_regenerate(
     )
 
 
-def _extract_cookie_from_headers(headers: list[tuple[bytes, bytes]], name: str) -> str | None:
-    """Parse the ``Cookie`` header from raw ASGI *headers* and return the value for *name*.
-
-    Returns ``None`` when the cookie is absent or the headers contain no
-    ``Cookie`` entry.
-    """
-    for hdr_name, hdr_value in headers:
-        if hdr_name.lower() == b"cookie":
-            cookie: SimpleCookie = SimpleCookie()
-            cookie.load(hdr_value.decode("latin-1"))
-            morsel = cookie.get(name)
-            if morsel is not None:
-                return morsel.value
-    return None
-
-
-async def _ws_close(send: Any, code: int, reason: str) -> None:
-    """Attempt to close the WebSocket with *code*/*reason*.
-
-    FastHTML's ``send`` callback for WS is a plain ASGI send. We try the
-    ASGI ``websocket.close`` envelope first; if the runtime prefers a
-    JSON error event (e.g. in tests) we fall back to that.
-    """
-    try:
-        await send({"type": "websocket.close", "code": code, "reason": reason})
-    except Exception:
-        try:
-            await send(json.dumps({"type": "error", "message": reason, "code": code}))
-        except Exception:
-            logger.debug("Failed to close WS after provider init error", exc_info=True)
-
-
 def register_chat_ws_routes(app: Any) -> None:
     """Register the chat WebSocket route on the FastHTML *app*.
 
@@ -457,32 +384,20 @@ def register_chat_ws_routes(app: Any) -> None:
     from the raw ASGI headers inside ``_ws_handler`` below.
     """
 
-    # Shared provider instance for cookie verification; lazily created
-    # the first time a WS message arrives (avoids import-time DB hits).
-    _jwt_provider: list[JWTAuthProvider | None] = [None]
+    # Shared cookie-JWT authenticator (#856). The provider is lazily
+    # created on first use (avoids import-time DB hits). The factory
+    # lambda resolves ``JWTAuthProvider`` from THIS module's globals at
+    # call time so the established test patch path
+    # (``patch("app.chat.websocket.JWTAuthProvider")``) keeps working.
+    authenticator = WSCookieAuth("chat", provider_factory=lambda: JWTAuthProvider())
 
-    def _get_jwt_provider() -> JWTAuthProvider | None:
-        """Return the shared JWT provider, constructing it lazily.
-
-        Returns ``None`` when construction fails (missing secret, DB
-        unreachable, etc.). Callers MUST treat ``None`` as a
-        fail-closed signal and reject the WS with close code ``1011``
-        instead of silently proceeding with empty auth (#594.4).
-        """
-        if _jwt_provider[0] is None:
-            try:
-                _jwt_provider[0] = JWTAuthProvider()
-            except Exception:
-                logger.error("Failed to construct JWTAuthProvider", exc_info=True)
-                return None
-        return _jwt_provider[0]
-
-    # One registry per connection is ideal, but the FastHTML WS hook
-    # doesn't give us a per-connection init spot other than ``conn``.
-    # The registry is keyed by (id(send), conversation_id) so that
-    # cancel targets the right socket's stream.  ``id(send)`` is stable
-    # for the lifetime of a single WS connection.
-    _per_send_tasks: dict[int, dict[str, asyncio.Task[Any]]] = {}
+    # Per-connection task registry so ``stop_generation`` can cancel the
+    # right socket's stream. Keyed by :func:`app.auth.ws_auth.conn_key`
+    # — i.e. ``id(ws)``, the raw Starlette conn, which is the SAME
+    # object across every hook dispatch of one connection. ``id(send)``
+    # is NOT stable (FastHTML rebuilds ``partial(_send_ws, conn)`` per
+    # dispatch), which is exactly the F4 defect this replaces.
+    _per_conn_tasks: dict[int, dict[str, asyncio.Task[Any]]] = {}
 
     # IMPORTANT — FastHTML param resolution (root cause of #802):
     #   * ``send`` / ``scope`` MUST be unannotated. ``_find_p`` only
@@ -508,79 +423,44 @@ def register_chat_ws_routes(app: Any) -> None:
     #     ``ws_chat``'s existing ``msg: str`` contract — and its unit
     #     tests — stay unchanged.
     # See ``docs/2026-05-18-bugfix-plan.md`` Wave 3.
-    async def _ws_handler(msg: dict, send, scope=None) -> None:
+    async def _ws_handler(msg: dict, send, scope=None, ws=None) -> None:
         """Extract JWT from WS handshake cookies and pass auth scope to ws_chat.
 
-        Mirrors the HTTP middleware's silent-refresh contract (#637): if
-        the ``access_token`` cookie is missing or invalid but a valid
-        ``refresh_token`` is present, verify the refresh token, mint a
-        new pair, and proceed with the authenticated user. The new
-        cookies cannot be set on the WS upgrade response here (we only
-        have the ASGI send callable), so the next HTTP request the
-        client makes will go through the Beforeware which will do the
-        same rotation and persist the cookies. This keeps long-lived
-        chat sessions alive past the 60-minute access-token expiry.
+        Mirrors the HTTP middleware's silent-refresh contract (#637) via
+        the shared :class:`~app.auth.ws_auth.WSCookieAuth`: if the
+        ``access_token`` cookie is missing or invalid but a valid
+        ``refresh_token`` is present, verify the refresh token
+        (verify-only — the WS upgrade response cannot persist rotated
+        cookies) and proceed with the authenticated user. The next HTTP
+        request rotates the pair through the Beforeware. This keeps
+        long-lived chat sessions alive past the 60-minute access-token
+        expiry.
+
+        ``ws`` binds the raw Starlette conn — the ONLY object whose
+        identity is stable across hook dispatches, and the only handle
+        that can actually close the socket (F1/F4, #856).
         """
         auth_scope: dict[str, Any] = {}
 
-        if scope is not None:
-            # Try to extract the access_token from handshake headers.
-            raw_headers: list[tuple[bytes, bytes]] = scope.get("headers", [])
-            access_token = _extract_cookie_from_headers(raw_headers, "access_token")
-            refresh_token = _extract_cookie_from_headers(raw_headers, "refresh_token")
+        result = authenticator.resolve_user(scope)
+        if result.provider_unavailable:
+            # Fail-closed: we cannot verify tokens, so terminate the
+            # socket rather than letting the request through as
+            # unauthenticated (#594.4). The close MUST go through
+            # ``ws.close()`` — pushing an ASGI close dict through
+            # FastHTML's wrapped ``send`` yields a text frame and
+            # leaves the connection open (F1).
+            await close_ws(ws, 1011, "auth provider unavailable", channel="chat")
+            return
+        if result.user is not None:
+            auth_scope["auth"] = result.user
 
-            if access_token or refresh_token:
-                provider = _get_jwt_provider()
-                if provider is None:
-                    # Fail-closed: we cannot verify tokens, so reject
-                    # the socket rather than letting the request
-                    # through as unauthenticated.
-                    await _ws_close(send, 1011, "auth provider unavailable")
-                    return
-
-                user: dict[str, Any] | None = None
-                if access_token:
-                    verified = provider.get_current_user(access_token)
-                    if verified is not None:
-                        user = dict(verified)
-
-                if user is None and refresh_token:
-                    # #637 — silent refresh for long-lived chat sessions.
-                    # The WS upgrade response cannot set replacement
-                    # cookies, so we use the verify-only helper here
-                    # (see #637, review). Consuming the refresh token
-                    # without being able to persist the rotated
-                    # cookies would leave the browser with a dead
-                    # refresh_token and break the next HTTP request's
-                    # silent-refresh. The refresh token still rotates
-                    # atomically on the next HTTP call through
-                    # ``auth_before``.
-                    #
-                    # Import here so the chat module has no
-                    # side-effect-y dependency on the HTTP middleware
-                    # at import time.
-                    from app.auth.middleware import verify_refresh_token_user
-
-                    refreshed_user = verify_refresh_token_user(refresh_token, provider=provider)
-                    if refreshed_user is not None:
-                        user = refreshed_user
-
-                if user is not None:
-                    auth_scope["auth"] = user
-
-        key = id(send)
-        tasks = _per_send_tasks.setdefault(key, {})
-        # Post-review fix to #684: spawn the heartbeat here (where
-        # ``send`` is the closure-local that ``_per_send_tasks`` keys
-        # off) rather than in the FastHTML ``conn``/``disconn`` hooks.
-        # Those hooks are separate ASGI invocations and may receive
-        # different ``send`` objects (each constructed as
-        # ``partial(_send_ws, conn)`` per call), so a registry keyed by
-        # ``id(send)`` cannot reliably pair register-with-cancel across
-        # them. Scoping the heartbeat to one ``_ws_handler`` invocation
-        # is also functionally sufficient: NAT idle timeouts only
-        # matter while a long server-side operation is in flight.
-        heartbeat = _start_heartbeat(send)
+        key = conn_key(send, ws)
+        tasks = _per_conn_tasks.setdefault(key, {})
+        # Heartbeat scoped to one ``_ws_handler`` invocation (#684):
+        # NAT idle timeouts only matter while a long server-side
+        # operation is in flight.
+        heartbeat = start_heartbeat(send, channel="chat")
         try:
             # ``msg`` arrives as a dict from FastHTML's resolver (see the
             # ``__annotations__['msg'] = dict`` override below). Direct-
@@ -614,31 +494,37 @@ def register_chat_ws_routes(app: Any) -> None:
             # its own ``_run`` finally-block pops the conversation key
             # and the next handler call will GC the outer slot.
             if not tasks:
-                _per_send_tasks.pop(key, None)
+                _per_conn_tasks.pop(key, None)
 
     def _cancel_all_and_drop(key: int) -> None:
         """Cancel every task registered under *key* and drop the slot."""
-        tasks = _per_send_tasks.pop(key, None)
+        tasks = _per_conn_tasks.pop(key, None)
         if not tasks:
             return
         for task in list(tasks.values()):
             if not task.done():
                 task.cancel()
 
-    # IMPORTANT: do NOT annotate ``send``. See _ws_handler above and
-    # ``docs/2026-05-18-bugfix-plan.md`` Wave 3 for the FastHTML
-    # ``_find_p`` trap that motivates the missing annotation here.
-    async def _on_disconnect(send) -> None:
-        """Clear the per-send task registry when the socket closes."""
+    # IMPORTANT: do NOT annotate ``send`` / ``ws``. See _ws_handler
+    # above and ``docs/2026-05-18-bugfix-plan.md`` Wave 3 for the
+    # FastHTML ``_find_p`` trap that motivates the missing annotations.
+    async def _on_disconnect(send, ws=None) -> None:
+        """Clear the per-connection task registry when the socket closes.
+
+        Keyed on the stable conn identity (``id(ws)``) — the ``send``
+        received here is a DIFFERENT partial than the one any message
+        handler saw, so an ``id(send)`` keyed registry could never be
+        cleaned up from this hook (F4, #856).
+        """
         try:
-            _cancel_all_and_drop(id(send))
+            _cancel_all_and_drop(conn_key(send, ws))
         finally:
             await on_disconnect(send)
 
     # Expose registry + disconnect hook on the handler so tests (and
     # instrumentation) can inspect per-connection task state without
     # poking at closure internals.
-    _ws_handler._per_send_tasks = _per_send_tasks  # type: ignore[attr-defined]
+    _ws_handler._per_conn_tasks = _per_conn_tasks  # type: ignore[attr-defined]
     _ws_handler._on_disconnect = _on_disconnect  # type: ignore[attr-defined]
 
     # Override the stringified ``msg`` annotation with the real ``dict``
