@@ -71,8 +71,16 @@ class TestSparqlSafety:
     def test_ask_is_read_only(self):
         assert _is_read_only_sparql("ASK { ?s ?p ?o }") is True
 
-    def test_describe_is_read_only(self):
-        assert _is_read_only_sparql("DESCRIBE <http://example.org/e1>") is True
+    def test_describe_is_rejected(self):
+        # #844 review: DESCRIBE can't be reliably LIMIT-bounded and invites
+        # whole-graph server-side materialisation, so it is no longer an
+        # allowed form.
+        assert _is_read_only_sparql("DESCRIBE <http://example.org/e1>") is False
+
+    def test_construct_is_rejected(self):
+        # #844 review: CONSTRUCT emits triples rather than the binding rows
+        # the executor's caps are built for — rejected.
+        assert _is_read_only_sparql("CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }") is False
 
     def test_insert_is_rejected(self):
         assert _is_read_only_sparql("INSERT DATA { <a> <b> <c> }") is False
@@ -467,11 +475,14 @@ class TestSparqlWhitelist:
     def test_ask_passes(self):
         assert _is_read_only_sparql("ASK { ?s ?p ?o }") is True
 
-    def test_describe_passes(self):
-        assert _is_read_only_sparql("DESCRIBE <http://example.org/e1>") is True
+    def test_describe_rejected(self):
+        # #844 review: DESCRIBE is no longer an allowed form (uncappable /
+        # whole-graph materialisation risk).
+        assert _is_read_only_sparql("DESCRIBE <http://example.org/e1>") is False
 
-    def test_construct_passes(self):
-        assert _is_read_only_sparql("CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }") is True
+    def test_construct_rejected(self):
+        # #844 review: CONSTRUCT is no longer an allowed form.
+        assert _is_read_only_sparql("CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }") is False
 
     def test_insert_rejected(self):
         assert _is_read_only_sparql("INSERT DATA { <a> <b> <c> }") is False

@@ -137,6 +137,14 @@ def analyze_impact(
             """,
             (str(draft_id),),
         ).fetchall()
+        # #844 A3b: resolve the org's owned draft UUIDs on the *same*
+        # connection so the conflict pass can mask cross-org draft rows
+        # (foreign draft URIs / titles are never persisted into the
+        # report). Best-effort — a lookup failure yields an empty set,
+        # which masks every cross-draft row (the safe default). Done here,
+        # inside the already-open connection, so we add no extra
+        # ``get_connection()`` round-trip.
+        owned_draft_ids = _owned_draft_ids_on_conn(conn, draft.org_id)
 
     # Normalise the unresolved rows into the JSON-friendly shape that
     # gets persisted in ``report_data["unresolved_eu_refs"]``.
@@ -191,7 +199,10 @@ def analyze_impact(
         write_doc_lineage(draft, parent_vtk)
 
         analyzer = ImpactAnalyzer()
-        findings = analyzer.analyze(draft.graph_uri)
+        # #844 A3b: ``owned_draft_ids`` (resolved above on the draft-load
+        # connection) lets the conflict pass mask cross-org draft rows so
+        # foreign draft URIs / titles are never persisted into the report.
+        findings = analyzer.analyze(draft.graph_uri, owned_draft_ids=owned_draft_ids)
         score = calculate_impact_score(findings)
 
         report_id = uuid4()
@@ -490,6 +501,31 @@ def _row_to_resolved_ref(row: tuple[Any, ...]) -> ResolvedRef:
         match_score=1.0 if entity_uri else (0.5 if partial_match_dict else 0.0),
         partial_match=partial_match_dict,
     )
+
+
+def _owned_draft_ids_on_conn(conn: Any, org_id: UUID | str | None) -> set[str]:
+    """Return the draft UUIDs owned by *org_id*, using an open *conn* (#844 A3b).
+
+    Scopes the conflict pass: cross-draft conflict rows pointing at drafts
+    outside this set are masked so a freshly-generated report never
+    persists another org's draft URI / title. Runs on the caller's already
+    open connection (no extra ``get_connection()`` round-trip). Best-effort
+    — any error (or a falsy ``org_id``) yields an empty set, which masks
+    *every* cross-draft row (the safe default).
+    """
+    if not org_id:
+        return set()
+    try:
+        from app.docs.impact.masking import fetch_owned_draft_ids
+
+        return fetch_owned_draft_ids(conn, str(org_id))
+    except Exception:  # noqa: BLE001 — masking must never break analysis
+        logger.warning(
+            "analyze_impact: owned-draft lookup failed for org=%s; masking all cross-draft rows",
+            org_id,
+            exc_info=True,
+        )
+        return set()
 
 
 def _get_current_ontology_version() -> str:

@@ -398,18 +398,59 @@ def _add_affected_entities(
     return 1 + extra_units
 
 
+def _owned_draft_ids_for_export(org_id: Any) -> set[str]:
+    """Return the org's owned draft UUIDs for conflict masking (#844).
+
+    Best-effort — any error (or a falsy ``org_id``) yields an empty set,
+    which masks every cross-draft conflict row (the safe default). Kept
+    next to :func:`_add_conflicts` so the masking dependency stays local
+    to the conflict-rendering region.
+    """
+    if not org_id:
+        return set()
+    try:
+        from app.db import get_connection
+        from app.docs.impact.masking import fetch_owned_draft_ids
+
+        with get_connection() as conn:
+            return fetch_owned_draft_ids(conn, str(org_id))
+    except Exception:  # noqa: BLE001 — export must never break on masking
+        logger.warning(
+            "docx_export: owned-draft lookup failed for org=%s; masking all cross-draft rows",
+            org_id,
+            exc_info=True,
+        )
+        return set()
+
+
 def _add_conflicts(
     doc: Any,
     findings: dict[str, Any],
     *,
+    owned_draft_ids: set[str] | None = None,
     progress_callback: ProgressCallback | None = None,
     progress_base: int = 0,
     progress_total: int = 0,
 ) -> int:
-    """Write the "Konfliktid" table. See ``_add_affected_entities`` for the progress contract."""
+    """Write the "Konfliktid" table. See ``_add_affected_entities`` for the progress contract.
+
+    #844 data remediation: the stored ``conflicts`` rows are masked before
+    rendering so a report persisted before tenant scoping landed cannot
+    leak another org's draft URI / title into the exported .docx. Adhoc
+    probe rows are dropped; cross-org draft rows keep their shape but their
+    identity is replaced with a neutral Estonian placeholder. The owning
+    org's draft UUIDs are supplied by the caller (the export function has
+    the ``Draft`` row); ``owned_draft_ids=None`` masks every cross-draft
+    row (the safe default).
+    """
+    from app.docs.impact.masking import drop_adhoc_conflict_rows, mask_conflict_rows
+
     doc.add_heading("Konfliktid", level=1)
 
-    rows: list[dict[str, Any]] = list(findings.get("conflicts") or [])
+    rows: list[dict[str, Any]] = mask_conflict_rows(
+        drop_adhoc_conflict_rows(list(findings.get("conflicts") or [])),
+        owned_draft_ids=owned_draft_ids or set(),
+    )
     if not rows:
         doc.add_paragraph("Konflikte ei tuvastatud.")
         return 1
@@ -734,9 +775,14 @@ def build_impact_report_docx(
     # tables are short the blank space is acceptable for a legal export.
     doc.add_section(WD_SECTION.CONTINUOUS)
 
+    # #844: resolve the owning org's draft UUIDs so the conflicts table
+    # masks any foreign-org draft identity persisted in a pre-fix report.
+    # Best-effort — a lookup failure yields an empty set, which masks
+    # every cross-draft row (the safe default).
     consumed = _add_conflicts(
         doc,
         report_data,
+        owned_draft_ids=_owned_draft_ids_for_export(draft.org_id),
         progress_callback=progress_callback,
         progress_base=done,
         progress_total=total,

@@ -72,6 +72,7 @@ from app.analyysikeskus.competency import (
     InstitutionCompetences,
     gather_institution_competences,
     get_institution_label,
+    is_estleg_institution_uri,
     search_institutions_by_label,
 )
 from app.analyysikeskus.court_practice import (
@@ -1414,19 +1415,39 @@ def _parse_report_data(raw: Any) -> dict[str, Any]:
     return {}
 
 
-def _findings_from_report_data(data: dict[str, Any]) -> ImpactFindings:
-    """Rebuild an :class:`ImpactFindings` from a persisted ``report_data`` dict."""
+def _findings_from_report_data(
+    data: dict[str, Any],
+    *,
+    viewer_org_id: str | None = None,
+) -> ImpactFindings:
+    """Rebuild an :class:`ImpactFindings` from a persisted ``report_data`` dict.
+
+    #844 data remediation: reports persisted before tenant scoping landed
+    can carry FOREIGN org draft URIs/labels in their ``conflicts`` list
+    (and a stale adhoc-probe conflict). When *viewer_org_id* is given, the
+    stored conflict rows are run through
+    :func:`app.docs.impact.masking.mask_stored_conflict_rows` so adhoc
+    rows are dropped and cross-org draft identities are blanked before
+    anything is rendered. ``conflict_count`` is recomputed from the
+    surviving rows so the "N konflikti" summary stays consistent with what
+    is actually shown.
+    """
     affected = list(data.get("affected_entities") or [])
     conflicts = list(data.get("conflicts") or [])
     gaps = list(data.get("gaps") or [])
     eu = list(data.get("eu_compliance") or [])
+
+    from app.docs.impact.masking import mask_stored_conflict_rows
+
+    conflicts = mask_stored_conflict_rows(conflicts, viewer_org_id=viewer_org_id)
+
     return ImpactFindings(
         affected_entities=affected,
         conflicts=conflicts,
         gaps=gaps,
         eu_compliance=eu,
         affected_count=int(data.get("affected_count") or len(affected)),
-        conflict_count=int(data.get("conflict_count") or len(conflicts)),
+        conflict_count=len(conflicts),
         gap_count=int(data.get("gap_count") or len(gaps)),
     )
 
@@ -1853,8 +1874,13 @@ def _render_draft_backed_result(
     No synthetic graph here — the findings come straight from the
     ``impact_reports`` row. ``Lisa märkus`` is enabled (links to
     ``/drafts/{id}/report`` where the row-annotation flow lives).
+
+    #844: the stored report's conflict rows are masked against the
+    viewer's org so legacy reports can't leak another org's draft
+    identity at render time.
     """
-    findings = _findings_from_report_data(report_data)
+    viewer_org_id = auth.get("org_id") if auth else None
+    findings = _findings_from_report_data(report_data, viewer_org_id=viewer_org_id)
 
     input_summary = Div(  # noqa: F405
         P("Analüüsisin eelnõu: ", Strong(draft_title)),  # noqa: F405
@@ -4872,6 +4898,12 @@ def padevused_page(req: Request):
 
     # Direct URI deep-link branch (explorer evidence card → workflow).
     if sisend.startswith("http://") or sisend.startswith("https://"):
+        # A2 (#844): only resolve URIs in the canonical estleg namespace.
+        # A foreign URI (another org's draft graph, an arbitrary URL) must
+        # never reach the institution-label lookup — short-circuit to the
+        # "ei tuvastanud asutust" page without touching Jena.
+        if not is_estleg_institution_uri(sisend):
+            return _render_padevused_unresolved(auth=auth, theme=theme, sisend=sisend, scope=scope)
         label = get_institution_label(sisend)
         if label:
             return _render_padevused_result(
