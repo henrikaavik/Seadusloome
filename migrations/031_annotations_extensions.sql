@@ -1,4 +1,4 @@
--- Migration 029: Extend annotations schema for impact-report row annotations
+-- Migration 031: Extend annotations schema for impact-report row annotations
 -- (Phase A of #619 row-annotations rollout).
 --
 -- PURPOSE
