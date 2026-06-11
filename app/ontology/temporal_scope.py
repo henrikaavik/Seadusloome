@@ -253,8 +253,19 @@ def current_law_filter(provision_var: str = "provision") -> str:
     # Internal helper variables are name-spaced with the provision var so
     # splicing two of these blocks (different provision vars) into one
     # query never collides.
-    title = f"_tsTitle_{p}"
     act = f"_tsAct_{p}"
+    # The literal-title hop (arms b) joins the provision's ``sourceAct``
+    # literal to an ``Act`` node's ``rdfs:label``. We deliberately bind
+    # the two sides to *distinct* variables and compare them with
+    # ``STR()`` on both sides rather than re-using one variable: a shared
+    # variable forces RDF-term equality, which includes the language tag,
+    # so the moment labels become ``"…"@et`` (while ``sourceAct`` stays a
+    # plain literal — today's JSON-LD shape) the join would silently stop
+    # matching and the literal-title hop would degrade to a no-op. The
+    # ``STR()`` coercion compares lexical forms only, so it survives a
+    # later move to language-tagged labels. (Review follow-up, #850.)
+    sa = f"_tsSourceAct_{p}"
+    lbl = f"_tsLabel_{p}"
     return f"""  FILTER NOT EXISTS {{
     {{
       # (a) repeal marker directly on the provision itself
@@ -263,14 +274,17 @@ def current_law_filter(provision_var: str = "provision") -> str:
       ?{p} <{repeal_uri}> ?_tsProvRepeal_{p} .
     }} UNION {{
       # (b) repeal marker on the owning act — prod shape: sourceAct is a
-      #     literal title; match the Act node whose rdfs:label equals it.
-      ?{p} estleg:sourceAct ?{title} .
-      ?{act} rdfs:label ?{title} .
+      #     literal title; match the Act node whose rdfs:label equals it
+      #     (STR()-coerced so a future "@et" label tag can't break it).
+      ?{p} estleg:sourceAct ?{sa} .
+      ?{act} rdfs:label ?{lbl} .
       ?{act} <{status_uri}> "{repealed}" .
+      FILTER(STR(?{lbl}) = STR(?{sa}))
     }} UNION {{
-      ?{p} estleg:sourceAct ?{title}b .
-      ?{act}b rdfs:label ?{title}b .
+      ?{p} estleg:sourceAct ?{sa}b .
+      ?{act}b rdfs:label ?{lbl}b .
       ?{act}b <{repeal_uri}> ?_tsActRepeal_{p} .
+      FILTER(STR(?{lbl}b) = STR(?{sa}b))
     }} UNION {{
       # (c) repeal marker on the owning act — fixture shape: sourceAct is
       #     an Act URI; check that URI node directly.

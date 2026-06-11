@@ -330,6 +330,22 @@ class TestClauseReferencesOnlyAuditedPredicates:
         clause = current_law_filter("prov")
         assert "?prov " in clause or "?prov\n" in clause
 
+    def test_literal_title_join_is_str_coerced(self):
+        """The label↔sourceAct literal join must compare lexical forms.
+
+        Review follow-up (#850): the literal-title hop binds the
+        ``rdfs:label`` and ``estleg:sourceAct`` literals to *distinct*
+        variables and joins them with ``STR(...) = STR(...)`` rather than
+        re-using one variable. A shared variable forces RDF-term equality
+        (including the language tag), which would silently no-op the hop
+        the moment labels become ``"…"@et`` while ``sourceAct`` stays a
+        plain literal. This guards against a refactor reverting to that.
+        """
+        clause = current_law_filter("provision")
+        # Both label and sourceAct are STR()-coerced in the join filter.
+        assert "STR(?_tsLabel_provision) = STR(?_tsSourceAct_provision)" in clause
+        assert "STR(?_tsLabel_provisionb) = STR(?_tsSourceAct_provisionb)" in clause
+
 
 # ===========================================================================
 # 3. The filter bites real rdflib data
@@ -365,6 +381,60 @@ class TestFilterBitesRealData:
         kept = _select_provisions(g, TemporalScope.CURRENT)
         for repealed in _REPEALED_PROVISIONS:
             assert repealed not in kept, f"{repealed} should be excluded under current"
+
+    def test_language_tagged_act_label_still_excludes(self):
+        """Review follow-up (#850): a future ``"…"@et`` act label must not no-op.
+
+        The literal-title hop joins the act's ``rdfs:label`` to the
+        provision's plain ``estleg:sourceAct`` literal. If the join used a
+        shared variable (RDF-term equality), an ``@et`` tag on the label
+        would stop matching and a repealed act's provisions would silently
+        leak back into the current-law scope. The ``STR()``-coerced join
+        keeps comparing lexical forms, so the repealed act's provision is
+        still excluded — and the live act's provision is still kept.
+        """
+        ttl = f"""
+        @prefix estleg: <{_NS}> .
+        @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+        @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+        # Repealed act with an @et-tagged label; provision sourceAct is PLAIN.
+        estleg:ActDeadEt a estleg:Act ; rdfs:label "Kehtetu seadus"@et ;
+            estleg:temporalStatus "repealed" .
+        estleg:P_taggedRep a estleg:LegalProvision ; rdfs:label "prov rep" ;
+            estleg:sourceAct "Kehtetu seadus" .
+
+        # Repealed-by-date act, @et label, plain sourceAct.
+        estleg:ActDeadDateEt a estleg:Act ; rdfs:label "Aegunud seadus"@et ;
+            estleg:repealDate "2018-06-30"^^xsd:date .
+        estleg:P_taggedDateRep a estleg:LegalProvision ; rdfs:label "prov date rep" ;
+            estleg:sourceAct "Aegunud seadus" .
+
+        # Live act with @et label, plain sourceAct (must stay included).
+        estleg:ActLiveEt a estleg:Act ; rdfs:label "Elav seadus"@et ;
+            estleg:temporalStatus "in_force" .
+        estleg:P_taggedLive a estleg:LegalProvision ; rdfs:label "prov live" ;
+            estleg:sourceAct "Elav seadus" .
+        """
+        g = Graph()
+        g.parse(data=ttl, format="turtle")
+
+        kept = _select_provisions(g, TemporalScope.CURRENT)
+        assert f"{_NS}P_taggedRep" not in kept, (
+            "repealed act with @et label must still be excluded under current scope"
+        )
+        assert f"{_NS}P_taggedDateRep" not in kept, (
+            "date-repealed act with @et label must still be excluded under current scope"
+        )
+        assert f"{_NS}P_taggedLive" in kept, "live act with @et label must be kept"
+
+        # Under all-history scope every provision survives.
+        kept_all = _select_provisions(g, TemporalScope.ALL)
+        assert kept_all == {
+            f"{_NS}P_taggedRep",
+            f"{_NS}P_taggedDateRep",
+            f"{_NS}P_taggedLive",
+        }
 
 
 # ===========================================================================
