@@ -116,7 +116,7 @@ services:
   #   restart: unless-stopped
 
   postgres:
-    image: pgvector/pgvector:pg18
+    image: pgvector/pgvector:pg18@sha256:42e7f6b4e1eceb02ff14e3e6bc6108bbe259abbe83879dc1845d0da1ddeb555d
     ports:
       # #853 / H2: bind to the loopback interface only. A bare "5432:5432"
       # publishes Postgres on 0.0.0.0, i.e. every interface of the host —
@@ -145,12 +145,27 @@ services:
   tika:
     # Local dev only. In production, Tika is a separate Coolify application
     # with network alias `seadusloome-tika` (set TIKA_URL accordingly).
-    image: apache/tika:3.3.0.0-full
+    image: apache/tika:3.3.0.0-full@sha256:ecdd37e204308266b1f8e28569f8516ebd5b96d7a4518a71d3904710b20c03b3
     ports:
       # #853 / H2: loopback-only for local curl testing; internal-only in
       # prod (separate Coolify app, reached via TIKA_URL). See the matrix
       # at the top of this file.
       - "127.0.0.1:9998:9998"
+    environment:
+      # Bound the JVM heap so the JVM honours the container memory limit
+      # instead of sizing itself against the host RAM.  The container hard
+      # limit is set via deploy.resources.limits.memory below.
+      # 512m heap + ~100m metaspace/native ≈ fits in 768m container limit.
+      # Adjust TIKA_JAVA_ARGS if you raise/lower the memory limit.
+      JAVA_OPTS: "-Xms128m -Xmx512m"
+    deploy:
+      resources:
+        limits:
+          # Hard cap: Tika OOMs without a limit on multi-document bursts.
+          # 768 MB covers a 512 MB heap + JVM overhead; raise to 1g if
+          # parsing large PDFs regularly.  Production: set the equivalent
+          # limit in the Coolify service "Resources" tab.
+          memory: 768m
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:9998/tika || exit 1"]
       interval: 10s
