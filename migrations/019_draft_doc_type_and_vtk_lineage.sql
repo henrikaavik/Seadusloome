@@ -46,10 +46,21 @@ ALTER TABLE drafts
 -- 2. VTK->VTK chain prevention
 -- ---------------------------------------------------------------------------
 -- A VTK cannot itself have a parent VTK; only eelnoud may carry a VTK link.
+-- Postgres has no ADD CONSTRAINT IF NOT EXISTS; wrapped in a DO block (same
+-- pattern as migration 012) so re-running when the constraint exists is a
+-- no-op.
 
-ALTER TABLE drafts
-    ADD CONSTRAINT IF NOT EXISTS chk_vtk_has_no_parent
-        CHECK (doc_type = 'eelnou' OR parent_vtk_id IS NULL);
+DO $$ BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'chk_vtk_has_no_parent'
+          AND conrelid = 'drafts'::regclass
+    ) THEN
+        ALTER TABLE drafts
+            ADD CONSTRAINT chk_vtk_has_no_parent
+                CHECK (doc_type = 'eelnou' OR parent_vtk_id IS NULL);
+    END IF;
+END $$;
 
 -- ---------------------------------------------------------------------------
 -- 3. Composite index for the filtered listing page
