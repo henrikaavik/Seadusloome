@@ -330,7 +330,18 @@ def _get_job_detail(job_id: int) -> dict | None:  # type: ignore[type-arg]
 
 
 def _retry_job(job_id: int) -> bool:
-    """Reset a job to 'pending' status for retry. Returns True on success."""
+    """Reset a failed job to 'pending' for ONE more attempt. True on success.
+
+    #852: ``attempts`` is deliberately PRESERVED (it used to be reset to
+    0, which made a poison job retryable forever and defeated
+    ``max_attempts``). A failed job already has ``attempts >=
+    max_attempts``, so each admin click grants exactly one extra
+    attempt: the worker runs it, and on failure ``mark_failed`` sees
+    ``attempts + 1 > max_attempts`` and flips it straight back to
+    ``failed`` (handlers likewise see ``attempt >= max_attempts`` and
+    apply their final-attempt domain consequences). The climbing
+    counter (e.g. ``4/3``) doubles as the audit trail of admin retries.
+    """
     try:
         with _connect() as conn:
             result = conn.execute(
@@ -341,7 +352,6 @@ def _retry_job(job_id: int) -> bool:
                 "    claimed_by = NULL, "
                 "    claimed_at = NULL, "
                 "    started_at = NULL, "
-                "    attempts = 0, "
                 "    scheduled_for = %s "
                 "WHERE id = %s AND status = 'failed'",
                 (datetime.now(UTC), job_id),
@@ -638,6 +648,13 @@ def _jobs_table(
                 hx_post=f"/admin/jobs/{job['id']}/retry",
                 hx_target="#job-monitor-content",
                 hx_swap="innerHTML",
+                # #852: state-mutating action — confirm like the adjacent
+                # purge button. One click grants exactly one extra
+                # attempt (the attempt counter is preserved).
+                hx_confirm=(
+                    "Kas olete kindel? Töö käivitatakse uuesti "
+                    "ühe lisakatsega; katsete ajalugu säilib."
+                ),
                 variant="secondary",
                 size="sm",
             )

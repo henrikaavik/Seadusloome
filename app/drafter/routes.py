@@ -1121,15 +1121,63 @@ async def submit_review(req: Request, session_id: str):
             status_code=303,
         )
 
-    # Trigger integrated review: assemble draft, call Phase 2 upload
+    # Trigger integrated review: assemble draft, call Phase 2 upload.
+    #
+    # #852 E3: the old read-then-act check (``if session.integrated_draft_id
+    # is not None`` on a snapshot fetched above) let two concurrent POSTs
+    # both see NULL and both run ``_trigger_integrated_review`` — duplicate
+    # draft rows, named graphs, and parse jobs. The claim is now atomic:
+    # a per-session advisory transaction lock serialises submitters, the
+    # winner re-checks ``integrated_draft_id`` under the lock and claims it
+    # with a conditional UPDATE (``... WHERE integrated_draft_id IS NULL``);
+    # losers block on the lock, then see the winner's value and idempotently
+    # render the existing state.
     if session.integrated_draft_id is not None:
-        # Already done — show the page
+        # Already done — show the page (idempotent fast path).
         return _step_6_page(session, auth)
 
     try:
-        draft_id = _trigger_integrated_review(session, auth)
         with _connect() as conn:
-            update_session(conn, session.id, integrated_draft_id=str(draft_id))
+            # Transaction-scoped advisory lock keyed on the session id;
+            # released automatically at COMMIT/ROLLBACK (including the
+            # implicit rollback when this block raises).
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended('drafter-review:' || %s, 0))",
+                (str(session.id),),
+            )
+            row = conn.execute(
+                "SELECT integrated_draft_id FROM drafting_sessions WHERE id = %s",
+                (str(session.id),),
+            ).fetchone()
+            if row is None:
+                return _not_found_page(req)
+            if row[0] is not None:
+                # A concurrent POST won the claim while we waited on the
+                # lock — return the existing state instead of duplicating.
+                conn.commit()
+                session = fetch_session(parsed) or session
+                return _step_6_page(session, auth)
+
+            draft_id = _trigger_integrated_review(session, auth)
+            claimed = conn.execute(
+                """
+                UPDATE drafting_sessions
+                SET integrated_draft_id = %s, updated_at = now()
+                WHERE id = %s AND integrated_draft_id IS NULL
+                """,
+                (str(draft_id), str(session.id)),
+            )
+            if getattr(claimed, "rowcount", 1) == 0:
+                # Defence in depth: unreachable while every writer goes
+                # through this route (the advisory lock serialises them).
+                # An out-of-band writer would orphan the draft we just
+                # created — log loudly so the operator can clean it up.
+                logger.error(
+                    "submit_review: lost integrated-review claim race for "
+                    "session %s despite advisory lock; orphaned draft %s",
+                    session.id,
+                    draft_id,
+                )
             conn.commit()
     except Exception:
         logger.exception("Failed to trigger integrated review for session %s", session_id)
@@ -1172,21 +1220,45 @@ def _trigger_integrated_review(session: DraftingSession, auth: UserDict) -> uuid
     structure = session.proposed_structure or {}
     title = structure.get("title", session.intent or "Eelnõu")
 
-    # Build .docx
-    docx_path = build_drafter_docx(
-        session_id=str(session.id),
-        title=title,
-        workflow_type=session.workflow_type,
-        structure=structure,
-        clauses=clauses,
+    # Build .docx into a request-scoped 0600 temp file (#852, residual of
+    # #845/#867): the default ``build_drafter_docx`` output path is
+    # ``EXPORT_DIR/drafter-<session_id>.docx``, which left the politically
+    # sensitive plaintext draft on disk forever with no deletion path.
+    # Only the Fernet-encrypted copy written by ``store_file`` below may
+    # persist; the plaintext temp file is removed in the ``finally``.
+    import tempfile
+    from pathlib import Path as _Path
+
+    tmp_handle = tempfile.NamedTemporaryFile(
+        prefix=f"seadusloome-integreeritud-{session.id}-",
+        suffix=".docx",
+        delete=False,
     )
+    tmp_handle.close()
+    tmp_path = _Path(tmp_handle.name)
 
     # Create a draft row and enqueue parse_draft via Phase 2 infrastructure
     from app.docs.draft_model import create_draft
     from app.storage import store_file
 
-    # Read the docx and store it encrypted
-    docx_bytes = docx_path.read_bytes()
+    try:
+        docx_path = build_drafter_docx(
+            session_id=str(session.id),
+            title=title,
+            workflow_type=session.workflow_type,
+            structure=structure,
+            clauses=clauses,
+            out_path=tmp_path,
+        )
+        # Read the docx and store it encrypted
+        docx_bytes = docx_path.read_bytes()
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning(
+                "Failed to remove temp integrated-review docx %s", tmp_path, exc_info=True
+            )
     stored = store_file(
         docx_bytes,
         filename=f"drafter-{session.id}.docx",

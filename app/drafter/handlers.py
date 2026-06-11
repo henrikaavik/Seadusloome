@@ -47,6 +47,38 @@ from app.storage import decrypt_text, encrypt_text
 logger = logging.getLogger(__name__)
 
 
+class LLMOutputError(RuntimeError):
+    """LLM returned unusable output (parse failure or missing required fields).
+
+    #852 E2: the provider's ``extract_json`` returns ``{"error": ...}``
+    instead of raising when the model's reply is not parseable JSON.
+    Treating that dict as data let ``drafter_draft`` persist blank
+    clauses while the job "succeeded" — retry-gating never engaged and
+    the state machine waved empty clauses into review. Raising this
+    (a ``RuntimeError`` subclass, so existing except/re-wrap paths and
+    tests keep working) routes bad output through the normal retry
+    budget + abandon gating instead.
+    """
+
+
+def _require_llm_json(result: Any, *, context: str) -> dict[str, Any]:
+    """Validate a raw ``extract_json`` payload before it is used (#852 E2).
+
+    Raises :class:`LLMOutputError` when the payload is not a dict or
+    carries the provider's ``{"error": ...}`` parse-failure marker, so
+    the job fails (and retries) instead of silently persisting garbage.
+
+    Stub-mode payloads (``{"stub": True, ...}``) pass through: local
+    development without API keys must still complete the pipeline, and
+    each call site decides how strict to be about stub content.
+    """
+    if not isinstance(result, dict):
+        raise LLMOutputError(f"{context}: LLM returned a non-dict payload")
+    if result.get("error"):
+        raise LLMOutputError(f"{context}: LLM output could not be parsed: {result['error']}")
+    return result
+
+
 # ---------------------------------------------------------------------------
 # SPARQL helpers
 # ---------------------------------------------------------------------------
@@ -579,44 +611,60 @@ def drafter_clarify(
     provider = get_default_provider()
     prompt = CLARIFY_PROMPT.format(intent=session.intent or "", laws=laws_text)
 
+    # #852 E2: post-LLM parsing + persistence used to live OUTSIDE this
+    # gated region, so a malformed payload or a DB write failure skipped
+    # the abandon-on-final-attempt gating entirely. Everything from the
+    # LLM call to the session write is now inside one gate.
     try:
-        result = provider.extract_json(
-            prompt,
-            feature="drafter_clarify",
-            user_id=session.user_id,
-            org_id=session.org_id,
-        )
-    except Exception as exc:
+        try:
+            result = provider.extract_json(
+                prompt,
+                feature="drafter_clarify",
+                user_id=session.user_id,
+                org_id=session.org_id,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"LLM call failed: {exc}") from exc
+
+        result = _require_llm_json(result, context="drafter_clarify")
+
+        questions = result.get("questions", [])
+        if not questions:
+            # Fallback: generate minimal questions. Deliberately NOT an
+            # error — an empty-but-valid payload (or stub mode) still has
+            # a safe deterministic interview to fall back on, unlike the
+            # parse-failure case handled by ``_require_llm_json`` above.
+            questions = [
+                {"question": "Milliseid asutusi see seadus mõjutab?", "rationale": "scope"},
+                {
+                    "question": "Kas see täiendab või asendab olemasolevat seadust?",
+                    "rationale": "relationship",
+                },
+                {
+                    "question": "Kas on EL-i nõudeid, mida tuleb arvestada?",
+                    "rationale": "EU compliance",
+                },
+            ]
+
+        clarifications = [
+            {
+                "question": q.get("question", ""),
+                "answer": None,
+                "rationale": q.get("rationale", ""),
+            }
+            for q in questions
+        ]
+
+        with get_connection() as conn:
+            update_session(conn, session_id, clarifications=clarifications)
+            conn.commit()
+    except Exception:
         if attempt >= max_attempts:
             logger.exception("drafter_clarify permanently failed for session %s", session_id)
             with get_connection() as conn:
                 abandon_session(conn, session_id)
                 conn.commit()
-        raise RuntimeError(f"LLM call failed: {exc}") from exc
-
-    questions = result.get("questions", [])
-    if not questions:
-        # Fallback: generate minimal questions
-        questions = [
-            {"question": "Milliseid asutusi see seadus mõjutab?", "rationale": "scope"},
-            {
-                "question": "Kas see täiendab või asendab olemasolevat seadust?",
-                "rationale": "relationship",
-            },
-            {
-                "question": "Kas on EL-i nõudeid, mida tuleb arvestada?",
-                "rationale": "EU compliance",
-            },
-        ]
-
-    clarifications = [
-        {"question": q.get("question", ""), "answer": None, "rationale": q.get("rationale", "")}
-        for q in questions
-    ]
-
-    with get_connection() as conn:
-        update_session(conn, session_id, clarifications=clarifications)
-        conn.commit()
+        raise
 
     logger.info(
         "drafter_clarify: generated %d questions for session %s",
@@ -776,48 +824,57 @@ def drafter_structure(
         similar_laws=similar_laws_text,
     )
 
+    # #852 E2: same gating fix as ``drafter_clarify`` — post-LLM parsing
+    # and the session write now live inside the retry-gated region so a
+    # malformed payload or DB failure also engages abandon-on-final-attempt.
     try:
-        result = provider.extract_json(
-            prompt,
-            feature="drafter_structure",
-            user_id=session.user_id,
-            org_id=session.org_id,
-        )
-    except Exception as exc:
+        try:
+            result = provider.extract_json(
+                prompt,
+                feature="drafter_structure",
+                user_id=session.user_id,
+                org_id=session.org_id,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"LLM call failed: {exc}") from exc
+
+        structure = _require_llm_json(result, context="drafter_structure")
+
+        # Validate structure has minimum fields. An empty-but-valid
+        # payload (or stub mode) falls back to a deterministic skeleton —
+        # only the parse-failure marker above is treated as a hard error.
+        if "chapters" not in structure or not structure["chapters"]:
+            structure = {
+                "title": session.intent or "Uus seadus",
+                "chapters": [
+                    {
+                        "number": "1. peatukk",
+                        "title": "Uldsatted",
+                        "sections": [
+                            {"paragraph": "par 1", "title": "Seaduse reguleerimisala"},
+                            {"paragraph": "par 2", "title": "Moistete selgitused"},
+                        ],
+                    },
+                    {
+                        "number": "2. peatukk",
+                        "title": "Rakendussatted",
+                        "sections": [
+                            {"paragraph": "par 3", "title": "Seaduse joustumise aeg"},
+                        ],
+                    },
+                ],
+            }
+
+        with get_connection() as conn:
+            update_session(conn, session_id, proposed_structure=structure)
+            conn.commit()
+    except Exception:
         if attempt >= max_attempts:
             logger.exception("drafter_structure permanently failed for session %s", session_id)
             with get_connection() as conn:
                 abandon_session(conn, session_id)
                 conn.commit()
-        raise RuntimeError(f"LLM call failed: {exc}") from exc
-
-    structure = result
-    # Validate structure has minimum fields
-    if "chapters" not in structure or not structure["chapters"]:
-        structure = {
-            "title": session.intent or "Uus seadus",
-            "chapters": [
-                {
-                    "number": "1. peatukk",
-                    "title": "Uldsatted",
-                    "sections": [
-                        {"paragraph": "par 1", "title": "Seaduse reguleerimisala"},
-                        {"paragraph": "par 2", "title": "Moistete selgitused"},
-                    ],
-                },
-                {
-                    "number": "2. peatukk",
-                    "title": "Rakendussatted",
-                    "sections": [
-                        {"paragraph": "par 3", "title": "Seaduse joustumise aeg"},
-                    ],
-                },
-            ],
-        }
-
-    with get_connection() as conn:
-        update_session(conn, session_id, proposed_structure=structure)
-        conn.commit()
+        raise
 
     logger.info(
         "drafter_structure: generated %d chapters for session %s",
@@ -904,6 +961,21 @@ def drafter_draft(
                     org_id=session.org_id,
                 )
 
+                # #852 E2: a parse-failure payload ({"error": ...}) or a
+                # clause without text must FAIL the job (and consume the
+                # retry budget) instead of being persisted as a blank
+                # clause that the state machine happily waves into review.
+                result = _require_llm_json(
+                    result,
+                    context=f"drafter_draft section {section.get('paragraph', '?')!r}",
+                )
+                clause_text = str(result.get("text") or "").strip()
+                if not clause_text and not result.get("stub"):
+                    raise LLMOutputError(
+                        "drafter_draft: LLM returned no clause text for section "
+                        f"{section.get('paragraph', '?')!r} ({section_title!r})"
+                    )
+
                 clauses.append(
                     {
                         "chapter": chapter.get("number", ""),
@@ -919,6 +991,23 @@ def drafter_draft(
                     }
                 )
 
+        # #852 E2: an empty clause list means the structure had no
+        # sections (or every section was skipped) — persisting it would
+        # let the step-5→6 guard pass on encrypted-but-empty content.
+        if not clauses:
+            raise LLMOutputError(
+                f"drafter_draft produced no clauses for session {session_id} "
+                "(structure has no sections?)"
+            )
+
+        # The persist step sits inside the gated region too, so a DB
+        # failure here also engages abandon-on-final-attempt.
+        encrypted = encrypt_text(json.dumps({"clauses": clauses}, ensure_ascii=False))
+
+        with get_connection() as conn:
+            update_session(conn, session_id, draft_content_encrypted=encrypted)
+            conn.commit()
+
     except Exception as exc:
         if attempt >= max_attempts:
             logger.exception(
@@ -930,12 +1019,6 @@ def drafter_draft(
                 abandon_session(conn, session_id)
                 conn.commit()
         raise RuntimeError(f"Clause drafting failed: {exc}") from exc
-
-    encrypted = encrypt_text(json.dumps({"clauses": clauses}, ensure_ascii=False))
-
-    with get_connection() as conn:
-        update_session(conn, session_id, draft_content_encrypted=encrypted)
-        conn.commit()
 
     logger.info(
         "drafter_draft: drafted %d clauses for session %s",
@@ -1029,6 +1112,12 @@ def drafter_regenerate_clause(
             feature="drafter_regenerate",
             user_id=session.user_id,
             org_id=session.org_id,
+        )
+        # #852 E2: a parse-failure payload must fail the job (visibly,
+        # with retries) — silently keeping the old clause would look
+        # like a successful regeneration that changed nothing.
+        result = _require_llm_json(
+            result, context=f"drafter_regenerate_clause clause {clause_index}"
         )
         clause["text"] = result.get("text", clause.get("text", ""))
         # #842: resolve citations through the ontology (see drafter_draft).
