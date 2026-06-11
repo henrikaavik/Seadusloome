@@ -196,15 +196,45 @@ class TestSchedulerRunsBothScans:
         assert calls == ["drafts", "sessions"]
 
 
-_MIGRATION_038 = (
-    Path(__file__).parent.parent / "migrations" / "038_drafting_session_archive_warning.sql"
-)
+_MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
+_MIGRATION_038 = _MIGRATIONS_DIR / "038_drafting_session_archive_warning.sql"
+
+# Matches the recreated ``notifications.type`` CHECK list in any form the
+# constraint-rebuild migrations use: lowercase ``check (type in (...))``
+# (036/038) and the uppercase DO-block ``CHECK (type IN (...))`` (012/019/044).
+_TYPE_CHECK_RE = re.compile(r"check\s*\(\s*type\s+in\s*\((.*?)\)\)", re.DOTALL | re.IGNORECASE)
 
 
-def _migration_038_allowed_types() -> set[str]:
-    """Parse the type list out of migration 038's recreated CHECK."""
-    match = re.search(r"check \(type in \((.*?)\)\)", _MIGRATION_038.read_text(), re.DOTALL)
-    assert match, "could not locate the CHECK (type in (...)) list in migration 038"
+def _latest_notifications_type_check_migration() -> Path:
+    """Return the highest-numbered migration that rebuilds the canonical
+    ``notifications.type`` CHECK.
+
+    The constraint has been recreated several times as new notification
+    types shipped (012 → 015 → 036 → 038 → 044 …). The *latest* such
+    migration is authoritative — it carries the full allowed set the DB
+    ends up with. Deriving the file dynamically keeps this contract test
+    self-extending: a future migration that adds a notification type is
+    picked up automatically, exactly like ``_emitted_notification_types``
+    self-extends on the code side.
+    """
+    candidates: list[tuple[str, Path]] = []
+    for path in _MIGRATIONS_DIR.glob("*.sql"):
+        text = path.read_text(encoding="utf-8")
+        # Only migrations that *rebuild* the notifications.type CHECK with a
+        # full type list qualify — they must both name the canonical
+        # constraint and carry a ``CHECK (type IN (...))`` list.
+        if "notifications_type_check" in text and _TYPE_CHECK_RE.search(text):
+            candidates.append((path.name, path))
+    assert candidates, "no migration rebuilds the notifications.type CHECK list"
+    # File names are zero-padded (NNN_*.sql), so lexical max == numeric max.
+    return max(candidates, key=lambda c: c[0])[1]
+
+
+def _canonical_allowed_types() -> set[str]:
+    """Parse the type list out of the latest CHECK-rebuild migration."""
+    migration = _latest_notifications_type_check_migration()
+    match = _TYPE_CHECK_RE.search(migration.read_text(encoding="utf-8"))
+    assert match, f"could not locate the CHECK (type in (...)) list in {migration.name}"
     return set(re.findall(r"'([a-z_]+)'", match.group(1)))
 
 
@@ -250,21 +280,36 @@ class TestMigration038Contract:
         annotations feature, never in any constraint, every insert
         silently swallowed by ``notify()``). The recreated list must be
         a superset of every type literal the codebase emits, so the
-        next constraint rebuild cannot regress one."""
+        next constraint rebuild cannot regress one.
+
+        Reads the *latest* CHECK-rebuild migration (038 → 044 → …) rather
+        than a fixed file, so a new type + its migration are both picked
+        up automatically (#861 added ``cost_exhausted`` in migration 044)."""
         emitted = _emitted_notification_types()
-        allowed = _migration_038_allowed_types()
+        allowed = _canonical_allowed_types()
         # Extraction sanity: the patterns must keep finding real usage.
         assert "drafting_session_archive_warning" in emitted
         assert "annotation_mention" in emitted
-        assert len(allowed) >= 9
+        assert "cost_exhausted" in emitted
+        assert len(allowed) >= 10  # noqa: PLR2004
         missing = emitted - allowed
         assert not missing, (
-            f"migration 038 CHECK omits emitted notification types: {sorted(missing)} — "
-            "notify() swallows the CHECK violation, so these would be dropped silently"
+            "the latest notifications.type CHECK rebuild "
+            f"({_latest_notifications_type_check_migration().name}) omits emitted "
+            f"notification types: {sorted(missing)} — notify() swallows the CHECK "
+            "violation, so these would be dropped silently"
         )
 
     def test_annotation_mention_explicitly_allowed(self):
         """Pin the finding-1 fix itself: annotation_mention inserts have
         been silently dropped since the feature shipped (no prior
-        migration ever allowed the type); 038 fixes that."""
-        assert "annotation_mention" in _migration_038_allowed_types()
+        migration ever allowed the type); 038 fixed it and every later
+        canonical rebuild must keep it."""
+        assert "annotation_mention" in _canonical_allowed_types()
+
+    def test_cost_exhausted_explicitly_allowed(self):
+        """#861 B: the 100%-budget alert emits type='cost_exhausted'
+        (app/notifications/wire.py::notify_cost_exhausted). Migration 044
+        adds it to the canonical CHECK; without it every alert insert is
+        silently swallowed by ``notify()``."""
+        assert "cost_exhausted" in _canonical_allowed_types()

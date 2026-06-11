@@ -122,29 +122,58 @@ def check_org_cost_budget(
     calendar month. If the total meets or exceeds
     ``ORG_MAX_MONTHLY_COST_USD``, raises immediately.
 
-    **TOCTOU race window and mitigation** — A naive implementation reads
-    the running monthly total with a plain ``SELECT`` and returns. Two
-    concurrent requests can both observe a total below the cap, both
-    pass the check, and both proceed to spend against the budget,
-    causing an unbounded overshoot as concurrency scales.
+    **Concurrency, the advisory lock, and the residual race** — A naive
+    implementation reads the running monthly total with a plain
+    ``SELECT`` and returns. Two concurrent requests can both observe a
+    total below the cap, both pass the check, and both proceed to spend
+    against the budget, causing an unbounded overshoot as concurrency
+    scales.
 
-    To close that window, when this function is invoked with an active
-    ``conn`` the check runs inside the caller's transaction and takes a
+    When this function is invoked with an active ``conn`` it takes a
     transaction-scoped PostgreSQL advisory lock keyed to the org id:
 
         ``pg_advisory_xact_lock(hashtextextended('cost_budget:<org>', 0))``
 
-    This serialises concurrent budget checks for a given org without
-    requiring a dedicated lock row or new table. The lock is released
-    automatically when the caller's transaction commits or rolls back.
-    The caller is expected to insert the message (or otherwise record
-    the work that will drive the next LLM charge) inside the same
-    transaction, so the "read-then-act" sequence is atomic.
+    This serialises *the budget checks themselves* for a given org
+    without requiring a dedicated lock row or new table: while one
+    request holds the lock, a second request for the same org blocks on
+    the lock acquire and therefore cannot run its ``SELECT SUM`` until
+    the first request's transaction commits/rolls back. The lock is
+    released automatically at that boundary.
 
-    When called without ``conn`` (the legacy shape), the function opens
-    its own short-lived connection and performs the plain SELECT with
-    no locking. This mode is intentionally kept for non-critical paths
-    (status/usage display) where a momentary race is acceptable.
+    **The lock does NOT span the LLM spend, and that is deliberate.**
+    The chat orchestrator (see ``app/chat/orchestrator.py``
+    ``_check_budget_in_own_tx`` + ``_phase_check_budget``) calls this in
+    its *own* short-lived transaction that commits immediately after the
+    check returns — the lock is released before any token is spent. This
+    was an intentional trade-off for #658: an earlier design held the
+    lock across the user-message persist, but a stuck pre-deploy
+    connection holding the lock then blocked every chat turn for that org
+    and risked losing the user's input. The persist was therefore moved
+    into its own transaction that commits *before* this check runs
+    (``_phase_persist_user_message`` precedes ``_phase_check_budget``),
+    so the "read total → release lock → later spend tokens" sequence is
+    **not** atomic.
+
+    The residual race is bounded and accepted: the lock prevents two
+    *simultaneous* checks from racing on a stale read, but it does not
+    prevent a request that passed the check from spending after the lock
+    is released while a later request also passes (because the spend from
+    the first has not yet landed in ``llm_usage``). In the worst case a
+    burst of N near-simultaneous turns can each pass at ~99% of the cap
+    and collectively overshoot by roughly N turns' worth of spend. For
+    the 5-50 concurrent-user target this is a few dollars of overshoot,
+    not an unbounded one, and the next turn sees the corrected sum and
+    blocks. Closing it fully would require holding a lock (or a reserved
+    spend row) across the entire LLM call, which re-introduces the #658
+    hang/data-loss failure mode; we explicitly do not do that.
+
+    When called without ``conn`` (the legacy shape, e.g. the drafter
+    handlers), the function opens its own short-lived connection and
+    performs the plain SELECT with **no** locking — so concurrent
+    drafter steps for one org are not even serialised on the check. This
+    mode is intentionally kept for paths where a momentary race is
+    acceptable; the same bounded-overshoot reasoning applies.
 
     The advisory-lock acquire is bounded by ``SET LOCAL lock_timeout =
     '3s'``: if a stale connection holds the lock for longer than that,
@@ -191,14 +220,25 @@ def check_org_cost_budget(
         # Fail open
         return
 
-    # Notify org admins when cost hits 80% of the budget.
-    if total_cost >= max_cost * _COST_ALERT_FRACTION and total_cost < max_cost:
+    # Notify org admins when cost crosses a threshold. Both wire helpers
+    # dedupe to one alert per org/day per type, so calling them on every
+    # turn is safe — the dedupe query suppresses the repeat fan-out. The
+    # 80% advisory and the 100% "exhausted" alert are mutually exclusive
+    # per call (a single ``total_cost`` is in exactly one band).
+    if max_cost * _COST_ALERT_FRACTION <= total_cost < max_cost:
         try:
             from app.notifications.wire import notify_cost_alert
 
             notify_cost_alert(org_id, total_cost, max_cost)
         except Exception:
             logger.debug("notify_cost_alert failed (non-critical)", exc_info=True)
+    elif total_cost >= max_cost:
+        try:
+            from app.notifications.wire import notify_cost_exhausted
+
+            notify_cost_exhausted(org_id, total_cost, max_cost)
+        except Exception:
+            logger.debug("notify_cost_exhausted failed (non-critical)", exc_info=True)
 
     if total_cost >= max_cost:
         raise CostBudgetExceededError(

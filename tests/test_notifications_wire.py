@@ -161,8 +161,13 @@ class TestNotifyAnalysisDone:
 
 class TestNotifyDrafterComplete:
     @patch("app.notifications.wire.notify")
-    def test_notifies_session_owner(self, mock_notify):
+    @patch("app.db.get_connection")
+    def test_notifies_session_owner(self, mock_connect, mock_notify):
         session = _make_session()
+        conn = MagicMock()
+        # The per-session dedupe check returns no prior notification.
+        conn.execute.return_value.fetchone.return_value = None
+        mock_connect.return_value = _ConnectCM(conn)
 
         notify_drafter_complete(session)
 
@@ -196,7 +201,13 @@ class TestNotifySyncFailed:
         admin1 = uuid.uuid4()
         admin2 = uuid.uuid4()
         conn = MagicMock()
-        conn.execute.return_value.fetchall.return_value = [(admin1,), (admin2,)]
+        # 1st execute: throttle check (no recent failure -> None).
+        # 2nd execute: the admin lookup.
+        throttle_cursor = MagicMock()
+        throttle_cursor.fetchone.return_value = None
+        admins_cursor = MagicMock()
+        admins_cursor.fetchall.return_value = [(admin1,), (admin2,)]
+        conn.execute.side_effect = [throttle_cursor, admins_cursor]
         mock_connect.return_value = _ConnectCM(conn)
 
         notify_sync_failed("Connection refused")
@@ -214,7 +225,11 @@ class TestNotifySyncFailed:
         """
         admin1 = uuid.uuid4()
         conn = MagicMock()
-        conn.execute.return_value.fetchall.return_value = [(admin1,)]
+        throttle_cursor = MagicMock()
+        throttle_cursor.fetchone.return_value = None
+        admins_cursor = MagicMock()
+        admins_cursor.fetchall.return_value = [(admin1,)]
+        conn.execute.side_effect = [throttle_cursor, admins_cursor]
         mock_connect.return_value = _ConnectCM(conn)
 
         notify_sync_failed("Connection refused")
@@ -237,12 +252,31 @@ class TestNotifySyncFailed:
 
 
 class TestNotifyCostAlert:
+    @patch("app.notifications.wire.push_notification")
     @patch("app.notifications.wire.notify")
     @patch("app.db.get_connection")
-    def test_notifies_org_admins(self, mock_connect, mock_notify):
+    def test_notifies_org_admins(self, mock_connect, mock_notify, mock_push):
+        """The atomic fan-out (#882 P2) takes an advisory lock, then dedupes,
+        then notifies each admin via notify(conn=conn). Dispatch the mock
+        connection's execute by SQL so the lock/day/dedupe/admins calls all
+        return sane results (full lock-key/atomicity coverage lives in
+        tests/test_cost_alerts.py)."""
         admin1 = uuid.uuid4()
         conn = MagicMock()
-        conn.execute.return_value.fetchall.return_value = [(admin1,)]
+
+        def _execute(sql, params=()):
+            cur = MagicMock()
+            if "to_char" in sql:
+                cur.fetchone.return_value = ("2026-06-11",)
+            elif "pg_advisory_xact_lock" in sql:
+                cur.fetchone.return_value = (True,)
+            elif "FROM notifications" in sql:
+                cur.fetchone.return_value = None  # no prior alert today
+            elif "FROM users" in sql:
+                cur.fetchall.return_value = [(admin1,)]
+            return cur
+
+        conn.execute.side_effect = _execute
         mock_connect.return_value = _ConnectCM(conn)
 
         notify_cost_alert(_ORG_ID, 42.0, 50.0)
@@ -252,6 +286,8 @@ class TestNotifyCostAlert:
         assert call_kwargs["user_id"] == admin1
         assert call_kwargs["type"] == "cost_alert"
         assert "84%" in call_kwargs["title"]
+        # Insert joined the lock-holding transaction.
+        assert call_kwargs["conn"] is conn
 
 
 # ---------------------------------------------------------------------------

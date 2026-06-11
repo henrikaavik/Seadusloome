@@ -25,10 +25,13 @@ from app.notifications.routes import api_notifications_partial
 from app.notifications.wire import (
     notify_analysis_done,
     notify_annotation_reply,
+    notify_cost_exhausted,
     notify_draft_archive_warning,
     notify_drafter_complete,
     notify_sync_failed,
 )
+
+_ORG_ID = uuid.UUID("33333333-3333-3333-3333-333333333333")
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -184,7 +187,13 @@ class TestAnalysisDoneCopy:
 
 class TestDrafterCompleteCopy:
     @patch("app.notifications.wire.notify")
-    def test_title_uses_proper_diacritics(self, mock_notify):
+    @patch("app.db.get_connection")
+    def test_title_uses_proper_diacritics(self, mock_connect, mock_notify):
+        conn = MagicMock()
+        # Per-session dedupe check finds no prior notification.
+        conn.execute.return_value.fetchone.return_value = None
+        mock_connect.return_value = _ConnectCM(conn)
+
         notify_drafter_complete(_make_session())
 
         kwargs = mock_notify.call_args[1]
@@ -192,7 +201,12 @@ class TestDrafterCompleteCopy:
         _assert_no_banned_substrings(kwargs["title"], where="drafter_complete.title")
 
     @patch("app.notifications.wire.notify")
-    def test_default_title_text_uses_diacritics_when_no_intent(self, mock_notify):
+    @patch("app.db.get_connection")
+    def test_default_title_text_uses_diacritics_when_no_intent(self, mock_connect, mock_notify):
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = None
+        mock_connect.return_value = _ConnectCM(conn)
+
         session = _make_session()
         session.intent = None
 
@@ -231,7 +245,13 @@ class TestSyncFailedCopy:
     def test_title_uses_proper_diacritics(self, mock_connect, mock_notify):
         admin_id = uuid.uuid4()
         conn = MagicMock()
-        conn.execute.return_value.fetchall.return_value = [(admin_id,)]
+        # 1st execute: throttle check (no recent failure -> None).
+        # 2nd execute: the admin lookup.
+        throttle_cursor = MagicMock()
+        throttle_cursor.fetchone.return_value = None
+        admins_cursor = MagicMock()
+        admins_cursor.fetchall.return_value = [(admin_id,)]
+        conn.execute.side_effect = [throttle_cursor, admins_cursor]
         mock_connect.return_value = _ConnectCM(conn)
 
         notify_sync_failed("Connection refused")
@@ -239,6 +259,45 @@ class TestSyncFailedCopy:
         kwargs = mock_notify.call_args[1]
         assert kwargs["title"] == "Ontoloogia sünkroonimine ebaõnnestus"
         _assert_no_banned_substrings(kwargs["title"], where="sync_failed.title")
+
+
+# ---------------------------------------------------------------------------
+# Wire-up: notify_cost_exhausted (#861-B)
+# ---------------------------------------------------------------------------
+
+
+class TestCostExhaustedCopy:
+    @patch("app.notifications.wire.push_notification")
+    @patch("app.notifications.wire.notify")
+    @patch("app.db.get_connection")
+    def test_title_and_body_use_proper_diacritics(self, mock_connect, mock_notify, mock_push):
+        admin_id = uuid.uuid4()
+        conn = MagicMock()
+
+        # The atomic fan-out (#882 P2) issues lock_timeout/to_char/lock/
+        # dedupe/admins before notify(); dispatch by SQL so each returns
+        # a sane result regardless of call count.
+        def _execute(sql, params=()):
+            cur = MagicMock()
+            if "to_char" in sql:
+                cur.fetchone.return_value = ("2026-06-11",)
+            elif "pg_advisory_xact_lock" in sql:
+                cur.fetchone.return_value = (True,)
+            elif "FROM notifications" in sql:
+                cur.fetchone.return_value = None
+            elif "FROM users" in sql:
+                cur.fetchall.return_value = [(admin_id,)]
+            return cur
+
+        conn.execute.side_effect = _execute
+        mock_connect.return_value = _ConnectCM(conn)
+
+        notify_cost_exhausted(_ORG_ID, 50.0, 50.0)
+
+        kwargs = mock_notify.call_args[1]
+        assert "täis" in kwargs["title"]
+        _assert_no_banned_substrings(kwargs["title"], where="cost_exhausted.title")
+        _assert_no_banned_substrings(kwargs["body"], where="cost_exhausted.body")
 
 
 # ---------------------------------------------------------------------------
