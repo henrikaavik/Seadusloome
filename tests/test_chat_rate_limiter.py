@@ -118,9 +118,14 @@ class TestCheckOrgCostBudget:
 
         check_org_cost_budget(_ORG_ID)
 
+    @patch("app.notifications.wire.notify_cost_exhausted")
     @patch("app.chat.rate_limiter.get_connection")
-    def test_at_budget_raises(self, mock_get_conn: MagicMock):
-        """CostBudgetExceededError when cost equals the cap."""
+    def test_at_budget_raises(self, mock_get_conn: MagicMock, mock_exhausted: MagicMock):
+        """CostBudgetExceededError when cost equals the cap.
+
+        The exhausted-alert side effect is patched out so this stays a
+        pure unit test; the alert wiring is covered in test_cost_alerts.py.
+        """
         conn = MagicMock()
         mock_get_conn.return_value.__enter__ = MagicMock(return_value=conn)
         mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
@@ -129,8 +134,9 @@ class TestCheckOrgCostBudget:
         with pytest.raises(CostBudgetExceededError):
             check_org_cost_budget(_ORG_ID)
 
+    @patch("app.notifications.wire.notify_cost_exhausted")
     @patch("app.chat.rate_limiter.get_connection")
-    def test_over_budget_raises(self, mock_get_conn: MagicMock):
+    def test_over_budget_raises(self, mock_get_conn: MagicMock, mock_exhausted: MagicMock):
         """CostBudgetExceededError when cost exceeds the cap."""
         conn = MagicMock()
         mock_get_conn.return_value.__enter__ = MagicMock(return_value=conn)
@@ -158,8 +164,9 @@ class TestCheckOrgCostBudget:
         # Should NOT raise -- fail-open semantics
         check_org_cost_budget(_ORG_ID)
 
+    @patch("app.notifications.wire.notify_cost_exhausted")
     @patch("app.chat.rate_limiter.get_connection")
-    def test_error_message_contains_usd(self, mock_get_conn: MagicMock):
+    def test_error_message_contains_usd(self, mock_get_conn: MagicMock, mock_exhausted: MagicMock):
         """The exception message mentions the budget in USD."""
         conn = MagicMock()
         mock_get_conn.return_value.__enter__ = MagicMock(return_value=conn)
@@ -205,11 +212,17 @@ class TestCheckOrgCostBudgetWithConn:
         third_call_sql = conn.execute.call_args_list[2].args[0]
         assert "SUM(cost_usd)" in third_call_sql
 
-    def test_second_check_sees_accumulated_cost(self):
+    @patch("app.notifications.wire.notify_cost_exhausted")
+    def test_second_check_sees_accumulated_cost(self, mock_exhausted: MagicMock):
         """Proxy for FOR UPDATE correctness: two sequential checks against the
         same budget inside one transaction should see the updated total on the
         second call. We simulate an insert happening between them by returning
-        a higher SUM on the second SELECT."""
+        a higher SUM on the second SELECT.
+
+        The exhausted-alert side effect (which would open its own
+        connection on the over-cap second call) is patched out so the
+        injected ``conn``'s ``side_effect`` script is the only thing
+        exercised."""
         conn = MagicMock()
 
         # Each call now emits 3 execute()s: lock_timeout, advisory lock, select.

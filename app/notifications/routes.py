@@ -388,7 +388,12 @@ def api_notifications_partial(req: Request):
         limit = int(limit_param)
     except (ValueError, TypeError):
         limit = 5
-    limit = min(limit, 20)
+    # Clamp to a sane range. A missing upper bound let a huge ``?limit=``
+    # pull an unbounded list; a missing lower bound let ``?limit=0`` or a
+    # negative value reach the SQL ``LIMIT`` clause (0 returns nothing;
+    # a negative raises and the handler degrades to an empty list — both
+    # are confusing). Floor at 1 so the dropdown always shows something.
+    limit = max(1, min(limit, 20))
 
     try:
         with _connect() as conn:

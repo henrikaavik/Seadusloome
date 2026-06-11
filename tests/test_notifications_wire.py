@@ -161,8 +161,13 @@ class TestNotifyAnalysisDone:
 
 class TestNotifyDrafterComplete:
     @patch("app.notifications.wire.notify")
-    def test_notifies_session_owner(self, mock_notify):
+    @patch("app.db.get_connection")
+    def test_notifies_session_owner(self, mock_connect, mock_notify):
         session = _make_session()
+        conn = MagicMock()
+        # The per-session dedupe check returns no prior notification.
+        conn.execute.return_value.fetchone.return_value = None
+        mock_connect.return_value = _ConnectCM(conn)
 
         notify_drafter_complete(session)
 
@@ -196,7 +201,13 @@ class TestNotifySyncFailed:
         admin1 = uuid.uuid4()
         admin2 = uuid.uuid4()
         conn = MagicMock()
-        conn.execute.return_value.fetchall.return_value = [(admin1,), (admin2,)]
+        # 1st execute: throttle check (no recent failure -> None).
+        # 2nd execute: the admin lookup.
+        throttle_cursor = MagicMock()
+        throttle_cursor.fetchone.return_value = None
+        admins_cursor = MagicMock()
+        admins_cursor.fetchall.return_value = [(admin1,), (admin2,)]
+        conn.execute.side_effect = [throttle_cursor, admins_cursor]
         mock_connect.return_value = _ConnectCM(conn)
 
         notify_sync_failed("Connection refused")
@@ -214,7 +225,11 @@ class TestNotifySyncFailed:
         """
         admin1 = uuid.uuid4()
         conn = MagicMock()
-        conn.execute.return_value.fetchall.return_value = [(admin1,)]
+        throttle_cursor = MagicMock()
+        throttle_cursor.fetchone.return_value = None
+        admins_cursor = MagicMock()
+        admins_cursor.fetchall.return_value = [(admin1,)]
+        conn.execute.side_effect = [throttle_cursor, admins_cursor]
         mock_connect.return_value = _ConnectCM(conn)
 
         notify_sync_failed("Connection refused")
@@ -242,7 +257,13 @@ class TestNotifyCostAlert:
     def test_notifies_org_admins(self, mock_connect, mock_notify):
         admin1 = uuid.uuid4()
         conn = MagicMock()
-        conn.execute.return_value.fetchall.return_value = [(admin1,)]
+        # 1st execute: per-org/day dedupe check (no prior alert -> None).
+        # 2nd execute: the admin lookup.
+        dedupe_cursor = MagicMock()
+        dedupe_cursor.fetchone.return_value = None
+        admins_cursor = MagicMock()
+        admins_cursor.fetchall.return_value = [(admin1,)]
+        conn.execute.side_effect = [dedupe_cursor, admins_cursor]
         mock_connect.return_value = _ConnectCM(conn)
 
         notify_cost_alert(_ORG_ID, 42.0, 50.0)
