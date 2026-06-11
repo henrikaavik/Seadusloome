@@ -93,18 +93,121 @@ _LAW_SUFFIX_RE = re.compile(
 )
 
 
+# Unicode superscript digits (``¹²³…``) → their ASCII counterparts.
+# Estonian section numbers carry a superscript index for inserted
+# provisions: ``§ 113¹`` is "paragrahv sada kolmteist üks" (the §113
+# that was inserted after the original §113). We normalise the
+# superscript to the caret form ``113^1`` so it matches the
+# input-parser convention (``_SECTION_RE`` already accepts ``113^1`` /
+# ``113.1``) and so the corpus's ``estleg:paragrahv`` literal forms can
+# be probed in both shapes.
+_SUPERSCRIPT_DIGITS = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹", "0123456789")
+
+
+def _normalise_section_number(raw: str) -> str | None:
+    """Canonicalise a captured section token to ``N`` or ``N^M``.
+
+    Accepts the base digits optionally followed by a superscript index
+    in any of three spellings:
+
+      * Unicode superscript — ``113¹``  → ``113^1``
+      * caret form          — ``113^1`` → ``113^1``
+      * dotted form         — ``113.1`` → ``113^1``
+
+    Returns ``None`` for anything that is not a digit-run with an
+    optional all-digit superscript (the injection guard — the result
+    is interpolated into the URI guess and SPARQL literals).
+    """
+    token = (raw or "").strip()
+    if not token:
+        return None
+    # Fold any Unicode superscript digits to ASCII, tagging them so we
+    # know a superscript boundary even without an explicit ^/. marker.
+    folded = token.translate(_SUPERSCRIPT_DIGITS)
+    if folded != token:
+        # The original carried Unicode superscripts: split the base from
+        # the (now-ASCII) superscript run. Re-scan the original so we
+        # only treat the trailing superscript glyphs as the index.
+        m = re.match(r"^(\d+)([⁰¹²³⁴⁵⁶⁷⁸⁹]+)$", token)
+        if not m:
+            return None
+        base = m.group(1)
+        sup = m.group(2).translate(_SUPERSCRIPT_DIGITS)
+        return f"{base}^{sup}"
+    # ASCII path: bare digits, or base + caret/dot + digits.
+    m = re.match(r"^(\d+)(?:[.^](\d+))?$", folded)
+    if not m:
+        return None
+    base, sup = m.group(1), m.group(2)
+    return f"{base}^{sup}" if sup else base
+
+
+# ASCII digit → Unicode superscript, for rendering ``113^1`` back to the
+# human-facing ``113¹`` in result labels.
+_ASCII_TO_SUPERSCRIPT = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
+
+
+def _section_display(section: str) -> str:
+    """Render a canonical section (``N`` / ``N^M``) for a user label.
+
+    Plain sections render verbatim; a superscript index renders with
+    Unicode superscript glyphs (``113^1`` → ``113¹``) so the result
+    card reads the way an Estonian lawyer wrote the reference.
+    """
+    base, sep, sup = section.partition("^")
+    if not sep:
+        return base
+    return base + sup.translate(_ASCII_TO_SUPERSCRIPT)
+
+
+def _paragrahv_literals(section: str) -> list[str]:
+    """Candidate ``estleg:paragrahv`` literal spellings to probe.
+
+    The corpus stores the section marker as ``"§ N."`` (with a trailing
+    period) and, in some rows, ``"§ N"`` (without) — the spike pinned
+    both forms for plain sections. For a superscript section we don't
+    know which spelling the corpus uses, so we widen the probe to the
+    caret, the bare-digit-concatenation, and the Unicode-superscript
+    forms, each with and without the trailing period.
+
+    Every returned literal is built from a validated ``section`` (digits
+    plus an optional all-digit superscript) so the strings only ever
+    contain digits, ``^``, superscript glyphs, ``§``, spaces and a
+    period — safe to interpolate into a SPARQL ``VALUES`` clause.
+    """
+    base, sep, sup = section.partition("^")
+    if not sep:
+        forms = [base]
+    else:
+        forms = [
+            section,  # 113^1
+            base + sup,  # 1131
+            base + sup.translate(_ASCII_TO_SUPERSCRIPT),  # 113¹
+        ]
+    literals: list[str] = []
+    for form in forms:
+        literals.append(f"§ {form}.")
+        literals.append(f"§ {form}")
+    return literals
+
+
 # Decomposition of provision references. Captures:
 #   1. act half (everything before the §/paragrahv marker)
-#   2. section number (digits only)
+#   2. section number (digits, optionally with a superscript index)
 #   3. optional lõige number
 #   4. optional punkt number
 #
 # The Estonian inflection space is wide: ``lõige`` (nom.), ``lõike``
 # (gen./part.), ``lõikest`` (elative), ``lõikele`` (allative), the
-# bare abbrev ``lg``. Likewise for ``punkt`` → ``punkti``,
-# ``punktist``, ``p``. We use loose stems (``l(õi|oi|õ|o)[gk]`` for
-# lõige; ``p(unkt[…])?``) and then allow any letters before the
+# bare abbrev ``lg`` (and its dotted ``lg.`` spelling). Likewise for
+# ``punkt`` → ``punkti``, ``punktist``, ``p`` / ``p.``. We use loose
+# stems (``l(õi|oi|õ|o)[gk]`` for lõige; ``p(unkt[…])?``), allow a
+# trailing ``.`` (the abbreviation dot), then any letters before the
 # digit.
+#
+# The section number tolerates a superscript index — Unicode
+# ``§ 113¹`` or the ASCII ``§ 113^1`` / ``§ 113.1`` spellings — captured
+# raw here and canonicalised by :func:`_normalise_section_number`.
 _PROVISION_RE = re.compile(
     r"""
     ^\s*
@@ -112,16 +215,16 @@ _PROVISION_RE = re.compile(
     \s+
     (?:§(?:-s|-st|-le|-ni)?|paragrahv[ia]?|paragrahvist|paragrahvile)
     \s*
-    (?P<num>\d+)                                     # section number
+    (?P<num>\d+(?:[.^]\d+|[⁰¹²³⁴⁵⁶⁷⁸⁹]+)?)           # section number + optional superscript
     (?:
         \s*
-        (?:lg|l(?:õi|oi|õ|o)[gk][a-zõöäü]*)         # lg / lõige / lõike / lõikest …
+        (?:lg|l(?:õi|oi|õ|o)[gk][a-zõöäü]*)\.?        # lg / lg. / lõige / lõike / lõikest …
         \s*
         (?P<lg>\d+)
     )?
     (?:
         \s*
-        (?:p|punkt[a-zõöäü]*)                       # p / punkt / punkti / punktist …
+        (?:p|punkt[a-zõöäü]*)\.?                       # p / p. / punkt / punkti / punktist …
         \s*
         (?P<p>\d+)
     )?
@@ -567,22 +670,31 @@ class ReferenceResolver:
             return _unresolved(ref)
 
         act_text = match.group("act").strip()
-        num = match.group("num")
+        raw_num = match.group("num")
 
-        # Hard injection guard: only accept digits in the section number.
-        if not num or not num.isdigit():
+        # Hard injection guard: accept only a digit run plus an optional
+        # all-digit superscript index. ``section`` is the canonical
+        # ``N`` / ``N^M`` form; ``base`` is the leading digits used for
+        # the (proven) URI-guess fast path.
+        section = _normalise_section_number(raw_num)
+        if section is None:
             self._log_miss(ref, tried_keys=["non_digit_section"], candidates=0)
             return _unresolved(ref)
+        base = section.split("^", 1)[0]
+        has_superscript = "^" in section
 
         token, title, _ = self._resolve_law_half(act_text)
         if title is None:
-            self._log_miss(ref, tried_keys=[act_text, num], candidates=0)
+            self._log_miss(ref, tried_keys=[act_text, section], candidates=0)
             return _unresolved(ref)
 
-        # URI-guess fast path. Only attempt when TOKEN is known and num
-        # is purely digits (validated above).
-        if token:
-            guess_uri = f"{ESTLEG_NS}{token}_Par_{num}"
+        # URI-guess fast path. Only attempt for plain-digit sections —
+        # the corpus ``_Par_N`` URI shape for superscript sections is
+        # not pinned, so we route those through the literal-probe
+        # structural query / partial-match path instead of guessing a
+        # URI that would never hit.
+        if token and not has_superscript:
+            guess_uri = f"{ESTLEG_NS}{token}_Par_{base}"
             ask_sparql = PREFIXES + f"\nASK {{ <{guess_uri}> ?p ?o }}\n"
             try:
                 hit = self._sparql.ask(ask_sparql)
@@ -590,7 +702,7 @@ class ReferenceResolver:
                 logger.warning(
                     "resolve: URI-guess ASK failed token=%s num=%s: %s",
                     token,
-                    num,
+                    base,
                     exc,
                 )
                 hit = False
@@ -598,21 +710,24 @@ class ReferenceResolver:
                 return ResolvedRef(
                     extracted=ref,
                     entity_uri=guess_uri,
-                    matched_label=f"{title} § {num}",
+                    matched_label=f"{title} § {base}",
                     match_score=1.0,
                 )
 
         # Structural fallback: single-arm sourceAct + paragrahv match.
-        # Both literal forms (``"§ N."`` and ``"§ N"``) per spike.
-        # ``num`` is digits-only, validated above — safe to interpolate.
+        # Probe every plausible ``estleg:paragrahv`` literal spelling
+        # (with/without the trailing period; for superscript sections
+        # also the caret and Unicode forms). ``section`` is validated
+        # digits-plus-optional-superscript above — safe to interpolate;
         # ``actLit`` is bound via the SparqlClient escape helper.
+        par_literals = " ".join(f'"{lit}"' for lit in _paragrahv_literals(section))
         struct_sparql = (
             PREFIXES
             + f"""
             SELECT ?p WHERE {{
               ?p estleg:paragrahv ?par ;
                  estleg:sourceAct  ?actLit .
-              VALUES ?par {{ "§ {num}." "§ {num}" }}
+              VALUES ?par {{ {par_literals} }}
             }}
             LIMIT 1
             """
@@ -623,6 +738,7 @@ class ReferenceResolver:
             logger.warning("resolve: provision SPARQL failed: %s", exc)
             rows = []
 
+        section_display = _section_display(section)
         if rows:
             row = rows[0]
             uri = row.get("p")
@@ -630,7 +746,7 @@ class ReferenceResolver:
                 return ResolvedRef(
                     extracted=ref,
                     entity_uri=uri,
-                    matched_label=f"{title} § {num}",
+                    matched_label=f"{title} § {section_display}",
                     match_score=1.0,
                 )
 
@@ -639,18 +755,18 @@ class ReferenceResolver:
         # only" instead of treating it like a clean miss.
         self._log_miss(
             ref,
-            tried_keys=[token or "", title, num],
+            tried_keys=[token or "", title, section],
             candidates=0,
         )
         return ResolvedRef(
             extracted=ref,
             entity_uri=None,
-            matched_label=f"{title} (sätet § {num} ei leitud)",
+            matched_label=f"{title} (sätet § {section_display} ei leitud)",
             match_score=0.5,
             partial_match={
                 "act_token": token,
                 "act_title": title,
-                "section": num,
+                "section": section,
             },
         )
 

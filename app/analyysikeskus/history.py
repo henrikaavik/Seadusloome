@@ -778,12 +778,24 @@ def list_impact_reports(
 ) -> list[ImpactReportRow]:
     """Return historical ``impact_reports`` rows touching *input_uri*, newest-first.
 
-    Scans the JSONB ``report_data`` for the URI as a string match. The
-    intent is "did any analysis report mention this entity"; a stable
-    structured key (e.g. ``report_data.affected[].entity_uri``) would
-    let us use a JSON-path index but is not pinned yet — we use
-    ``report_data::text ILIKE`` so the query works against the schema
-    today. The result list is capped at :data:`_MAX_IMPACT_REPORTS`.
+    The intent is "did any analysis report mention this entity". The
+    ``report_data`` JSONB stores entity URIs in a small, stable set of
+    array-of-object fields (``affected_entities[].uri``,
+    ``conflicts[].conflicting_entity``, ``eu_compliance[].eu_act`` /
+    ``estonian_provision``, ``gaps[].topic_cluster``, and the v2
+    ``sanctions_delta.rows[].provision_uri`` /
+    ``burden_delta.rows[].provision_uri``). We match with the JSONB
+    containment operator ``@>`` against those paths, which the GIN
+    index ``idx_impact_reports_report_data`` (migration 042) accelerates
+    — replacing the previous ``report_data::text ILIKE %uri%``
+    full-table scan. Containment also matches on a *URI field* rather
+    than a coincidental substring of some label literal, so it is both
+    faster and more precise.
+
+    Every value is passed as a bound parameter (psycopg adapts the dict
+    to ``jsonb``), so there are no ILIKE wildcards to escape and no
+    injection surface — the previous ``ILIKE %uri%`` wildcard-escaping
+    hazard is removed entirely by dropping the text-cast scan.
 
     Args:
         input_uri: The entity URI to search for. Empty input ⇒ ``[]``.
@@ -799,28 +811,45 @@ def list_impact_reports(
     if not uri:
         return []
 
-    sql = """
+    # One containment probe per URI-bearing path. Postgres BitmapOrs the
+    # per-branch GIN index scans, so the whole predicate stays indexed.
+    # ``Jsonb`` wraps each value so psycopg sends a typed ``jsonb``
+    # parameter (no ``::text`` cast, no string interpolation).
+    from psycopg.types.json import Jsonb
+
+    containment_params = [
+        Jsonb({"affected_entities": [{"uri": uri}]}),
+        Jsonb({"conflicts": [{"conflicting_entity": uri}]}),
+        Jsonb({"eu_compliance": [{"eu_act": uri}]}),
+        Jsonb({"eu_compliance": [{"estonian_provision": uri}]}),
+        Jsonb({"gaps": [{"topic_cluster": uri}]}),
+        Jsonb({"sanctions_delta": {"rows": [{"provision_uri": uri}]}}),
+        Jsonb({"burden_delta": {"rows": [{"provision_uri": uri}]}}),
+    ]
+    containment_clause = " OR ".join("ir.report_data @> %s" for _ in containment_params)
+
+    sql = f"""
         SELECT ir.id, ir.draft_id, d.title, ir.generated_at,
                dv.version_number
         FROM impact_reports ir
         JOIN drafts d ON d.id = ir.draft_id
         LEFT JOIN draft_versions dv ON dv.id = ir.draft_version_id
-        WHERE ir.report_data::text ILIKE %s
+        WHERE {containment_clause}
         ORDER BY ir.generated_at DESC NULLS LAST
         LIMIT %s
     """
-    pattern = f"%{uri}%"
+    params = (*containment_params, _MAX_IMPACT_REPORTS)
 
     try:
         if db_connection is not None:
             with db_connection.cursor() as cur:
-                cur.execute(sql, (pattern, _MAX_IMPACT_REPORTS))
+                cur.execute(sql, params)
                 rows = cur.fetchall()
         else:
             from app.db import get_connection
 
             with get_connection() as conn, conn.cursor() as cur:
-                cur.execute(sql, (pattern, _MAX_IMPACT_REPORTS))
+                cur.execute(sql, params)
                 rows = cur.fetchall()
     except Exception:
         logger.warning("list_impact_reports: query failed for %r", uri, exc_info=True)

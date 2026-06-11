@@ -1,0 +1,44 @@
+-- =============================================================================
+-- Migration 042: GIN index on impact_reports.report_data for containment lookups
+-- =============================================================================
+--
+-- ``app.analyysikeskus.history.list_impact_reports`` answers "did any analysis
+-- report mention this entity URI" for the Ajalooline kehtivus workflow.  It
+-- previously matched with ``report_data::text ILIKE '%<uri>%'`` — a cast to
+-- text plus a leading-wildcard LIKE, which forces a sequential scan of every
+-- impact_reports row and re-serialises each JSONB blob to text on the way.
+--
+-- The query now uses the JSONB containment operator ``@>`` against the small,
+-- stable set of URI-bearing paths in report_data:
+--
+--     report_data @> '{"affected_entities":   [{"uri": "<uri>"}]}'
+--  OR report_data @> '{"conflicts":           [{"conflicting_entity": "<uri>"}]}'
+--  OR report_data @> '{"eu_compliance":       [{"eu_act": "<uri>"}]}'
+--  OR report_data @> '{"eu_compliance":       [{"estonian_provision": "<uri>"}]}'
+--  OR report_data @> '{"gaps":                [{"topic_cluster": "<uri>"}]}'
+--  OR report_data @> '{"sanctions_delta": {"rows": [{"provision_uri": "<uri>"}]}}'
+--  OR report_data @> '{"burden_delta":    {"rows": [{"provision_uri": "<uri>"}]}}'
+--
+-- A GIN index on the column accelerates every ``@>`` branch; Postgres BitmapOrs
+-- the per-branch index scans so the whole OR predicate stays indexed instead of
+-- degrading to a seqscan.
+--
+-- INDEX CHOICE: jsonb_ops vs jsonb_path_ops
+-- -----------------------------------------
+-- The default ``jsonb_ops`` opclass indexes every key AND every value, and
+-- supports the existence operators (``?`` / ``?&`` / ``?|``) in addition to
+-- containment (``@>``).  ``jsonb_path_ops`` is smaller and faster for ``@>``
+-- alone but supports neither the existence operators nor the cheap top-level
+-- key lookups that other report_data consumers may want later.  At the
+-- impact_reports table's modest row count the size difference is immaterial, so
+-- we use the default ``jsonb_ops`` for its broader operator coverage and to
+-- keep the index reusable by future report_data queries.
+--
+-- IF NOT EXISTS makes the statement idempotent (safe to re-apply).  The index
+-- is built without CONCURRENTLY: the migration runner wraps each file in a
+-- single transaction (CONCURRENTLY cannot run inside one) and impact_reports is
+-- small enough that the brief ShareLock on build is a non-event.
+-- =============================================================================
+
+CREATE INDEX IF NOT EXISTS idx_impact_reports_report_data
+    ON impact_reports USING gin (report_data);

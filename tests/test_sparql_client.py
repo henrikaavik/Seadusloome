@@ -7,7 +7,37 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
-from app.ontology.sparql_client import SparqlClient, _extract_bindings, _sanitize_sparql_value
+import app.ontology.sparql_client as sparql_mod
+from app.ontology.sparql_client import (
+    SparqlClient,
+    _extract_bindings,
+    _get_shared_http_client,
+    _sanitize_sparql_value,
+    close_shared_http_client,
+)
+
+
+@pytest.fixture(autouse=True)
+def _reset_shared_http_client():
+    """Drop the pooled client around each test so a mocked ``post`` from
+    one test never leaks into the next, and so the lazy-init path is
+    exercised fresh."""
+    close_shared_http_client()
+    yield
+    close_shared_http_client()
+
+
+def _patch_post(**kwargs):
+    """Patch the pooled client's ``post`` method.
+
+    ``_execute`` now routes through the shared ``httpx.Client`` instead
+    of the module-level ``httpx.post`` (connection pooling — see the
+    SparqlClient docstring), so tests patch the bound method on the
+    singleton. ``return_value`` / ``side_effect`` keyword semantics are
+    identical to patching a free function.
+    """
+    return patch.object(_get_shared_http_client(), "post", **kwargs)
+
 
 # ---------------------------------------------------------------------------
 # _extract_bindings
@@ -174,7 +204,7 @@ class TestSparqlClientQuery:
         }
         mock_response.raise_for_status = MagicMock()
 
-        with patch("app.ontology.sparql_client.httpx.post", return_value=mock_response):
+        with _patch_post(return_value=mock_response):
             result = client.query("SELECT ?s ?label WHERE { ?s rdfs:label ?label }")
 
         assert len(result) == 1
@@ -184,8 +214,7 @@ class TestSparqlClientQuery:
     def test_connection_error_returns_empty(self):
         client = SparqlClient()
 
-        with patch(
-            "app.ontology.sparql_client.httpx.post",
+        with _patch_post(
             side_effect=httpx.ConnectError("Connection refused"),
         ):
             result = client.query("SELECT ?s WHERE { ?s ?p ?o }")
@@ -195,8 +224,7 @@ class TestSparqlClientQuery:
     def test_timeout_returns_empty(self):
         client = SparqlClient()
 
-        with patch(
-            "app.ontology.sparql_client.httpx.post",
+        with _patch_post(
             side_effect=httpx.ReadTimeout("Timed out"),
         ):
             result = client.query("SELECT ?s WHERE { ?s ?p ?o }")
@@ -211,7 +239,7 @@ class TestSparqlClientQuery:
             "Server error", request=MagicMock(), response=mock_response
         )
 
-        with patch("app.ontology.sparql_client.httpx.post", return_value=mock_response):
+        with _patch_post(return_value=mock_response):
             result = client.query("SELECT ?s WHERE { ?s ?p ?o }")
 
         assert result == []
@@ -222,7 +250,7 @@ class TestSparqlClientQuery:
         mock_response.json.return_value = {"results": {"bindings": []}}
         mock_response.raise_for_status = MagicMock()
 
-        with patch("app.ontology.sparql_client.httpx.post", return_value=mock_response):
+        with _patch_post(return_value=mock_response):
             result = client.query("SELECT ?s WHERE { ?s ?p ?o }")
 
         assert result == []
@@ -241,8 +269,7 @@ class TestSparqlClientQueryOnErrorRaise:
 
     def test_connection_error_raises_when_on_error_is_raise(self):
         client = SparqlClient()
-        with patch(
-            "app.ontology.sparql_client.httpx.post",
+        with _patch_post(
             side_effect=httpx.ConnectError("Connection refused"),
         ):
             with pytest.raises(httpx.ConnectError):
@@ -253,8 +280,7 @@ class TestSparqlClientQueryOnErrorRaise:
 
     def test_timeout_raises_when_on_error_is_raise(self):
         client = SparqlClient()
-        with patch(
-            "app.ontology.sparql_client.httpx.post",
+        with _patch_post(
             side_effect=httpx.ReadTimeout("Timed out"),
         ):
             with pytest.raises(httpx.TimeoutException):
@@ -270,7 +296,7 @@ class TestSparqlClientQueryOnErrorRaise:
         mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
             "Server error", request=MagicMock(), response=mock_response
         )
-        with patch("app.ontology.sparql_client.httpx.post", return_value=mock_response):
+        with _patch_post(return_value=mock_response):
             with pytest.raises(httpx.HTTPStatusError):
                 client.query(
                     "SELECT ?s WHERE { ?s ?p ?o }",
@@ -289,7 +315,7 @@ class TestSparqlClientQueryOnErrorRaise:
         mock_response = MagicMock()
         mock_response.json.return_value = {"results": {"bindings": []}}
         mock_response.raise_for_status = MagicMock()
-        with patch("app.ontology.sparql_client.httpx.post", return_value=mock_response):
+        with _patch_post(return_value=mock_response):
             result = client.query(
                 "SELECT ?s WHERE { ?s ?p ?o }",
                 on_error="raise",
@@ -299,8 +325,7 @@ class TestSparqlClientQueryOnErrorRaise:
     def test_default_swallow_preserves_legacy_behaviour(self):
         """Without ``on_error`` the legacy behaviour is preserved: log + empty."""
         client = SparqlClient()
-        with patch(
-            "app.ontology.sparql_client.httpx.post",
+        with _patch_post(
             side_effect=httpx.ConnectError("Connection refused"),
         ):
             # No on_error kwarg → swallows + returns empty (legacy).
@@ -319,7 +344,7 @@ class TestSparqlClientAsk:
         mock_response.json.return_value = {"boolean": True}
         mock_response.raise_for_status = MagicMock()
 
-        with patch("app.ontology.sparql_client.httpx.post", return_value=mock_response):
+        with _patch_post(return_value=mock_response):
             assert client.ask("ASK { ?s ?p ?o }") is True
 
     def test_ask_false(self):
@@ -328,14 +353,13 @@ class TestSparqlClientAsk:
         mock_response.json.return_value = {"boolean": False}
         mock_response.raise_for_status = MagicMock()
 
-        with patch("app.ontology.sparql_client.httpx.post", return_value=mock_response):
+        with _patch_post(return_value=mock_response):
             assert client.ask("ASK { ?s ?p ?o }") is False
 
     def test_ask_error_returns_false(self):
         client = SparqlClient()
 
-        with patch(
-            "app.ontology.sparql_client.httpx.post",
+        with _patch_post(
             side_effect=httpx.ConnectError("Connection refused"),
         ):
             assert client.ask("ASK { ?s ?p ?o }") is False
@@ -355,7 +379,7 @@ class TestSparqlClientCount:
         }
         mock_response.raise_for_status = MagicMock()
 
-        with patch("app.ontology.sparql_client.httpx.post", return_value=mock_response):
+        with _patch_post(return_value=mock_response):
             assert client.count("SELECT (COUNT(*) AS ?count) WHERE { ?s ?p ?o }") == 42
 
     def test_count_empty_returns_zero(self):
@@ -364,7 +388,7 @@ class TestSparqlClientCount:
         mock_response.json.return_value = {"results": {"bindings": []}}
         mock_response.raise_for_status = MagicMock()
 
-        with patch("app.ontology.sparql_client.httpx.post", return_value=mock_response):
+        with _patch_post(return_value=mock_response):
             assert client.count("SELECT (COUNT(*) AS ?count) WHERE { ?s ?p ?o }") == 0
 
     def test_count_invalid_value_returns_zero(self):
@@ -375,5 +399,90 @@ class TestSparqlClientCount:
         }
         mock_response.raise_for_status = MagicMock()
 
-        with patch("app.ontology.sparql_client.httpx.post", return_value=mock_response):
+        with _patch_post(return_value=mock_response):
             assert client.count("SELECT (COUNT(*) AS ?count) WHERE { ?s ?p ?o }") == 0
+
+
+class TestSparqlClientCountOnError:
+    """``count(on_error=...)`` lets a caller tell a real zero apart from an
+    outage so pagination never renders a dead Jena as a truthful
+    ``total: 0``."""
+
+    def test_default_swallow_returns_zero_on_outage(self):
+        """Legacy default: a transport failure yields ``0`` (no raise)."""
+        client = SparqlClient()
+        with _patch_post(side_effect=httpx.ConnectError("refused")):
+            assert client.count("SELECT (COUNT(*) AS ?count) WHERE { ?s ?p ?o }") == 0
+
+    def test_on_error_raise_propagates_outage(self):
+        """``on_error='raise'`` re-raises the httpx error instead of 0."""
+        client = SparqlClient()
+        with _patch_post(side_effect=httpx.ConnectError("refused")):
+            with pytest.raises(httpx.ConnectError):
+                client.count(
+                    "SELECT (COUNT(*) AS ?count) WHERE { ?s ?p ?o }",
+                    on_error="raise",
+                )
+
+    def test_on_error_raise_still_zero_on_genuine_empty(self):
+        """A reachable Jena with zero rows is a real ``0``, not an error."""
+        client = SparqlClient()
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"results": {"bindings": []}}
+        mock_response.raise_for_status = MagicMock()
+        with _patch_post(return_value=mock_response):
+            assert (
+                client.count(
+                    "SELECT (COUNT(*) AS ?count) WHERE { ?s ?p ?o }",
+                    on_error="raise",
+                )
+                == 0
+            )
+
+
+# ---------------------------------------------------------------------------
+# Shared pooled httpx.Client (lazy-init singleton)
+# ---------------------------------------------------------------------------
+
+
+class TestSharedHttpClient:
+    def test_lazy_init_builds_once_and_is_shared(self):
+        """No client exists until first use; then every caller shares one."""
+        # The autouse fixture closed any prior client, so we start cold.
+        assert sparql_mod._shared_client is None
+        first = _get_shared_http_client()
+        second = _get_shared_http_client()
+        assert first is second
+        assert isinstance(first, httpx.Client)
+
+    def test_pool_limits_configured(self):
+        """The pool carries bounded connection limits (FD-exhaustion guard)."""
+        # Assert on the module-level limits the pool is built from rather
+        # than httpx's private ``Client._limits`` attribute.
+        assert sparql_mod._HTTP_LIMITS.max_connections == 20
+        assert sparql_mod._HTTP_LIMITS.max_keepalive_connections == 10
+        # The built client is a real httpx.Client wired to that pool.
+        assert isinstance(_get_shared_http_client(), httpx.Client)
+
+    def test_distinct_sparqlclients_reuse_one_pool(self):
+        """Two SparqlClient instances issue requests through the same pool."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"results": {"bindings": []}}
+        mock_response.raise_for_status = MagicMock()
+        a = SparqlClient(jena_url="http://a:3030", dataset="x")
+        b = SparqlClient(jena_url="http://b:3030", dataset="y")
+        with _patch_post(return_value=mock_response) as post:
+            a.query("SELECT ?s WHERE { ?s ?p ?o }")
+            b.query("SELECT ?s WHERE { ?s ?p ?o }")
+        # Both calls landed on the single pooled client's post.
+        assert post.call_count == 2
+        # Each instance targeted its own endpoint via the shared pool.
+        endpoints = {call.args[0] for call in post.call_args_list}
+        assert endpoints == {"http://a:3030/x/sparql", "http://b:3030/y/sparql"}
+
+    def test_close_is_idempotent_when_never_built(self):
+        """Closing before any client was built is a no-op, not an error."""
+        close_shared_http_client()
+        assert sparql_mod._shared_client is None
+        # Calling again must not raise.
+        close_shared_http_client()

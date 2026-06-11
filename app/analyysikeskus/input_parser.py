@@ -53,10 +53,22 @@ from app.docs.reference_resolver import _HUMAN_ABBREV_ALIASES
 _CELEX_RE = re.compile(r"^\d{5}[A-Z]\d{1,4}$", re.IGNORECASE)
 _CELEX_SCAN_RE = re.compile(r"\b\d{5}[A-Z]\d{1,4}\b", re.IGNORECASE)
 
-# Estonian court case numbers: ``3-1-1-63-15``, ``3-2-1-4-13``, ``5-19-1-2``…
-# A run of digit groups joined by hyphens, at least three groups, last
-# group typically a 2-digit year but we don't enforce that.
-_EE_CASE_RE = re.compile(r"^\d+-\d+-\d+(?:-\d+)*$")
+# Estonian court case numbers: ``3-1-1-63-15``, ``3-2-1-4-13``,
+# ``5-19-1-2``, ``3-20-1044``… A run of digit groups joined by hyphens,
+# at least three groups. The leading group is a single-digit court-type
+# code (1–9), which is the key signal that distinguishes a case number
+# from an ISO date like ``2026-06-10`` (whose leading group is the
+# 4-digit year). We cap the first group at two digits as headroom while
+# still excluding any 4-digit year prefix.
+_EE_CASE_RE = re.compile(r"^\d{1,2}-\d+-\d+(?:-\d+)*$")
+
+# Strict ISO calendar date (``YYYY-MM-DD``): a 4-digit year, a 1–12
+# month, a 1–31 day. Used as a belt-and-braces guard so a date never
+# parses as a court case number even if a future case format widened
+# the leading group. Anchored fullmatch at the call site.
+_ISO_DATE_RE = re.compile(
+    r"^\d{4}-(?:0?[1-9]|1[0-2])-(?:0?[1-9]|[12]\d|3[01])$",
+)
 
 # CJEU / EU General Court case numbers: ``C-131/12``, ``T-99/04``,
 # ``F-1/05``, ``C-362/14`` … letter + dash + digits + slash + digits.
@@ -76,9 +88,9 @@ _SECTION_RE = re.compile(
     ^\s*
     (?P<law>[A-Za-zÕÄÖÜŠŽõäöüšž][\wÕÄÖÜŠŽõäöüšž]*)   # law short name, e.g. AvTS / KarS / KOKS
     \s+§\s*
-    (?P<section>\d+(?:[.\^]\d+)?)                       # section number, optional .N / ^N suffix
-    (?:\s+lg\s*(?P<lg>\d+))?                            # optional 'lg N'
-    (?:\s+p\s*(?P<p>\d+))?                              # optional 'p N'
+    (?P<section>\d+(?:[.\^]\d+|[⁰¹²³⁴⁵⁶⁷⁸⁹]+)?)        # section + optional .N/^N/superscript
+    (?:\s+lg\.?\s*(?P<lg>\d+))?                         # optional 'lg N' / 'lg. N'
+    (?:\s+p\.?\s*(?P<p>\d+))?                           # optional 'p N' / 'p. N'
     \s*$
     """,
     re.IGNORECASE | re.VERBOSE,
@@ -215,8 +227,11 @@ def parse_user_reference(sisend: str) -> list[ExtractedRef]:
 
     # 2. Court case numbers — Estonian (``3-1-1-63-15``) or CJEU
     #    (``C-131/12``). Exact-match only: we don't want a stray number
-    #    range inside prose to be misread as a case number.
-    if _EE_CASE_RE.fullmatch(text) or _EU_CASE_RE.fullmatch(text):
+    #    range inside prose to be misread as a case number. An ISO date
+    #    (``2026-06-10``) is explicitly excluded so it never lands here.
+    if not _ISO_DATE_RE.fullmatch(text) and (
+        _EE_CASE_RE.fullmatch(text) or _EU_CASE_RE.fullmatch(text)
+    ):
         return [_ref(text, "court_decision")]
 
     # 3. §-reference — ``AvTS § 35``, ``KarS § 133 lg 2 p 1`` … The
@@ -279,6 +294,29 @@ def _ref(ref_text: str, ref_type: str, *, confidence: float = 1.0) -> ExtractedR
     )
 
 
+# Unicode superscript digits → ASCII, so a section typed as ``113¹``
+# canonicalises to the caret form ``113^1`` that the resolver and
+# ontology literal probing share.
+_SUPERSCRIPT_DIGITS = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹", "0123456789")
+
+
+def _canonical_section(section: str) -> str:
+    """Canonicalise a captured section to ``N`` or ``N^M``.
+
+    Folds a Unicode-superscript index (``113¹``) to the caret form
+    (``113^1``); a dotted index (``113.1``) likewise; bare digits pass
+    through unchanged. Keeps the §-reference spelling stable regardless
+    of how the user typed the superscript.
+    """
+    m = re.match(r"^(\d+)([⁰¹²³⁴⁵⁶⁷⁸⁹]+)$", section)
+    if m:
+        return f"{m.group(1)}^{m.group(2).translate(_SUPERSCRIPT_DIGITS)}"
+    dotted = re.match(r"^(\d+)\.(\d+)$", section)
+    if dotted:
+        return f"{dotted.group(1)}^{dotted.group(2)}"
+    return section
+
+
 def _canonical_provision_text(
     law_short: str,
     section: str,
@@ -288,11 +326,12 @@ def _canonical_provision_text(
     """Render a canonical ``"Law § N[ lg N][ p N]"`` provision string.
 
     The ontology stores provision literals in a consistent shape; the
-    user's typing may differ in spacing ("§35", "lg2"). Re-spelling
-    here gives the resolver its best shot at an exact literal match
-    before it falls back to the law short-name lookup.
+    user's typing may differ in spacing ("§35", "lg2") or superscript
+    spelling ("§ 113¹" vs "§ 113^1"). Re-spelling here gives the
+    resolver its best shot at an exact literal match before it falls
+    back to the law short-name lookup.
     """
-    out = f"{law_short} § {section}"
+    out = f"{law_short} § {_canonical_section(section)}"
     if lg:
         out += f" lg {lg}"
     if p:
