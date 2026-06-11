@@ -497,15 +497,37 @@ def _filter_querystring(filters: dict) -> str:  # type: ignore[type-arg]
     """Encode filters (incl. repeated ``actions``) into a stable query string.
 
     Used both for pagination links and the CSV export href so a filtered
-    view round-trips across page navigation and downloads. The org value
-    (including the ``all`` cross-org sentinel) is preserved so an explicit
-    org scope survives pagination (#861-B).
+    view round-trips across page navigation and downloads.
+
+    Org handling (#861-B, #886 review): the *effective* org scope must
+    survive pagination so page 2 does not widen back to all orgs — but it
+    must NOT promote the resolved *default* own-org scope into an explicit
+    ``?org=`` filter (that would flip page 2 into the "over-filtered" empty
+    state and mislabel the export). So we emit ``org=`` only when the scope
+    was either an explicit choice (``org_present``) or the ``all`` cross-org
+    sentinel; for the default own-org case we omit it, and page 2 re-derives
+    the same own-org scope via :func:`_resolve_org_scope`.
     """
     parts: list[tuple[str, str]] = []
-    for key in ("action", "user", "org", "from", "to", "query"):
+    for key in ("action", "user", "from", "to", "query"):
         val = filters.get(key)
         if val:
             parts.append((key, str(val)))
+
+    org_effective = filters.get("org_effective")
+    if org_effective is None:
+        # Legacy callers that never set ``org_effective`` (e.g. raw test
+        # dicts) fall back to the request value with the old semantics.
+        org_raw = filters.get("org")
+        if org_raw:
+            parts.append(("org", str(org_raw)))
+    else:
+        is_all = str(org_effective).strip().lower() in _ORG_ALL_TOKENS
+        explicit = bool(filters.get("org_present"))
+        if explicit or is_all:
+            parts.append(("org", str(org_effective)))
+        # else: resolved default own-org — omit so it stays the baseline.
+
     for act in filters.get("actions", []) or []:
         if act:
             parts.append(("actions", act))
@@ -515,10 +537,17 @@ def _filter_querystring(filters: dict) -> str:  # type: ignore[type-arg]
 def _has_narrowing_filter(filters: dict) -> bool:  # type: ignore[type-arg]
     """True when the admin applied a result-narrowing filter (#861-B).
 
-    Used only to pick the empty-state copy. The org dimension is excluded:
-    the viewer always resolves *some* org scope (own org or the ``all``
-    cross-org view) by default, so it is not a user-applied narrowing of an
-    otherwise-empty log. A *specific* org chosen explicitly still counts.
+    Used only to pick the empty-state copy. The org dimension counts ONLY
+    when the request *explicitly* supplied a specific org (``org_present``
+    is set AND the value is a real org, not blank/the ``all`` sentinel). The
+    resolved default scope (own-org-by-default, or the cross-org view) must
+    NOT count — otherwise an org admin with an empty log would get the
+    "over-filtered" empty state and a "clear filters" button that just
+    reloads the identical default scope, a no-op loop (#886 review).
+
+    This reads ``filters["org"]`` / ``filters["org_present"]`` — the *actual
+    request* signal, which the page handler leaves untouched — not the
+    resolved ``org_effective``.
     """
     if filters.get("action") or filters.get("actions"):
         return True
@@ -526,6 +555,8 @@ def _has_narrowing_filter(filters: dict) -> bool:  # type: ignore[type-arg]
         return True
     if filters.get("query"):
         return True
+    if not filters.get("org_present"):
+        return False
     org_val = (filters.get("org") or "").strip()
     return bool(org_val) and org_val.lower() not in _ORG_ALL_TOKENS
 
@@ -657,12 +688,16 @@ def _audit_filter_form(
 def _csv_export_link(filters: dict) -> object:  # type: ignore[type-arg]
     """Render an export-to-CSV link that respects the current filter set.
 
-    Labelled "Ekspordi filtreeritud vaade" when any filter is active so it
-    is obvious the download is scoped, not a full dump.
+    The href always carries the *effective* org scope (via
+    :func:`_filter_querystring`) so the download matches the on-screen view.
+    The label says "Ekspordi filtreeritud vaade" only when a real
+    result-narrowing filter is active (an explicit org or any other filter),
+    not merely because the default org scope is present (#886 review) — the
+    org-scoped default is still the baseline view, not a user-applied filter.
     """
     qs = _filter_querystring(filters)
     href = f"/admin/audit/export?{qs}" if qs else "/admin/audit/export"
-    label = "Ekspordi filtreeritud vaade" if qs else "Ekspordi CSV"
+    label = "Ekspordi filtreeritud vaade" if _has_narrowing_filter(filters) else "Ekspordi CSV"
     return A(  # noqa: F405
         label,
         href=href,
@@ -682,9 +717,11 @@ def _filter_summary_text(filters: dict, total: int) -> str:  # type: ignore[type
         active.append("tegevus: " + ", ".join(actions))
     if filters.get("user"):
         active.append("kasutaja valitud")
-    # #861-B: surface the org scope explicitly so the admin always knows
-    # whether they are seeing one org or the whole platform.
-    org_val = (filters.get("org") or "").strip()
+    # #861-B: surface the *effective* org scope (``org_effective``, falling
+    # back to the raw ``org``) so the admin always knows whether they are
+    # seeing one org or the whole platform — even when the scope came from
+    # the default-to-own-org policy rather than an explicit ?org= (#886 review).
+    org_val = (filters.get("org_effective") or filters.get("org") or "").strip()
     if org_val and org_val.lower() not in _ORG_ALL_TOKENS:
         active.append("organisatsioon valitud")
     elif org_val.lower() in _ORG_ALL_TOKENS:
@@ -816,12 +853,15 @@ def admin_audit_page(req: Request):
         user_filter = filters["user"] or None
         # #861-B: default to the admin's own org, honour explicit ?org= override.
         org_filter = _resolve_org_scope(filters, auth)
-        # Pin the resolved scope back onto ``filters`` so pagination links,
-        # the CSV-export href, and the result summary all carry the effective
-        # org (otherwise page 2 would silently widen back to all orgs). The
-        # ``all`` sentinel makes the cross-org view round-trip explicitly.
-        filters["org"] = org_filter or "all"
-        filters["org_present"] = True
+        # Record the *resolved* scope under a separate key so URL builders
+        # (pagination links, CSV-export href) and the result summary carry the
+        # effective org — page 2 must not silently widen back to all orgs. We
+        # deliberately do NOT clobber ``filters["org"]`` / ``filters["org_present"]``:
+        # those keep reflecting the actual request so ``_has_narrowing_filter``
+        # can still tell an explicit specific-org filter from the resolved
+        # default (#886 review). The ``all`` sentinel round-trips the cross-org
+        # view explicitly.
+        filters["org_effective"] = org_filter or "all"
         date_from = _parse_date(filters["from"])
         date_to = _parse_date(filters["to"])
         query_filter = filters["query"] or None
