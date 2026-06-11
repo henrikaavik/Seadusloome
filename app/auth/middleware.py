@@ -10,6 +10,7 @@ from urllib.parse import parse_qsl
 from starlette.requests import Request
 from starlette.responses import RedirectResponse, Response
 
+from app.auth.audit import log_action
 from app.auth.cookies import set_auth_cookie
 from app.auth.jwt_provider import JWTAuthProvider
 
@@ -251,6 +252,17 @@ def auth_before(req: Request) -> Response | None:
         rotated = try_refresh_access_token(refresh_token, provider=provider)
         if rotated is not None:
             new_access, new_refresh, _user = rotated
+
+            # #851: audit the token rotation with the validated source IP.
+            # The IP is read inline (not via perimeter.client_ip) because
+            # app.auth.perimeter imports _TOKEN_BEARER_PATHS from this
+            # module — importing back would be circular. log_action is
+            # fire-and-forget, so this cannot break the refresh path.
+            ip = "unknown"
+            client = getattr(req, "client", None)
+            if client is not None and getattr(client, "host", None):
+                ip = str(client.host)
+            log_action(_user.get("id"), "auth.token_refresh", {"ip": ip})
 
             # We cannot simply set cookies on the current response because the
             # Beforeware runs *before* the handler and the response object does

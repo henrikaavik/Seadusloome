@@ -37,6 +37,16 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 60
 REFRESH_TOKEN_EXPIRE_DAYS = 30
 JWT_ALGORITHM = "HS256"
 
+# #851 (timing enumeration): a static bcrypt hash (cost 12 — the same
+# default cost ``hash_password`` uses) that ``authenticate`` verifies a
+# candidate password against when the email is UNKNOWN. Without this,
+# an unknown email returned in ~1 ms (no bcrypt work) versus ~100 ms of
+# bcrypt for a known email — a remotely measurable account-existence
+# oracle. The hash value is irrelevant (it is the hash of a throwaway
+# pad, and the comparison result is discarded); only the equal-cost
+# bcrypt work matters.
+_DUMMY_PASSWORD_HASH = "$2b$12$0geTT8MNXJAq7cFcnXIJLeKPJf1v7qmcEKSW.LYuxOBxAMbCcomd6"
+
 
 def _hash_token(token: str) -> str:
     """Return a SHA-256 hex digest of *token* for safe storage."""
@@ -72,6 +82,10 @@ class JWTAuthProvider(AuthProvider):
         """Verify *email* / *password* against the users table.
 
         Returns a ``UserDict`` on success, ``None`` otherwise.
+
+        #851: the unknown-email path performs a dummy bcrypt check
+        against :data:`_DUMMY_PASSWORD_HASH` so the response time does
+        not reveal whether the email exists.
         """
         with self._connect() as conn:
             row = conn.execute(
@@ -82,6 +96,9 @@ class JWTAuthProvider(AuthProvider):
             ).fetchone()
 
         if row is None:
+            # Equalize timing with the known-email path (see #851 note
+            # on _DUMMY_PASSWORD_HASH). Result intentionally discarded.
+            bcrypt.checkpw(password.encode(), _DUMMY_PASSWORD_HASH.encode())
             return None
 
         user_id, user_email, pw_hash, full_name, role, org_id, must_change = row
