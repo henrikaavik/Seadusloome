@@ -239,6 +239,8 @@ def create_annotation(
     target_id: str,
     content: str,
     target_metadata: dict | None = None,
+    *,
+    mentions: list[uuid.UUID] | None = None,
 ) -> Annotation:
     """Insert a new ``annotations`` row and return the created annotation.
 
@@ -246,6 +248,12 @@ def create_annotation(
     to ``content_encrypted``; the legacy plaintext ``content`` column is left
     NULL, matching :func:`create_row_annotation` (#772). Read paths fall back
     to plaintext for rows written before this change.
+
+    ``mentions`` is a pre-resolved list of in-org user UUIDs (see
+    :func:`parse_mentions`). The caller resolves them rather than this helper
+    so the write still performs exactly one ``conn.execute`` (#861). The
+    ``content_encrypted`` ciphertext stays the LAST bound parameter so the
+    encryption-at-rest contract tests keep their ``params[-1]`` anchor.
 
     The caller is responsible for committing the transaction.
     """
@@ -258,8 +266,8 @@ def create_annotation(
         f"""
         INSERT INTO annotations
             (user_id, org_id, target_type, target_id, target_metadata,
-             content, content_encrypted)
-        VALUES (%s, %s, %s, %s, %s::jsonb, NULL, %s)
+             mentions, content, content_encrypted)
+        VALUES (%s, %s, %s, %s, %s::jsonb, %s, NULL, %s)
         RETURNING {_ANNOTATION_COLUMNS}
         """,
         (
@@ -268,6 +276,7 @@ def create_annotation(
             target_type,
             target_id,
             json.dumps(target_metadata) if target_metadata is not None else None,
+            [str(m) for m in mentions] if mentions else [],
             ciphertext,
         ),
     ).fetchone()
@@ -378,6 +387,8 @@ def create_reply(
     annotation_id: uuid.UUID | str,
     user_id: uuid.UUID | str,
     content: str,
+    *,
+    mentions: list[uuid.UUID] | None = None,
 ) -> AnnotationReply:
     """Insert a new ``annotation_replies`` row and return the created reply.
 
@@ -386,6 +397,12 @@ def create_reply(
     NULL (#772). Read paths fall back to plaintext for rows written before
     this change.
 
+    ``mentions`` is a pre-resolved list of in-org user UUIDs (see
+    :func:`parse_mentions`). The caller resolves them so this helper still
+    performs exactly one ``conn.execute`` (#861); the ``content_encrypted``
+    ciphertext stays the LAST bound parameter so the encryption-at-rest
+    contract tests keep their ``params[-1]`` anchor.
+
     The caller is responsible for committing the transaction.
     """
     ciphertext = encrypt_text(content)
@@ -393,13 +410,14 @@ def create_reply(
     row = conn.execute(
         f"""
         INSERT INTO annotation_replies
-            (annotation_id, user_id, content, content_encrypted)
-        VALUES (%s, %s, NULL, %s)
+            (annotation_id, user_id, mentions, content, content_encrypted)
+        VALUES (%s, %s, %s, NULL, %s)
         RETURNING {_REPLY_COLUMNS}
         """,
         (
             str(annotation_id),
             str(user_id),
+            [str(m) for m in mentions] if mentions else [],
             ciphertext,
         ),
     ).fetchone()
@@ -443,6 +461,23 @@ def list_replies(
 # as a single token so the server resolves it unambiguously even when two
 # users in different orgs share the same email local-part.
 _MENTION_RE = re.compile(r"@([\w.\-]+(?:@[\w.\-]+)?)")
+
+# Upper bound on resolved mentions per message (#861). A single comment can
+# at most ping this many distinct in-org users; tokens beyond the cap are
+# parsed but their resolved UUIDs are dropped so a "@a @b @c …" spray cannot
+# fan out an unbounded notification storm.
+MAX_MENTIONS_PER_MESSAGE = 10
+
+
+def _escape_like(value: str) -> str:
+    """Escape LIKE wildcards so a user token matches itself literally.
+
+    ``%`` and ``_`` are LIKE metacharacters; an unescaped ``_`` in a token
+    like ``a_b`` would match ``aXb`` (over-match) and ``%`` would match any
+    run of characters. We backslash-escape ``\\``, ``%``, and ``_`` and the
+    caller pairs the pattern with an explicit ``ESCAPE '\\'`` clause (#861).
+    """
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def parse_mentions(
@@ -489,6 +524,12 @@ def parse_mentions(
     result: list[uuid.UUID] = []
 
     for token in tokens:
+        # Cap the fan-out: stop resolving once MAX_MENTIONS_PER_MESSAGE
+        # distinct users are collected so a "@a @b @c …" spray cannot trigger
+        # an unbounded notification storm (#861). Excess tokens are ignored
+        # without a DB round-trip.
+        if len(result) >= MAX_MENTIONS_PER_MESSAGE:
+            break
         # Tokens that contain ``@`` are treated as a full email address: the
         # ``users.email`` UNIQUE constraint disambiguates across orgs, so we
         # skip every name / local-part fallback to avoid resolving the wrong
@@ -500,8 +541,11 @@ def parse_mentions(
         name_variant = None if token_has_at else token.replace("_", " ")
         # Local-part prefix match: ``andres`` should resolve ``andres@min.ee``.
         # Suppressed when the token already contains ``@`` so the well-formed
-        # exact-email arm wins unambiguously.
-        email_local_pattern = None if token_has_at else f"{token.lower()}@%"
+        # exact-email arm wins unambiguously. The token's own LIKE
+        # metacharacters are escaped so an ``a_b`` token matches the literal
+        # local-part and not ``aXb`` (#861); the trailing ``@%`` stays a real
+        # wildcard. Paired with ``ESCAPE '\'`` on the LIKE clause below.
+        email_local_pattern = None if token_has_at else f"{_escape_like(token.lower())}@%"
         # Bare tokens use the legacy multi-arm OR; full-email tokens go through
         # the single exact-email arm so a local-part collision in another row
         # cannot win the LIMIT 1.
@@ -532,7 +576,7 @@ def parse_mentions(
                       AND (
                           email = %s
                           OR email = %s
-                          OR lower(email) LIKE %s
+                          OR lower(email) LIKE %s ESCAPE '\\'
                           OR full_name ILIKE %s
                           OR full_name ILIKE %s
                       )

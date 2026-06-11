@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Any
+from typing import Any, LiteralString
 
 from fasthtml.common import *  # noqa: F403
 from starlette.requests import Request
@@ -43,6 +43,7 @@ from app.annotations.models import (
     list_annotations_for_target,
     list_annotations_for_version_row,
     list_replies,
+    parse_mentions,
     reopen_row_thread,
     resolve_annotation,
     resolve_row_thread,
@@ -129,6 +130,66 @@ def _load_annotations_with_replies(
             target_id,
         )
         return []
+
+
+# Target types whose rows carry an ``org_id`` we can authorise against. The
+# ontology-backed types (``provision`` / ``entity``) are global, shared
+# read-only resources with no per-org owner, so they are not gated here —
+# only the annotation ROW is org-scoped (#861). Values are ``LiteralString``
+# so the table name composes into a ``LiteralString`` query (no SQL injection
+# surface — the names are constants, never user input).
+_ORG_OWNED_TARGETS: dict[str, LiteralString] = {
+    "draft": "drafts",
+    "conversation": "conversations",
+}
+
+
+def _caller_may_annotate_target(
+    target_type: str,
+    target_id: str,
+    caller_org_id: str,
+) -> bool:
+    """Return True iff the caller's org may annotate ``(target_type, target_id)``.
+
+    Legacy create previously accepted any ``target_id`` for a valid type and
+    simply stamped the caller's ``org_id`` — so a user could attach a comment
+    to another org's draft / conversation (#861). For org-owned targets we
+    now verify the row's ``org_id`` matches the caller's, mirroring the
+    row-annotation ACL in :func:`_load_draft_version_or_404`. Cross-org or
+    missing rows return False (the handler renders a generic error, never
+    leaking whether the target exists). Global ontology targets
+    (provision / entity) are always allowed.
+    """
+    table = _ORG_OWNED_TARGETS.get(target_type)
+    if table is None:
+        # provision / entity / unknown-but-valid types: no org ownership row.
+        return True
+    if not caller_org_id:
+        return False
+    # Org-owned targets are keyed by UUID; a non-UUID target_id cannot match
+    # a real row, so reject it before the DB round-trip.
+    parsed_target = _parse_uuid(target_id)
+    if parsed_target is None:
+        return False
+    # ``table`` comes from the trusted whitelist above — never user input —
+    # so interpolating it into the query is safe.
+    try:
+        with _connect() as conn:
+            row = conn.execute(
+                f"SELECT org_id FROM {table} WHERE id = %s",  # noqa: S608 — whitelisted table
+                (str(parsed_target),),
+            ).fetchone()
+    except Exception:
+        logger.exception(
+            "Target ACL lookup failed target_type=%s target_id=%s",
+            target_type,
+            target_id,
+        )
+        return False
+    if row is None:
+        return False
+    owning_org = str(row[0]) if row[0] is not None else ""
+    return owning_org == caller_org_id
 
 
 # ---------------------------------------------------------------------------
@@ -314,22 +375,25 @@ def mentions_search_handler(req: Request):
     if not q:
         return JSONResponse({"results": []}, status_code=200)
 
-    # ``LIKE`` pattern: prefix match on the front of the field plus
-    # substring match anywhere — matches both "And…" and "…and…" so the
-    # typeahead surfaces partial-name candidates from the start.
-    pattern = f"%{q}%"
+    # ``LIKE`` pattern: substring match anywhere — matches both "And…" and
+    # "…and…" so the typeahead surfaces partial-name candidates from the
+    # start. Escape the user-typed ``%`` / ``_`` / ``\`` so they match
+    # literally instead of acting as wildcards (#861, same class of LIKE
+    # hardening as parse_mentions); paired with ``ESCAPE '\'`` on the clause.
+    escaped_q = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    pattern = f"%{escaped_q}%"
 
     try:
         with _connect() as conn:
             rows = conn.execute(
-                """
+                r"""
                 SELECT id, full_name, email
                 FROM users
                 WHERE org_id = %s
                   AND is_active = TRUE
                   AND (
-                      lower(full_name) LIKE lower(%s)
-                      OR lower(email)  LIKE lower(%s)
+                      lower(full_name) LIKE lower(%s) ESCAPE '\'
+                      OR lower(email)  LIKE lower(%s) ESCAPE '\'
                   )
                 ORDER BY full_name
                 LIMIT 10
@@ -438,8 +502,19 @@ async def create_annotation_handler(req: Request):
             cls="annotation-popover",
         )
 
+    # #861: authorise the target before stamping the caller's org onto a new
+    # annotation. Cross-org / missing org-owned targets return a generic 404
+    # so we never leak whether the target exists.
+    if not _caller_may_annotate_target(target_type, target_id, str(org_id)):
+        return Response(status_code=404)
+
     try:
         with _connect() as conn:
+            # #861: resolve @mentions on the legacy create path too, so the
+            # "@nimi mainimiseks" placeholder is honoured here and not only on
+            # the row-annotation surface. Parsing is org-scoped inside the
+            # same connection.
+            mentions = parse_mentions(conn, content, org_id)
             annotation = create_annotation(
                 conn,
                 user_id=auth["id"],
@@ -448,6 +523,7 @@ async def create_annotation_handler(req: Request):
                 target_id=target_id,
                 content=content,
                 target_metadata=target_metadata if isinstance(target_metadata, dict) else None,
+                mentions=mentions,
             )
             conn.commit()
     except ValueError as exc:
@@ -463,6 +539,15 @@ async def create_annotation_handler(req: Request):
         )
 
     log_annotation_create(auth["id"], annotation.id, target_type, target_id)
+
+    # #861: fan out "you were mentioned" notifications, mirroring the
+    # row-annotation path. The author is excluded inside notify_*.
+    if annotation.mentions:
+        notify_annotation_mention(
+            annotation=annotation,
+            mentioned_user_ids=annotation.mentions,
+            mentioner_user_id=auth["id"],
+        )
 
     return _annotation_list_fragment(target_type, target_id, auth)
 
@@ -514,14 +599,29 @@ async def reply_annotation_handler(req: Request, id: str):
 
     try:
         with _connect() as conn:
-            reply = create_reply(conn, parsed, auth["id"], content)
+            # #861: resolve @mentions on the reply path too — the reply
+            # textarea promises "@nimi mainimiseks", so a mention here must
+            # behave like one on the row-annotation surface. Scoped to the
+            # parent annotation's org.
+            mentions = parse_mentions(conn, content, annotation.org_id)
+            reply = create_reply(conn, parsed, auth["id"], content, mentions=mentions)
             conn.commit()
     except Exception:
         logger.exception("Failed to create reply for annotation %s", id)
         return Response(status_code=500)
 
     log_annotation_reply(auth["id"], annotation.id, reply.id)
+    # Notify the annotation author of the reply (existing behaviour) and, in
+    # addition (#861), every user mentioned in the reply body. The mention
+    # notification reuses the parent annotation for the target link so the
+    # recipient lands on the same resource.
     notify_annotation_reply(annotation, reply)
+    if reply.mentions:
+        notify_annotation_mention(
+            annotation=annotation,
+            mentioned_user_ids=reply.mentions,
+            mentioner_user_id=auth["id"],
+        )
 
     # Return just the updated thread item so the outerHTML swap on
     # #annotation-thread-{id} replaces only that thread, not the whole popover.
@@ -1007,6 +1107,24 @@ def _load_panel_messages(
         return []
 
 
+def _caller_may_toggle_thread(messages: list[Annotation], auth: UserDict) -> bool:
+    """Return True iff the caller may resolve/reopen this row thread (#861).
+
+    Aligns the row-thread resolve/reopen gate with the legacy single-annotation
+    surface, which only lets the *author* (or an admin) flip resolution state.
+    A row thread has many authors, so the analogue is: the caller authored at
+    least one message in the thread, OR they are an admin. An empty thread is
+    a no-op (nothing to toggle) so it is allowed through rather than 403'd —
+    this keeps the empty-state render path intact.
+    """
+    if not messages:
+        return True
+    if auth.get("role") == "admin":
+        return True
+    caller_id = str(auth.get("id") or "")
+    return any(str(m.user_id) == caller_id for m in messages)
+
+
 # ---------------------------------------------------------------------------
 # Handler: GET /annotations/version/{draft_version_id}/{row_kind}/{row_key}
 # ---------------------------------------------------------------------------
@@ -1171,6 +1289,11 @@ def post_row_resolve_handler(
     except (ValueError, UnicodeDecodeError):
         return Response(status_code=400)
 
+    # #861: only a thread author (or admin) may resolve, matching the legacy
+    # single-annotation gate. Cross-org is already 404'd above.
+    if not _caller_may_toggle_thread(_load_panel_messages(version_uuid, row_kind, row_key), auth):
+        return Response(status_code=403)
+
     try:
         with _connect() as conn:
             updated = resolve_row_thread(
@@ -1222,6 +1345,11 @@ def post_row_reopen_handler(
         row_key = decode_row_key(row_key)
     except (ValueError, UnicodeDecodeError):
         return Response(status_code=400)
+
+    # #861: only a thread author (or admin) may reopen, matching the legacy
+    # single-annotation gate. Cross-org is already 404'd above.
+    if not _caller_may_toggle_thread(_load_panel_messages(version_uuid, row_kind, row_key), auth):
+        return Response(status_code=403)
 
     try:
         with _connect() as conn:

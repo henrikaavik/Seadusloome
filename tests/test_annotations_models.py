@@ -927,6 +927,101 @@ class TestRowAnnotationExtensions:
         assert params[1] == "john.doe@min.ee"
 
     # ------------------------------------------------------------------
+    # parse_mentions — LIKE-wildcard escaping + mention cap (#861)
+    # ------------------------------------------------------------------
+
+    def test_parse_mentions_escapes_like_wildcards_in_local_part(self):
+        """A bare token containing a LIKE metachar (``_``) must be escaped so
+        it matches literally and not as a single-char wildcard, and the LIKE
+        clause must carry an explicit ``ESCAPE '\\'`` (#861).
+        """
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = (_USER_ID,)
+
+        # Token "a_b" — the ``_`` would otherwise wildcard-match "aXb@…".
+        parse_mentions(conn, "@a_b kirjutab.", _ORG_ID)
+
+        sql, params = conn.execute.call_args.args
+        assert "ESCAPE '\\'" in sql
+        # The local-part LIKE pattern (index 3) escapes the underscore and
+        # keeps the trailing @% as a real wildcard.
+        assert params[3] == "a\\_b@%"
+
+    def test_parse_mentions_escapes_percent_in_local_part(self):
+        """A literal ``%`` in a token is escaped so it cannot match any run."""
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = (_USER_ID,)
+
+        # ``%`` is not a \\w char, so _MENTION_RE stops the token before it;
+        # use a backslash instead, which IS escapable and exercises the
+        # backslash arm of _escape_like.
+        from app.annotations.models import _escape_like
+
+        assert _escape_like("a%b_c\\d") == "a\\%b\\_c\\\\d"
+
+    def test_parse_mentions_caps_fan_out(self):
+        """No more than MAX_MENTIONS_PER_MESSAGE users resolve, even if more
+        distinct @tokens appear (#861).
+        """
+        from app.annotations.models import MAX_MENTIONS_PER_MESSAGE
+
+        conn = MagicMock()
+        # Every token resolves to a fresh unique user so dedup does not mask
+        # the cap.
+        conn.execute.return_value.fetchone.side_effect = [
+            (uuid.uuid4(),) for _ in range(MAX_MENTIONS_PER_MESSAGE + 5)
+        ]
+
+        content = " ".join(f"@user{i}" for i in range(MAX_MENTIONS_PER_MESSAGE + 5))
+        result = parse_mentions(conn, content, _ORG_ID)
+
+        assert len(result) == MAX_MENTIONS_PER_MESSAGE
+        # Resolution stops at the cap — no DB round-trip for the surplus.
+        assert conn.execute.call_count == MAX_MENTIONS_PER_MESSAGE
+
+    # ------------------------------------------------------------------
+    # create_annotation / create_reply persist resolved mentions (#861)
+    # ------------------------------------------------------------------
+
+    def test_create_annotation_persists_mentions(self):
+        """A pre-resolved mentions list is written to the mentions column and
+        the ciphertext stays the last bound param (#861)."""
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = _make_annotation_row()
+
+        mention_uid = uuid.uuid4()
+        create_annotation(
+            conn,
+            _USER_ID,
+            _ORG_ID,
+            "draft",
+            "draft-id",
+            "Tere @keegi",
+            mentions=[mention_uid],
+        )
+
+        conn.execute.assert_called_once()
+        sql, params = conn.execute.call_args.args
+        assert "mentions" in sql
+        # mentions param is a list of str UUIDs; ciphertext remains last.
+        assert [str(mention_uid)] in params
+        assert isinstance(params[-1], bytes)
+
+    def test_create_reply_persists_mentions(self):
+        """A pre-resolved mentions list is written to annotation_replies."""
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = _make_reply_row()
+
+        mention_uid = uuid.uuid4()
+        create_reply(conn, _ANN_ID, _USER_ID, "Vastus @keegi", mentions=[mention_uid])
+
+        conn.execute.assert_called_once()
+        sql, params = conn.execute.call_args.args
+        assert "mentions" in sql
+        assert [str(mention_uid)] in params
+        assert isinstance(params[-1], bytes)
+
+    # ------------------------------------------------------------------
     # list_annotations_for_version_row
     # ------------------------------------------------------------------
 
