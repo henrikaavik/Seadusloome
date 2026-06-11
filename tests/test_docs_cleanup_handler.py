@@ -1,10 +1,12 @@
-"""Tests for the ``draft_cleanup`` background job handler (#628, #736).
+"""Tests for the ``draft_cleanup`` background job handler (#628, #736, #845).
 
-The handler is deliberately tolerant of partial failure: we keep the
-user-visible delete fast by moving external cleanups (encrypted file +
-Jena graph purge) off-line, and we only re-raise when EVERYTHING fails
-(work was attempted, nothing was cleaned) so a persistently-missing
-Jena graph doesn't loop us forever once the files are already gone.
+The handler keeps the user-visible delete fast by moving external
+cleanups (encrypted file + Jena graph + rendered export purge)
+off-line. Within a run it attempts every item even when one fails, but
+any failure makes the run raise at the end (#845 B3): each step is
+idempotent (missing file / absent graph count as success), so the
+worker's bounded retry budget can re-run the whole payload instead of
+silently reporting success over orphaned sensitive artifacts.
 
 #736 widened the payload from a single ``storage_path`` / ``graph_uri``
 to ``storage_paths`` / ``graph_uris`` arrays — one entry per draft
@@ -104,24 +106,32 @@ class TestDraftCleanupHandler:
     @patch("app.docs.cleanup_handler.delete_named_graph")
     @patch("app.docs.cleanup_handler.delete_encrypted_file")
     def test_one_bad_path_does_not_abort_the_rest(self, mock_file, mock_graph):
-        """A missing/erroring file is logged and skipped; siblings still go."""
+        """An erroring file is logged and the siblings are still attempted.
+
+        #845 (B3): the run now raises at the END so the worker's retry
+        budget engages on the failed path — but only after every other
+        path got its delete attempt (idempotent re-runs converge).
+        """
 
         def _maybe_boom(path):
             if path == "/tmp/v2.enc":
                 raise RuntimeError("disk boom")
 
         mock_file.side_effect = _maybe_boom
-        result = draft_cleanup(
-            {
-                "draft_id": "d1",
-                "storage_paths": ["/tmp/v1.enc", "/tmp/v2.enc", "/tmp/v3.enc"],
-                "graph_uris": [],
-            }
-        )
-        # v1 + v3 succeeded, v2 failed — but no exception bubbled up
-        # because there was *some* progress.
-        assert result["storage_deleted"] == 2
-        assert result["storage_total"] == 3
+        with pytest.raises(RuntimeError, match="disk boom"):
+            draft_cleanup(
+                {
+                    "draft_id": "d1",
+                    "storage_paths": ["/tmp/v1.enc", "/tmp/v2.enc", "/tmp/v3.enc"],
+                    "graph_uris": [],
+                }
+            )
+        # v2 failing did NOT abort v3 — all three were attempted.
+        assert [c.args[0] for c in mock_file.call_args_list] == [
+            "/tmp/v1.enc",
+            "/tmp/v2.enc",
+            "/tmp/v3.enc",
+        ]
 
     # -- failure semantics ------------------------------------------------
 
@@ -141,18 +151,26 @@ class TestDraftCleanupHandler:
 
     @patch("app.docs.cleanup_handler.delete_named_graph")
     @patch("app.docs.cleanup_handler.delete_encrypted_file")
-    def test_partial_failure_does_not_raise(self, mock_file, mock_graph):
-        """Files deleted but Jena still failing — don't loop forever."""
+    def test_partial_failure_raises_so_retry_budget_engages(self, mock_file, mock_graph):
+        """Files deleted but Jena still failing must raise (#845 B3).
+
+        Pre-#845 a partial success returned cleanly, which silently
+        orphaned the sensitive named graph with zero retries. Re-running
+        is safe (file deletes are idempotent: missing file == success),
+        so the run fails and the worker retries until the bounded budget
+        is exhausted — at which point the job is *visibly* failed.
+        """
         mock_graph.side_effect = RuntimeError("jena boom")
-        result = draft_cleanup(
-            {
-                "draft_id": "d1",
-                "storage_paths": ["/tmp/v1.enc"],
-                "graph_uris": ["https://example.org/drafts/d1"],
-            }
-        )
-        assert result["storage_deleted"] == 1
-        assert result["graph_deleted"] == 0
+        with pytest.raises(RuntimeError, match="jena boom"):
+            draft_cleanup(
+                {
+                    "draft_id": "d1",
+                    "storage_paths": ["/tmp/v1.enc"],
+                    "graph_uris": ["https://example.org/drafts/d1"],
+                }
+            )
+        # The storage delete was still attempted before the raise.
+        mock_file.assert_called_once_with("/tmp/v1.enc")
 
     def test_empty_payload_is_a_no_op(self):
         result = draft_cleanup({"draft_id": "d1"})

@@ -1289,14 +1289,42 @@ def export_docx(req: Request, session_id: str):
         except Exception:
             logger.warning("Could not load impact summary for session %s", session.id)
 
-    docx_path = build_drafter_docx(
-        session_id=str(session.id),
-        title=title,
-        workflow_type=session.workflow_type,
-        structure=structure,
-        clauses=clauses,
-        impact_summary=impact_summary,
+    # #845 (B4a): the rendered draft is politically sensitive plaintext.
+    # Write it to a response-scoped 0600 temp file (NOT EXPORT_DIR, where
+    # it used to persist keyed by session id with no deletion path) and
+    # remove it right after Starlette finishes streaming the response.
+    import tempfile
+    from pathlib import Path as _Path
+
+    from starlette.background import BackgroundTask
+
+    tmp_handle = tempfile.NamedTemporaryFile(
+        prefix=f"seadusloome-eelnou-{session.id}-",
+        suffix=".docx",
+        delete=False,
     )
+    tmp_handle.close()
+    tmp_path = _Path(tmp_handle.name)
+
+    def _discard_tmp_export() -> None:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Failed to remove temp drafter export %s", tmp_path, exc_info=True)
+
+    try:
+        docx_path = build_drafter_docx(
+            session_id=str(session.id),
+            title=title,
+            workflow_type=session.workflow_type,
+            structure=structure,
+            clauses=clauses,
+            impact_summary=impact_summary,
+            out_path=tmp_path,
+        )
+    except Exception:
+        _discard_tmp_export()
+        raise
 
     log_drafter_export(auth.get("id"), session.id)
 
@@ -1321,6 +1349,7 @@ def export_docx(req: Request, session_id: str):
         str(docx_path),
         filename=filename,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        background=BackgroundTask(_discard_tmp_export),
     )
 
 

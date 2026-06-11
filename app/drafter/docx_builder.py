@@ -21,7 +21,6 @@ Content structure for VTK:
 from __future__ import annotations
 
 import logging
-import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -30,6 +29,7 @@ from docx import Document
 from docx.enum.section import WD_SECTION
 from docx.shared import Pt
 
+from app.docs.docx_export import get_export_dir
 from app.drafter.citations import coerce_citation, unverified_label
 from app.ui.time import format_tallinn
 
@@ -37,16 +37,15 @@ logger = logging.getLogger(__name__)
 
 
 def _get_export_dir() -> Path:
-    """Return the export directory, creating it if needed."""
-    raw = os.environ.get("EXPORT_DIR")
-    if raw:
-        p = Path(raw)
-    elif os.environ.get("APP_ENV", "development") == "development":
-        p = Path("./storage/exports").resolve()
-    else:
-        p = Path("/var/seadusloome/exports")
-    p.mkdir(parents=True, exist_ok=True)
-    return p
+    """Return the export directory, creating it if needed.
+
+    #845 (C2): delegates to :func:`app.docs.docx_export.get_export_dir`
+    so BOTH export writers share one resolution path — including the
+    production fail-closed guard against an in-repo directory — and
+    neither module can drift back to a ``./storage/exports`` default
+    on its own.
+    """
+    return get_export_dir(create=True)
 
 
 _WATERMARK_TEXT = (
@@ -123,6 +122,7 @@ def build_drafter_docx(
     clauses: list[dict[str, Any]],
     *,
     impact_summary: dict[str, Any] | None = None,
+    out_path: Path | None = None,
 ) -> Path:
     """Build the final .docx and return the path.
 
@@ -133,12 +133,19 @@ def build_drafter_docx(
         structure: The proposed structure dict.
         clauses: List of drafted clause dicts.
         impact_summary: Optional impact analysis summary for appendix.
+        out_path: Explicit output file path. The user-facing export
+            route passes a response-scoped temp file here so the
+            plaintext draft never persists on disk after delivery
+            (#845 B4a). When ``None``, falls back to
+            ``EXPORT_DIR/drafter-<session_id>.docx`` (shared, guarded
+            resolution via :func:`_get_export_dir`).
 
     Returns:
         Path to the generated .docx file.
     """
-    export_dir = _get_export_dir()
-    out_path = export_dir / f"drafter-{session_id}.docx"
+    if out_path is None:
+        export_dir = _get_export_dir()
+        out_path = export_dir / f"drafter-{session_id}.docx"
 
     doc = Document()
 

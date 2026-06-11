@@ -2063,6 +2063,43 @@ async def export_draft_report_handler(req: Request, draft_id: str):
 # ---------------------------------------------------------------------------
 
 
+def _report_belongs_to_draft(report_id: Any, draft_id: uuid.UUID) -> bool:
+    """Return True when the job's *report_id* is still a report of *draft_id*.
+
+    #845 ride-along: the export worker guards report↔draft binding at
+    render time (``export_handler.py``), but a finished job keeps
+    serving its cached artifact afterwards — so a report that has since
+    been deleted or re-bound (re-analysis, version rollback) must be
+    re-checked at *serving* time too. A missing/garbled ``report_id``
+    or a definitive "no such row" answer fails closed.
+
+    A DB **transport** error returns True instead: the caller has
+    already passed the fail-closed, org-scoped ``fetch_draft`` +
+    ``can_view_draft`` gate (itself DB-backed, so a genuine outage
+    404s before we ever get here), and this secondary integrity check
+    must not take downloads offline on a blip — mirroring how
+    ``touch_draft_access_conn`` swallows DB errors on these routes.
+    """
+    try:
+        parsed_report = uuid.UUID(str(report_id))
+    except (TypeError, ValueError):
+        return False
+    try:
+        with _connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM impact_reports WHERE id = %s AND draft_id = %s",
+                (str(parsed_report), str(draft_id)),
+            ).fetchone()
+    except Exception:
+        logger.exception(
+            "_report_belongs_to_draft: lookup failed report=%s draft=%s",
+            parsed_report,
+            draft_id,
+        )
+        return True
+    return row is not None
+
+
 def export_status_fragment(req: Request, draft_id: str, job_id: str):
     """GET /drafts/{draft_id}/export-status/{job_id} — poll fragment."""
     auth_or_redirect = _require_auth(req)
@@ -2101,6 +2138,10 @@ def export_status_fragment(req: Request, draft_id: str, job_id: str):
         return _not_found_page(req)
 
     if job.status == "success":
+        # #845: never render a download link for a report that no longer
+        # belongs to this draft (deleted / re-bound after the job ran).
+        if not _report_belongs_to_draft(payload.get("report_id"), parsed_draft):
+            return _not_found_page(req)
         # #572: a successful export that the user observes counts as
         # access; reset the archive clock.
         touch_draft_access_conn(parsed_draft)
@@ -2236,6 +2277,12 @@ def download_export_handler(req: Request, draft_id: str, job_id: str):
 
     payload = job.payload or {}
     if str(payload.get("draft_id")) != str(parsed_draft):
+        return _not_found_page(req)
+
+    # #845: the worker verified report↔draft binding when it *rendered*
+    # the file (export_handler), but this job may be stale — re-assert
+    # the binding before serving the cached artifact.
+    if not _report_belongs_to_draft(payload.get("report_id"), parsed_draft):
         return _not_found_page(req)
 
     # #613: pick the artefact + MIME based on the job's stored format.
