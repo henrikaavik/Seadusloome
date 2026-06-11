@@ -33,12 +33,12 @@ def _no_background_flush():
         # in-flight flag, or a retention sweep from one test can't affect another.
         m._flush_suppressed_until = 0.0
         m._flush_in_progress = False
-        m._last_retention_sweep = 0.0
+        m._last_retention_sweep = None
         yield
         m._BUFFER.clear()
         m._flush_suppressed_until = 0.0
         m._flush_in_progress = False
-        m._last_retention_sweep = 0.0
+        m._last_retention_sweep = None
 
 
 def _authenticated_user() -> dict[str, Any]:
@@ -137,7 +137,7 @@ class TestRetention:
         import app.metrics as m
 
         # Force the throttle to allow a sweep this flush.
-        m._last_retention_sweep = 0.0
+        m._last_retention_sweep = None
 
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
@@ -164,7 +164,7 @@ class TestRetention:
     def test_retention_disabled(self, mock_connect: MagicMock):
         import app.metrics as m
 
-        m._last_retention_sweep = 0.0
+        m._last_retention_sweep = None
 
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
@@ -183,21 +183,22 @@ class TestRetention:
     @patch.dict("os.environ", {"METRICS_RETENTION_DAYS": "7"})
     @patch("app.metrics._connect")
     def test_retention_throttled_to_one_sweep_per_interval(self, mock_connect: MagicMock):
-        import time
-
         import app.metrics as m
 
-        # Pretend a sweep just happened: the next flush must NOT prune.
-        m._last_retention_sweep = time.monotonic()
+        # Pin the clock so the test is fully deterministic (no wall-clock /
+        # boot-relative dependence): a sweep happened 1s ago, well inside the
+        # interval, so the next flush must NOT prune.
+        with patch.object(m.time, "monotonic", return_value=10_000.0):
+            m._last_retention_sweep = 9_999.0
 
-        mock_conn = MagicMock()
-        mock_cursor = MagicMock()
-        mock_conn.cursor.return_value = mock_cursor
-        mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
-        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+            mock_conn = MagicMock()
+            mock_cursor = MagicMock()
+            mock_conn.cursor.return_value = mock_cursor
+            mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+            mock_connect.return_value.__exit__ = MagicMock(return_value=False)
 
-        m.record_metric("ret_metric", 1.0)
-        m._flush_buffer()
+            m.record_metric("ret_metric", 1.0)
+            m._flush_buffer()
 
         delete_calls = [
             c for c in mock_conn.execute.call_args_list if "DELETE FROM metrics" in c[0][0]

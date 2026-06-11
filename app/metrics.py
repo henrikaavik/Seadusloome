@@ -75,7 +75,12 @@ _MAX_LABEL_LEN = 200
 # DELETE on every batch. The (name, recorded_at) index from migration 011 plus
 # the recorded_at index from migration 043 keep the sweep cheap.
 _RETENTION_SWEEP_INTERVAL = 3600.0  # seconds — at most one sweep per hour
-_last_retention_sweep: float = 0.0
+# ``None`` means "never swept yet" so the first flush always prunes. We must NOT
+# use 0.0 as a "long ago" sentinel: ``time.monotonic()`` is relative to an
+# arbitrary (often boot-relative) epoch, so on a freshly-booted host ``now``
+# can be < _RETENTION_SWEEP_INTERVAL and ``now - 0.0`` would wrongly throttle
+# the very first sweep.
+_last_retention_sweep: float | None = None
 
 
 def _retention_days() -> int:
@@ -102,7 +107,10 @@ def _maybe_prune(conn: Any) -> None:
 
     now = time.monotonic()
     with _lock:
-        if now - _last_retention_sweep < _RETENTION_SWEEP_INTERVAL:
+        # None => never swept => always due. Otherwise enforce the interval.
+        if _last_retention_sweep is not None and (
+            now - _last_retention_sweep < _RETENTION_SWEEP_INTERVAL
+        ):
             return
         _last_retention_sweep = now
 

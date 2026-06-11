@@ -140,6 +140,9 @@ def test_checkout_failure_trips_breaker_for_fast_subsequent_failures(
 ):
     """A getconn failure trips the breaker; the next call fails immediately."""
     monkeypatch.setattr(db, "_BREAKER_COOLDOWN", 30.0)
+    # Pin the clock so the second call is unambiguously inside the cooldown,
+    # independent of wall-clock / boot-relative monotonic values.
+    monkeypatch.setattr(db.time, "monotonic", lambda: 10_000.0)
     pool = MagicMock(name="ConnectionPool")
     pool.getconn.side_effect = RuntimeError("pool timeout")
 
