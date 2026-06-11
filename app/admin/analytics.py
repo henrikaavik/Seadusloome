@@ -12,6 +12,7 @@ from __future__ import annotations
 import csv
 import io
 import logging
+import threading
 from datetime import UTC, date, datetime
 from urllib.parse import urlencode
 
@@ -87,6 +88,30 @@ _METRIC_COLORS: dict[str, str] = {
 
 
 # ---------------------------------------------------------------------------
+# Refresh wiring (#861-C)
+# ---------------------------------------------------------------------------
+#
+# REFRESH MATERIALIZED VIEW CONCURRENTLY can take seconds on a busy database,
+# so it must run off the request path. The project's ``FOR UPDATE SKIP
+# LOCKED`` queue would be the natural home, but its handler registry
+# (``app/jobs/registry.py``) is deliberately framework-free — it must NOT
+# import FastHTML/Starlette so the standalone worker can stay slim — and this
+# module imports ``fasthtml.common`` at the top. Wiring a queue handler would
+# therefore mean a new framework-free handler module, which is out of scope
+# for this fix. Per the issue's sanctioned fallback we instead run the
+# refresh on a short-lived daemon thread and record the real completion
+# timestamp; the request returns immediately and the page polls the timestamp
+# on reload.
+#
+# The completion timestamp is a marker row in the ``metrics`` table
+# (``recorded_at`` defaults to ``now()`` at commit), read back by
+# ``_get_last_refresh`` — the *real* completion time, not the unreliable
+# ``pg_stat_all_tables.last_analyze`` proxy (which reflects ANALYZE, not
+# REFRESH, and also fires on autoanalyze).
+_REFRESH_METRIC_NAME = "usage_daily_refresh_ms"
+
+
+# ---------------------------------------------------------------------------
 # Data helpers
 # ---------------------------------------------------------------------------
 
@@ -94,16 +119,54 @@ _METRIC_COLORS: dict[str, str] = {
 def _refresh_usage_daily() -> bool:
     """Refresh the ``usage_daily`` materialized view concurrently.
 
+    On success also writes a ``usage_daily_refresh_ms`` marker row into the
+    ``metrics`` table (with ``recorded_at`` defaulting to ``now()`` at commit
+    time) so :func:`_get_last_refresh` can read back the real completion
+    timestamp (#861-C). The marker INSERT shares the refresh connection and
+    is committed atomically with it, so a recorded timestamp always implies a
+    completed refresh.
+
     Returns True on success, False on error. Errors are logged but never
     propagated so callers can degrade gracefully.
     """
     try:
         with _connect() as conn:
             conn.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY usage_daily")
+            # Marker row: value carries no meaning beyond "a refresh finished";
+            # ``recorded_at`` (default now()) is the signal we read back.
+            conn.execute(
+                "INSERT INTO metrics (name, value, labels) VALUES (%s, %s, %s::jsonb)",
+                (_REFRESH_METRIC_NAME, 0, '{"source": "refresh_usage_daily"}'),
+            )
             conn.commit()
         return True
     except Exception:
         logger.exception("Failed to refresh usage_daily materialized view")
+        return False
+
+
+def trigger_usage_daily_refresh() -> bool:
+    """Start a background ``usage_daily`` refresh; return whether it launched.
+
+    Runs :func:`_refresh_usage_daily` on a short-lived daemon thread so the
+    HTTP request returns immediately (#861-C). Returns ``True`` when the
+    thread was started, ``False`` if the thread could not be launched
+    (logged, never raised) so the caller can degrade to a failure flash.
+
+    Clean, framework-free signature so it can later be wrapped as a REST
+    endpoint or MCP tool (Phase 5). The actual completion timestamp is
+    recorded by the thread and surfaced via :func:`_get_last_refresh`.
+    """
+    try:
+        thread = threading.Thread(
+            target=_refresh_usage_daily,
+            name="usage-daily-refresh",
+            daemon=True,
+        )
+        thread.start()
+        return True
+    except Exception:
+        logger.exception("Failed to start usage_daily refresh thread")
         return False
 
 
@@ -187,15 +250,30 @@ def _get_usage_by_org(days: int = 30) -> list[dict]:  # type: ignore[type-arg]
 
 
 def _get_last_refresh() -> datetime | None:
-    """Return the last successful refresh timestamp of ``usage_daily``.
+    """Return the last successful refresh-completion timestamp of ``usage_daily``.
 
-    Reads ``pg_stat_all_tables.last_analyze`` for the materialized view
-    as a best-effort proxy — Postgres updates that statistic on every
-    REFRESH.  Returns ``None`` if the view does not exist or the system
-    catalog query fails.
+    Reads the ``recorded_at`` of the most recent ``usage_daily_refresh_ms``
+    marker row that :func:`_refresh_usage_daily` writes on every successful
+    refresh (#861-C) — this is the *real* completion time, not a statistics
+    proxy.
+
+    Falls back to ``pg_stat_all_tables.last_analyze`` only when no marker row
+    exists yet (e.g. the first page load after deploy, before any refresh has
+    run through the new code path). Returns ``None`` when neither signal is
+    available or the query fails.
     """
     try:
         with _connect() as conn:
+            row = conn.execute(
+                "SELECT recorded_at FROM metrics "
+                "WHERE name = %s "
+                "ORDER BY recorded_at DESC LIMIT 1",
+                (_REFRESH_METRIC_NAME,),
+            ).fetchone()
+            if row and row[0]:
+                return row[0]
+
+            # Legacy fallback: best-effort proxy from the planner stats.
             row = conn.execute(
                 "SELECT GREATEST("
                 "  COALESCE(last_analyze, '-infinity'::timestamptz), "
@@ -387,9 +465,23 @@ def admin_analytics_page(req: Request):
         summary = _usage_summary(data)
         last_refresh = _get_last_refresh()
 
-        # ---- Optional flash banner from a successful refresh redirect ----
+        # ---- Optional flash banner from a refresh redirect ----
+        # #861-C: the refresh now runs as a background job, so the common
+        # outcome is "queued". The legacy ``ok`` state is still honoured for
+        # any in-flight redirect/bookmark.
         flash_banner: object | None = None
-        if req.query_params.get("refreshed") == "ok":
+        refreshed_flag = req.query_params.get("refreshed")
+        if refreshed_flag == "queued":
+            flash_banner = Alert(
+                P(  # noqa: F405
+                    "Andmete värskendamine pandi taustatööde järjekorda. "
+                    "Värskendatud andmed ilmuvad mõne hetke pärast — "
+                    "laadi leht uuesti."
+                ),
+                variant="info",
+                title="Värskendamine järjekorras",
+            )
+        elif refreshed_flag == "ok":
             ts_raw = req.query_params.get("refreshed_at", "")
             flash_banner = Alert(
                 P(  # noqa: F405
@@ -398,7 +490,7 @@ def admin_analytics_page(req: Request):
                 variant="success",
                 title="Värskendatud",
             )
-        elif req.query_params.get("refreshed") == "fail":
+        elif refreshed_flag == "fail":
             flash_banner = Alert(
                 P("Andmete värskendamine ebaõnnestus. Proovi uuesti."),  # noqa: F405
                 variant="danger",
@@ -660,25 +752,25 @@ def admin_analytics_page(req: Request):
 
 
 def admin_analytics_refresh(req: Request):
-    """POST /admin/analytics/refresh — refresh ``usage_daily`` on demand.
+    """POST /admin/analytics/refresh — start a ``usage_daily`` refresh.
 
-    Redirects back to ``/admin/analytics`` with a flash banner indicating
-    success or failure.  Preserves the active ``?window=`` selection so
-    the admin lands on the same view they triggered the refresh from.
+    The REFRESH runs off the request path on a background thread (#861-C) so
+    a slow concurrent refresh never blocks the request thread. Redirects back
+    to ``/admin/analytics`` with a flash banner; the ``?window=`` selection
+    is preserved so the admin lands on the same view they triggered the
+    refresh from. The real completion timestamp is recorded by the refresh
+    and surfaced via ``_get_last_refresh`` on the next page load.
     """
     try:
-        from app.admin.analytics import _refresh_usage_daily, _resolve_window
-        from app.ui.time import format_tallinn
+        from app.admin.analytics import _resolve_window, trigger_usage_daily_refresh
 
         # Window can ride on the query string (``?window=…``) so plain
         # form posts that put the selection in the URL keep working.
         slug, _days = _resolve_window(req.query_params.get("window"))
 
-        ok = _refresh_usage_daily()
-        flash = "ok" if ok else "fail"
+        started = trigger_usage_daily_refresh()
+        flash = "queued" if started else "fail"
         params = {"window": slug, "refreshed": flash}
-        if ok:
-            params["refreshed_at"] = format_tallinn(datetime.now(UTC))
         qs = urlencode(params)
         return RedirectResponse(f"/admin/analytics?{qs}", status_code=303)
     except Exception:

@@ -62,6 +62,10 @@ class TestDashboardAuth:
 
 
 class TestHealthCheck:
+    # #861-D: the unauthenticated /api/health payload is reduced to
+    # ``{"status": ...}`` — no version/SHA or per-subsystem breakdown is
+    # exposed publicly. The detailed breakdown is covered (incl. the
+    # admin-only path) in tests/test_admin_health.py::TestHealthCheckPayload.
     @patch("app.admin.health.jena_check_health")
     @patch("app.admin.health._check_postgres")
     def test_health_returns_json(self, mock_pg: MagicMock, mock_jena: MagicMock):
@@ -74,9 +78,8 @@ class TestHealthCheck:
         response = client.get("/api/health")
         assert response.status_code == 200
         data = response.json()
-        assert data["status"] == "ok"
-        assert data["jena"] is True
-        assert data["postgres"] is True
+        # Public payload is status-only.
+        assert data == {"status": "ok"}
 
     @patch("app.admin.health.jena_check_health")
     @patch("app.admin.health._check_postgres")
@@ -90,9 +93,7 @@ class TestHealthCheck:
         response = client.get("/api/health")
         assert response.status_code == 200
         data = response.json()
-        assert data["status"] == "degraded"
-        assert data["jena"] is False
-        assert data["postgres"] is True
+        assert data == {"status": "degraded"}
 
     def test_health_no_auth_required(self):
         """Health check must be accessible without cookies."""
@@ -104,8 +105,10 @@ class TestHealthCheck:
         assert response.status_code == 200
         data = response.json()
         assert data["status"] in {"ok", "degraded"}
-        assert "jena" in data
-        assert "postgres" in data
+        # No subsystem detail leaks to anonymous callers (#861-D).
+        assert "jena" not in data
+        assert "postgres" not in data
+        assert "version" not in data
 
     def test_ping_no_auth_required(self):
         """/api/ping is a lightweight liveness probe that must work anon."""

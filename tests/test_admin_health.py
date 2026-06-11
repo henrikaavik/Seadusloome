@@ -346,3 +346,119 @@ class TestAdminHealthPage:
         assert "Süsteemi tervis" in html
         # The shared error banner copy.
         assert "Andmete laadimine ebaõnnestus" in html
+
+
+# ---------------------------------------------------------------------------
+# /api/health public-payload reduction (#861-D)
+# ---------------------------------------------------------------------------
+
+
+def _health_request(*, auth: dict | None = None, cookies: dict | None = None) -> Request:  # type: ignore[type-arg]
+    """Build an ``/api/health`` Request, optionally with an auth scope/cookie."""
+    headers: list[tuple[bytes, bytes]] = []
+    if cookies:
+        cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items())
+        headers.append((b"cookie", cookie_str.encode()))
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/api/health",
+        "headers": headers,
+        "query_string": b"",
+        "scheme": "http",
+        "server": ("testserver", 80),
+        "client": ("127.0.0.1", 12345),
+    }
+    if auth is not None:
+        scope["auth"] = auth
+    return Request(scope)
+
+
+class TestHealthCheckPayload:
+    @patch("app.admin.health._check_postgres", return_value=True)
+    @patch("app.admin.health.jena_check_health", return_value=True)
+    def test_unauthenticated_payload_is_status_only(
+        self, mock_jena: MagicMock, mock_pg: MagicMock
+    ):
+        """#861-D: anonymous callers must not see version/SHA/subsystems."""
+        import json
+
+        from app.admin.health import health_check
+
+        resp = health_check(_health_request())
+        body = json.loads(bytes(resp.body).decode())
+        assert body == {"status": "ok"}
+        assert "version" not in body
+        assert "jena" not in body
+        assert "postgres" not in body
+
+    @patch("app.admin.health._check_postgres", return_value=False)
+    @patch("app.admin.health.jena_check_health", return_value=True)
+    def test_unauthenticated_degraded_status_still_minimal(
+        self, mock_jena: MagicMock, mock_pg: MagicMock
+    ):
+        import json
+
+        from app.admin.health import health_check
+
+        resp = health_check(_health_request())
+        body = json.loads(bytes(resp.body).decode())
+        assert body == {"status": "degraded"}
+
+    @patch("app.admin.health._check_postgres", return_value=True)
+    @patch("app.admin.health.jena_check_health", return_value=True)
+    def test_admin_scope_gets_detailed_payload(self, mock_jena: MagicMock, mock_pg: MagicMock):
+        """An admin (resolved via scope) gets the rich payload (#861-D)."""
+        import json
+
+        from app.admin.health import health_check
+
+        resp = health_check(_health_request(auth={"role": "admin", "id": "a-1"}))
+        body = json.loads(bytes(resp.body).decode())
+        assert body["status"] == "ok"
+        assert body["jena"] is True
+        assert body["postgres"] is True
+        assert "version" in body
+        assert set(body["version"]) >= {"app", "sha", "built_at"}
+
+    @patch("app.admin.health._check_postgres", return_value=True)
+    @patch("app.admin.health.jena_check_health", return_value=True)
+    def test_non_admin_scope_gets_minimal_payload(self, mock_jena: MagicMock, mock_pg: MagicMock):
+        import json
+
+        from app.admin.health import health_check
+
+        resp = health_check(_health_request(auth={"role": "drafter", "id": "d-1"}))
+        body = json.loads(bytes(resp.body).decode())
+        assert body == {"status": "ok"}
+
+    @patch("app.admin.health._check_postgres", return_value=True)
+    @patch("app.admin.health.jena_check_health", return_value=True)
+    def test_admin_cookie_gets_detailed_payload(self, mock_jena: MagicMock, mock_pg: MagicMock):
+        """When scope['auth'] is absent (the live SKIP_PATHS case), the
+        handler resolves an admin from the access_token cookie (#861-D)."""
+        import json
+
+        from app.admin import health as health_mod
+
+        provider = MagicMock()
+        provider.get_current_user.return_value = {"role": "admin", "id": "a-1"}
+        with patch("app.auth.middleware._get_provider", return_value=provider):
+            resp = health_mod.health_check(_health_request(cookies={"access_token": "tok"}))
+        body = json.loads(bytes(resp.body).decode())
+        assert "version" in body
+        provider.get_current_user.assert_called_once_with("tok")
+
+    @patch("app.admin.health._check_postgres", return_value=True)
+    @patch("app.admin.health.jena_check_health", return_value=True)
+    def test_bad_cookie_does_not_500(self, mock_jena: MagicMock, mock_pg: MagicMock):
+        """A malformed/expired cookie must degrade to the public payload,
+        never raise (#861-D)."""
+        import json
+
+        from app.admin import health as health_mod
+
+        with patch("app.auth.middleware._get_provider", side_effect=Exception("boom")):
+            resp = health_mod.health_check(_health_request(cookies={"access_token": "bad"}))
+        body = json.loads(bytes(resp.body).decode())
+        assert body == {"status": "ok"}

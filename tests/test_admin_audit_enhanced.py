@@ -101,6 +101,22 @@ class TestBuildAuditWhere:
         assert "a.detail::text ILIKE %s" in where
         assert "%draft%" in params
 
+    def test_query_filter_has_escape_clause(self):
+        """#861-B: the ILIKE pattern must carry an explicit ESCAPE clause."""
+        from app.admin.audit import _build_audit_where
+
+        where, _params = _build_audit_where(query="draft")
+        assert "ILIKE %s ESCAPE '\\'" in where
+
+    def test_query_filter_escapes_like_wildcards(self):
+        """#861-B: %, _ and \\ in a user query must be matched literally."""
+        from app.admin.audit import _build_audit_where
+
+        _where, params = _build_audit_where(query="100%_x\\y")
+        # The bound pattern is wrapped in %...% but the user's own wildcards
+        # are backslash-escaped so they cannot act as wildcards.
+        assert params[-1] == "%100\\%\\_x\\\\y%"
+
     def test_combined_filters(self):
         from app.admin.audit import _build_audit_where
 
@@ -326,6 +342,186 @@ class TestExtractFilters:
         req = _make_request("/admin/audit", "org=org-42")
         f = _extract_filters(req)
         assert f["org"] == "org-42"
+
+    def test_org_present_flag_tracks_explicit_param(self):
+        """#861-B: ``org_present`` distinguishes a blank ?org= from no ?org=."""
+        from app.admin.audit import _extract_filters
+
+        # Present but blank (explicit "all orgs" opt-in).
+        f_blank = _extract_filters(_make_request("/admin/audit", "org="))
+        assert f_blank["org_present"] is True
+        # Absent entirely (default-to-own-org).
+        f_absent = _extract_filters(_make_request("/admin/audit", "user=u-1"))
+        assert f_absent["org_present"] is False
+
+
+# ---------------------------------------------------------------------------
+# Org-scoping policy + LIKE escaping (#861-B)
+# ---------------------------------------------------------------------------
+
+
+class TestEscapeLike:
+    def test_escapes_percent_underscore_backslash(self):
+        from app.admin.audit import _escape_like
+
+        assert _escape_like("100%") == "100\\%"
+        assert _escape_like("a_b") == "a\\_b"
+        # Backslash escaped first so it is not double-processed.
+        assert _escape_like("a\\b") == "a\\\\b"
+
+    def test_plain_text_unchanged(self):
+        from app.admin.audit import _escape_like
+
+        assert _escape_like("draft.upload") == "draft.upload"
+
+
+class TestResolveOrgScope:
+    def test_defaults_to_own_org_when_no_param(self):
+        from app.admin.audit import _resolve_org_scope
+
+        filters = {"org": "", "org_present": False}
+        auth = {"role": "admin", "org_id": "own-org"}
+        assert _resolve_org_scope(filters, auth) == "own-org"
+
+    def test_platform_admin_without_org_sees_all_by_default(self):
+        from app.admin.audit import _resolve_org_scope
+
+        filters = {"org": "", "org_present": False}
+        auth = {"role": "admin"}  # no org_id
+        assert _resolve_org_scope(filters, auth) is None
+
+    def test_explicit_org_override_wins(self):
+        from app.admin.audit import _resolve_org_scope
+
+        filters = {"org": "picked-org", "org_present": True}
+        auth = {"role": "admin", "org_id": "own-org"}
+        assert _resolve_org_scope(filters, auth) == "picked-org"
+
+    def test_explicit_all_token_returns_none(self):
+        from app.admin.audit import _resolve_org_scope
+
+        auth = {"role": "admin", "org_id": "own-org"}
+        for token in ("all", "*", ""):
+            filters = {"org": token, "org_present": True}
+            assert _resolve_org_scope(filters, auth) is None
+
+    def test_no_auth_returns_none(self):
+        from app.admin.audit import _resolve_org_scope
+
+        assert _resolve_org_scope({"org": "", "org_present": False}, None) is None
+
+
+class TestHasNarrowingFilter:
+    def test_all_org_is_not_narrowing(self):
+        from app.admin.audit import _has_narrowing_filter
+
+        base = {"action": "", "actions": [], "user": "", "from": "", "to": "", "query": ""}
+        assert _has_narrowing_filter({**base, "org": "all"}) is False
+        assert _has_narrowing_filter({**base, "org": ""}) is False
+
+    def test_specific_org_is_narrowing(self):
+        from app.admin.audit import _has_narrowing_filter
+
+        base = {"action": "", "actions": [], "user": "", "from": "", "to": "", "query": ""}
+        assert _has_narrowing_filter({**base, "org": "org-7"}) is True
+
+    def test_other_filters_are_narrowing(self):
+        from app.admin.audit import _has_narrowing_filter
+
+        base = {
+            "action": "",
+            "actions": [],
+            "user": "",
+            "from": "",
+            "to": "",
+            "query": "",
+            "org": "all",
+        }
+        assert _has_narrowing_filter({**base, "query": "x"}) is True
+        assert _has_narrowing_filter({**base, "action": "user.login"}) is True
+
+
+class TestAuditPageOrgScoping:
+    """End-to-end: the page handler applies the default-to-own-org policy."""
+
+    @patch("app.admin.audit._get_audit_orgs")
+    @patch("app.admin.audit._get_audit_users")
+    @patch("app.admin.audit._get_distinct_actions")
+    @patch("app.admin.audit._get_audit_log_page")
+    def test_default_scopes_query_to_own_org(
+        self,
+        mock_page: MagicMock,
+        mock_actions: MagicMock,
+        mock_users: MagicMock,
+        mock_orgs: MagicMock,
+    ):
+        from app.admin.audit import admin_audit_page
+
+        mock_page.return_value = ([], 0)
+        mock_actions.return_value = []
+        mock_users.return_value = []
+        mock_orgs.return_value = []
+
+        # Admin with an org_id, no ?org= override.
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/admin/audit",
+            "headers": [],
+            "query_string": b"",
+            "scheme": "http",
+            "server": ("testserver", 80),
+            "client": ("127.0.0.1", 12345),
+            "auth": {
+                "role": "admin",
+                "id": "a-1",
+                "org_id": "home-org",
+                "email": "a@b.ee",
+                "full_name": "Admin User",
+            },
+        }
+        admin_audit_page(Request(scope))
+        # The DB query must have been scoped to the admin's own org.
+        assert mock_page.call_args.kwargs.get("org_id") == "home-org"
+
+    @patch("app.admin.audit._get_audit_orgs")
+    @patch("app.admin.audit._get_audit_users")
+    @patch("app.admin.audit._get_distinct_actions")
+    @patch("app.admin.audit._get_audit_log_page")
+    def test_explicit_all_widens_to_cross_org(
+        self,
+        mock_page: MagicMock,
+        mock_actions: MagicMock,
+        mock_users: MagicMock,
+        mock_orgs: MagicMock,
+    ):
+        from app.admin.audit import admin_audit_page
+
+        mock_page.return_value = ([], 0)
+        mock_actions.return_value = []
+        mock_users.return_value = []
+        mock_orgs.return_value = []
+
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/admin/audit",
+            "headers": [],
+            "query_string": b"org=all",
+            "scheme": "http",
+            "server": ("testserver", 80),
+            "client": ("127.0.0.1", 12345),
+            "auth": {
+                "role": "admin",
+                "id": "a-1",
+                "org_id": "home-org",
+                "email": "a@b.ee",
+                "full_name": "Admin User",
+            },
+        }
+        admin_audit_page(Request(scope))
+        # Cross-org opt-in => no org predicate.
+        assert mock_page.call_args.kwargs.get("org_id") is None
 
 
 class TestFilterQuerystring:

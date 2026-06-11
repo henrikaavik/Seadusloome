@@ -46,9 +46,15 @@ class TestRefreshUsageDaily:
 
         result = _refresh_usage_daily()
         assert result is True
-        mock_conn.execute.assert_called_once()
-        sql = mock_conn.execute.call_args[0][0]
-        assert "REFRESH MATERIALIZED VIEW CONCURRENTLY usage_daily" in sql
+        # Two statements: the REFRESH, then the completion-marker INSERT
+        # whose recorded_at is the real refresh timestamp (#861-C).
+        assert mock_conn.execute.call_count == 2
+        refresh_sql = mock_conn.execute.call_args_list[0][0][0]
+        assert "REFRESH MATERIALIZED VIEW CONCURRENTLY usage_daily" in refresh_sql
+        marker_sql = mock_conn.execute.call_args_list[1][0][0]
+        assert "INSERT INTO metrics" in marker_sql
+        marker_params = mock_conn.execute.call_args_list[1][0][1]
+        assert marker_params[0] == "usage_daily_refresh_ms"
         mock_conn.commit.assert_called_once()
 
     @patch("app.admin.analytics._connect")
@@ -154,16 +160,40 @@ class TestGetUsageByOrg:
 
 class TestGetLastRefresh:
     @patch("app.admin.analytics._connect")
-    def test_returns_timestamp_when_present(self, mock_connect: MagicMock):
+    def test_returns_marker_timestamp_when_present(self, mock_connect: MagicMock):
+        """#861-C: prefers the real refresh-marker row over the stats proxy."""
         from app.admin.analytics import _get_last_refresh
 
         ts = datetime(2026, 4, 8, 12, 30)
         mock_conn = MagicMock()
         mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
         mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+        # First query (metrics marker) returns the real timestamp.
         mock_conn.execute.return_value.fetchone.return_value = (ts,)
 
         assert _get_last_refresh() == ts
+        # The first query reads the marker row from the metrics table.
+        first_sql = mock_conn.execute.call_args_list[0][0][0]
+        assert "FROM metrics" in first_sql
+        first_params = mock_conn.execute.call_args_list[0][0][1]
+        assert first_params == ("usage_daily_refresh_ms",)
+
+    @patch("app.admin.analytics._connect")
+    def test_falls_back_to_stats_proxy_without_marker(self, mock_connect: MagicMock):
+        """#861-C: legacy fallback when no marker row exists yet."""
+        from app.admin.analytics import _get_last_refresh
+
+        ts = datetime(2026, 4, 8, 12, 30)
+        mock_conn = MagicMock()
+        mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+        # First call (marker) → None; second call (pg_stat proxy) → timestamp.
+        mock_conn.execute.return_value.fetchone.side_effect = [None, (ts,)]
+
+        assert _get_last_refresh() == ts
+        assert mock_conn.execute.call_count == 2
+        second_sql = mock_conn.execute.call_args_list[1][0][0]
+        assert "pg_stat_all_tables" in second_sql
 
     @patch("app.admin.analytics._connect")
     def test_returns_none_on_error(self, mock_connect: MagicMock):
@@ -390,6 +420,27 @@ class TestAnalyticsPageRender:
     @patch("app.admin.analytics._get_last_refresh")
     @patch("app.admin.analytics._get_usage_by_org")
     @patch("app.admin.analytics._get_usage_data")
+    def test_refresh_queued_flash(
+        self,
+        mock_data: MagicMock,
+        mock_org: MagicMock,
+        mock_refresh: MagicMock,
+    ):
+        """#861-C: the async refresh redirect surfaces a 'queued' banner."""
+        mock_data.return_value = []
+        mock_org.return_value = []
+        mock_refresh.return_value = None
+
+        from app.admin.analytics import admin_analytics_page
+
+        req = Request(_scope(query="window=30d&refreshed=queued"))
+        result = admin_analytics_page(req)
+        html = to_xml(result)
+        assert "taustatööde järjekorda" in html
+
+    @patch("app.admin.analytics._get_last_refresh")
+    @patch("app.admin.analytics._get_usage_by_org")
+    @patch("app.admin.analytics._get_usage_data")
     def test_refresh_failure_flash(
         self,
         mock_data: MagicMock,
@@ -423,9 +474,12 @@ class TestAnalyticsPageRender:
 
 
 class TestAnalyticsRefreshHandler:
-    @patch("app.admin.analytics._refresh_usage_daily")
-    def test_success_redirects_with_ok_flash(self, mock_refresh: MagicMock):
-        mock_refresh.return_value = True
+    # #861-C: the refresh now runs off the request path on a background
+    # thread, so the handler returns ``refreshed=queued`` on a successful
+    # launch rather than ``ok`` after a synchronous REFRESH.
+    @patch("app.admin.analytics.trigger_usage_daily_refresh")
+    def test_success_redirects_with_queued_flash(self, mock_trigger: MagicMock):
+        mock_trigger.return_value = True
 
         from app.admin.analytics import admin_analytics_refresh
 
@@ -436,12 +490,13 @@ class TestAnalyticsRefreshHandler:
         assert response.status_code == 303
         location = response.headers["location"]
         assert "/admin/analytics?" in location
-        assert "refreshed=ok" in location
+        assert "refreshed=queued" in location
         assert "window=7d" in location
+        mock_trigger.assert_called_once()
 
-    @patch("app.admin.analytics._refresh_usage_daily")
-    def test_failure_redirects_with_fail_flash(self, mock_refresh: MagicMock):
-        mock_refresh.return_value = False
+    @patch("app.admin.analytics.trigger_usage_daily_refresh")
+    def test_failed_launch_redirects_with_fail_flash(self, mock_trigger: MagicMock):
+        mock_trigger.return_value = False
 
         from app.admin.analytics import admin_analytics_refresh
 
@@ -453,7 +508,7 @@ class TestAnalyticsRefreshHandler:
         assert "refreshed=fail" in response.headers["location"]
         assert "window=30d" in response.headers["location"]
 
-    @patch("app.admin.analytics._refresh_usage_daily", side_effect=Exception("boom"))
+    @patch("app.admin.analytics.trigger_usage_daily_refresh", side_effect=Exception("boom"))
     def test_unexpected_error_redirects_with_fail_flash(self, _mock: MagicMock):
         from app.admin.analytics import admin_analytics_refresh
 
@@ -463,6 +518,30 @@ class TestAnalyticsRefreshHandler:
         response = admin_analytics_refresh(req)
         assert response.status_code == 303
         assert "refreshed=fail" in response.headers["location"]
+
+
+class TestTriggerUsageDailyRefresh:
+    """Cover the background-thread launcher itself (#861-C)."""
+
+    @patch("app.admin.analytics.threading.Thread")
+    def test_launches_daemon_thread(self, mock_thread_cls: MagicMock):
+        from app.admin.analytics import _refresh_usage_daily, trigger_usage_daily_refresh
+
+        mock_thread = MagicMock()
+        mock_thread_cls.return_value = mock_thread
+
+        assert trigger_usage_daily_refresh() is True
+        # The refresh runs on a started daemon thread, not inline.
+        _, kwargs = mock_thread_cls.call_args
+        assert kwargs["target"] is _refresh_usage_daily
+        assert kwargs["daemon"] is True
+        mock_thread.start.assert_called_once()
+
+    @patch("app.admin.analytics.threading.Thread", side_effect=RuntimeError("no threads"))
+    def test_returns_false_when_thread_cannot_start(self, _mock: MagicMock):
+        from app.admin.analytics import trigger_usage_daily_refresh
+
+        assert trigger_usage_daily_refresh() is False
 
 
 # ---------------------------------------------------------------------------

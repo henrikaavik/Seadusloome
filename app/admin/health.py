@@ -454,21 +454,53 @@ def admin_health_page(req: Request):
         return _render_admin_error_page(title="Süsteemi tervis", user=auth, theme=theme)
 
 
-def health_check(req: Request):
-    """GET /api/health — JSON health check endpoint (unauthenticated).
+def _health_request_is_admin(req: Request) -> bool:
+    """Best-effort: is this ``/api/health`` request from an authenticated admin?
 
-    Returns a JSON response suitable for Coolify or uptime monitoring:
-    {"status": "ok", "jena": true/false, "postgres": true/false}
+    ``/api/health`` is in the auth Beforeware's ``SKIP_PATHS`` (so uptime
+    monitors can hit it anonymously), which means ``req.scope['auth']`` is
+    normally *not* populated even for a logged-in admin. We therefore resolve
+    the caller directly here (#861-D): trust a pre-populated ``scope['auth']``
+    if present, otherwise validate the ``access_token`` cookie read-only via
+    the JWT provider. Any failure is swallowed and treated as "not admin" so
+    the public probe can never 500 on a bad/missing cookie.
+    """
+    auth = req.scope.get("auth")
+    if isinstance(auth, dict) and auth.get("role") == "admin":
+        return True
+    try:
+        token = req.cookies.get("access_token")
+        if not token:
+            return False
+        from app.auth.middleware import _get_provider
+
+        user = _get_provider().get_current_user(token)
+        return bool(user and user.get("role") == "admin")
+    except Exception:
+        logger.debug("health_check admin detection failed", exc_info=True)
+        return False
+
+
+def health_check(req: Request):
+    """GET /api/health — JSON health check endpoint.
+
+    Unauthenticated callers (Coolify, uptime monitors) get a deliberately
+    minimal ``{"status": "ok"|"degraded"}`` payload — no version, git SHA,
+    or per-subsystem breakdown is exposed publicly (#861-D).
+
+    Authenticated **admins** get the richer payload (per-subsystem
+    reachability + version/SHA/build time) so the endpoint stays useful for
+    operators; the same detail is also on the authenticated
+    ``/admin/health/aggregator`` page.
     """
     jena_ok = jena_check_health()
     pg_ok = _check_postgres()
     overall = "ok" if (jena_ok and pg_ok) else "degraded"
 
-    return JSONResponse(
-        {
-            "status": overall,
-            "jena": jena_ok,
-            "postgres": pg_ok,
-            "version": read_version(),
-        }
-    )
+    payload: dict[str, Any] = {"status": overall}
+    if _health_request_is_admin(req):
+        payload["jena"] = jena_ok
+        payload["postgres"] = pg_ok
+        payload["version"] = read_version()
+
+    return JSONResponse(payload)

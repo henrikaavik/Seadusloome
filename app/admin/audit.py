@@ -1,4 +1,19 @@
-"""Admin audit log page, filtering helpers, and CSV export."""
+"""Admin audit log page, filtering helpers, and CSV export.
+
+Org-scoping policy (#861-B)
+---------------------------
+The audit viewer is reachable only by the system ``admin`` role (every
+``/admin/audit*`` route is wrapped in ``require_role("admin")``), so the
+caller is always cross-org capable. To avoid silently dumping every
+organisation's audit trail by default, the viewer **defaults to the
+admin's own organisation** (``auth["org_id"]``) and only widens to other
+orgs — or to all orgs — when the request carries an explicit ``?org=``
+override (``?org=<uuid>`` for one org, ``?org=all`` / ``?org=*`` for the
+full cross-org view). An admin with no ``org_id`` on their token (a pure
+platform admin) sees all orgs by default since there is no home org to
+scope to. The org-filter dropdown in the UI sets the same ``?org=``
+param, so the default and the override share one code path.
+"""
 
 from __future__ import annotations
 
@@ -48,6 +63,28 @@ def _parse_actions(value: str | list[str] | None) -> list[str]:
     if isinstance(value, str):
         return [v.strip() for v in value.split(",") if v.strip()]
     return [str(v).strip() for v in value if str(v).strip()]
+
+
+# Backslash is the ESCAPE character we pair with every ILIKE pattern below
+# (``... ILIKE %s ESCAPE '\'``), so it must be escaped first — otherwise
+# escaping ``%``/``_`` would double-process the backslashes we just added.
+_LIKE_ESCAPE_CHAR = "\\"
+
+
+def _escape_like(value: str) -> str:
+    """Escape LIKE/ILIKE wildcards so a user search is matched literally.
+
+    Postgres ``ILIKE`` treats ``%`` (any run) and ``_`` (any single char)
+    as wildcards. A raw user query of e.g. ``100%`` or ``user_id`` would
+    otherwise silently match far more than intended (#861-B). We escape
+    the ESCAPE char itself, then ``%`` and ``_``, and pair the resulting
+    pattern with an explicit ``ESCAPE '\\'`` clause at the call site.
+    """
+    return (
+        value.replace(_LIKE_ESCAPE_CHAR, _LIKE_ESCAPE_CHAR * 2)
+        .replace("%", _LIKE_ESCAPE_CHAR + "%")
+        .replace("_", _LIKE_ESCAPE_CHAR + "_")
+    )
 
 
 def _build_audit_where(
@@ -104,8 +141,11 @@ def _build_audit_where(
 
         params.append(datetime.combine(date_to + timedelta(days=1), datetime.min.time()))
     if query:
-        clauses.append("a.detail::text ILIKE %s")
-        params.append(f"%{query}%")
+        # Escape LIKE wildcards and pair the pattern with an explicit ESCAPE
+        # clause so ``%``/``_``/``\`` in the user's query match literally
+        # rather than acting as wildcards (#861-B).
+        clauses.append("a.detail::text ILIKE %s ESCAPE '\\'")
+        params.append(f"%{_escape_like(query)}%")
 
     where = " AND ".join(clauses) if clauses else "TRUE"
     return where, params
@@ -400,12 +440,22 @@ def _audit_detail_cell(entry: dict) -> object:  # type: ignore[type-arg]
 # ---------------------------------------------------------------------------
 
 
+# Explicit ``?org=`` values that mean "show every organisation" rather
+# than scope to a specific one (#861-B).
+_ORG_ALL_TOKENS = frozenset({"all", "*", "koik", "kõik"})
+
+
 def _extract_filters(req: Request) -> dict:  # type: ignore[type-arg]
     """Extract filter values from query params.
 
     ``actions`` (plural) accepts multi-select values via repeated
     ``actions=...`` query params; the legacy ``action`` (singular) is
     still honoured for backward compatibility and merged in.
+
+    ``org_present`` records whether the request carried an explicit
+    ``?org=`` key at all — :func:`_resolve_org_scope` uses it to tell
+    "admin explicitly asked for all orgs" (``?org=`` present, blank/``all``)
+    apart from "no choice yet, default to own org" (key absent).
     """
     actions = req.query_params.getlist("actions") if hasattr(req.query_params, "getlist") else []
     return {
@@ -413,17 +463,43 @@ def _extract_filters(req: Request) -> dict:  # type: ignore[type-arg]
         "actions": [a for a in actions if a],
         "user": req.query_params.get("user", ""),
         "org": req.query_params.get("org", ""),
+        "org_present": "org" in req.query_params,
         "from": req.query_params.get("from", ""),
         "to": req.query_params.get("to", ""),
         "query": req.query_params.get("query", ""),
     }
 
 
+def _resolve_org_scope(
+    filters: dict,  # type: ignore[type-arg]
+    auth: dict | None,  # type: ignore[type-arg]
+) -> str | None:
+    """Resolve the org_id the audit query should be scoped to (#861-B).
+
+    Policy (see module docstring): default to the admin's own org; honour
+    an explicit ``?org=`` override (a UUID for one org, blank or an
+    ``_ORG_ALL_TOKENS`` value for all orgs). Returns ``None`` to mean
+    "no org predicate" (i.e. all organisations).
+    """
+    raw = (filters.get("org") or "").strip()
+    if filters.get("org_present"):
+        # Admin explicitly chose. Blank or an "all" token => no scoping;
+        # any other value => scope to that org.
+        if not raw or raw.lower() in _ORG_ALL_TOKENS:
+            return None
+        return raw
+    # No explicit choice: default to the admin's own org when known.
+    own_org = auth.get("org_id") if auth else None
+    return str(own_org) if own_org else None
+
+
 def _filter_querystring(filters: dict) -> str:  # type: ignore[type-arg]
     """Encode filters (incl. repeated ``actions``) into a stable query string.
 
     Used both for pagination links and the CSV export href so a filtered
-    view round-trips across page navigation and downloads.
+    view round-trips across page navigation and downloads. The org value
+    (including the ``all`` cross-org sentinel) is preserved so an explicit
+    org scope survives pagination (#861-B).
     """
     parts: list[tuple[str, str]] = []
     for key in ("action", "user", "org", "from", "to", "query"):
@@ -436,17 +512,42 @@ def _filter_querystring(filters: dict) -> str:  # type: ignore[type-arg]
     return urlencode(parts)
 
 
+def _has_narrowing_filter(filters: dict) -> bool:  # type: ignore[type-arg]
+    """True when the admin applied a result-narrowing filter (#861-B).
+
+    Used only to pick the empty-state copy. The org dimension is excluded:
+    the viewer always resolves *some* org scope (own org or the ``all``
+    cross-org view) by default, so it is not a user-applied narrowing of an
+    otherwise-empty log. A *specific* org chosen explicitly still counts.
+    """
+    if filters.get("action") or filters.get("actions"):
+        return True
+    if filters.get("user") or filters.get("from") or filters.get("to"):
+        return True
+    if filters.get("query"):
+        return True
+    org_val = (filters.get("org") or "").strip()
+    return bool(org_val) and org_val.lower() not in _ORG_ALL_TOKENS
+
+
 def _audit_filter_form(
     filters: dict,  # type: ignore[type-arg]
     actions: list[str],
     users: list[dict],  # type: ignore[type-arg]
     orgs: list[dict] | None = None,  # type: ignore[type-arg]
+    effective_org: str | None = None,
 ) -> object:
     """Render the audit log filter controls.
 
     The action picker is a native multi-select so admins can OR several
     action types together; the org dropdown is rendered only when more
     than one org has audit traffic (single-org admins do not need it).
+
+    ``effective_org`` is the org the view is *actually* scoped to after
+    :func:`_resolve_org_scope` applies the default-to-own-org policy
+    (#861-B). The dropdown pre-selects it so the admin sees that they are
+    looking at one org by default; choosing "Kõik organisatsioonid"
+    (value ``all``) is the explicit opt-in to the cross-org view.
     """
     selected_actions = set(filters.get("actions") or [])
     if filters.get("action"):
@@ -491,9 +592,14 @@ def _audit_filter_form(
     # deployments would just see a useless one-item filter.
     org_list = orgs or []
     if len(org_list) > 1:
-        org_options = [Option("Kõik organisatsioonid", value="")]  # noqa: F405
+        # value="all" is the explicit cross-org opt-in (#861-B); a specific
+        # org is selected when it matches the resolved effective scope.
+        all_selected = "selected" if effective_org is None else None
+        org_options = [
+            Option("Kõik organisatsioonid", value="all", selected=all_selected)  # noqa: F405
+        ]
         for o in org_list:
-            selected = "selected" if filters.get("org") == o["id"] else None
+            selected = "selected" if effective_org == o["id"] else None
             org_options.append(Option(o["name"], value=o["id"], selected=selected))  # noqa: F405
         fields.append(
             Div(  # noqa: F405
@@ -576,8 +682,13 @@ def _filter_summary_text(filters: dict, total: int) -> str:  # type: ignore[type
         active.append("tegevus: " + ", ".join(actions))
     if filters.get("user"):
         active.append("kasutaja valitud")
-    if filters.get("org"):
+    # #861-B: surface the org scope explicitly so the admin always knows
+    # whether they are seeing one org or the whole platform.
+    org_val = (filters.get("org") or "").strip()
+    if org_val and org_val.lower() not in _ORG_ALL_TOKENS:
         active.append("organisatsioon valitud")
+    elif org_val.lower() in _ORG_ALL_TOKENS:
+        active.append("kõik organisatsioonid")
     if filters.get("from") or filters.get("to"):
         rng = f"{filters.get('from') or '…'}–{filters.get('to') or '…'}"
         active.append(f"kuupäev: {rng}")
@@ -605,8 +716,10 @@ def _audit_results_content(
     if not entries:
         # Empty state — distinguish "no audit traffic at all" from "no
         # match for current filters" so the admin knows whether to widen
-        # the search or move on.
-        has_active_filter = bool(_filter_querystring(filters))
+        # the search or move on. The org scope is excluded from this check
+        # (#861-B): it is always resolved to *some* default, so an empty
+        # result under the default scope is "log empty", not "over-filtered".
+        has_active_filter = _has_narrowing_filter(filters)
         if has_active_filter:
             empty_msg = "Praeguste filtritega ei leitud kirjeid."
             empty_hint = A(  # noqa: F405
@@ -686,6 +799,7 @@ def admin_audit_page(req: Request):
             _get_audit_users,
             _get_distinct_actions,
             _parse_date,
+            _resolve_org_scope,
         )
 
         filters = _extract_filters(req)
@@ -700,7 +814,14 @@ def admin_audit_page(req: Request):
         action_filter = filters["action"] or None
         actions_multi = filters["actions"] or None
         user_filter = filters["user"] or None
-        org_filter = filters["org"] or None
+        # #861-B: default to the admin's own org, honour explicit ?org= override.
+        org_filter = _resolve_org_scope(filters, auth)
+        # Pin the resolved scope back onto ``filters`` so pagination links,
+        # the CSV-export href, and the result summary all carry the effective
+        # org (otherwise page 2 would silently widen back to all orgs). The
+        # ``all`` sentinel makes the cross-org view round-trip explicitly.
+        filters["org"] = org_filter or "all"
+        filters["org_present"] = True
         date_from = _parse_date(filters["from"])
         date_to = _parse_date(filters["to"])
         query_filter = filters["query"] or None
@@ -727,7 +848,7 @@ def admin_audit_page(req: Request):
             entries, page, total_pages, per_page, total, filters
         )
 
-        filter_form = _audit_filter_form(filters, actions, users, orgs)
+        filter_form = _audit_filter_form(filters, actions, users, orgs, effective_org=org_filter)
         export_link = _csv_export_link(filters)
         summary_text = _filter_summary_text(filters, total)
 
@@ -822,15 +943,19 @@ def admin_audit_export(req: Request):
             _extract_filters,
             _get_all_filtered_entries,
             _parse_date,
+            _resolve_org_scope,
         )
         from app.ui.time import format_tallinn
 
+        auth = req.scope.get("auth")
         filters = _extract_filters(req)
 
         action_filter = filters["action"] or None
         actions_multi = filters["actions"] or None
         user_filter = filters["user"] or None
-        org_filter = filters["org"] or None
+        # #861-B: the export must honour the same default-to-own-org scoping
+        # as the page so it can never silently dump every org's audit trail.
+        org_filter = _resolve_org_scope(filters, auth)
         date_from = _parse_date(filters["from"])
         date_to = _parse_date(filters["to"])
         query_filter = filters["query"] or None
