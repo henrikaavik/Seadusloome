@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
 from fasthtml.common import to_xml
 from starlette.requests import Request
 from starlette.responses import RedirectResponse, Response
@@ -395,6 +396,28 @@ class TestNotificationLinkGating:
 
         assert 'href="https://example.org/x"' in html
 
+    @pytest.mark.parametrize("ctrl", ["\x00", "\x7f", "\t", "\n", "\r"])
+    def test_control_byte_in_same_origin_path_not_rendered_as_href(self, ctrl: str):
+        """#848 round-3: a same-origin path with an embedded control byte
+        (NUL/DEL/tab/CR/LF) must fall through to the non-link wrapper, never
+        an ``<a href>`` — browsers strip these bytes and could be steered
+        off-origin."""
+        notif = _make_notification(read=False, link=f"/drafts/{ctrl}evil")
+
+        html = to_xml(NotificationItem(notif))
+
+        # No anchor link class — it rendered as the non-link wrapper instead.
+        assert "notification-link" not in html
+        assert f'id="notification-wrapper-{_NOTIF_ID}"' in html
+
+    def test_diacritic_relative_link_still_renders_as_href(self):
+        """Don't over-reject: a legitimate Estonian path renders as a link."""
+        notif = _make_notification(read=False, link="/märkused/123")
+
+        html = to_xml(NotificationItem(notif))
+
+        assert "notification-link" in html
+
 
 class TestIsSafeRedirect:
     """#848: the open-redirect guard must reject backslash variants that
@@ -414,11 +437,36 @@ class TestIsSafeRedirect:
         assert _is_safe_redirect("javascript:alert(1)") is False
         assert _is_safe_redirect("") is False
 
+    @pytest.mark.parametrize(
+        "target",
+        [
+            "/foo\x00bar",  # NUL
+            "/foo\x7fbar",  # DEL
+            "/foo\tbar",  # tab
+            "/foo\nbar",  # newline
+            "/foo\rbar",  # carriage return
+            "/foo bar",  # space
+        ],
+    )
+    def test_rejects_control_bytes_in_same_origin_path(self, target: str):
+        """#848 round-3: align with the absolute-URL helper — raw
+        control/whitespace bytes in a redirect target are rejected."""
+        from app.notifications.routes import _is_safe_redirect
+
+        assert _is_safe_redirect(target) is False
+
     def test_accepts_same_origin_relative_path(self):
         from app.notifications.routes import _is_safe_redirect
 
         assert _is_safe_redirect("/drafts/abc") is True
         assert _is_safe_redirect("/admin/costs") is True
+
+    def test_accepts_estonian_diacritic_path(self):
+        """Don't over-reject legitimate non-ASCII (raw and percent-encoded)."""
+        from app.notifications.routes import _is_safe_redirect
+
+        assert _is_safe_redirect("/märkused") is True
+        assert _is_safe_redirect("/m%C3%A4rkused") is True
 
 
 class TestIsSafeLink:
@@ -432,6 +480,19 @@ class TestIsSafeLink:
         assert _is_safe_link("/\\evil.example") is False
         assert _is_safe_link(None) is False
         assert _is_safe_link("") is False
+
+    @pytest.mark.parametrize("ctrl", ["\x00", "\x7f", "\t", "\n", "\r", " "])
+    def test_rejects_control_bytes_in_relative_branch(self, ctrl: str):
+        """#848 round-3: the relative-path branch inherits the control-byte
+        rejection from ``_is_safe_redirect``."""
+        from app.notifications.routes import _is_safe_link
+
+        assert _is_safe_link(f"/drafts/{ctrl}evil") is False
+
+    def test_accepts_estonian_diacritic_path(self):
+        from app.notifications.routes import _is_safe_link
+
+        assert _is_safe_link("/märkused") is True
 
 
 # ---------------------------------------------------------------------------

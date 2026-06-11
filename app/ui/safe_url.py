@@ -39,6 +39,33 @@ from urllib.parse import quote, urlsplit
 _ALLOWED_SCHEMES = frozenset({"http", "https"})
 
 
+def has_unsafe_chars(value: str) -> bool:
+    """Return ``True`` if *value* contains a raw control or whitespace byte.
+
+    "Unsafe" means any C0 control character or space (codepoint ``<= 0x20``,
+    which covers NUL / tab / newline / carriage-return / space) or the C1 DEL
+    byte (``0x7F``). Browsers strip ``\\t`` / ``\\r`` / ``\\n`` from URLs before
+    acting on them, so a raw control byte can smuggle an otherwise-blocked
+    scheme (``java\\tscript:``) past a naive prefix check, or hide an
+    off-origin target inside an apparently same-origin redirect path.
+
+    This is the single character-safety policy shared by both
+    :func:`is_safe_http_url` (absolute URLs) and the relative-path redirect /
+    link gate in ``app.notifications.routes`` — keeping it here means the two
+    cannot drift apart again (#848 round-3 review). It deliberately does **not**
+    reject non-ASCII: a legitimate Estonian path such as ``/märkused`` (raw or
+    percent-encoded) must still pass. Reserved/percent characters are fine too
+    — only raw control/whitespace bytes are blocked.
+
+    Args:
+        value: The candidate string (URL or relative path).
+
+    Returns:
+        ``True`` if any raw control/whitespace byte is present.
+    """
+    return any(ord(ch) <= 0x20 or ord(ch) == 0x7F for ch in value)
+
+
 def is_safe_http_url(value: str | None) -> bool:
     """Return ``True`` only for a safe, absolute ``http(s)://`` URL.
 
@@ -71,13 +98,12 @@ def is_safe_http_url(value: str | None) -> bool:
     if not value:
         return False
 
-    # Reject any control character (incl. tab / newline / NUL) or whitespace
-    # *anywhere* in the string. Browsers strip tab/CR/LF from URLs before
-    # acting on the scheme, so ``java\tscript:alert(1)`` would otherwise slip
-    # an unsafe scheme past a naive ``startswith`` check. A legitimate absolute
-    # http(s) URL never contains raw whitespace or control bytes (spaces are
-    # percent-encoded as ``%20``).
-    if any(ord(ch) <= 0x20 or ord(ch) == 0x7F for ch in value):
+    # Reject any raw control/whitespace byte *anywhere* in the string (shared
+    # policy — see ``has_unsafe_chars``). Browsers strip tab/CR/LF from URLs
+    # before acting on the scheme, so ``java\tscript:alert(1)`` would otherwise
+    # slip an unsafe scheme past a naive ``startswith`` check. A legitimate
+    # absolute http(s) URL never contains raw whitespace (spaces → ``%20``).
+    if has_unsafe_chars(value):
         return False
 
     # Backslashes are normalised to forward slashes by browsers, turning

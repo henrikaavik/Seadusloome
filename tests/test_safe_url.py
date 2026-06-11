@@ -9,7 +9,46 @@ from __future__ import annotations
 
 import pytest
 
-from app.ui.safe_url import is_safe_http_url, quote_uri_param
+from app.ui.safe_url import has_unsafe_chars, is_safe_http_url, quote_uri_param
+
+# ---------------------------------------------------------------------------
+# has_unsafe_chars — shared control/whitespace policy (#848 round-3 review)
+# ---------------------------------------------------------------------------
+
+
+class TestHasUnsafeChars:
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "/foo\x00bar",  # NUL
+            "/foo\x7fbar",  # DEL
+            "/foo\tbar",  # tab
+            "/foo\nbar",  # newline
+            "/foo\rbar",  # carriage return
+            "/foo bar",  # space
+            "java\tscript:alert(1)",
+            "\x00",
+            "https://example.org/\x1f",  # C0 control
+        ],
+    )
+    def test_raw_control_or_whitespace_flagged(self, value: str):
+        assert has_unsafe_chars(value) is True
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "/drafts/abc",
+            "/märkused",  # raw Estonian diacritics — must NOT be flagged
+            "/m%C3%A4rkused",  # percent-encoded diacritics
+            "https://example.org/entity/1",
+            "https://example.org/a?b=1&c#frag",  # reserved chars are fine
+            "õäöü",
+            "",
+        ],
+    )
+    def test_clean_values_not_flagged(self, value: str):
+        assert has_unsafe_chars(value) is False
+
 
 # ---------------------------------------------------------------------------
 # is_safe_http_url — accepted values

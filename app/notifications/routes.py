@@ -32,7 +32,7 @@ from app.notifications.models import (
     mark_read,
 )
 from app.ui.layout import PageShell
-from app.ui.safe_url import is_safe_http_url
+from app.ui.safe_url import has_unsafe_chars, is_safe_http_url
 from app.ui.theme import get_theme_from_request
 from app.ui.time import format_tallinn
 
@@ -218,12 +218,20 @@ def _is_safe_redirect(target: str) -> bool:
     #848: also reject any target containing a backslash. Browsers normalise
     ``\\`` to ``/``, so ``/\\evil.com`` becomes ``//evil.com`` (a
     protocol-relative off-site URL) after normalisation — an open redirect.
+
+    #848 (round-3 review): reject raw control/whitespace bytes too (NUL, DEL,
+    ``\\t`` / ``\\r`` / ``\\n``, space) via the shared ``has_unsafe_chars``
+    policy, so this relative-path gate matches the strictness of the absolute
+    URL helper and the two cannot drift. Estonian diacritic paths
+    (``/märkused``, raw or percent-encoded) are unaffected.
     """
     if not target or not target.startswith("/"):
         return False
     if target.startswith("//"):
         return False
     if "\\" in target:
+        return False
+    if has_unsafe_chars(target):
         return False
     parsed = urlparse(target)
     # urlparse of a relative path should yield empty scheme and netloc.
