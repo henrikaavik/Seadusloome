@@ -855,6 +855,212 @@ class TestAuditDetailFragment:
 
 
 # ---------------------------------------------------------------------------
+# Detail-endpoint org scoping (#886 review)
+# ---------------------------------------------------------------------------
+
+
+def _detail_request(entry_id: str, *, query_string: str = "", org_id: str | None) -> Request:
+    """Build an /admin/audit/detail/{id} Request with a controllable scope.
+
+    ``org_id=None`` models a platform admin (no home org); otherwise the
+    admin is bound to that org.
+    """
+    auth: dict[str, object] = {"role": "admin", "id": "a-1", "email": "a@b.ee"}
+    if org_id is not None:
+        auth["org_id"] = org_id
+    req = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": f"/admin/audit/detail/{entry_id}",
+            "headers": [],
+            "query_string": query_string.encode(),
+            "scheme": "http",
+            "server": ("testserver", 80),
+            "client": ("127.0.0.1", 12345),
+            "auth": auth,
+            "path_params": {"id": entry_id},
+        }
+    )
+    return req
+
+
+class TestGetAuditEntryScoping:
+    """#886: the single-row fetch must apply the SAME org predicate as the list."""
+
+    @patch("app.admin.audit._connect")
+    def test_no_org_id_has_no_org_predicate(self, mock_connect: MagicMock):
+        from app.admin.audit import _get_audit_entry
+
+        mock_conn = MagicMock()
+        mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+        mock_conn.execute.return_value.fetchone.return_value = None
+
+        _get_audit_entry(5)
+        sql = mock_conn.execute.call_args[0][0]
+        params = mock_conn.execute.call_args[0][1]
+        assert "u.org_id" not in sql
+        assert list(params) == [5]
+
+    @patch("app.admin.audit._connect")
+    def test_org_id_adds_predicate_and_param(self, mock_connect: MagicMock):
+        from app.admin.audit import _get_audit_entry
+
+        mock_conn = MagicMock()
+        mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+        mock_conn.execute.return_value.fetchone.return_value = None
+
+        _get_audit_entry(5, org_id="home-org")
+        sql = mock_conn.execute.call_args[0][0]
+        params = mock_conn.execute.call_args[0][1]
+        # Same join + predicate the list path uses.
+        assert "LEFT JOIN users u ON u.id = a.user_id" in sql
+        assert "u.org_id = %s" in sql
+        assert list(params) == [5, "home-org"]
+
+
+class TestAuditDetailOrgScoping:
+    """#886: the HTMX detail endpoint enforces the list's org scope and treats
+    an out-of-scope id exactly like a missing row (no existence leak)."""
+
+    @patch("app.admin.audit._get_audit_entry")
+    def test_own_org_admin_can_expand_own_org_entry(self, mock_entry: MagicMock):
+        from fasthtml.common import to_xml
+
+        from app.admin.audit import admin_audit_detail
+
+        mock_entry.return_value = {
+            "id": 5,
+            "user_id": "u-1",
+            "user_name": "Alice",
+            "action": "doc.upload",
+            "detail": {"filename": "x.docx"},
+            "created_at": datetime(2025, 6, 15, 12, 0),
+        }
+        result = admin_audit_detail(_detail_request("5", org_id="home-org"))
+        html = to_xml(result)
+        assert "x.docx" in html
+        # The fetch was scoped to the admin's own org.
+        assert mock_entry.call_args.kwargs.get("org_id") == "home-org"
+
+    @patch("app.admin.audit._get_audit_entry", return_value=None)
+    def test_own_org_admin_other_org_id_gets_not_found(self, mock_entry: MagicMock):
+        """An org admin requesting another org's id: the scoped fetch returns
+        None (the DB predicate excludes it), so the handler shows the
+        not-found branch — identical to a genuinely missing row, no 403 body."""
+        from fasthtml.common import to_xml
+
+        from app.admin.audit import admin_audit_detail
+
+        result = admin_audit_detail(_detail_request("999", org_id="home-org"))
+        html = to_xml(result)
+        assert "Kirjet ei leitud" in html
+        # The fetch was scoped to own-org; the foreign id simply did not match.
+        assert mock_entry.call_args.kwargs.get("org_id") == "home-org"
+        # Same not-found copy as TestAuditDetailFragment — no distinct 403.
+        assert "keelatud" not in html.lower()
+
+    @patch("app.admin.audit._get_audit_entry")
+    def test_platform_admin_reads_any_entry(self, mock_entry: MagicMock):
+        from fasthtml.common import to_xml
+
+        from app.admin.audit import admin_audit_detail
+
+        mock_entry.return_value = {
+            "id": 7,
+            "user_id": "u-9",
+            "user_name": "Bob",
+            "action": "draft.create",
+            "detail": {"title": "Foo"},
+            "created_at": datetime(2025, 6, 15, 12, 0),
+        }
+        # Platform admin: no org_id, no ?org= => no scoping predicate.
+        result = admin_audit_detail(_detail_request("7", org_id=None))
+        html = to_xml(result)
+        assert "Foo" in html
+        assert mock_entry.call_args.kwargs.get("org_id") is None
+
+    @patch("app.admin.audit._get_audit_entry")
+    def test_explicit_org_all_imposes_no_scope(self, mock_entry: MagicMock):
+        from fasthtml.common import to_xml
+
+        from app.admin.audit import admin_audit_detail
+
+        mock_entry.return_value = {
+            "id": 8,
+            "user_id": "u-3",
+            "user_name": "Cara",
+            "action": "doc.upload",
+            "detail": {"filename": "y.docx"},
+            "created_at": datetime(2025, 6, 15, 12, 0),
+        }
+        # Org admin who explicitly opted into the cross-org view.
+        result = admin_audit_detail(
+            _detail_request("8", query_string="org=all", org_id="home-org")
+        )
+        html = to_xml(result)
+        assert "y.docx" in html
+        # ?org=all => cross-org => no org predicate on the fetch.
+        assert mock_entry.call_args.kwargs.get("org_id") is None
+
+    @patch("app.admin.audit._get_audit_entry")
+    def test_explicit_specific_org_scopes_fetch(self, mock_entry: MagicMock):
+        from app.admin.audit import admin_audit_detail
+
+        mock_entry.return_value = None
+        # Platform admin drilling into one specific org's entry.
+        admin_audit_detail(_detail_request("9", query_string="org=other-org", org_id=None))
+        assert mock_entry.call_args.kwargs.get("org_id") == "other-org"
+
+
+class TestAuditDetailExpanderUrl:
+    """#886: the list expander hx_get must carry the active org so the
+    fragment resolves the same scope as the list it was rendered in."""
+
+    def _render_list(self, req, *, org_rows: bool = True) -> str:
+        from fasthtml.common import to_xml
+
+        from app.admin.audit import admin_audit_page
+
+        entries = [
+            {
+                "id": 42,
+                "user_id": "u-1",
+                "user_name": "U",
+                "action": "doc.upload",
+                "detail": {"filename": "z.docx"},
+                "created_at": datetime(2026, 4, 8, 9, 0),
+                "org_id": "home-org",
+            }
+        ]
+        orgs = (
+            [{"id": "home-org", "name": "Home"}, {"id": "other-org", "name": "Other"}]
+            if org_rows
+            else []
+        )
+        with (
+            patch("app.admin.audit._get_audit_log_page", return_value=(entries, 1)),
+            patch("app.admin.audit._get_distinct_actions", return_value=[]),
+            patch("app.admin.audit._get_audit_users", return_value=[]),
+            patch("app.admin.audit._get_audit_orgs", return_value=orgs),
+        ):
+            return to_xml(admin_audit_page(req))
+
+    def test_explicit_all_expander_carries_org(self):
+        html = self._render_list(_audit_scope("org=all", org_id="home-org"))
+        assert "/admin/audit/detail/42?org=all" in html
+
+    def test_default_own_org_expander_omits_org(self):
+        # Default scope: the expander omits ?org= (the fragment re-defaults to
+        # own-org), matching the pagination/CSV omission policy.
+        html = self._render_list(_audit_scope("", org_id="home-org"))
+        assert "/admin/audit/detail/42" in html
+        assert "/admin/audit/detail/42?org=" not in html
+
+
+# ---------------------------------------------------------------------------
 # CSV export
 # ---------------------------------------------------------------------------
 

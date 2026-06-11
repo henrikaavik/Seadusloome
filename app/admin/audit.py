@@ -261,17 +261,35 @@ def _get_audit_orgs() -> list[dict]:  # type: ignore[type-arg]
         return []
 
 
-def _get_audit_entry(entry_id: int) -> dict | None:  # type: ignore[type-arg]
-    """Return a single audit entry by id, or None if not found."""
+def _get_audit_entry(entry_id: int, *, org_id: str | None = None) -> dict | None:  # type: ignore[type-arg]
+    """Return a single audit entry by id, or None if not found / out of scope.
+
+    When *org_id* is given the row must also satisfy ``u.org_id = %s`` — the
+    SAME join + predicate the list query applies via
+    :func:`_build_audit_where` (``audit_log a LEFT JOIN users u ON
+    u.id = a.user_id``). This keeps the detail endpoint from leaking another
+    org's audit JSON to an org-scoped admin (#886 review): an out-of-scope id
+    returns ``None``, indistinguishable from a genuinely missing row so the
+    HTMX fragment never reveals that the id exists. ``org_id=None`` (platform
+    admin / explicit cross-org) imposes no org constraint.
+
+    Note: like the list path, an ``org_id`` filter excludes user-less system
+    events (``a.user_id IS NULL`` => ``u.org_id`` is NULL), so the two paths
+    show exactly the same set of rows to a scoped admin.
+    """
+    sql = (
+        "SELECT a.id, a.user_id, u.full_name, a.action, a.detail, a.created_at "
+        "FROM audit_log a "
+        "LEFT JOIN users u ON u.id = a.user_id "
+        "WHERE a.id = %s"
+    )
+    params: list = [entry_id]
+    if org_id:
+        sql += " AND u.org_id = %s"
+        params.append(org_id)
     try:
         with _connect() as conn:
-            row = conn.execute(
-                "SELECT a.id, a.user_id, u.full_name, a.action, a.detail, a.created_at "
-                "FROM audit_log a "
-                "LEFT JOIN users u ON u.id = a.user_id "
-                "WHERE a.id = %s",
-                (entry_id,),
-            ).fetchone()
+            row = conn.execute(sql, params).fetchone()
             if not row:
                 return None
             return {
@@ -410,24 +428,34 @@ def _format_detail_json(detail: object) -> str:
         return str(detail)
 
 
-def _audit_detail_cell(entry: dict) -> object:  # type: ignore[type-arg]
+def _audit_detail_cell(entry: dict, org_param: str | None = None) -> object:  # type: ignore[type-arg]
     """Render the ``Detailid`` table cell with a server-side expander.
 
     The cell shows a one-line Estonian summary by default; clicking the
     disclosure triangle fetches the formatted JSON via HTMX from
     ``/admin/audit/detail/{id}``.  Empty details render as an em-dash.
+
+    ``org_param`` is the active ``?org=`` value (from :func:`_org_query_value`)
+    threaded onto the ``hx_get`` so the detail fragment resolves the SAME org
+    scope as the list view (#886 review) — otherwise expanding a row in an
+    explicit ``?org=all`` / specific-org view would default the fragment back
+    to the admin's own org and wrongly report "Kirjet ei leitud." for a
+    legitimately-visible row.
     """
     detail = entry.get("detail")
     if detail is None:
         return "—"
     summary = _summarize_detail(entry.get("action", ""), detail)
     target_id = f"audit-detail-{entry['id']}"
+    detail_url = f"/admin/audit/detail/{entry['id']}"
+    if org_param:
+        detail_url += "?" + urlencode({"org": org_param})
     return Details(  # noqa: F405
         Summary(summary),  # noqa: F405
         Div(  # noqa: F405
             P("Laen detaile…", cls="muted-text"),  # noqa: F405
             id=target_id,
-            hx_get=f"/admin/audit/detail/{entry['id']}",
+            hx_get=detail_url,
             hx_trigger="toggle from:closest details once",
             hx_swap="innerHTML",
         ),
@@ -493,20 +521,37 @@ def _resolve_org_scope(
     return str(own_org) if own_org else None
 
 
+def _org_query_value(filters: dict) -> str | None:  # type: ignore[type-arg]
+    """Return the ``org`` value a URL should carry for *filters*, or None.
+
+    Single source of truth for the org URL param (#861-B, #886 review),
+    shared by pagination/CSV links and the detail-expander ``hx_get`` so they
+    can't drift. Emits the *effective* org only when it was an explicit choice
+    (``org_present``) or the ``all`` cross-org sentinel; for the resolved
+    *default* own-org scope it returns None so the param is omitted and the
+    next request re-derives the same scope via :func:`_resolve_org_scope`
+    (which keeps the default off the "narrowing filter" path).
+    """
+    org_effective = filters.get("org_effective")
+    if org_effective is None:
+        # Legacy callers that never set ``org_effective`` (e.g. raw test
+        # dicts) fall back to the request value with the old semantics.
+        org_raw = filters.get("org")
+        return str(org_raw) if org_raw else None
+    is_all = str(org_effective).strip().lower() in _ORG_ALL_TOKENS
+    explicit = bool(filters.get("org_present"))
+    if explicit or is_all:
+        return str(org_effective)
+    return None
+
+
 def _filter_querystring(filters: dict) -> str:  # type: ignore[type-arg]
     """Encode filters (incl. repeated ``actions``) into a stable query string.
 
     Used both for pagination links and the CSV export href so a filtered
-    view round-trips across page navigation and downloads.
-
-    Org handling (#861-B, #886 review): the *effective* org scope must
-    survive pagination so page 2 does not widen back to all orgs — but it
-    must NOT promote the resolved *default* own-org scope into an explicit
-    ``?org=`` filter (that would flip page 2 into the "over-filtered" empty
-    state and mislabel the export). So we emit ``org=`` only when the scope
-    was either an explicit choice (``org_present``) or the ``all`` cross-org
-    sentinel; for the default own-org case we omit it, and page 2 re-derives
-    the same own-org scope via :func:`_resolve_org_scope`.
+    view round-trips across page navigation and downloads. Org handling is
+    delegated to :func:`_org_query_value` so every URL builder applies the
+    identical effective-vs-default policy (#861-B, #886 review).
     """
     parts: list[tuple[str, str]] = []
     for key in ("action", "user", "from", "to", "query"):
@@ -514,19 +559,9 @@ def _filter_querystring(filters: dict) -> str:  # type: ignore[type-arg]
         if val:
             parts.append((key, str(val)))
 
-    org_effective = filters.get("org_effective")
-    if org_effective is None:
-        # Legacy callers that never set ``org_effective`` (e.g. raw test
-        # dicts) fall back to the request value with the old semantics.
-        org_raw = filters.get("org")
-        if org_raw:
-            parts.append(("org", str(org_raw)))
-    else:
-        is_all = str(org_effective).strip().lower() in _ORG_ALL_TOKENS
-        explicit = bool(filters.get("org_present"))
-        if explicit or is_all:
-            parts.append(("org", str(org_effective)))
-        # else: resolved default own-org — omit so it stays the baseline.
+    org_out = _org_query_value(filters)
+    if org_out:
+        parts.append(("org", org_out))
 
     for act in filters.get("actions", []) or []:
         if act:
@@ -778,6 +813,9 @@ def _audit_results_content(
             Column(key="action", label="Tegevus", sortable=False),
             Column(key="detail", label="Detailid", sortable=False),
         ]
+        # The expander fragment must resolve the same org scope as the list,
+        # so carry the active org value onto each detail ``hx_get`` (#886).
+        org_param = _org_query_value(filters)
         rows = []
         for entry in entries:
             ts = entry["created_at"]
@@ -786,7 +824,7 @@ def _audit_results_content(
                     "time": format_tallinn(ts),
                     "user_name": entry["user_name"],
                     "action": entry["action"],
-                    "detail": _audit_detail_cell(entry),
+                    "detail": _audit_detail_cell(entry, org_param),
                 }
             )
         body = DataTable(columns=columns, rows=rows)
@@ -937,9 +975,23 @@ def admin_audit_detail(req: Request):
     Returns a small ``<pre>`` block (or a one-line muted message when the
     entry is missing or has no detail).  Used by the inline expander on
     the audit table; not a full PageShell.
+
+    The detail row is held to the SAME org scope as the list/export paths
+    (#886 review): the caller's scope is resolved via
+    :func:`_resolve_org_scope` (own-org default; explicit ``?org=`` override;
+    platform admins without ``org_id`` => all). An id outside that scope is
+    treated exactly like a missing row ("Kirjet ei leitud."), so the fragment
+    never leaks the existence — or contents — of another org's audit entry.
     """
     try:
-        from app.admin.audit import _format_detail_json, _get_audit_entry
+        from app.admin.audit import (
+            _extract_filters,
+            _format_detail_json,
+            _get_audit_entry,
+            _resolve_org_scope,
+        )
+
+        auth = req.scope.get("auth")
 
         raw_id = req.path_params.get("id", "")
         try:
@@ -949,7 +1001,11 @@ def admin_audit_detail(req: Request):
                 content="Vigane ID.", status_code=400, media_type="text/plain; charset=utf-8"
             )
 
-        entry = _get_audit_entry(entry_id)
+        # Same org-scope resolution as the list path. The expander link carries
+        # the active ?org= so an explicitly-scoped view stays coherent.
+        org_filter = _resolve_org_scope(_extract_filters(req), auth)
+
+        entry = _get_audit_entry(entry_id, org_id=org_filter)
         if entry is None:
             return P("Kirjet ei leitud.", cls="muted-text")  # noqa: F405
 
