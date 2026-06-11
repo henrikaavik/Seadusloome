@@ -124,7 +124,9 @@ class TestGlobalSearchEndpoint:
         body = resp.text
         assert "Entiteedid" in body
         assert "Zzzzz seadus" in body
-        assert "/explorer?focus=https://data.riik.ee/ontology/estleg#Act_ZZZ" in body
+        # #848: the focus param is URL-encoded so ``#``/``&`` in the URI can't
+        # truncate the query string (``#`` → ``%23``).
+        assert "/explorer?focus=https%3A%2F%2Fdata.riik.ee%2Fontology%2Festleg%23Act_ZZZ" in body
 
     @patch("app.auth.middleware._get_provider")
     @patch("app.ui.components.search_routes._entity_matches")
@@ -316,6 +318,23 @@ class TestRenderDropdown:
         assert "X seadus" in rendered
         assert "/explorer?focus=" in rendered
         assert 'role="option"' in rendered
+
+    def test_entity_focus_param_is_url_encoded(self):
+        """#848: ``&``/``#``/``?`` in a SPARQL-derived URI must be
+        percent-encoded so they can't truncate the deep-link query."""
+        entities = [
+            {
+                "uri": "https://example.org/ns#A?evil=1&x=2",
+                "label": "Tricky",
+                "type": "https://example.org/ns#Act",
+            }
+        ]
+        rendered = to_xml(render_dropdown(entities=entities, capabilities=[], query="x"))
+        # The reserved characters must be encoded inside the href value.
+        assert "focus=https%3A%2F%2Fexample.org%2Fns%23A%3Fevil%3D1%26x%3D2" in rendered
+        # Raw reserved chars must not leak into the href, which would split
+        # the URI across multiple (spurious) query params.
+        assert "focus=https://example.org/ns#A?evil=1&x=2" not in rendered
 
     def test_capability_row_carries_icon_and_url(self):
         caps = [

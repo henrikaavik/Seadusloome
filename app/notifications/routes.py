@@ -32,6 +32,7 @@ from app.notifications.models import (
     mark_read,
 )
 from app.ui.layout import PageShell
+from app.ui.safe_url import has_unsafe_chars, is_safe_http_url
 from app.ui.theme import get_theme_from_request
 from app.ui.time import format_tallinn
 
@@ -94,7 +95,12 @@ def NotificationItem(notif: Any, *, compact: bool = False):  # noqa: ANN201, N80
         id=f"notification-{notif.id}",
     )
 
-    if notif.link and not notif.read:
+    # #848: only render an <a href> when the link passes the safe-link policy
+    # (same-origin relative path OR absolute http(s) URL). An unsafe value
+    # (javascript:/data:/protocol-relative/backslash) falls through to the
+    # non-link wrapper below so it is shown as plain, non-clickable content.
+    link_is_safe = _is_safe_link(notif.link)
+    if link_is_safe and not notif.read:
         # Wrap in a link and mark as read on click. The raw <a href> is
         # swallowed by HTMX's hx-post, so we pipe the destination through
         # a ``?redirect=`` query param — the handler validates same-origin
@@ -107,7 +113,7 @@ def NotificationItem(notif: Any, *, compact: bool = False):  # noqa: ANN201, N80
             hx_swap="none",
             cls="notification-link",
         )
-    if notif.link:
+    if link_is_safe:
         return A(content, href=notif.link, cls="notification-link")  # noqa: F405
     # Non-link notifications always render inside a wrapper with a stable
     # ID. The unread variant has a "Loe" button; the read variant does
@@ -208,16 +214,46 @@ def _is_safe_redirect(target: str) -> bool:
     We only allow relative paths beginning with a single ``/`` so the
     browser cannot be sent to an attacker-controlled host. ``//host`` is
     a protocol-relative URL and must be rejected.
+
+    #848: also reject any target containing a backslash. Browsers normalise
+    ``\\`` to ``/``, so ``/\\evil.com`` becomes ``//evil.com`` (a
+    protocol-relative off-site URL) after normalisation — an open redirect.
+
+    #848 (round-3 review): reject raw control/whitespace bytes too (NUL, DEL,
+    ``\\t`` / ``\\r`` / ``\\n``, space) via the shared ``has_unsafe_chars``
+    policy, so this relative-path gate matches the strictness of the absolute
+    URL helper and the two cannot drift. Estonian diacritic paths
+    (``/märkused``, raw or percent-encoded) are unaffected.
     """
     if not target or not target.startswith("/"):
         return False
     if target.startswith("//"):
+        return False
+    if "\\" in target:
+        return False
+    if has_unsafe_chars(target):
         return False
     parsed = urlparse(target)
     # urlparse of a relative path should yield empty scheme and netloc.
     if parsed.scheme or parsed.netloc:
         return False
     return True
+
+
+def _is_safe_link(link: str | None) -> bool:
+    """Return True if *link* is safe to render as a notification ``href``.
+
+    A notification link is safe when it is **either** a same-origin relative
+    path (``/drafts/123`` — the shape every current ``notify()`` caller emits)
+    **or** an absolute ``http(s)://`` URL. This blocks ``javascript:`` /
+    ``data:`` / protocol-relative / backslash-normalised values from ever
+    landing in an ``href`` should a future caller pass a user-influenced link
+    (e.g. ``_annotation_target_link``). Unsafe links render as plain,
+    non-clickable content instead.
+    """
+    if not link:
+        return False
+    return _is_safe_redirect(link) or is_safe_http_url(link)
 
 
 def mark_single_read(req: Request, id: str):

@@ -28,7 +28,7 @@ from urllib.parse import urlencode
 
 from fasthtml.common import *
 from starlette.requests import Request
-from starlette.responses import JSONResponse, RedirectResponse
+from starlette.responses import JSONResponse, RedirectResponse, Response
 
 from app.analyysikeskus.eu_transposition import (
     DEFAULT_TRANSPOSITION_HORIZON_DAYS,
@@ -50,6 +50,7 @@ from app.ui.primitives.badge import Badge, BadgeVariant
 from app.ui.primitives.button import Button
 from app.ui.primitives.icon import Icon
 from app.ui.primitives.link_button import LinkButton
+from app.ui.safe_url import is_safe_http_url
 from app.ui.surfaces.card import Card, CardBody, CardHeader
 from app.ui.theme import get_theme_from_request
 from app.ui.time import format_tallinn
@@ -1292,7 +1293,15 @@ def _bookmarks_card(bookmarks: list[dict]):  # type: ignore[type-arg]
                 key="entity_uri",
                 label="URI",
                 sortable=False,
-                render=lambda r: A(r["entity_uri"], href=r["entity_uri"]),
+                # #848: render-side guard (defense in depth). Even though the
+                # POST handler now validates before insert, legacy rows may
+                # carry an unsafe ``javascript:`` / ``data:`` value — render
+                # those as plain text, never as a clickable ``href``.
+                render=lambda r: (
+                    A(r["entity_uri"], href=r["entity_uri"])
+                    if is_safe_http_url(r["entity_uri"])
+                    else Span(r["entity_uri"], cls="muted-text")
+                ),
             ),
             Column(
                 key="actions",
@@ -1447,6 +1456,11 @@ def _wants_json(req: Request) -> bool:
     return req.headers.get("x-requested-with", "").lower() == "xmlhttprequest"
 
 
+# #848: Estonian message for a rejected bookmark URI (shown to plain-form
+# callers as the 400 body and returned to XHR callers in the JSON payload).
+_INVALID_URI_MSG = "Vigane URI. Lubatud on ainult http:// või https:// aadressid."
+
+
 def add_bookmark(req: Request, entity_uri: str, label: str = ""):
     """POST /api/bookmarks — add a bookmark for the current user.
 
@@ -1461,10 +1475,23 @@ def add_bookmark(req: Request, entity_uri: str, label: str = ""):
             return JSONResponse({"ok": False, "error": "auth"}, status_code=401)
         return RedirectResponse(url="/auth/login", status_code=303)
 
+    clean_uri = entity_uri.strip()
+    # #848: validate the scheme server-side BEFORE insert — only absolute
+    # http(s):// URLs are allowed. Rejects javascript:/data:/protocol-relative/
+    # backslash-normalised/relative/empty values so a crafted bookmark can
+    # never become stored XSS on dashboard load. No row is persisted on reject.
+    if not is_safe_http_url(clean_uri):
+        if wants_json:
+            return JSONResponse(
+                {"ok": False, "error": "invalid_uri", "message": _INVALID_URI_MSG},
+                status_code=400,
+            )
+        return Response(_INVALID_URI_MSG, status_code=400)
+
     actual_label = label.strip() if label else None
-    bookmark = _add_bookmark(user_id, entity_uri.strip(), actual_label)
+    bookmark = _add_bookmark(user_id, clean_uri, actual_label)
     if bookmark:
-        log_action(user_id, "bookmark.add", {"entity_uri": entity_uri, "label": actual_label})
+        log_action(user_id, "bookmark.add", {"entity_uri": clean_uri, "label": actual_label})
     if wants_json:
         # ``bookmark`` is None when the row already existed (ON CONFLICT DO
         # NOTHING) — still "ok" from the caller's point of view.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
 from starlette.testclient import TestClient
 
 # ---------------------------------------------------------------------------
@@ -988,6 +989,148 @@ class TestBookmarkRoute:
         resp = remove_bookmark(self._req(auth=self._AUTH, xhr=True), "bm-1")
         assert resp.status_code == 200
         assert _json.loads(bytes(resp.body)) == {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# #848: bookmark URI scheme validation — reject XSS / open-redirect vectors
+# before insert, and never render unsafe legacy rows as a link.
+# ---------------------------------------------------------------------------
+
+
+_UNSAFE_BOOKMARK_URIS = [
+    "javascript:alert(1)",
+    "data:text/html,<script>alert(1)</script>",
+    "//evil.example",
+    "/\\evil.example",
+    "",
+    "   ",
+    "/relative/path",
+    "example.org/no-scheme",
+]
+
+
+class TestBookmarkUriValidation:
+    _AUTH = {"id": "u-1", "email": "u@x.ee", "full_name": "U", "role": "drafter", "org_id": None}
+
+    def _req(self, *, xhr: bool):  # type: ignore[type-arg]
+        from starlette.requests import Request
+
+        headers: list[tuple[bytes, bytes]] = []
+        if xhr:
+            headers.append((b"x-requested-with", b"XMLHttpRequest"))
+        return Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/api/bookmarks",
+                "query_string": b"",
+                "headers": headers,
+                "auth": self._AUTH,
+            }
+        )
+
+    @pytest.mark.parametrize("bad_uri", _UNSAFE_BOOKMARK_URIS)
+    @patch("app.templates.dashboard.log_action")
+    @patch("app.templates.dashboard._add_bookmark")
+    def test_xhr_unsafe_uri_returns_400_and_no_insert(
+        self, mock_add: MagicMock, mock_log: MagicMock, bad_uri: str
+    ):
+        import json as _json
+
+        from app.templates.dashboard import add_bookmark
+
+        resp = add_bookmark(self._req(xhr=True), bad_uri, "L")
+        assert resp.status_code == 400
+        payload = _json.loads(bytes(resp.body))
+        assert payload["ok"] is False
+        assert payload["error"] == "invalid_uri"
+        # No row persisted, no audit log entry for a rejected URI.
+        mock_add.assert_not_called()
+        mock_log.assert_not_called()
+
+    @pytest.mark.parametrize("bad_uri", _UNSAFE_BOOKMARK_URIS)
+    @patch("app.templates.dashboard.log_action")
+    @patch("app.templates.dashboard._add_bookmark")
+    def test_plain_form_unsafe_uri_returns_400_and_no_insert(
+        self, mock_add: MagicMock, mock_log: MagicMock, bad_uri: str
+    ):
+        from starlette.responses import Response
+
+        from app.templates.dashboard import add_bookmark
+
+        resp = add_bookmark(self._req(xhr=False), bad_uri, "L")
+        assert isinstance(resp, Response)
+        assert resp.status_code == 400
+        # Estonian message in the body, not an HTML escape of the bad URI.
+        assert "Vigane URI" in bytes(resp.body).decode()
+        mock_add.assert_not_called()
+        mock_log.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "good_uri",
+        [
+            "https://example.org/entity/1",
+            "http://www.riigiteataja.ee/akt/13201407",
+            "  https://example.org/trimmed  ",  # trimmed before validation
+        ],
+    )
+    @patch("app.templates.dashboard.log_action")
+    @patch(
+        "app.templates.dashboard._add_bookmark",
+        return_value={"id": "bm-1", "entity_uri": "x", "label": "L"},
+    )
+    def test_valid_uri_is_inserted(self, mock_add: MagicMock, mock_log: MagicMock, good_uri: str):
+        from app.templates.dashboard import add_bookmark
+
+        resp = add_bookmark(self._req(xhr=True), good_uri, "L")
+        assert resp.status_code == 200
+        # The trimmed URI is what gets persisted.
+        mock_add.assert_called_once()
+        assert mock_add.call_args.args[1] == good_uri.strip()
+
+
+class TestBookmarkRenderGuard:
+    """#848 regression: legacy unsafe bookmark rows must never render as a link."""
+
+    def test_unsafe_legacy_row_renders_as_plain_text_not_link(self):
+        from fasthtml.common import to_xml
+
+        from app.templates.dashboard import _bookmarks_card
+
+        html = to_xml(
+            _bookmarks_card(
+                [
+                    {
+                        "id": "bm-evil",
+                        "entity_uri": "javascript:alert(document.cookie)",
+                        "label": "Paha",
+                    }
+                ]
+            )
+        )
+        # The payload appears (as escaped text) but never inside an href.
+        assert 'href="javascript:' not in html
+        assert "href='javascript:" not in html
+        # It is rendered as plain text inside the muted span, not an anchor.
+        assert '<span class="muted-text">javascript:alert(document.cookie)</span>' in html
+
+    def test_safe_row_renders_as_link(self):
+        from fasthtml.common import to_xml
+
+        from app.templates.dashboard import _bookmarks_card
+
+        html = to_xml(
+            _bookmarks_card(
+                [
+                    {
+                        "id": "bm-1",
+                        "entity_uri": "https://example.org/entity/1",
+                        "label": "Hea",
+                    }
+                ]
+            )
+        )
+        assert 'href="https://example.org/entity/1"' in html
 
 
 # ---------------------------------------------------------------------------
