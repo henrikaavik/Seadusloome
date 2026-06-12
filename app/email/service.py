@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import os
 import threading
 
-from app.config import is_stub_allowed
+from app import config
 from app.email.provider import EmailProvider
 from app.email.stub_provider import StubProvider
 
@@ -34,11 +33,11 @@ def get_email_provider() -> EmailProvider:
         if _provider is not None:
             return _provider
 
-        token = os.environ.get("POSTMARK_API_TOKEN", "").strip()
-        from_addr = os.environ.get("EMAIL_FROM", "").strip() or _DEFAULT_FROM
+        token = config.env_str("POSTMARK_API_TOKEN", "").strip()
+        from_addr = config.env_str("EMAIL_FROM", "").strip() or _DEFAULT_FROM
 
         if not token:
-            if is_stub_allowed():
+            if config.is_stub_allowed():
                 _provider = StubProvider()
                 return _provider
             raise RuntimeError(

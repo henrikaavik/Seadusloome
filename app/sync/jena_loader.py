@@ -22,16 +22,17 @@ rejects if left raw in the query string.
 """
 
 import logging
-import os
 import re
 from urllib.parse import quote
 
 import httpx
 
+from app import config
+
 logger = logging.getLogger(__name__)
 
-JENA_URL = os.environ.get("JENA_URL", "http://localhost:3030")
-JENA_DATASET = os.environ.get("JENA_DATASET", "ontology")
+JENA_URL = config.env_str("JENA_URL", "http://localhost:3030")
+JENA_DATASET = config.env_str("JENA_DATASET", "ontology")
 JENA_ADMIN_USER = "admin"
 
 # #853 / comment item 1: the Fuseki write endpoints are now behind
@@ -42,11 +43,12 @@ JENA_ADMIN_USER = "admin"
 # that. We now resolve the password lazily at first write and FAIL
 # CLOSED outside local development when it is missing.
 #
-# We read ``APP_ENV`` directly here (NOT via app.config) on purpose:
-# app/config.py is owned by another change set, and the gate we want is
-# the same "dev-only fallback" rule app.db already applies to
+# The gate matches the same "dev-only fallback" rule app.db applies to
 # DATABASE_URL — a missing secret is a hard error everywhere except
-# ``APP_ENV=development`` (the default for a fresh clone / tests).
+# ``APP_ENV=development`` (the default for a fresh clone / tests). The
+# password and APP_ENV are both sourced via the typed settings registry
+# (config.env_str / config.get_app_env, #897); the fail-closed domain
+# logic stays here next to the feature it protects.
 _DEV_FALLBACK_ADMIN_PASSWORD = "localdev"
 
 
@@ -71,10 +73,10 @@ def _resolve_admin_password() -> str:
       guessable password to an auth-guarded write endpoint in
       staging/production.
     """
-    value = os.environ.get("FUSEKI_ADMIN_PASSWORD")
+    value = config.env_str("FUSEKI_ADMIN_PASSWORD")
     if value:
         return value
-    if os.environ.get("APP_ENV", "development") == "development":
+    if config.get_app_env() == "development":
         return _DEV_FALLBACK_ADMIN_PASSWORD
     raise FusekiAdminPasswordError(
         "FUSEKI_ADMIN_PASSWORD must be set outside local development — "

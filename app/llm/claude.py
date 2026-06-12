@@ -20,13 +20,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import re
 import threading
 import time
 from collections.abc import AsyncIterator
 from typing import Any
 
+from app import config
 from app.config import STUB_ALLOWED_ENVS, get_app_env, is_stub_allowed
 from app.llm.provider import LLMProvider, StreamEvent
 from app.llm.retry import retry_async, retry_sync
@@ -55,7 +55,7 @@ class ClaudeProvider(LLMProvider):
     """
 
     def __init__(self) -> None:
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+        api_key = config.env_str("ANTHROPIC_API_KEY", "").strip()
 
         if not api_key:
             if not is_stub_allowed():
@@ -78,7 +78,7 @@ class ClaudeProvider(LLMProvider):
             self._stubbed = False
             self._api_key = api_key
 
-        self._model = os.environ.get("CLAUDE_MODEL", DEFAULT_MODEL)
+        self._model = config.env_str("CLAUDE_MODEL", DEFAULT_MODEL)
         # Lazy-initialised SDK clients; only built on first real call so
         # stub users never need the ``anthropic`` package installed.
         self._client: Any = None

@@ -64,7 +64,6 @@ frictionless, with a loud warning so nobody accidentally ships it.
 from __future__ import annotations
 
 import logging
-import os
 import threading
 import uuid
 from dataclasses import dataclass
@@ -72,7 +71,7 @@ from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 
-from app.config import is_stub_allowed
+from app import config
 
 logger = logging.getLogger(__name__)
 
@@ -137,7 +136,7 @@ def _load_fernets() -> list[Fernet]:
     (Tika, Claude, Fernet) follow the same APP_ENV rule (#449, #865).
     """
     global _warned_dev_ephemeral
-    value = os.environ.get("STORAGE_ENCRYPTION_KEY")
+    value = config.env_str("STORAGE_ENCRYPTION_KEY")
     if value:
         segments = [seg.strip() for seg in value.split(",")]
         keys = [seg for seg in segments if seg]
@@ -161,7 +160,7 @@ def _load_fernets() -> list[Fernet]:
                     'print(generate_encryption_key())"`.'
                 ) from exc
         return fernets
-    if is_stub_allowed():
+    if config.is_stub_allowed():
         if not _warned_dev_ephemeral:
             logger.warning(
                 "STORAGE_ENCRYPTION_KEY not set — using ephemeral key. "
@@ -205,10 +204,10 @@ def _load_storage_dir() -> Path:
     test/staging/dev all default to the local relative path; only
     APP_ENV=production falls back to the system-wide ``/var`` path.
     """
-    raw = os.environ.get("STORAGE_DIR")
+    raw = config.env_str("STORAGE_DIR")
     if raw:
         return Path(raw)
-    if is_stub_allowed():
+    if config.is_stub_allowed():
         return Path("./storage/drafts").resolve()
     return Path("/var/seadusloome/drafts")
 

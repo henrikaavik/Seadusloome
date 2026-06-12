@@ -40,7 +40,6 @@ There are no stubs left in this module.
 from __future__ import annotations
 
 import logging
-import os
 import socket
 import threading
 import time
@@ -49,6 +48,7 @@ import uuid
 from collections.abc import Callable
 from typing import Any
 
+from app import config
 from app.jobs.queue import (
     DEFAULT_REAPER_CLAIMED_TIMEOUT_S,
     DEFAULT_REAPER_RUNNING_TIMEOUT_S,
@@ -66,7 +66,7 @@ DEFAULT_REAP_INTERVAL_S = 60.0
 
 def _env_seconds(name: str, default: float) -> float:
     """Read a positive seconds value from the environment, else *default*."""
-    raw = os.environ.get(name, "").strip()
+    raw = (config.env_str(name) or "").strip()
     if not raw:
         return default
     try:

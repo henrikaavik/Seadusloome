@@ -37,13 +37,13 @@ from __future__ import annotations
 
 import io
 import logging
-import os
 import uuid
 import zipfile
 from typing import Any, Protocol
 
 import psycopg
 
+from app import config
 from app.auth.audit import log_action
 from app.auth.provider import UserDict
 from app.db import get_connection as _connect
@@ -174,9 +174,6 @@ class _UploadLike(Protocol):
 # ---------------------------------------------------------------------------
 
 
-_DEFAULT_MAX_UPLOAD_MB = 50
-
-
 def _max_upload_mb() -> int:
     """Return the configured ``MAX_UPLOAD_SIZE_MB`` clamped to ``[1, ∞)``.
 
@@ -185,17 +182,7 @@ def _max_upload_mb() -> int:
     §3 calls for 25 MB but 50 MB leaves headroom for scanned PDFs and is
     still well below the encryption overhead budget.
     """
-    raw = os.environ.get("MAX_UPLOAD_SIZE_MB", str(_DEFAULT_MAX_UPLOAD_MB))
-    try:
-        mb = int(raw)
-    except ValueError:
-        logger.warning(
-            "Invalid MAX_UPLOAD_SIZE_MB=%r, falling back to %d",
-            raw,
-            _DEFAULT_MAX_UPLOAD_MB,
-        )
-        mb = _DEFAULT_MAX_UPLOAD_MB
-    return max(1, mb)
+    return config.env_int("MAX_UPLOAD_SIZE_MB")
 
 
 def max_upload_bytes() -> int:

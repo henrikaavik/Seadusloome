@@ -26,12 +26,13 @@ bare form.
 from __future__ import annotations
 
 import atexit
-import os
 import threading
 import time
 from typing import TYPE_CHECKING, Any
 
 import psycopg
+
+from app import config
 
 if TYPE_CHECKING:
     from psycopg_pool import ConnectionPool
@@ -43,10 +44,10 @@ _DEV_DATABASE_URL = "postgresql://seadusloome:localdev@localhost:5432/seadusloom
 
 def _load_database_url() -> str:
     """Return the DATABASE_URL, enforcing an explicit value off-dev."""
-    value = os.environ.get("DATABASE_URL")
+    value = config.env_str("DATABASE_URL")
     if value:
         return value
-    if os.environ.get("APP_ENV", "development") == "development":
+    if config.get_app_env() == "development":
         return _DEV_DATABASE_URL
     raise RuntimeError("DATABASE_URL must be set in non-development environments")
 
@@ -70,8 +71,8 @@ DATABASE_URL = _load_database_url()
 # under Postgres' default ``max_connections`` while collapsing the
 # connection-per-query storm that motivated this change. Override with
 # ``DB_POOL_MIN`` / ``DB_POOL_MAX`` per deployment.
-_POOL_MIN = max(0, int(os.environ.get("DB_POOL_MIN", "1")))
-_POOL_MAX = max(1, int(os.environ.get("DB_POOL_MAX", "10")))
+_POOL_MIN = max(0, config.env_int("DB_POOL_MIN"))
+_POOL_MAX = max(1, config.env_int("DB_POOL_MAX"))
 # Seconds getconn() blocks waiting for the pool to hand back a connection
 # before raising PoolTimeout. psycopg_pool always routes getconn through its
 # background maintenance worker, so this also bounds how long a *single* call
@@ -81,10 +82,10 @@ _POOL_MAX = max(1, int(os.environ.get("DB_POOL_MAX", "10")))
 # breaker below keeps a dead DB from making *every* subsequent call pay even
 # this wait. Raise ``DB_POOL_TIMEOUT`` in production if a connection-storm
 # warm-up is expected.
-_POOL_TIMEOUT = float(os.environ.get("DB_POOL_TIMEOUT", "2"))
+_POOL_TIMEOUT = config.env_float("DB_POOL_TIMEOUT")
 # Per-attempt TCP/auth connect timeout, applied via the libpq ``connect_timeout``
 # keyword so a dead host fails in seconds rather than the OS default (~75s).
-_CONNECT_TIMEOUT = int(os.environ.get("DB_CONNECT_TIMEOUT", "5"))
+_CONNECT_TIMEOUT = config.env_int("DB_CONNECT_TIMEOUT")
 # Circuit breaker: when a checkout fails (PoolTimeout / OperationalError) the
 # DB is treated as unavailable for this cooldown, during which get_connection()
 # fails *immediately* instead of making each caller wait DB_POOL_TIMEOUT again.
@@ -93,7 +94,7 @@ _CONNECT_TIMEOUT = int(os.environ.get("DB_CONNECT_TIMEOUT", "5"))
 # runs without a Postgres service — does not serialise into one timeout per
 # call) while still pooling normally when the DB is up. Kept short so a
 # transient blip self-heals within a couple of seconds of DB recovery.
-_BREAKER_COOLDOWN = float(os.environ.get("DB_BREAKER_COOLDOWN", "2"))
+_BREAKER_COOLDOWN = config.env_float("DB_BREAKER_COOLDOWN")
 
 _pool: ConnectionPool | None = None
 _pool_lock = threading.Lock()

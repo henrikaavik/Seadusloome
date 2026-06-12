@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import logging
-import os
 
 from fasthtml.common import *
 from starlette.requests import Request
 from starlette.responses import RedirectResponse
 
+from app import config
 from app.auth import throttle
 from app.auth.audit import log_action
 from app.auth.cookies import clear_auth_cookie, set_auth_cookie
@@ -289,7 +289,7 @@ def forgot_post(req: Request, email: str):
             user_id, full_name = row
             raw = issue_reset_token(user_id=user_id, created_by=None, conn=conn)
             conn.commit()
-            base = os.environ.get("APP_BASE_URL", "http://localhost:8000").rstrip("/")
+            base = config.env_str("APP_BASE_URL", "http://localhost:8000").rstrip("/")
             reset_url = f"{base}/auth/reset/{raw}"
             subject, html, text = password_reset(full_name=full_name, reset_url=reset_url)
             try:

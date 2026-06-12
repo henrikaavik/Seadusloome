@@ -12,13 +12,13 @@ from __future__ import annotations
 import csv
 import io
 import logging
-import os
 from datetime import UTC, datetime
 
 from fasthtml.common import *  # noqa: F403
 from starlette.requests import Request
 from starlette.responses import Response
 
+from app import config
 from app.db import get_connection as _connect
 from app.ui.data.data_table import Column, DataTable
 from app.ui.layout import PageShell
@@ -159,7 +159,7 @@ def _get_cost_by_org(window: str = _DEFAULT_WINDOW, org_id: str | None = None) -
 
     When *org_id* is given the result is restricted to that single org.
     """
-    max_cost = float(os.environ.get("ORG_MAX_MONTHLY_COST_USD", "50.0"))
+    max_cost = config.env_float("ORG_MAX_MONTHLY_COST_USD")
     start = _window_start(window)
     params: list = [start]
     where_clause = ""

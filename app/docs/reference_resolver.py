@@ -51,7 +51,6 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
-import os
 import re
 import threading
 from collections import Counter, defaultdict
@@ -59,6 +58,7 @@ from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from typing import Any
 
+from app import config
 from app.config import is_stub_allowed
 from app.docs.entity_extractor import ExtractedRef
 from app.ontology.queries import ESTLEG_NS, PREFIXES
@@ -1033,7 +1033,7 @@ def _get_ref_hash_secret() -> bytes:
     Tests monkeypatch this helper directly to keep assertions on the
     hashed identifier stable.
     """
-    secret = os.environ.get(_REF_HASH_SECRET_ENV)
+    secret = config.env_str(_REF_HASH_SECRET_ENV)
     if secret:
         return secret.encode("utf-8")
     if not is_stub_allowed():  # production

@@ -25,13 +25,13 @@ Design notes:
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any
 
 import httpx
 from fasthtml.common import *  # noqa: F403
 from starlette.requests import Request
 
+from app import config
 from app.admin._shared import _tooltip
 from app.ui.data.data_table import Column, DataTable
 from app.ui.layout import PageShell
@@ -53,9 +53,9 @@ def _sentry_env() -> tuple[str, str, str] | None:
     not-configured branch with ``monkeypatch.delenv`` and keeps the
     token-vs-slug distinction local to this module.
     """
-    token = os.environ.get("SENTRY_API_TOKEN")
-    org = os.environ.get("SENTRY_ORG_SLUG")
-    project = os.environ.get("SENTRY_PROJECT_SLUG")
+    token = config.env_str("SENTRY_API_TOKEN")
+    org = config.env_str("SENTRY_ORG_SLUG")
+    project = config.env_str("SENTRY_PROJECT_SLUG")
     if not (token and org and project):
         return None
     return token, org, project

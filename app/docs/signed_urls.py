@@ -37,11 +37,11 @@ import hashlib
 import hmac
 import json
 import logging
-import os
 import secrets
 import time
 from typing import Any
 
+from app import config
 from app.config import is_stub_allowed
 
 logger = logging.getLogger(__name__)
@@ -75,10 +75,10 @@ def _load_signing_key() -> bytes:
        so a misconfigured deploy can't silently sign tokens with a
        well-known value.
     """
-    explicit = os.environ.get(_DOWNLOAD_TOKEN_SECRET_ENV)
+    explicit = config.env_str(_DOWNLOAD_TOKEN_SECRET_ENV)
     if explicit:
         return explicit.encode("utf-8")
-    jwt_secret = os.environ.get("SECRET_KEY")
+    jwt_secret = config.env_str("SECRET_KEY")
     if jwt_secret:
         return jwt_secret.encode("utf-8")
     if not is_stub_allowed():  # production

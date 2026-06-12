@@ -20,13 +20,13 @@ from __future__ import annotations
 import atexit
 import json
 import logging
-import os
 import threading
 import time
 from collections import deque
 from contextlib import contextmanager
 from typing import Any
 
+from app import config
 from app.db import get_connection as _connect
 
 logger = logging.getLogger(__name__)
@@ -84,7 +84,7 @@ _last_retention_sweep: float | None = None
 
 def _retention_days() -> int:
     """Days of metrics history to keep; 0 (or invalid) disables retention."""
-    raw = os.environ.get("METRICS_RETENTION_DAYS", "30")
+    raw = config.env_str("METRICS_RETENTION_DAYS", "30")
     try:
         return max(0, int(raw))
     except ValueError:

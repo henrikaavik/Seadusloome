@@ -1,5 +1,4 @@
 import logging
-import os
 import threading
 import time
 from pathlib import Path
@@ -12,6 +11,7 @@ from starlette.staticfiles import StaticFiles
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
+from app import config
 from app.admin import register_admin_routes
 from app.analyysikeskus import register_analyysikeskus_routes
 from app.annotations.routes import register_annotation_routes
@@ -128,7 +128,7 @@ async def lifespan(_app):  # type: ignore[no-untyped-def]
             exc_info=True,
         )
 
-    if os.environ.get("DISABLE_BACKGROUND_WORKER") == "1":
+    if config.env_bool("DISABLE_BACKGROUND_WORKER"):
         logger.info("Background worker disabled via DISABLE_BACKGROUND_WORKER=1")
         yield
         return
@@ -407,7 +407,7 @@ app, rt = fast_app(
 # TrustedHostMiddleware is too strict for local dev (it rejects the
 # `testserver` host used by Starlette's TestClient and plain `localhost`),
 # so enable it only when we're running in a non-development environment.
-if os.environ.get("APP_ENV", "development") != "development":
+if config.get_app_env() != "development":
     app.add_middleware(
         TrustedHostMiddleware,
         allowed_hosts=[

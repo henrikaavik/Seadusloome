@@ -1,7 +1,6 @@
 """Sync pipeline orchestrator: GitHub → RDF → validate → Jena Fuseki."""
 
 import logging
-import os
 import re
 import shutil
 import subprocess
@@ -10,6 +9,7 @@ import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
+from app import config
 from app.db import get_connection
 from app.sync.converter import convert_ontology, serialize_to_turtle
 from app.sync.jena_loader import (
@@ -71,7 +71,7 @@ def _scrub_secrets(text: str) -> str:
     if not text:
         return ""
     scrubbed = _URL_CREDENTIALS_RE.sub(r"\g<scheme>***:***@", text)
-    secret = os.environ.get("FUSEKI_ADMIN_PASSWORD")
+    secret = config.env_str("FUSEKI_ADMIN_PASSWORD")
     if secret and secret in scrubbed:
         scrubbed = scrubbed.replace(secret, "***")
     return scrubbed
@@ -103,31 +103,23 @@ ONTOLOGY_REPO = "https://github.com/henrikaavik/estonian-legal-ontology.git"
 STAGING_GRAPH = "urn:estleg:staging"
 
 # Lower bound for "this sync looks plausible". Default: 1,000,000 triples
-# (the enacted-law ontology has ~1.3M today). Overridable per env for
-# non-prod fixtures and tests. The effective threshold is the max of
-# this value and 80% of the current live-graph count — see
-# :func:`_compute_verification_threshold`.
-_DEFAULT_MIN_TRIPLES = 1_000_000
+# (the enacted-law ontology has ~1.3M today). Overridable per env via
+# ``SYNC_MIN_TRIPLES`` for non-prod fixtures and tests. The effective
+# threshold is the max of this value and 80% of the current live-graph
+# count — see :func:`_compute_verification_threshold`. The default and
+# lenient parse now live in the typed settings registry (#897).
 
 
 def _sync_min_triples() -> int:
     """Return the configured absolute minimum triple count for verification.
 
     Exposed as a function so tests (and ops overriding ``SYNC_MIN_TRIPLES``
-    at runtime) don't need to patch a module-level constant.
+    at runtime) don't need to patch a module-level constant. The registry
+    (#897) supplies the default (1,000,000), warns and falls back on a
+    garbage value, and clamps valid values to a floor of 0 — semantics
+    identical to the parser this replaced.
     """
-    raw = os.environ.get("SYNC_MIN_TRIPLES")
-    if raw is None:
-        return _DEFAULT_MIN_TRIPLES
-    try:
-        return max(0, int(raw))
-    except ValueError:
-        logger.warning(
-            "Invalid SYNC_MIN_TRIPLES=%r; falling back to default %d",
-            raw,
-            _DEFAULT_MIN_TRIPLES,
-        )
-        return _DEFAULT_MIN_TRIPLES
+    return config.env_int("SYNC_MIN_TRIPLES")
 
 
 def _compute_verification_threshold(live_count: int) -> int:

@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import logging
-import os
 import re
 import threading
 import time
 
 import httpx
 
+from app import config
 from app.metrics import record_metric
 
 logger = logging.getLogger(__name__)
@@ -144,8 +144,8 @@ class SparqlClient:
         dataset: str | None = None,
         timeout: float = 30.0,
     ) -> None:
-        self.jena_url = jena_url or os.environ.get("JENA_URL", _DEFAULT_JENA_URL)
-        self.dataset = dataset or os.environ.get("JENA_DATASET", _DEFAULT_JENA_DATASET)
+        self.jena_url = jena_url or config.env_str("JENA_URL", _DEFAULT_JENA_URL)
+        self.dataset = dataset or config.env_str("JENA_DATASET", _DEFAULT_JENA_DATASET)
         self.timeout = timeout
 
     @property

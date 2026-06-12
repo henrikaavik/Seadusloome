@@ -6,11 +6,11 @@ defaults to ``True`` (production) and can be overridden via the
 ``COOKIE_SECURE`` environment variable for local development.
 """
 
-import os
-
 from starlette.responses import Response
 
-COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "true").lower() == "true"
+from app import config
+
+COOKIE_SECURE = config.env_bool("COOKIE_SECURE")
 
 
 def set_auth_cookie(response: Response, key: str, value: str, max_age: int) -> None:

@@ -27,7 +27,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
+
+from app import config
 
 logger = logging.getLogger(__name__)
 
@@ -47,19 +48,7 @@ def get_similarity_threshold() -> float:
     Defaults to :data:`DEFAULT_SIMILARITY_THRESHOLD` (0.15) when the
     variable is absent or unparseable.
     """
-    raw = os.environ.get(
-        "SEADUSLOOME_SIMILARITY_THRESHOLD",
-        str(DEFAULT_SIMILARITY_THRESHOLD),
-    )
-    try:
-        v = float(raw)
-    except ValueError:
-        logger.warning(
-            "similarity: invalid SEADUSLOOME_SIMILARITY_THRESHOLD=%r, using default %.2f",
-            raw,
-            DEFAULT_SIMILARITY_THRESHOLD,
-        )
-        return DEFAULT_SIMILARITY_THRESHOLD
+    v = config.env_float("SEADUSLOOME_SIMILARITY_THRESHOLD")
     return max(0.0, min(1.0, v))
 
 

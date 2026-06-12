@@ -24,12 +24,12 @@ frontend can display quota headroom and retry timers.
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+from app import config
 from app.db import get_connection
 
 if TYPE_CHECKING:
@@ -40,8 +40,8 @@ logger = logging.getLogger(__name__)
 # Backward-compatible aliases for tests that import these names.
 # The actual check functions re-read from the environment each call so
 # that config changes take effect without a process restart.
-_MAX_MESSAGES_PER_HOUR = int(os.environ.get("CHAT_MAX_MESSAGES_PER_HOUR", "100"))
-_MAX_MONTHLY_COST_USD = float(os.environ.get("ORG_MAX_MONTHLY_COST_USD", "50.0"))
+_MAX_MESSAGES_PER_HOUR = config.env_int("CHAT_MAX_MESSAGES_PER_HOUR")
+_MAX_MONTHLY_COST_USD = config.env_float("ORG_MAX_MONTHLY_COST_USD")
 
 # Alert when cost usage crosses this fraction of the monthly cap.
 _COST_ALERT_FRACTION = 0.8
@@ -49,12 +49,12 @@ _COST_ALERT_FRACTION = 0.8
 
 def _get_max_messages_per_hour() -> int:
     """Read the rate limit from the environment on each call."""
-    return int(os.environ.get("CHAT_MAX_MESSAGES_PER_HOUR", "100"))
+    return config.env_int("CHAT_MAX_MESSAGES_PER_HOUR")
 
 
 def _get_max_monthly_cost_usd() -> float:
     """Read the cost cap from the environment on each call."""
-    return float(os.environ.get("ORG_MAX_MONTHLY_COST_USD", "50.0"))
+    return config.env_float("ORG_MAX_MONTHLY_COST_USD")
 
 
 class RateLimitExceededError(Exception):
