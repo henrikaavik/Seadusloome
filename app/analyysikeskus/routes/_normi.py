@@ -1,17 +1,24 @@
 """Normi mõjuahel — ``GET /analyysikeskus/normi-mojuahel`` (#722, #860).
 
-Resolves the user\'s free-text input to one ontology entity URI, runs the
-impact analyser against an ephemeral synthetic named graph
-(:func:`app.analyysikeskus.adhoc_analysis.run_adhoc_impact_analysis`), and
-renders the findings through the shared result shell. A UUID matching an
-owned draft with an ``impact_reports`` row short-circuits to that draft\'s
-persisted report. The ``Tulemused`` / ``Tõendid`` rendering machinery is
+The route is a thin adapter: it delegates all orchestration to
+:func:`app.analyysikeskus.services.normi_mojuahel.analyse_normi_mojuahel`
+(the framework-free service) and only renders the typed result. The service
+resolves the user\'s free-text input to one ontology entity URI and runs the
+impact analyser against an ephemeral synthetic named graph (composing
+:func:`app.analyysikeskus.adhoc_analysis.run_adhoc_impact_analysis`); a UUID
+matching an owned draft with an ``impact_reports`` row short-circuits to that
+draft\'s persisted report. The route branches on the returned dataclass
+(``NormiDraftBackedResult`` / ``NormiAdhocResult`` / ``NormiDisambiguation`` /
+``NormiUnresolved``). The ``Tulemused`` / ``Tõendid`` rendering machinery is
 shared with the policy-intent flow and lives in ``_common``.
 
 Patch where used (post-#860), e.g.::
 
-  patch("app.analyysikeskus.routes._normi.run_adhoc_impact_analysis")
-  patch("app.analyysikeskus.routes._normi._load_owned_draft_report")
+  # service boundary, as seen from the route
+  patch("app.analyysikeskus.routes._normi.analyse_normi_mojuahel")
+  # orchestration dep — now used inside the service, so patch it there
+  patch("app.analyysikeskus.services.normi_mojuahel.run_adhoc_impact_analysis")
+  # render-side helper still lives on (and is patched on) the route submodule
   patch("app.analyysikeskus.routes._normi._build_results_block")
 """
 

@@ -44,7 +44,12 @@ their dependencies at module load time, so a package-level patch does NOT
 propagate into a submodule\'s call sites. To intercept a submodule
 dependency, patch where it is USED (e.g.
 ``patch("app.analyysikeskus.routes._sanktsioonid.list_sanctions_for_provision")``
-or ``patch("app.analyysikeskus.routes._normi.run_adhoc_impact_analysis")``).
+or ``patch("app.analyysikeskus.routes._normi.analyse_normi_mojuahel")``).
+Orchestration that moved into ``app/analyysikeskus/services/`` is patched at
+the service module — e.g.
+``patch("app.analyysikeskus.services.normi_mojuahel.run_adhoc_impact_analysis")``
+— not on the route submodule; see
+``docs/2026-06-12-service-layer-convention.md``.
 This is the standard "patch where used" rule, pinned by
 ``tests/test_analyysikeskus_routes_patch_paths.py``.
 """

@@ -1,16 +1,24 @@
 """EL ülevõtt ja harmoneerimine — ``GET /analyysikeskus/el-ulevott`` (#723, #860).
 
-Resolves the user\'s input to one ``estleg:EULegislation`` URI (a CELEX via
+The route is a thin adapter: it delegates all orchestration to
+:func:`app.analyysikeskus.services.el_ulevott.analyse_el_ulevott` (the
+framework-free service) and only renders the typed result. The service
+resolves the user\'s input to one ``estleg:EULegislation`` URI (a CELEX via
 :class:`app.docs.reference_resolver.ReferenceResolver`, or a label search via
 :func:`app.analyysikeskus.eu_lookup.search_eu_acts_by_label`), then runs an
 act/provision-level transposition query
-(:func:`app.impact.eu_transposition.run_eu_transposition`) and renders the
-transposition table + risk band through the shared result shell.
+(:func:`app.impact.eu_transposition.run_eu_transposition`). The route branches
+on the returned dataclass (``ElTranspositionResult`` / ``ElUlevottDisambiguation``
+/ ``ElUlevottUnresolved``) and renders the transposition table + risk band
+through the shared result shell.
 
 Patch where used (post-#860), e.g.::
 
-  patch("app.analyysikeskus.routes._el_ulevott.run_eu_transposition")
-  patch("app.analyysikeskus.routes._el_ulevott.search_eu_acts_by_label")
+  # service boundary, as seen from the route
+  patch("app.analyysikeskus.routes._el_ulevott.analyse_el_ulevott")
+  # orchestration deps — now used inside the service, so patch them there
+  patch("app.analyysikeskus.services.el_ulevott.run_eu_transposition")
+  patch("app.analyysikeskus.services.el_ulevott.search_eu_acts_by_label")
 """
 
 from __future__ import annotations
