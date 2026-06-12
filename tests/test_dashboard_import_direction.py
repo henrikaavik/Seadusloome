@@ -23,17 +23,20 @@ The contract is pinned **both ways**. The AST scan above guards the source
 import surface; a runtime ``sys.modules`` check (like
 ``tests/test_impact_import_direction``'s) then proves the guarantee actually
 holds at import time. ``service.py``'s one ``app.analyysikeskus`` dependency —
-the neutral ``eu_transposition`` data helper — is deferred to *call time*
-rather than imported at module scope, because importing any
-``app.analyysikeskus`` submodule executes that package's ``__init__`` and,
-through its SPARQL client → ``app.metrics``, pulls in the starlette stack. With
+the neutral ``eu_transposition`` data helper — is still deferred to *call time*
+rather than imported at module scope, so a fresh ``import app.dashboard.service``
+touches no ``app.analyysikeskus`` module at all (this keeps the patch point at
+the dependency's canonical home and keeps the import graphs independent). With
 that import deferred, a fresh ``import app.dashboard.service`` loads neither
 ``fasthtml`` nor ``starlette`` nor any ``app.analyysikeskus`` module — which is
 exactly what ``test_importing_service_loads_no_framework_at_runtime`` asserts in
-a pristine subprocess. (The package-init coupling and the residual
-``app.metrics`` starlette floor reached on the *first call* are tracked in issue
-#895; they are out of scope for this layer because nothing in ``service.py``
-itself reaches them until invoked.)
+a pristine subprocess. Historically the deferral also guarded against a
+transitive starlette floor (importing an ``app.analyysikeskus`` submodule ran
+that package's ``__init__`` → SPARQL client → ``app.metrics``, which imported
+Starlette middleware at module scope); that floor was sealed in #895 (the
+``MetricsMiddleware`` was split out of ``app.metrics``), so the deferral now
+buys import-graph hygiene rather than framework isolation — but the runtime
+assertion holds regardless.
 """
 
 from __future__ import annotations
@@ -191,12 +194,16 @@ def test_importing_service_loads_no_framework_at_runtime() -> None:
 
     The AST scan above guards the *source* import surface; this guards the
     *runtime* one. ``service.py`` defers its single ``app.analyysikeskus``
-    data-helper import (``eu_transposition``) to call time, because importing
-    any ``app.analyysikeskus`` submodule runs that package's ``__init__`` and,
-    via its SPARQL client → ``app.metrics``, drags in the starlette stack. With
-    that import deferred, a fresh ``import app.dashboard.service`` must load
-    neither ``fasthtml`` nor ``starlette`` — and, to pin the deferral itself, no
-    ``app.analyysikeskus`` module either.
+    data-helper import (``eu_transposition``) to call time, which keeps a fresh
+    ``import app.dashboard.service`` clear of the entire ``app.analyysikeskus``
+    import graph. (That deferral once also fenced off a transitive starlette
+    floor — an ``app.analyysikeskus`` submodule ran the package ``__init__`` →
+    SPARQL client → ``app.metrics``, which imported Starlette middleware at
+    module scope — but #895 split the middleware out of ``app.metrics`` and
+    sealed that floor.) With the import deferred, a fresh
+    ``import app.dashboard.service`` must load neither ``fasthtml`` nor
+    ``starlette`` — and, to pin the deferral itself, no ``app.analyysikeskus``
+    module either.
 
     Run in a subprocess so the assertion sees a pristine ``sys.modules`` — the
     parent test process has almost certainly already imported ``fasthtml`` and

@@ -12,7 +12,7 @@ This module is the *data* layer: three pure, individually-testable functions —
 :func:`get_user_bookmarks`, :func:`get_high_risk_reports`,
 :func:`get_recent_drafts` — each with a clean signature that can later be wrapped
 as a REST endpoint or an MCP tool (see ``CLAUDE.md`` — "Internal service
-functions"). They mirror the helper pattern in ``app/templates/dashboard.py``
+functions"). They mirror the helper pattern in ``app/dashboard/service.py``
 (``_get_bookmarks`` / ``_get_high_risk_reports``) — every query is **org-scoped
 at the SQL layer** (bookmarks are scoped by ``user_id``), wrapped in
 ``try/except`` → log + return ``[]`` so a DB hiccup degrades the panel to "empty"

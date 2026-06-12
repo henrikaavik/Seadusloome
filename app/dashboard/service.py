@@ -517,13 +517,14 @@ def _get_eu_transposition_deadlines(
     ``ReadTimeout`` at the network layer, the worker exits cleanly, and
     there is no orphaned thread.
     """
-    # Deferred to call time, not module scope: importing any
-    # ``app.analyysikeskus`` submodule first executes that package's
-    # ``__init__`` and, via its SPARQL client → ``app.metrics``, pulls in the
-    # starlette stack. Keeping it here means ``import app.dashboard.service``
-    # stays framework-free at runtime (pinned by
-    # ``tests/test_dashboard_import_direction.py``; the remaining transitive
-    # framework floor reached on the *first call* is tracked in #895).
+    # Deferred to call time, not module scope: this keeps
+    # ``import app.dashboard.service`` independent of the whole
+    # ``app.analyysikeskus`` import graph and keeps the patch point at the
+    # dependency's canonical home. (It originally also guarded against a
+    # framework coupling — importing an ``app.analyysikeskus`` submodule ran
+    # that package's ``__init__`` → SPARQL client → ``app.metrics`` → starlette
+    # — but that was sealed in #895.) The runtime guarantee is pinned by
+    # ``tests/test_dashboard_import_direction.py`` either way.
     from app.analyysikeskus.eu_transposition import (
         DEFAULT_TRANSPOSITION_HORIZON_DAYS,
         list_overdue_or_upcoming_transpositions,

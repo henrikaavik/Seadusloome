@@ -45,7 +45,7 @@ def _get_recent_analyses(user_id: str | None, org_id: str | None) -> list[dict[s
     """Return recent analysis activity for the directory page, newest first.
 
     Two small org-scoped raw-SQL queries — mirroring the try/except → log
-    + return ``[]`` pattern from ``app/templates/dashboard.py``'s widget
+    + return ``[]`` pattern from ``app/dashboard/service.py``'s widget
     loaders — merged into one list capped at :data:`_MAX_RECENT_ANALYSES`:
 
     * **Impact reports** — the latest report per draft for the org (via a
@@ -188,7 +188,7 @@ def _recent_analyses_card(items: list[dict[str, Any]]) -> Any:
     """The "Hiljutised analüüsid" card — a DataTable of recent activity.
 
     Empty → a single muted "Veel pole analüüse." row (consistent with how
-    ``app/templates/dashboard.py`` renders its empty section bodies).
+    ``app/dashboard/pages.py`` renders its empty section bodies).
     """
     if not items:
         return Card(

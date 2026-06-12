@@ -13,9 +13,12 @@ HTTP response / FT node) for the unresolved branch, which needs no Jena.
 Fresh-subprocess runtime tests then pin what the AST scan cannot see: the
 package ``__init__`` resolves its UI exports lazily (PEP 562), so importing
 ``app.analyysikeskus`` — or only the ``services/`` subpackage — never loads
-the package's own ``routes`` / ``result_shell`` FastHTML layer. (The residual
-transitive framework floor under the services, via ``app.docs``'s eager init
-and ``app.metrics``'s starlette middleware imports, is tracked in #895.)
+the package's own ``routes`` / ``result_shell`` FastHTML layer **and** loads
+zero ``fasthtml`` / ``starlette`` modules at all. The residual transitive
+framework floor that once leaked under the services (via ``app.docs``'s eager
+``__init__`` → ``app.auth`` and ``app.metrics``'s starlette middleware imports)
+was removed in #895 — the runtime tests below now assert zero framework, not a
+floor.
 """
 
 from __future__ import annotations
@@ -145,14 +148,19 @@ def test_normi_unresolved_returns_typed_result_not_response() -> None:
 # ---------------------------------------------------------------------------
 # Runtime import-direction tests (subprocess) — the AST scan above only proves
 # the service *source files* carry no direct ``fasthtml`` / ``starlette``
-# import. These pin the *runtime* invariant #860/#894 actually owns: the
-# analyysikeskus package's ``__init__`` must resolve its public exports
-# lazily (PEP 562), so importing the package — or only the framework-free
-# ``services/`` subpackage — never drags the package's own FastHTML UI layer
-# (``routes`` / ``result_shell``) into ``sys.modules``. Run in fresh
-# subprocesses so the assertions see a pristine ``sys.modules`` (the parent
-# test process has long since imported fasthtml + the UI layer transitively,
-# which would mask any regression).
+# import. These pin the *runtime* invariant: importing the package — or only
+# the framework-free ``services/`` subpackage — loads zero ``fasthtml`` /
+# ``starlette`` modules. That rests on two fixes: #860/#894 made the package
+# ``__init__`` resolve its public exports lazily (PEP 562) so it never drags
+# its own FastHTML UI layer (``routes`` / ``result_shell``) into
+# ``sys.modules``, and #895 sealed the transitive leaks the services reached
+# through their neutral dependencies (metrics middleware split out of
+# ``app.metrics``; lazy ``app.auth`` init; ``BadgeVariant`` type-only in
+# ``app.docs.status``). The UI-layer named-module checks are kept alongside the
+# bare zero-framework count because they localize a regression faster. Run in
+# fresh subprocesses so the assertions see a pristine ``sys.modules`` (the
+# parent test process has long since imported fasthtml + the UI layer
+# transitively, which would mask any regression).
 # ---------------------------------------------------------------------------
 
 
@@ -208,27 +216,44 @@ def test_package_init_loads_no_framework() -> None:
     assert "OK" in result.stdout
 
 
-def test_importing_services_does_not_load_package_ui() -> None:
-    """``import app.analyysikeskus.services`` must not load the package's UI layer.
+def test_importing_services_loads_no_framework() -> None:
+    """``import app.analyysikeskus.services`` must load zero framework — full guarantee.
 
-    Scope note: importing the service subpackage today *still* pulls
-    ``fasthtml`` / ``starlette`` into ``sys.modules`` through pre-existing
-    leaks that live **outside** this package and are out of scope for
-    #860/#894 — the service modules import ``app.docs.reference_resolver``
-    (whose ``app.docs`` package ``__init__`` eagerly imports handlers →
-    ``app.auth`` → ``fasthtml``) and ``app.ontology.sparql_client`` (→
-    ``app.metrics``, which imports Starlette middleware at module scope).
-    Those are tracked in issue #895. This test therefore does **not** assert
-    "zero framework modules" — it would fail today; it pins exactly the
-    invariant this package owns: importing only the framework-free service
-    layer never loads ``app.analyysikeskus``'s *own* FastHTML UI siblings
-    (``routes`` / ``result_shell``), which only the lazy package ``__init__``
-    makes possible. When #895 lands and the upstream leaks are sealed, this
-    can be tightened to assert no ``fasthtml`` / ``starlette`` at all.
+    The full framework-free guarantee now holds for the service subpackage: a
+    fresh ``import app.analyysikeskus.services`` pulls **no** ``fasthtml`` /
+    ``starlette`` module into ``sys.modules``. Two independent fixes make this
+    true:
+
+    * #894 — the package ``__init__`` exports its UI siblings (``routes`` /
+      ``result_shell``) lazily (PEP 562 ``__getattr__``), so importing the
+      service layer never drags in ``app.analyysikeskus``'s *own* FastHTML UI.
+    * #895 — the transitive leaks the services reached through their neutral
+      dependencies were sealed: the ``MetricsMiddleware`` was split out of
+      ``app.metrics`` (no more starlette floor under ``app.ontology.sparql_client``);
+      ``app.auth.__init__`` went lazy (PEP 562); and ``BadgeVariant`` is now a
+      ``TYPE_CHECKING``-only import in ``app.docs.status`` — so the service
+      modules' ``app.docs.reference_resolver`` import no longer loads
+      ``fasthtml``.
+
+    The zero-framework assertion is the real contract; the UI-layer assertions
+    (``routes`` / ``result_shell`` absent) are kept alongside it because they
+    localize a regression faster — if a future change reintroduces an eager UI
+    export in the package ``__init__``, the named-module check points straight
+    at it, whereas the bare framework count only says "something leaked".
+
+    Run in a fresh subprocess so the assertions see a pristine ``sys.modules``
+    — the parent test process has long since imported fasthtml + the UI layer
+    transitively, which would mask any regression.
     """
     code = (
         "import sys\n"
         "import app.analyysikeskus.services  # noqa: F401\n"
+        "framework = sorted(m for m in sys.modules "
+        "if m.startswith(('fasthtml', 'starlette')))\n"
+        "assert not framework, "
+        "'import app.analyysikeskus.services pulled in a web framework: ' + repr(framework) + "
+        "' -- the service layer must stay framework-free (PEP 562 lazy UI exports "
+        "in the package __init__, plus the upstream leaks sealed in #895)'\n"
         "ui = [m for m in ('app.analyysikeskus.routes', "
         "'app.analyysikeskus.result_shell') if m in sys.modules]\n"
         "assert not ui, "
@@ -245,8 +270,8 @@ def test_importing_services_does_not_load_package_ui() -> None:
         text=True,
     )
     assert result.returncode == 0, (
-        "fresh-subprocess import of app.analyysikeskus.services loaded the "
-        "package's own FastHTML UI layer (routes / result_shell).\n"
+        "fresh-subprocess import of app.analyysikeskus.services loaded a web "
+        "framework or the package's own FastHTML UI layer (routes / result_shell).\n"
         f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
     assert "OK" in result.stdout
