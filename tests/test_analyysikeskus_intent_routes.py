@@ -148,7 +148,7 @@ def test_intent_routes_redirect_unauthenticated():
 # ---------------------------------------------------------------------------
 
 
-@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.routes._directory._get_recent_analyses", return_value=[])
 @patch("app.auth.middleware._get_provider")
 def test_intent_intake_form_renders(mock_provider: MagicMock, mock_recent: MagicMock):
     mock_provider.return_value = _stub_provider()
@@ -191,7 +191,7 @@ def test_intent_intake_form_renders(mock_provider: MagicMock, mock_recent: Magic
 # ---------------------------------------------------------------------------
 
 
-@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.routes._directory._get_recent_analyses", return_value=[])
 @patch("app.auth.middleware._get_provider")
 def test_analyysikeskus_directory_links_to_new_intent_route(
     mock_provider: MagicMock, mock_recent: MagicMock
@@ -218,7 +218,7 @@ def test_analyysikeskus_directory_links_to_new_intent_route(
 # ---------------------------------------------------------------------------
 
 
-@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.routes._directory._get_recent_analyses", return_value=[])
 @patch("app.analyysikeskus.intent_analysis.extract_intent_candidates")
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve")
 @patch("app.auth.middleware._get_provider")
@@ -279,7 +279,7 @@ def test_intent_extract_renders_confirmation_panel(
 # ---------------------------------------------------------------------------
 
 
-@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.routes._directory._get_recent_analyses", return_value=[])
 @patch("app.analyysikeskus.intent_analysis.extract_intent_candidates")
 @patch("app.auth.middleware._get_provider")
 def test_intent_extract_empty_intent_shows_validation_no_llm(
@@ -307,7 +307,7 @@ def test_intent_extract_empty_intent_shows_validation_no_llm(
 # ---------------------------------------------------------------------------
 
 
-@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.routes._directory._get_recent_analyses", return_value=[])
 @patch("app.analyysikeskus.intent_analysis.extract_intent_candidates")
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve")
 @patch("app.auth.middleware._get_provider")
@@ -339,7 +339,7 @@ def test_intent_extract_zero_candidates_shows_empty_state(
 # ---------------------------------------------------------------------------
 
 
-@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.routes._directory._get_recent_analyses", return_value=[])
 @patch("app.analyysikeskus.intent_analysis.extract_intent_candidates")
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve")
 @patch("app.auth.middleware._get_provider")
@@ -397,7 +397,7 @@ def test_intent_extract_includes_manual_known_refs(
 # ---------------------------------------------------------------------------
 
 
-@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.routes._directory._get_recent_analyses", return_value=[])
 @patch("app.analyysikeskus.intent_analysis.run_adhoc_impact_analysis")
 @patch("app.auth.middleware._get_provider")
 def test_intent_analyze_zero_confirmed_returns_empty_state(
@@ -426,7 +426,7 @@ def test_intent_analyze_zero_confirmed_returns_empty_state(
 # ---------------------------------------------------------------------------
 
 
-@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.routes._directory._get_recent_analyses", return_value=[])
 @patch("app.analyysikeskus.intent_analysis.run_adhoc_impact_analysis")
 @patch("app.auth.middleware._get_provider")
 def test_intent_analyze_runs_per_uri_and_renders_result(
@@ -506,7 +506,7 @@ def test_intent_analyze_runs_per_uri_and_renders_result(
 # ---------------------------------------------------------------------------
 
 
-@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.routes._directory._get_recent_analyses", return_value=[])
 @patch("app.analyysikeskus.intent_analysis.run_adhoc_impact_analysis")
 @patch("app.auth.middleware._get_provider")
 def test_intent_analyze_traceability_per_source(
@@ -551,7 +551,7 @@ def test_intent_analyze_traceability_per_source(
 # ---------------------------------------------------------------------------
 
 
-@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.routes._directory._get_recent_analyses", return_value=[])
 @patch("app.analyysikeskus.intent_analysis.run_adhoc_impact_analysis")
 @patch("app.auth.middleware._get_provider")
 def test_intent_analyze_drops_confirmed_rows_without_uri(
@@ -598,7 +598,7 @@ def test_intent_analyze_drops_confirmed_rows_without_uri(
 # ---------------------------------------------------------------------------
 
 
-@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.routes._directory._get_recent_analyses", return_value=[])
 @patch("app.auth.middleware._get_provider")
 def test_intake_form_prefills_intent_from_sisend_query_param(
     mock_provider: MagicMock,
@@ -627,7 +627,7 @@ def test_intake_form_prefills_intent_from_sisend_query_param(
     assert resp_blank.status_code == 200
 
 
-@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.routes._directory._get_recent_analyses", return_value=[])
 @patch("app.analyysikeskus.intent_analysis.extract_intent_candidates")
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve")
 @patch("app.auth.middleware._get_provider")
@@ -679,7 +679,7 @@ def test_extract_caps_manual_known_refs_to_max_intent_known_refs(
     )
 
 
-@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.routes._directory._get_recent_analyses", return_value=[])
 @patch("app.analyysikeskus.intent_analysis.extract_intent_candidates")
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve")
 @patch("app.auth.middleware._get_provider")
@@ -755,7 +755,7 @@ def test_extract_manual_refs_win_when_llm_fills_the_cap(
     assert "Manual § 2" in body
 
 
-@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.routes._directory._get_recent_analyses", return_value=[])
 @patch("app.analyysikeskus.intent_analysis.extract_intent_candidates")
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve")
 @patch("app.auth.middleware._get_provider")
@@ -819,7 +819,7 @@ def test_extract_manual_refs_capped_when_overflowing_total(
     assert "Manual10" not in captured_texts  # past the cap
 
 
-@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.routes._directory._get_recent_analyses", return_value=[])
 @patch("app.analyysikeskus.intent_analysis.run_adhoc_impact_analysis")
 @patch("app.auth.middleware._get_provider")
 def test_analyze_caps_confirmed_uris_to_max_intent_confirmed_uris(

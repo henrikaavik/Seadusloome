@@ -711,7 +711,7 @@ def test_kohtupraktika_landing_renders_input_form(mock_provider: MagicMock):
     assert "Sisestage päring" in body
 
 
-@patch("app.analyysikeskus.routes.list_decisions_for_provision")
+@patch("app.analyysikeskus.routes._kohtupraktika.list_decisions_for_provision")
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve")
 @patch("app.auth.middleware._get_provider")
 def test_kohtupraktika_resolved_provision_multi_court_grouping(
@@ -754,7 +754,7 @@ def test_kohtupraktika_resolved_provision_multi_court_grouping(
     mock_list.assert_called_once_with(_AVTS_P35_URI, scope=TemporalScope.CURRENT)
 
 
-@patch("app.analyysikeskus.routes.list_decisions_for_act")
+@patch("app.analyysikeskus.routes._kohtupraktika.list_decisions_for_act")
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve")
 @patch("app.auth.middleware._get_provider")
 def test_kohtupraktika_resolved_law_uses_act_query(
@@ -779,8 +779,8 @@ def test_kohtupraktika_resolved_law_uses_act_query(
     mock_list_act.assert_called_once_with("Avaliku teabe seadus", scope=TemporalScope.CURRENT)
 
 
-@patch("app.analyysikeskus.routes.list_decisions_for_act")
-@patch("app.analyysikeskus.routes._rag_candidates", return_value=[])
+@patch("app.analyysikeskus.routes._kohtupraktika.list_decisions_for_act")
+@patch("app.analyysikeskus.routes._kohtupraktika._rag_candidates", return_value=[])
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve")
 @patch("app.auth.middleware._get_provider")
 def test_kohtupraktika_bare_law_input_routes_to_for_act(
@@ -810,7 +810,7 @@ def test_kohtupraktika_bare_law_input_routes_to_for_act(
     assert "Ei tuvastanud õiguslikku viidet" not in body
 
 
-@patch("app.analyysikeskus.routes.list_decisions_for_provision", return_value=[])
+@patch("app.analyysikeskus.routes._kohtupraktika.list_decisions_for_provision", return_value=[])
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve")
 @patch("app.auth.middleware._get_provider")
 def test_kohtupraktika_empty_result_renders_friendly_message(
@@ -828,7 +828,7 @@ def test_kohtupraktika_empty_result_renders_friendly_message(
     assert "Kohtupraktikat ei leitud" in resp.text
 
 
-@patch("app.analyysikeskus.routes.list_decisions_for_provision")
+@patch("app.analyysikeskus.routes._kohtupraktika.list_decisions_for_provision")
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve")
 @patch("app.auth.middleware._get_provider")
 def test_kohtupraktika_disambiguation_when_multiple_resolutions(
@@ -874,7 +874,7 @@ def test_kohtupraktika_disambiguation_when_multiple_resolutions(
     mock_list.assert_not_called()
 
 
-@patch("app.analyysikeskus.routes._rag_candidates", return_value=[])
+@patch("app.analyysikeskus.routes._kohtupraktika._rag_candidates", return_value=[])
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve", return_value=[])
 @patch("app.auth.middleware._get_provider")
 def test_kohtupraktika_unresolved_input_shows_warning(
@@ -893,7 +893,7 @@ def test_kohtupraktika_unresolved_input_shows_warning(
         assert heading in body, heading
 
 
-@patch("app.analyysikeskus.routes.list_decisions_for_provision")
+@patch("app.analyysikeskus.routes._kohtupraktika.list_decisions_for_provision")
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve")
 @patch("app.auth.middleware._get_provider")
 def test_kohtupraktika_evidence_rows_use_legal_phrase(
@@ -915,7 +915,7 @@ def test_kohtupraktika_evidence_rows_use_legal_phrase(
     assert 'action="/chat/seed"' in body
 
 
-@patch("app.analyysikeskus.routes.list_decisions_for_provision")
+@patch("app.analyysikeskus.routes._kohtupraktika.list_decisions_for_provision")
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve")
 @patch("app.auth.middleware._get_provider")
 def test_kohtupraktika_actions_carry_scope(

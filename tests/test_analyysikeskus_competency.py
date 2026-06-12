@@ -641,8 +641,8 @@ def test_padevused_landing_renders_input_form(mock_provider: MagicMock):
     assert "Sisestage asutuse nimi" in body
 
 
-@patch("app.analyysikeskus.routes.gather_institution_competences")
-@patch("app.analyysikeskus.routes.search_institutions_by_label")
+@patch("app.analyysikeskus.routes._padevused.gather_institution_competences")
+@patch("app.analyysikeskus.routes._padevused.search_institutions_by_label")
 @patch("app.auth.middleware._get_provider")
 def test_padevused_single_match_renders_result(
     mock_provider: MagicMock,
@@ -697,7 +697,7 @@ def test_padevused_single_match_renders_result(
     assert "Tagasi analüüsikeskusesse" in body
 
 
-@patch("app.analyysikeskus.routes.search_institutions_by_label")
+@patch("app.analyysikeskus.routes._padevused.search_institutions_by_label")
 @patch("app.auth.middleware._get_provider")
 def test_padevused_disambiguation_when_multiple_candidates(
     mock_provider: MagicMock,
@@ -724,7 +724,7 @@ def test_padevused_disambiguation_when_multiple_candidates(
     assert "Tarbijakaitse" in body
 
 
-@patch("app.analyysikeskus.routes.search_institutions_by_label", return_value=[])
+@patch("app.analyysikeskus.routes._padevused.search_institutions_by_label", return_value=[])
 @patch("app.auth.middleware._get_provider")
 def test_padevused_unresolved_shows_warning(
     mock_provider: MagicMock,
@@ -741,8 +741,8 @@ def test_padevused_unresolved_shows_warning(
         assert heading in body, heading
 
 
-@patch("app.analyysikeskus.routes.gather_institution_competences")
-@patch("app.analyysikeskus.routes.search_institutions_by_label")
+@patch("app.analyysikeskus.routes._padevused.gather_institution_competences")
+@patch("app.analyysikeskus.routes._padevused.search_institutions_by_label")
 @patch("app.auth.middleware._get_provider")
 def test_padevused_exact_match_short_circuits_to_result(
     mock_provider: MagicMock,
@@ -769,9 +769,9 @@ def test_padevused_exact_match_short_circuits_to_result(
     assert "Näitan pädevusi asutuse tasandil" in body
 
 
-@patch("app.analyysikeskus.routes.gather_institution_competences")
-@patch("app.analyysikeskus.routes.get_institution_label")
-@patch("app.analyysikeskus.routes.search_institutions_by_label")
+@patch("app.analyysikeskus.routes._padevused.gather_institution_competences")
+@patch("app.analyysikeskus.routes._padevused.get_institution_label")
+@patch("app.analyysikeskus.routes._padevused.search_institutions_by_label")
 @patch("app.auth.middleware._get_provider")
 def test_padevused_uri_deep_link_resolves_directly(
     mock_provider: MagicMock,
@@ -796,8 +796,8 @@ def test_padevused_uri_deep_link_resolves_directly(
     mock_get_label.assert_called_once_with(_INST_2_URI)
 
 
-@patch("app.analyysikeskus.routes.gather_institution_competences")
-@patch("app.analyysikeskus.routes.search_institutions_by_label")
+@patch("app.analyysikeskus.routes._padevused.gather_institution_competences")
+@patch("app.analyysikeskus.routes._padevused.search_institutions_by_label")
 @patch("app.auth.middleware._get_provider")
 def test_padevused_empty_result_renders_friendly_message(
     mock_provider: MagicMock,
