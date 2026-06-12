@@ -161,7 +161,7 @@ def test_workflow_routes_redirect_unauthenticated():
 # ---------------------------------------------------------------------------
 
 
-@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.routes._directory._get_recent_analyses", return_value=[])
 @patch("app.auth.middleware._get_provider")
 def test_analyysikeskus_directory_renders(mock_provider: MagicMock, mock_recent: MagicMock):
     mock_provider.return_value = _stub_provider()
@@ -187,7 +187,7 @@ def test_analyysikeskus_directory_renders(mock_provider: MagicMock, mock_recent:
 # ---------------------------------------------------------------------------
 
 
-@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.routes._directory._get_recent_analyses", return_value=[])
 @patch("app.analyysikeskus.adhoc_analysis.delete_named_graph", return_value=True)
 @patch("app.analyysikeskus.adhoc_analysis.put_named_graph", return_value=True)
 @patch("app.analyysikeskus.adhoc_analysis.ImpactAnalyzer")
@@ -257,7 +257,7 @@ def test_normi_mojuahel_resolved_renders_full_result(
 # ---------------------------------------------------------------------------
 
 
-@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.routes._directory._get_recent_analyses", return_value=[])
 @patch("app.analyysikeskus.adhoc_analysis.delete_named_graph", return_value=True)
 @patch("app.analyysikeskus.adhoc_analysis.put_named_graph", return_value=True)
 @patch("app.analyysikeskus.adhoc_analysis.ImpactAnalyzer")
@@ -278,7 +278,7 @@ def test_normi_mojuahel_deletes_graph_even_on_render_error(
     # Make the result-page assembly blow up *after* the analysis (and
     # thus after run_adhoc_impact_analysis's finally deleted the graph).
     with patch(
-        "app.analyysikeskus.routes._build_results_block",
+        "app.analyysikeskus.routes._normi._build_results_block",
         side_effect=RuntimeError("boom while rendering"),
     ):
         client = _authed_client(raise_server_exceptions=False)
@@ -298,8 +298,8 @@ def test_normi_mojuahel_deletes_graph_even_on_render_error(
 # ---------------------------------------------------------------------------
 
 
-@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
-@patch("app.analyysikeskus.routes._rag_candidates", return_value=[])
+@patch("app.analyysikeskus.routes._directory._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.routes._normi._rag_candidates", return_value=[])
 @patch("app.analyysikeskus.adhoc_analysis.put_named_graph", return_value=True)
 @patch("app.auth.middleware._get_provider")
 def test_normi_mojuahel_unresolved_input_shows_warning(
@@ -329,9 +329,9 @@ def test_normi_mojuahel_unresolved_input_shows_warning(
 # ---------------------------------------------------------------------------
 
 
-@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.routes._directory._get_recent_analyses", return_value=[])
 @patch("app.analyysikeskus.adhoc_analysis.put_named_graph", return_value=True)
-@patch("app.analyysikeskus.routes._load_owned_draft_report")
+@patch("app.analyysikeskus.services.normi_mojuahel._load_owned_draft_report")
 @patch("app.auth.middleware._get_provider")
 def test_normi_mojuahel_draft_uuid_reuses_impact_report(
     mock_provider: MagicMock,
@@ -397,7 +397,7 @@ def test_normi_mojuahel_draft_uuid_reuses_impact_report(
 # ---------------------------------------------------------------------------
 
 
-@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.routes._directory._get_recent_analyses", return_value=[])
 @patch("app.analyysikeskus.adhoc_analysis.delete_named_graph", return_value=True)
 @patch("app.analyysikeskus.adhoc_analysis.put_named_graph", return_value=True)
 @patch("app.analyysikeskus.adhoc_analysis.ImpactAnalyzer")
@@ -587,8 +587,8 @@ def _canned_eu_resolved_ref(entity_uri: str = _GDPR_URI):
     )
 
 
-@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
-@patch("app.analyysikeskus.routes.run_eu_transposition")
+@patch("app.analyysikeskus.routes._directory._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.services.el_ulevott.run_eu_transposition")
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve")
 @patch("app.auth.middleware._get_provider")
 def test_el_ulevott_celex_renders_transposition_table(
@@ -641,8 +641,8 @@ def test_el_ulevott_celex_renders_transposition_table(
     assert mock_run.call_args.args[0] == _GDPR_URI
 
 
-@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
-@patch("app.analyysikeskus.routes.search_eu_acts_by_label", return_value=[])
+@patch("app.analyysikeskus.routes._directory._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.services.el_ulevott.search_eu_acts_by_label", return_value=[])
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve", return_value=[])
 @patch("app.auth.middleware._get_provider")
 def test_el_ulevott_unrecognised_input_shows_warning(
@@ -679,8 +679,8 @@ def test_el_ulevott_unrecognised_input_shows_warning(
 # the upstream wiring.
 
 
-@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
-@patch("app.analyysikeskus.routes.search_eu_acts_by_label", return_value=[])
+@patch("app.analyysikeskus.routes._directory._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.services.el_ulevott.search_eu_acts_by_label", return_value=[])
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve", return_value=[])
 @patch("app.auth.middleware._get_provider")
 def test_el_ulevott_canonical_celex_missing_from_data_shows_specific_warning(
@@ -711,8 +711,8 @@ def test_el_ulevott_canonical_celex_missing_from_data_shows_specific_warning(
     assert "Uuenda ulatust" in body
 
 
-@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
-@patch("app.analyysikeskus.routes.search_eu_acts_by_label", return_value=[])
+@patch("app.analyysikeskus.routes._directory._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.services.el_ulevott.search_eu_acts_by_label", return_value=[])
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve", return_value=[])
 @patch("app.auth.middleware._get_provider")
 def test_el_ulevott_lowercase_celex_shows_specific_warning(
@@ -739,8 +739,8 @@ def test_el_ulevott_lowercase_celex_shows_specific_warning(
     assert "Ei tuvastanud EL õigusakti" not in body
 
 
-@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
-@patch("app.analyysikeskus.routes.search_eu_acts_by_label", return_value=[])
+@patch("app.analyysikeskus.routes._directory._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.services.el_ulevott.search_eu_acts_by_label", return_value=[])
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve", return_value=[])
 @patch("app.auth.middleware._get_provider")
 def test_el_ulevott_near_celex_garbage_shows_generic_warning(
@@ -765,8 +765,8 @@ def test_el_ulevott_near_celex_garbage_shows_generic_warning(
     assert "ei ole veel" not in body or "ontoloogias kaardistatud" not in body
 
 
-@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
-@patch("app.analyysikeskus.routes.search_eu_acts_by_label", return_value=[])
+@patch("app.analyysikeskus.routes._directory._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.services.el_ulevott.search_eu_acts_by_label", return_value=[])
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve", return_value=[])
 @patch("app.auth.middleware._get_provider")
 def test_el_ulevott_directive_title_shows_generic_warning(
@@ -790,8 +790,8 @@ def test_el_ulevott_directive_title_shows_generic_warning(
     assert "ontoloogias kaardistatud" not in body
 
 
-@patch("app.analyysikeskus.routes._get_recent_analyses", return_value=[])
-@patch("app.analyysikeskus.routes.search_eu_acts_by_label")
+@patch("app.analyysikeskus.routes._directory._get_recent_analyses", return_value=[])
+@patch("app.analyysikeskus.services.el_ulevott.search_eu_acts_by_label")
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve", return_value=[])
 @patch("app.auth.middleware._get_provider")
 def test_el_ulevott_label_search_multiple_candidates(

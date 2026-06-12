@@ -700,8 +700,8 @@ def test_sanctions_landing_renders_input_form(mock_provider: MagicMock):
     assert "Sisestage päring" in body
 
 
-@patch("app.analyysikeskus.routes.find_similar_sanctions", return_value=[])
-@patch("app.analyysikeskus.routes.list_sanctions_for_provision")
+@patch("app.analyysikeskus.routes._sanktsioonid.find_similar_sanctions", return_value=[])
+@patch("app.analyysikeskus.routes._sanktsioonid.list_sanctions_for_provision")
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve")
 @patch("app.auth.middleware._get_provider")
 def test_sanctions_resolved_provision_renders_full_result(
@@ -753,8 +753,8 @@ def test_sanctions_resolved_provision_renders_full_result(
     mock_similar.assert_not_called()
 
 
-@patch("app.analyysikeskus.routes.find_similar_sanctions")
-@patch("app.analyysikeskus.routes.list_sanctions_for_provision")
+@patch("app.analyysikeskus.routes._sanktsioonid.find_similar_sanctions")
+@patch("app.analyysikeskus.routes._sanktsioonid.list_sanctions_for_provision")
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve")
 @patch("app.auth.middleware._get_provider")
 def test_sanctions_comparison_flag_runs_similar_query(
@@ -781,7 +781,7 @@ def test_sanctions_comparison_flag_runs_similar_query(
     mock_similar.assert_called_once()
 
 
-@patch("app.analyysikeskus.routes.list_sanctions_for_act")
+@patch("app.analyysikeskus.routes._sanktsioonid.list_sanctions_for_act")
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve")
 @patch("app.auth.middleware._get_provider")
 def test_sanctions_resolved_law_uses_act_query(
@@ -811,9 +811,9 @@ def test_sanctions_resolved_law_uses_act_query(
     mock_list_act.assert_called_once_with("Karistusseadustik", scope=TemporalScope.CURRENT)
 
 
-@patch("app.analyysikeskus.routes.find_similar_sanctions", return_value=[])
-@patch("app.analyysikeskus.routes.list_sanctions_for_act")
-@patch("app.analyysikeskus.routes._rag_candidates", return_value=[])
+@patch("app.analyysikeskus.routes._sanktsioonid.find_similar_sanctions", return_value=[])
+@patch("app.analyysikeskus.routes._sanktsioonid.list_sanctions_for_act")
+@patch("app.analyysikeskus.routes._sanktsioonid._rag_candidates", return_value=[])
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve")
 @patch("app.auth.middleware._get_provider")
 def test_sanctions_bare_law_input_routes_to_for_act(
@@ -851,7 +851,7 @@ def test_sanctions_bare_law_input_routes_to_for_act(
     assert "Ei tuvastanud õiguslikku viidet" not in body
 
 
-@patch("app.analyysikeskus.routes._rag_candidates", return_value=[])
+@patch("app.analyysikeskus.routes._sanktsioonid._rag_candidates", return_value=[])
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve", return_value=[])
 @patch("app.auth.middleware._get_provider")
 def test_sanctions_unresolved_input_shows_warning(
@@ -872,7 +872,7 @@ def test_sanctions_unresolved_input_shows_warning(
         assert heading in body, heading
 
 
-@patch("app.analyysikeskus.routes.list_sanctions_for_provision")
+@patch("app.analyysikeskus.routes._sanktsioonid.list_sanctions_for_provision")
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve")
 @patch("app.auth.middleware._get_provider")
 def test_sanctions_disambiguation_when_multiple_resolutions(
@@ -921,7 +921,7 @@ def test_sanctions_disambiguation_when_multiple_resolutions(
     mock_list.assert_not_called()
 
 
-@patch("app.analyysikeskus.routes.list_sanctions_for_provision", return_value=[])
+@patch("app.analyysikeskus.routes._sanktsioonid.list_sanctions_for_provision", return_value=[])
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve")
 @patch("app.auth.middleware._get_provider")
 def test_sanctions_empty_result_renders_friendly_message(

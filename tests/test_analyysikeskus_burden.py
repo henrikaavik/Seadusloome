@@ -589,7 +589,7 @@ def test_burden_landing_renders_input_form(mock_provider: MagicMock):
     assert "Hinda halduskoormust" in body
 
 
-@patch("app.analyysikeskus.routes.list_burden_for_provision")
+@patch("app.analyysikeskus.routes._halduskoormus.list_burden_for_provision")
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve")
 @patch("app.auth.middleware._get_provider")
 def test_burden_resolved_provision_renders_full_result(
@@ -623,7 +623,7 @@ def test_burden_resolved_provision_renders_full_result(
     mock_list.assert_called_once_with(_TLS_P12_URI, scope=TemporalScope.CURRENT)
 
 
-@patch("app.analyysikeskus.routes.list_burden_for_act")
+@patch("app.analyysikeskus.routes._halduskoormus.list_burden_for_act")
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve")
 @patch("app.auth.middleware._get_provider")
 def test_burden_resolved_law_uses_act_query(
@@ -652,8 +652,8 @@ def test_burden_resolved_law_uses_act_query(
     mock_list_act.assert_called_once_with("Töölepingu seadus", scope=TemporalScope.CURRENT)
 
 
-@patch("app.analyysikeskus.routes.list_burden_for_act")
-@patch("app.analyysikeskus.routes._rag_candidates", return_value=[])
+@patch("app.analyysikeskus.routes._halduskoormus.list_burden_for_act")
+@patch("app.analyysikeskus.routes._halduskoormus._rag_candidates", return_value=[])
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve")
 @patch("app.auth.middleware._get_provider")
 def test_burden_bare_law_input_routes_to_for_act(
@@ -689,7 +689,7 @@ def test_burden_bare_law_input_routes_to_for_act(
     assert "Ei tuvastanud õiguslikku viidet" not in body
 
 
-@patch("app.analyysikeskus.routes._rag_candidates", return_value=[])
+@patch("app.analyysikeskus.routes._halduskoormus._rag_candidates", return_value=[])
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve", return_value=[])
 @patch("app.auth.middleware._get_provider")
 def test_burden_unresolved_input_shows_warning(
@@ -705,7 +705,7 @@ def test_burden_unresolved_input_shows_warning(
     assert "Ei tuvastanud õiguslikku viidet" in body
 
 
-@patch("app.analyysikeskus.routes.list_burden_for_provision")
+@patch("app.analyysikeskus.routes._halduskoormus.list_burden_for_provision")
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve")
 @patch("app.auth.middleware._get_provider")
 def test_burden_disambiguation_when_multiple_resolutions(

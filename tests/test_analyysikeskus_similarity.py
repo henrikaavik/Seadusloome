@@ -660,7 +660,7 @@ def test_sarnasus_landing_renders_input_form(mock_provider: MagicMock):
     assert "Otsi sarnaseid sätteid" in body
 
 
-@patch("app.analyysikeskus.routes.find_similar")
+@patch("app.analyysikeskus.routes._sarnasus.find_similar")
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve")
 @patch("app.auth.middleware._get_provider")
 def test_sarnasus_resolved_provision_renders_full_result(
@@ -694,7 +694,7 @@ def test_sarnasus_resolved_provision_renders_full_result(
     assert call_kwargs["query_text"] == "AvTS § 35 — Avaliku teabe seadus"
 
 
-@patch("app.analyysikeskus.routes.find_similar")
+@patch("app.analyysikeskus.routes._sarnasus.find_similar")
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve", return_value=[])
 @patch("app.auth.middleware._get_provider")
 def test_sarnasus_free_text_uses_embedding_only(
@@ -716,7 +716,7 @@ def test_sarnasus_free_text_uses_embedding_only(
     assert call_kwargs["query_text"] == "menetlustähtaegade pikendamine"
 
 
-@patch("app.analyysikeskus.routes.find_similar", return_value=[])
+@patch("app.analyysikeskus.routes._sarnasus.find_similar", return_value=[])
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve", return_value=[])
 @patch("app.auth.middleware._get_provider")
 def test_sarnasus_no_results_shows_warning(

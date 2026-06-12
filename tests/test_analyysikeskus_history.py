@@ -872,7 +872,7 @@ def test_ajalugu_landing_renders_input_form(mock_provider: MagicMock):
     assert "Ainult akti tasandi ajalugu" not in body
 
 
-@patch("app.analyysikeskus.routes.get_history_bundle")
+@patch("app.analyysikeskus.routes._ajalugu.get_history_bundle")
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve")
 @patch("app.auth.middleware._get_provider")
 def test_ajalugu_provision_input_shows_banner(
@@ -911,7 +911,7 @@ def test_ajalugu_provision_input_shows_banner(
     assert kwargs.get("input_type") == "provision"
 
 
-@patch("app.analyysikeskus.routes.get_history_bundle")
+@patch("app.analyysikeskus.routes._ajalugu.get_history_bundle")
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve")
 @patch("app.auth.middleware._get_provider")
 def test_ajalugu_act_input_hides_banner(
@@ -944,8 +944,8 @@ def test_ajalugu_act_input_hides_banner(
     assert kwargs.get("input_type") == "act"
 
 
-@patch("app.analyysikeskus.routes.get_history_bundle")
-@patch("app.analyysikeskus.routes._rag_candidates", return_value=[])
+@patch("app.analyysikeskus.routes._ajalugu.get_history_bundle")
+@patch("app.analyysikeskus.routes._ajalugu._rag_candidates", return_value=[])
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve")
 @patch("app.auth.middleware._get_provider")
 def test_ajalugu_bare_law_input_routes_to_act_bundle(
@@ -983,7 +983,7 @@ def test_ajalugu_bare_law_input_routes_to_act_bundle(
     assert "Ei tuvastanud õiguslikku viidet" not in body
 
 
-@patch("app.analyysikeskus.routes.get_history_bundle")
+@patch("app.analyysikeskus.routes._ajalugu.get_history_bundle")
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve")
 @patch("app.auth.middleware._get_provider")
 def test_ajalugu_disambiguation_when_multiple_resolutions(
@@ -1029,7 +1029,7 @@ def test_ajalugu_disambiguation_when_multiple_resolutions(
     mock_bundle.assert_not_called()
 
 
-@patch("app.analyysikeskus.routes._rag_candidates", return_value=[])
+@patch("app.analyysikeskus.routes._ajalugu._rag_candidates", return_value=[])
 @patch("app.docs.reference_resolver.ReferenceResolver.resolve", return_value=[])
 @patch("app.auth.middleware._get_provider")
 def test_ajalugu_unresolved_input_shows_warning(

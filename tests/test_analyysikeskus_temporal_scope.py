@@ -684,7 +684,9 @@ class TestScopeFormRoundTrip:
         """The result-page scope form offers both options; default = current."""
         mock_provider.return_value = _stub_provider()
         mock_resolve.return_value = [_resolved_kars_law_ref()]
-        with patch("app.analyysikeskus.routes.list_sanctions_for_act", return_value=[]):
+        with patch(
+            "app.analyysikeskus.routes._sanktsioonid.list_sanctions_for_act", return_value=[]
+        ):
             client = _authed_client()
             resp = client.get("/analyysikeskus/sanktsioonid?sisend=KarS")
         assert resp.status_code == 200
@@ -725,7 +727,9 @@ class TestScopeFormRoundTrip:
                 },
             )
         ]
-        with patch("app.analyysikeskus.routes.list_sanctions_for_act", return_value=[]):
+        with patch(
+            "app.analyysikeskus.routes._sanktsioonid.list_sanctions_for_act", return_value=[]
+        ):
             client = _authed_client()
             resp = client.get(
                 "/analyysikeskus/sanktsioonid?sisend=KarS&oigus=all&ulatus_submitted=1"
@@ -766,7 +770,7 @@ class TestScopeFormRoundTrip:
             )
         ]
         with patch(
-            "app.analyysikeskus.routes.list_sanctions_for_act", return_value=[]
+            "app.analyysikeskus.routes._sanktsioonid.list_sanctions_for_act", return_value=[]
         ) as mock_act:
             client = _authed_client()
             resp = client.get(
