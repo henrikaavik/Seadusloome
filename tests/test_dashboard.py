@@ -215,10 +215,12 @@ class TestAdminDashboard:
 # Dashboard work-queue page (#717) — render the new operational sections
 # ---------------------------------------------------------------------------
 
-# Helper names patched at ``app.templates.dashboard.<name>`` per the
+# Helper names patched at ``app.dashboard.pages.<name>`` per the
 # patch-where-used contract — these are the DB-touching widget loaders the
-# page calls; mocking them lets us render ``dashboard_page`` with a fake
-# Request and no live DB.
+# page calls (the loaders themselves live in ``app.dashboard.service`` and are
+# imported into ``app.dashboard.pages`` by name, so patching the page-module
+# reference swaps what ``dashboard_page`` actually calls); mocking them lets us
+# render ``dashboard_page`` with a fake Request and no live DB.
 _WIDGET_HELPERS = (
     "_get_active_drafter_sessions",
     "_get_high_risk_reports",
@@ -273,13 +275,13 @@ def _render_dashboard(returns: dict[str, object]) -> str:
 
     from fasthtml.common import to_xml
 
-    from app.templates.dashboard import dashboard_page
+    from app.dashboard.pages import dashboard_page
 
     with ExitStack() as stack:
         for name in _WIDGET_HELPERS:
             default: object = None if name == "_get_user_org_info" else []
             stack.enter_context(
-                patch(f"app.templates.dashboard.{name}", return_value=returns.get(name, default))
+                patch(f"app.dashboard.pages.{name}", return_value=returns.get(name, default))
             )
         result = dashboard_page(_make_dashboard_request())
     return to_xml(result)
@@ -520,9 +522,9 @@ class TestDashboardWorkQueue:
 
 
 class TestBookmarkAdd:
-    @patch("app.templates.dashboard._connect")
+    @patch("app.dashboard.service._connect")
     def test_add_bookmark_returns_dict(self, mock_connect: MagicMock):
-        from app.templates.dashboard import _add_bookmark
+        from app.dashboard.service import _add_bookmark
 
         mock_conn = MagicMock()
         mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
@@ -541,9 +543,9 @@ class TestBookmarkAdd:
         assert result["label"] == "Test Entity"
         mock_conn.commit.assert_called_once()
 
-    @patch("app.templates.dashboard._connect")
+    @patch("app.dashboard.service._connect")
     def test_add_bookmark_returns_none_on_conflict(self, mock_connect: MagicMock):
-        from app.templates.dashboard import _add_bookmark
+        from app.dashboard.service import _add_bookmark
 
         mock_conn = MagicMock()
         mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
@@ -554,9 +556,9 @@ class TestBookmarkAdd:
         result = _add_bookmark("user-1", "http://example.org/entity/1", "Test")
         assert result is None
 
-    @patch("app.templates.dashboard._connect")
+    @patch("app.dashboard.service._connect")
     def test_add_bookmark_returns_none_on_db_error(self, mock_connect: MagicMock):
-        from app.templates.dashboard import _add_bookmark
+        from app.dashboard.service import _add_bookmark
 
         mock_connect.side_effect = Exception("DB unavailable")
         result = _add_bookmark("user-1", "http://example.org/entity/1", "Test")
@@ -564,9 +566,9 @@ class TestBookmarkAdd:
 
 
 class TestBookmarkRemove:
-    @patch("app.templates.dashboard._connect")
+    @patch("app.dashboard.service._connect")
     def test_remove_bookmark_returns_true(self, mock_connect: MagicMock):
-        from app.templates.dashboard import _remove_bookmark
+        from app.dashboard.service import _remove_bookmark
 
         mock_conn = MagicMock()
         mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
@@ -577,9 +579,9 @@ class TestBookmarkRemove:
         assert result is True
         mock_conn.commit.assert_called_once()
 
-    @patch("app.templates.dashboard._connect")
+    @patch("app.dashboard.service._connect")
     def test_remove_bookmark_returns_false_for_nonexistent(self, mock_connect: MagicMock):
-        from app.templates.dashboard import _remove_bookmark
+        from app.dashboard.service import _remove_bookmark
 
         mock_conn = MagicMock()
         mock_connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
@@ -589,9 +591,9 @@ class TestBookmarkRemove:
         result = _remove_bookmark("nonexistent", "user-1")
         assert result is False
 
-    @patch("app.templates.dashboard._connect")
+    @patch("app.dashboard.service._connect")
     def test_remove_bookmark_returns_false_on_db_error(self, mock_connect: MagicMock):
-        from app.templates.dashboard import _remove_bookmark
+        from app.dashboard.service import _remove_bookmark
 
         mock_connect.side_effect = Exception("DB unavailable")
         result = _remove_bookmark("bm-id-1", "user-1")
@@ -1070,9 +1072,9 @@ class TestBookmarkRoute:
             scope["auth"] = auth
         return Request(scope)
 
-    @patch("app.templates.dashboard.log_action")
+    @patch("app.dashboard.pages.log_action")
     @patch(
-        "app.templates.dashboard._add_bookmark",
+        "app.dashboard.pages._add_bookmark",
         return_value={"id": "bm-1", "entity_uri": "http://x/1", "label": "L"},
     )
     def test_add_xhr_returns_json_ok(self, mock_add: MagicMock, mock_log: MagicMock):
@@ -1080,19 +1082,19 @@ class TestBookmarkRoute:
 
         from starlette.responses import JSONResponse
 
-        from app.templates.dashboard import add_bookmark
+        from app.dashboard.pages import add_bookmark
 
         resp = add_bookmark(self._req(auth=self._AUTH, xhr=True), "http://x/1", "L")
         assert isinstance(resp, JSONResponse)
         assert resp.status_code == 200
         assert _json.loads(bytes(resp.body)) == {"ok": True, "id": "bm-1"}
 
-    @patch("app.templates.dashboard.log_action")
-    @patch("app.templates.dashboard._add_bookmark", return_value=None)  # ON CONFLICT DO NOTHING
+    @patch("app.dashboard.pages.log_action")
+    @patch("app.dashboard.pages._add_bookmark", return_value=None)  # ON CONFLICT DO NOTHING
     def test_add_xhr_already_exists_still_ok(self, mock_add: MagicMock, mock_log: MagicMock):
         import json as _json
 
-        from app.templates.dashboard import add_bookmark
+        from app.dashboard.pages import add_bookmark
 
         resp = add_bookmark(self._req(auth=self._AUTH, xhr=True), "http://x/1", "")
         assert resp.status_code == 200
@@ -1101,21 +1103,21 @@ class TestBookmarkRoute:
     def test_add_xhr_unauthenticated_returns_401_json(self):
         import json as _json
 
-        from app.templates.dashboard import add_bookmark
+        from app.dashboard.pages import add_bookmark
 
         resp = add_bookmark(self._req(auth=None, xhr=True), "http://x/1", "")
         assert resp.status_code == 401
         assert _json.loads(bytes(resp.body)) == {"ok": False, "error": "auth"}
 
-    @patch("app.templates.dashboard.log_action")
+    @patch("app.dashboard.pages.log_action")
     @patch(
-        "app.templates.dashboard._add_bookmark",
+        "app.dashboard.pages._add_bookmark",
         return_value={"id": "bm-1", "entity_uri": "http://x/1", "label": "L"},
     )
     def test_add_plain_form_still_redirects(self, mock_add: MagicMock, mock_log: MagicMock):
         from starlette.responses import RedirectResponse
 
-        from app.templates.dashboard import add_bookmark
+        from app.dashboard.pages import add_bookmark
 
         resp = add_bookmark(self._req(auth=self._AUTH, xhr=False), "http://x/1", "L")
         assert isinstance(resp, RedirectResponse)
@@ -1125,19 +1127,19 @@ class TestBookmarkRoute:
     def test_add_plain_form_unauthenticated_redirects_to_login(self):
         from starlette.responses import RedirectResponse
 
-        from app.templates.dashboard import add_bookmark
+        from app.dashboard.pages import add_bookmark
 
         resp = add_bookmark(self._req(auth=None, xhr=False), "http://x/1", "")
         assert isinstance(resp, RedirectResponse)
         assert resp.status_code == 303
         assert resp.headers["location"] == "/auth/login"
 
-    @patch("app.templates.dashboard.log_action")
-    @patch("app.templates.dashboard._remove_bookmark", return_value=True)
+    @patch("app.dashboard.pages.log_action")
+    @patch("app.dashboard.pages._remove_bookmark", return_value=True)
     def test_remove_xhr_returns_json(self, mock_rm: MagicMock, mock_log: MagicMock):
         import json as _json
 
-        from app.templates.dashboard import remove_bookmark
+        from app.dashboard.pages import remove_bookmark
 
         resp = remove_bookmark(self._req(auth=self._AUTH, xhr=True), "bm-1")
         assert resp.status_code == 200
@@ -1183,14 +1185,14 @@ class TestBookmarkUriValidation:
         )
 
     @pytest.mark.parametrize("bad_uri", _UNSAFE_BOOKMARK_URIS)
-    @patch("app.templates.dashboard.log_action")
-    @patch("app.templates.dashboard._add_bookmark")
+    @patch("app.dashboard.pages.log_action")
+    @patch("app.dashboard.pages._add_bookmark")
     def test_xhr_unsafe_uri_returns_400_and_no_insert(
         self, mock_add: MagicMock, mock_log: MagicMock, bad_uri: str
     ):
         import json as _json
 
-        from app.templates.dashboard import add_bookmark
+        from app.dashboard.pages import add_bookmark
 
         resp = add_bookmark(self._req(xhr=True), bad_uri, "L")
         assert resp.status_code == 400
@@ -1202,14 +1204,14 @@ class TestBookmarkUriValidation:
         mock_log.assert_not_called()
 
     @pytest.mark.parametrize("bad_uri", _UNSAFE_BOOKMARK_URIS)
-    @patch("app.templates.dashboard.log_action")
-    @patch("app.templates.dashboard._add_bookmark")
+    @patch("app.dashboard.pages.log_action")
+    @patch("app.dashboard.pages._add_bookmark")
     def test_plain_form_unsafe_uri_returns_400_and_no_insert(
         self, mock_add: MagicMock, mock_log: MagicMock, bad_uri: str
     ):
         from starlette.responses import Response
 
-        from app.templates.dashboard import add_bookmark
+        from app.dashboard.pages import add_bookmark
 
         resp = add_bookmark(self._req(xhr=False), bad_uri, "L")
         assert isinstance(resp, Response)
@@ -1227,13 +1229,13 @@ class TestBookmarkUriValidation:
             "  https://example.org/trimmed  ",  # trimmed before validation
         ],
     )
-    @patch("app.templates.dashboard.log_action")
+    @patch("app.dashboard.pages.log_action")
     @patch(
-        "app.templates.dashboard._add_bookmark",
+        "app.dashboard.pages._add_bookmark",
         return_value={"id": "bm-1", "entity_uri": "x", "label": "L"},
     )
     def test_valid_uri_is_inserted(self, mock_add: MagicMock, mock_log: MagicMock, good_uri: str):
-        from app.templates.dashboard import add_bookmark
+        from app.dashboard.pages import add_bookmark
 
         resp = add_bookmark(self._req(xhr=True), good_uri, "L")
         assert resp.status_code == 200
@@ -1248,7 +1250,7 @@ class TestBookmarkRenderGuard:
     def test_unsafe_legacy_row_renders_as_plain_text_not_link(self):
         from fasthtml.common import to_xml
 
-        from app.templates.dashboard import _bookmarks_card
+        from app.dashboard.pages import _bookmarks_card
 
         html = to_xml(
             _bookmarks_card(
@@ -1270,7 +1272,7 @@ class TestBookmarkRenderGuard:
     def test_safe_row_renders_as_link(self):
         from fasthtml.common import to_xml
 
-        from app.templates.dashboard import _bookmarks_card
+        from app.dashboard.pages import _bookmarks_card
 
         html = to_xml(
             _bookmarks_card(

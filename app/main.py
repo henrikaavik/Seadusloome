@@ -24,6 +24,7 @@ from app.auth.users import register_user_routes
 from app.chat.routes import register_chat_routes
 from app.chat.websocket import register_chat_ws_routes
 from app.config import get_app_env
+from app.dashboard import register_dashboard_routes
 from app.docs.report_routes import register_report_routes
 from app.docs.routes import register_draft_routes
 from app.docs.websocket import register_draft_ws_routes
@@ -35,7 +36,6 @@ from app.explorer.websocket import register_ws_routes
 from app.notifications.routes import register_notification_routes
 from app.notifications.websocket import register_notifications_ws_routes
 from app.sync.webhook import register_webhook_routes
-from app.templates.dashboard import register_dashboard_routes
 from app.ui.components.search_routes import register_search_routes
 from app.ui.design_system_pages import register_design_system_routes
 from app.ui.forms.live_validation import register_validation_routes

@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from fasthtml.common import to_xml
 
-from app.templates.dashboard import (
+from app.dashboard.pages import (
     _CAPABILITY_MAP_EXCLUDED_SLUGS,
     _MAX_CAPABILITY_CARDS,
     _capability_map_section,
@@ -70,7 +70,7 @@ def _render_dashboard(returns: dict[str, object] | None = None) -> str:
     """Render ``dashboard_page`` with every DB-touching widget patched."""
     from contextlib import ExitStack
 
-    from app.templates.dashboard import dashboard_page
+    from app.dashboard.pages import dashboard_page
 
     returns = returns or {}
     with ExitStack() as stack:
@@ -78,7 +78,7 @@ def _render_dashboard(returns: dict[str, object] | None = None) -> str:
             default: object = None if name == "_get_user_org_info" else []
             stack.enter_context(
                 patch(
-                    f"app.templates.dashboard.{name}",
+                    f"app.dashboard.pages.{name}",
                     return_value=returns.get(name, default),
                 )
             )
