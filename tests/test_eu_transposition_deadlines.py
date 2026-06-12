@@ -10,9 +10,10 @@ Covers:
   date as an ``xsd:date`` literal (cutoff is server-controlled, not user
   input).
 * The Töölaud rendering branch in
-  :mod:`app.templates.dashboard` — empty-state hides the widget entirely;
+  :mod:`app.dashboard.pages` — empty-state hides the widget entirely;
   populated state renders the right CELEX, deadline badge, status badge,
-  and CTA link.
+  and CTA link. The soft-timeout helper itself lives in
+  :mod:`app.dashboard.service`.
 
 No live Jena — every test injects a ``MagicMock`` ``SparqlClient`` whose
 ``.query`` returns canned rows.
@@ -466,13 +467,13 @@ def _render_dashboard(returns: dict[str, object]) -> str:
 
     from fasthtml.common import to_xml
 
-    from app.templates.dashboard import dashboard_page
+    from app.dashboard.pages import dashboard_page
 
     with ExitStack() as stack:
         for name in _DASHBOARD_WIDGET_HELPERS:
             default: object = None if name == "_get_user_org_info" else []
             stack.enter_context(
-                patch(f"app.templates.dashboard.{name}", return_value=returns.get(name, default))
+                patch(f"app.dashboard.pages.{name}", return_value=returns.get(name, default))
             )
         result = dashboard_page(_make_dashboard_request())
     return to_xml(result)
@@ -615,7 +616,7 @@ class TestDeadlinesHelperTimeout:
     blocking the page render."""
 
     def test_returns_rows_when_query_completes_in_time(self):
-        from app.templates.dashboard import _get_eu_transposition_deadlines
+        from app.dashboard.service import _get_eu_transposition_deadlines
 
         canned = [
             TranspositionDeadlineRow(
@@ -629,7 +630,7 @@ class TestDeadlinesHelperTimeout:
         ]
 
         with patch(
-            "app.templates.dashboard.list_overdue_or_upcoming_transpositions",
+            "app.dashboard.service.list_overdue_or_upcoming_transpositions",
             return_value=canned,
         ):
             out = _get_eu_transposition_deadlines(
@@ -642,7 +643,7 @@ class TestDeadlinesHelperTimeout:
         timeout fires (the widget then hides on the page)."""
         import time as _time
 
-        from app.templates.dashboard import _get_eu_transposition_deadlines
+        from app.dashboard.service import _get_eu_transposition_deadlines
 
         def _slow_query(*args, **kwargs):
             _time.sleep(0.5)
@@ -658,7 +659,7 @@ class TestDeadlinesHelperTimeout:
             ]
 
         with patch(
-            "app.templates.dashboard.list_overdue_or_upcoming_transpositions",
+            "app.dashboard.service.list_overdue_or_upcoming_transpositions",
             side_effect=_slow_query,
         ):
             out = _get_eu_transposition_deadlines(
@@ -668,10 +669,10 @@ class TestDeadlinesHelperTimeout:
         assert out == []
 
     def test_returns_empty_on_exception(self):
-        from app.templates.dashboard import _get_eu_transposition_deadlines
+        from app.dashboard.service import _get_eu_transposition_deadlines
 
         with patch(
-            "app.templates.dashboard.list_overdue_or_upcoming_transpositions",
+            "app.dashboard.service.list_overdue_or_upcoming_transpositions",
             side_effect=RuntimeError("kabloom"),
         ):
             out = _get_eu_transposition_deadlines(
@@ -690,7 +691,7 @@ class TestDeadlinesHelperTimeout:
         """
         import time as _time
 
-        from app.templates.dashboard import _get_eu_transposition_deadlines
+        from app.dashboard.service import _get_eu_transposition_deadlines
 
         slow_query_s = 1.5
         timeout_s = 0.1
@@ -704,7 +705,7 @@ class TestDeadlinesHelperTimeout:
 
         start = _time.perf_counter()
         with patch(
-            "app.templates.dashboard.list_overdue_or_upcoming_transpositions",
+            "app.dashboard.service.list_overdue_or_upcoming_transpositions",
             side_effect=_very_slow_query,
         ):
             out = _get_eu_transposition_deadlines(

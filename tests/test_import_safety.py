@@ -89,7 +89,7 @@ PAGE_MODULES = [
     "app.auth.routes",
     "app.auth.organizations",
     "app.auth.users",
-    "app.templates.dashboard",
+    "app.dashboard.pages",
     # Auto-discovered admin page modules (the wildcard + design-system
     # Button pattern). Discovery replaces the manual list the retired
     # ``app.templates.admin_dashboard`` shim used to funnel (#860).
