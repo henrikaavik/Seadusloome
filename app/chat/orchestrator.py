@@ -47,7 +47,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -55,6 +54,7 @@ from contextlib import aclosing
 from dataclasses import dataclass, field
 from typing import Any
 
+from app import config
 from app.auth.policy import can_access_conversation
 from app.chat.models import (
     Conversation,
@@ -195,10 +195,7 @@ def _is_follow_ups_enabled() -> bool:
     unset. Any truthy value (``"1"``, ``"true"``, ``"yes"``, ``"on"``)
     enables the feature; anything else disables it.
     """
-    raw = os.environ.get("CHAT_FOLLOW_UPS_ENABLED")
-    if raw is None:
-        return True
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
+    return config.env_bool("CHAT_FOLLOW_UPS_ENABLED")
 
 
 # ---------------------------------------------------------------------------

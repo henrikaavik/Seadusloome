@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import contextvars
 import logging
-import os
 import random
 import threading
 from abc import ABC, abstractmethod
@@ -28,6 +27,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
+from app import config
 from app.config import STUB_ALLOWED_ENVS, get_app_env, is_stub_allowed
 
 logger = logging.getLogger(__name__)
@@ -140,7 +140,7 @@ class VoyageProvider(EmbeddingProvider):
     """
 
     def __init__(self) -> None:
-        api_key = os.environ.get("VOYAGE_API_KEY", "").strip()
+        api_key = config.env_str("VOYAGE_API_KEY", "").strip()
 
         if not api_key:
             if not is_stub_allowed():
@@ -164,8 +164,8 @@ class VoyageProvider(EmbeddingProvider):
             self._stubbed = False
             self._api_key = api_key
 
-        self._model = os.environ.get("VOYAGE_MODEL", DEFAULT_MODEL)
-        self._dimensions = int(os.environ.get("VOYAGE_DIMENSIONS", str(DEFAULT_DIMENSIONS)))
+        self._model = config.env_str("VOYAGE_MODEL", DEFAULT_MODEL)
+        self._dimensions = config.env_int("VOYAGE_DIMENSIONS")
         # Lazy-initialised SDK client; only built on first real call so
         # stub users never need the ``voyageai`` package installed.
         self._client: Any = None

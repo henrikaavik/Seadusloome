@@ -3,12 +3,12 @@
 import hashlib
 import hmac
 import logging
-import os
 import threading
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from app import config
 from app.sync.orchestrator import has_recent_running_row, run_sync
 from app.sync.webhook_deliveries import (
     DeliveryRerunResult,
@@ -18,7 +18,7 @@ from app.sync.webhook_deliveries import (
 
 logger = logging.getLogger(__name__)
 
-WEBHOOK_SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
+WEBHOOK_SECRET = config.env_str("GITHUB_WEBHOOK_SECRET", "")
 ONTOLOGY_REPO_FULL_NAME = "henrikaavik/estonian-legal-ontology"
 
 # #853 / comment item 3: cap the request body we will read into memory

@@ -58,12 +58,12 @@ Env vars
 from __future__ import annotations
 
 import logging
-import os
 import threading
 from typing import Any
 
 import httpx
 
+from app import config
 from app.config import is_stub_allowed
 
 logger = logging.getLogger(__name__)
@@ -102,7 +102,7 @@ def _load_url(explicit: str | None) -> str | None:
     """Return the effective Tika URL, or ``None`` to trigger stub/error mode."""
     if explicit:
         return explicit.rstrip("/")
-    raw = os.environ.get("TIKA_URL")
+    raw = config.env_str("TIKA_URL")
     if raw:
         return raw.rstrip("/")
     return None
@@ -112,36 +112,20 @@ def _load_timeout(explicit: float | None) -> float:
     """Return the effective request timeout in seconds."""
     if explicit is not None:
         return float(explicit)
-    raw = os.environ.get("TIKA_TIMEOUT_SECONDS", "60")
-    try:
-        return float(raw)
-    except ValueError:
-        logger.warning("Invalid TIKA_TIMEOUT_SECONDS=%r, falling back to 60", raw)
-        return 60.0
+    return config.env_float("TIKA_TIMEOUT_SECONDS")
 
 
-# Default ceiling for the extracted-text response (#858). 20 MiB of
-# plaintext is far beyond any real legislative draft (the biggest
-# corpus acts come in well under 5 MB of text) while still small enough
-# that one runaway extraction cannot OOM the worker or bloat the
-# encrypted ``parsed_text`` column.
-_DEFAULT_MAX_TEXT_BYTES = 20 * 1024 * 1024
-
-
+# The default ceiling for the extracted-text response (#858) lives in the
+# TIKA_MAX_TEXT_BYTES registry entry (app/config.py): 20 MiB of plaintext is
+# far beyond any real legislative draft (the biggest corpus acts come in
+# well under 5 MB of text) while still small enough that one runaway
+# extraction cannot OOM the worker or bloat the encrypted ``parsed_text``
+# column.
 def _load_max_text_bytes(explicit: int | None) -> int:
     """Return the effective ``PUT /tika`` response byte ceiling."""
     if explicit is not None:
         return max(1, int(explicit))
-    raw = os.environ.get("TIKA_MAX_TEXT_BYTES", str(_DEFAULT_MAX_TEXT_BYTES))
-    try:
-        return max(1, int(raw))
-    except ValueError:
-        logger.warning(
-            "Invalid TIKA_MAX_TEXT_BYTES=%r, falling back to %d",
-            raw,
-            _DEFAULT_MAX_TEXT_BYTES,
-        )
-        return _DEFAULT_MAX_TEXT_BYTES
+    return config.env_int("TIKA_MAX_TEXT_BYTES")
 
 
 def _error_body_snippet(response: httpx.Response, limit: int = 200) -> str:

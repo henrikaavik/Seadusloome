@@ -6,6 +6,7 @@ import logging
 
 from fasthtml.common import *  # noqa: F403
 
+from app import config
 from app.admin._shared import _tooltip
 from app.db import get_connection as _connect
 from app.ui.data.data_table import Column, DataTable
@@ -18,10 +19,8 @@ logger = logging.getLogger(__name__)
 
 def _get_rate_limit_stats() -> dict:  # type: ignore[type-arg]
     """Return per-org cost vs budget and top-user message rates for the admin card."""
-    import os
-
-    max_cost = float(os.environ.get("ORG_MAX_MONTHLY_COST_USD", "50.0"))
-    max_msgs = int(os.environ.get("CHAT_MAX_MESSAGES_PER_HOUR", "100"))
+    max_cost = config.env_float("ORG_MAX_MONTHLY_COST_USD")
+    max_msgs = config.env_int("CHAT_MAX_MESSAGES_PER_HOUR")
 
     stats: dict = {  # type: ignore[type-arg]
         "max_monthly_cost_usd": max_cost,

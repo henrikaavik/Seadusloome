@@ -169,6 +169,21 @@ def test_env_int_refuses_site_parsed_vars() -> None:
         config.env_int("METRICS_RETENTION_DAYS")
 
 
+def test_env_str_allows_site_parsed_vars(monkeypatch: pytest.MonkeyPatch) -> None:
+    """parse="site" vars are readable as raw strings whatever their kind.
+
+    This is the documented escape hatch for module-local parsers
+    (app/metrics.py retention quirk, app/jobs/worker.py positive-seconds
+    parse) — without it those sites would be forced back onto os.environ.
+    """
+    monkeypatch.setenv("METRICS_RETENTION_DAYS", "7")
+    assert config.env_str("METRICS_RETENTION_DAYS", "30") == "7"
+    monkeypatch.delenv("METRICS_RETENTION_DAYS", raising=False)
+    assert config.env_str("METRICS_RETENTION_DAYS", "30") == "30"
+    monkeypatch.delenv("JOB_REAPER_INTERVAL_S", raising=False)
+    assert config.env_str("JOB_REAPER_INTERVAL_S") is None
+
+
 def test_env_bool_truthy(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("CHAT_FOLLOW_UPS_ENABLED", raising=False)
     assert config.env_bool("CHAT_FOLLOW_UPS_ENABLED") is True

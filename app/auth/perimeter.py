@@ -50,7 +50,6 @@ checks for emergencies (default: enforced).
 from __future__ import annotations
 
 import logging
-import os
 import re
 from typing import Any
 from urllib.parse import urlsplit
@@ -59,6 +58,7 @@ from starlette.datastructures import Headers
 from starlette.requests import Request
 from starlette.responses import HTMLResponse
 
+from app import config
 from app.auth.middleware import _TOKEN_BEARER_PATHS
 
 logger = logging.getLogger(__name__)
@@ -101,7 +101,7 @@ def get_trusted_proxy_hosts() -> list[str]:
     the bad value visible. Globs are not supported by uvicorn anyway —
     any non-``*`` wildcard entry would silently never match.
     """
-    raw = os.environ.get("TRUSTED_PROXY_HOSTS", "").strip()
+    raw = config.env_str("TRUSTED_PROXY_HOSTS", "").strip()
     if not raw:
         return list(DEFAULT_TRUSTED_PROXY_HOSTS)
     hosts = [item.strip() for item in raw.split(",") if item.strip()]
@@ -186,8 +186,7 @@ def is_origin_check_enabled() -> bool:
     Read per-request so a container restart is not required to flip it
     in tests; the cost is one env lookup.
     """
-    raw = os.environ.get("CSRF_ORIGIN_CHECK", "").strip().lower()
-    return raw not in {"off", "0", "false", "no", "disabled"}
+    return config.env_bool("CSRF_ORIGIN_CHECK")
 
 
 def _origin_of_url(url: str) -> str | None:
@@ -231,7 +230,7 @@ def allowed_origins(scope: dict[str, Any]) -> set[str]:
     own = _request_own_origin(scope)
     if own:
         allowed.add(own)
-    base = os.environ.get("APP_BASE_URL", "").strip()
+    base = config.env_str("APP_BASE_URL", "").strip()
     if base:
         base_origin = _origin_of_url(base)
         if base_origin:

@@ -51,6 +51,7 @@ from docx import Document
 from docx.enum.section import WD_SECTION
 from docx.shared import Pt
 
+from app import config
 from app.docs.draft_model import Draft
 from app.docs.labels import TYPE_LABELS_ET as _TYPE_LABELS_ET
 from app.ontology.relations import legal_phrase
@@ -184,8 +185,8 @@ def _resolve_export_dir(raw: str | None, app_env: str | None) -> Path:
 def _load_export_dir() -> Path:
     """Return the root export directory with a dev-friendly default."""
     return _resolve_export_dir(
-        os.environ.get("EXPORT_DIR"),
-        os.environ.get("APP_ENV"),
+        config.env_str("EXPORT_DIR"),
+        config.get_app_env(),
     )
 
 

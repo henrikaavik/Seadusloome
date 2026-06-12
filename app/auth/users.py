@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import secrets
 import threading
 import time
@@ -13,6 +12,7 @@ from fasthtml.common import to_xml
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse
 
+from app import config
 from app.auth.audit import log_action
 from app.auth.organizations import list_orgs
 from app.auth.password import (
@@ -955,7 +955,7 @@ def _admin_reset_email(req: Request, user_id: str, *, base_path: str, active_nav
         raw = issue_reset_token(user_id=user_id, created_by=auth.get("id"), conn=conn)
         conn.commit()
 
-    base = os.environ.get("APP_BASE_URL", "http://localhost:8000").rstrip("/")
+    base = config.env_str("APP_BASE_URL", "http://localhost:8000").rstrip("/")
     reset_url = f"{base}/auth/reset/{raw}"
     subject, html, text = password_reset_admin(
         full_name=user["full_name"],

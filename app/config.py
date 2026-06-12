@@ -614,7 +614,7 @@ ENV_REGISTRY: tuple[EnvSetting, ...] = (
         "float",
         None,
         "Age after which a 'claimed' job is returned to the queue. "
-        "Default: app.jobs.worker.DEFAULT_REAPER_CLAIMED_TIMEOUT_S.",
+        "Default: DEFAULT_REAPER_CLAIMED_TIMEOUT_S (app/jobs/queue.py).",
         section="Background jobs",
         parse="site",
     ),
@@ -623,7 +623,7 @@ ENV_REGISTRY: tuple[EnvSetting, ...] = (
         "float",
         None,
         "Age after which a 'running' job is presumed orphaned and retried. "
-        "Default: app.jobs.worker.DEFAULT_REAPER_RUNNING_TIMEOUT_S.",
+        "Default: DEFAULT_REAPER_RUNNING_TIMEOUT_S (app/jobs/queue.py).",
         section="Background jobs",
         parse="site",
     ),
@@ -702,9 +702,13 @@ def env_str(name: str, default: str | None = None) -> str | None:
     Returns the value verbatim — no strip/normalization (secrets are key
     material). The *default* is supplied by the call site so string vars
     keep their historical per-site defaults exactly.
+
+    ``parse="site"`` entries of any kind are also readable here — that is
+    the documented escape hatch for module-local parsers (their kind/
+    default declarations stay purely descriptive).
     """
     setting = _setting(name)
-    if setting.kind != "str":
+    if setting.kind != "str" and setting.parse != "site":
         raise TypeError(f"{name} is declared kind={setting.kind!r}; use env_{setting.kind}()")
     return os.environ.get(name, default)
 

@@ -11,10 +11,11 @@ app and capture unhandled exceptions automatically.
 from __future__ import annotations
 
 import logging
-import os
 import re
 import subprocess
 from typing import Any
+
+from app import config
 
 logger = logging.getLogger(__name__)
 
@@ -309,7 +310,7 @@ def _get_git_sha() -> str:
     Dockerfile ``ARG``).  Falls back to ``git rev-parse --short HEAD``
     for local development.  Returns ``"unknown"`` when neither works.
     """
-    sha = os.environ.get("GIT_SHA")
+    sha = config.env_str("GIT_SHA")
     if sha:
         return sha
     try:
@@ -367,7 +368,7 @@ def init_sentry() -> None:
     Safe to call unconditionally — when the DSN is empty or missing,
     the function returns immediately without importing ``sentry_sdk``.
     """
-    dsn = os.environ.get("SENTRY_DSN")
+    dsn = config.env_str("SENTRY_DSN")
     if not dsn:
         logger.debug("SENTRY_DSN not set — Sentry disabled")
         return
@@ -378,7 +379,7 @@ def init_sentry() -> None:
         dsn=dsn,
         traces_sample_rate=0.1,
         release=_get_git_sha(),
-        environment=os.environ.get("APP_ENV", "development"),
+        environment=config.get_app_env(),
         before_send=_scrub_pii,  # type: ignore[arg-type]  # Sentry stubs define Event as TypedDict
         # Transactions sample real request URLs (reset links, signed
         # download tokens) — scrub them with the same function (#846).

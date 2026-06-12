@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -12,6 +11,7 @@ import bcrypt
 import jwt
 import psycopg
 
+from app import config
 from app.auth.provider import AuthProvider, UserDict
 from app.db import get_connection
 
@@ -36,7 +36,7 @@ def _load_secret_key() -> str:
     happens on a laptop or in Coolify, and dev already has the (long)
     :data:`_DEV_SECRET_KEY` fallback when the variable is simply unset.
     """
-    value = os.environ.get("SECRET_KEY")
+    value = config.env_str("SECRET_KEY")
     if value:
         if len(value.encode("utf-8")) < MIN_SECRET_KEY_BYTES:
             raise RuntimeError(
@@ -47,7 +47,7 @@ def _load_secret_key() -> str:
                 "it in the environment."
             )
         return value
-    if os.environ.get("APP_ENV", "development") == "development":
+    if config.get_app_env() == "development":
         return _DEV_SECRET_KEY
     raise RuntimeError("SECRET_KEY must be set in non-development environments")
 
