@@ -31,14 +31,15 @@ from __future__ import annotations
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from app.analyysikeskus.eu_transposition import (
-    DEFAULT_TRANSPOSITION_HORIZON_DAYS,
-    TranspositionDeadlineRow,
-    list_overdue_or_upcoming_transpositions,
-)
 from app.db import get_connection as _connect
+
+if TYPE_CHECKING:
+    # Annotation-only — ``from __future__ import annotations`` keeps this out of
+    # the runtime import graph (see ``_get_eu_transposition_deadlines`` for why
+    # the real ``app.analyysikeskus.eu_transposition`` import is deferred).
+    from app.analyysikeskus.eu_transposition import TranspositionDeadlineRow
 
 logger = logging.getLogger(__name__)
 
@@ -478,7 +479,7 @@ def _get_unresolved_annotation_drafts(  # type: ignore[type-arg]
 def _get_eu_transposition_deadlines(
     org_id: str | None,
     *,
-    horizon_days: int = DEFAULT_TRANSPOSITION_HORIZON_DAYS,
+    horizon_days: int | None = None,
     timeout_s: float = _EU_DEADLINES_SPARQL_TIMEOUT_S,
 ) -> list[TranspositionDeadlineRow]:
     """Return EU directives whose transposition deadline is approaching or passed.
@@ -487,6 +488,10 @@ def _get_eu_transposition_deadlines(
     in a soft *wall-clock* timeout so a slow / stuck Jena cannot delay the
     dashboard render. On timeout (or any exception) returns ``[]`` — the
     widget then hides per the A6 empty-state rule.
+
+    ``horizon_days`` of ``None`` (the default) resolves at call time to
+    :data:`app.analyysikeskus.eu_transposition.DEFAULT_TRANSPOSITION_HORIZON_DAYS`
+    (the constant is imported lazily inside the function body, see below).
 
     ``org_id`` is forwarded for forward-compatibility (the underlying helper
     accepts it today but does not yet scope by responsible ministry — the
@@ -512,6 +517,20 @@ def _get_eu_transposition_deadlines(
     ``ReadTimeout`` at the network layer, the worker exits cleanly, and
     there is no orphaned thread.
     """
+    # Deferred to call time, not module scope: importing any
+    # ``app.analyysikeskus`` submodule first executes that package's
+    # ``__init__`` and, via its SPARQL client → ``app.metrics``, pulls in the
+    # starlette stack. Keeping it here means ``import app.dashboard.service``
+    # stays framework-free at runtime (pinned by
+    # ``tests/test_dashboard_import_direction.py``; the remaining transitive
+    # framework floor reached on the *first call* is tracked in #895).
+    from app.analyysikeskus.eu_transposition import (
+        DEFAULT_TRANSPOSITION_HORIZON_DAYS,
+        list_overdue_or_upcoming_transpositions,
+    )
+
+    horizon_days = DEFAULT_TRANSPOSITION_HORIZON_DAYS if horizon_days is None else horizon_days
+
     pool = ThreadPoolExecutor(max_workers=1)
     try:
         future = pool.submit(

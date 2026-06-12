@@ -19,18 +19,21 @@ imports no ``fasthtml`` / ``starlette``. The page layer
 (``app.dashboard.pages``) is deliberately NOT scanned: it is the presentation
 layer and is *expected* to import the framework.
 
-The contract is the **source import surface**, not the full runtime transitive
-closure. A runtime ``sys.modules`` check (like
-``tests/test_impact_import_direction``'s) is intentionally *not* used here:
-``app.dashboard.service`` depends on the neutral data helper
-``app.analyysikeskus.eu_transposition``, but importing any
-``app.analyysikeskus`` submodule executes that package's ``__init__`` — which
-eagerly imports its FastHTML UI siblings (``result_shell`` / ``routes``). That
-package-init coupling is an ``app.analyysikeskus`` concern, out of scope for
-this relocation; it does not make ``service.py`` itself framework-coupled. The
-AST guard is the meaningful, enforceable boundary: ``service.py`` never *writes*
-a framework import, so the Phase-5 wrapper can call its functions without the
-service code reaching into ``fasthtml`` / ``starlette`` directly.
+The contract is pinned **both ways**. The AST scan above guards the source
+import surface; a runtime ``sys.modules`` check (like
+``tests/test_impact_import_direction``'s) then proves the guarantee actually
+holds at import time. ``service.py``'s one ``app.analyysikeskus`` dependency —
+the neutral ``eu_transposition`` data helper — is deferred to *call time*
+rather than imported at module scope, because importing any
+``app.analyysikeskus`` submodule executes that package's ``__init__`` and,
+through its SPARQL client → ``app.metrics``, pulls in the starlette stack. With
+that import deferred, a fresh ``import app.dashboard.service`` loads neither
+``fasthtml`` nor ``starlette`` nor any ``app.analyysikeskus`` module — which is
+exactly what ``test_importing_service_loads_no_framework_at_runtime`` asserts in
+a pristine subprocess. (The package-init coupling and the residual
+``app.metrics`` starlette floor reached on the *first call* are tracked in issue
+#895; they are out of scope for this layer because nothing in ``service.py``
+itself reaches them until invoked.)
 """
 
 from __future__ import annotations
@@ -178,6 +181,51 @@ def test_package_init_does_not_eagerly_import_pages() -> None:
     assert result.returncode == 0, (
         "fresh-subprocess import of app.dashboard eagerly loaded the page layer "
         "or the lazy export failed to resolve.\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert "OK" in result.stdout
+
+
+def test_importing_service_loads_no_framework_at_runtime() -> None:
+    """``import app.dashboard.service`` must load no framework at runtime (#860).
+
+    The AST scan above guards the *source* import surface; this guards the
+    *runtime* one. ``service.py`` defers its single ``app.analyysikeskus``
+    data-helper import (``eu_transposition``) to call time, because importing
+    any ``app.analyysikeskus`` submodule runs that package's ``__init__`` and,
+    via its SPARQL client → ``app.metrics``, drags in the starlette stack. With
+    that import deferred, a fresh ``import app.dashboard.service`` must load
+    neither ``fasthtml`` nor ``starlette`` — and, to pin the deferral itself, no
+    ``app.analyysikeskus`` module either.
+
+    Run in a subprocess so the assertion sees a pristine ``sys.modules`` — the
+    parent test process has almost certainly already imported ``fasthtml`` and
+    the analyysikeskus package transitively, which would mask a regression here.
+    """
+    code = (
+        "import sys\n"
+        "import app.dashboard.service  # noqa: F401\n"
+        "framework = sorted("
+        "m for m in sys.modules if m.startswith(('fasthtml', 'starlette')))\n"
+        "assert not framework, "
+        "f'import app.dashboard.service loaded the web framework at runtime: {framework} "
+        "-- defer the app.analyysikeskus import to call time'\n"
+        "analyysikeskus = sorted("
+        "m for m in sys.modules if m.startswith('app.analyysikeskus'))\n"
+        "assert not analyysikeskus, "
+        "f'import app.dashboard.service loaded app.analyysikeskus at runtime: "
+        "{analyysikeskus} -- the eu_transposition import must stay deferred to call time'\n"
+        "print('OK')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=str(_REPO_ROOT),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        "fresh-subprocess import of app.dashboard.service loaded the web framework "
+        "or an app.analyysikeskus module at runtime.\n"
         f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
     assert "OK" in result.stdout

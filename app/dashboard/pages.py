@@ -13,10 +13,13 @@ the dashboard is no longer a welcome page. It is a daily work queue that answers
 (see :mod:`app.dashboard.service` for the per-widget query inventory).
 
 The widget loaders are imported by name so this module holds a module-level
-reference to each — tests patch ``app.dashboard.pages.<name>`` (patch-where-used)
-to render :func:`dashboard_page` without a live DB, and patch
-``app.dashboard.service.list_overdue_or_upcoming_transpositions`` /
-``app.dashboard.service._connect`` for the data layer itself.
+reference to each (including :func:`app.dashboard.service._get_eu_transposition_deadlines`)
+— tests patch ``app.dashboard.pages.<name>`` (patch-where-used) to render
+:func:`dashboard_page` without a live DB. The data layer itself is tested by
+patching ``app.dashboard.service._connect`` and, for the EU-deadlines helper,
+``app.analyysikeskus.eu_transposition.list_overdue_or_upcoming_transpositions``
+at its canonical home (``service.py`` defers that import to call time, so it is
+no longer a ``service`` module attribute to patch).
 """
 
 from __future__ import annotations

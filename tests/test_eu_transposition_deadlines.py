@@ -630,7 +630,7 @@ class TestDeadlinesHelperTimeout:
         ]
 
         with patch(
-            "app.dashboard.service.list_overdue_or_upcoming_transpositions",
+            "app.analyysikeskus.eu_transposition.list_overdue_or_upcoming_transpositions",
             return_value=canned,
         ):
             out = _get_eu_transposition_deadlines(
@@ -659,7 +659,7 @@ class TestDeadlinesHelperTimeout:
             ]
 
         with patch(
-            "app.dashboard.service.list_overdue_or_upcoming_transpositions",
+            "app.analyysikeskus.eu_transposition.list_overdue_or_upcoming_transpositions",
             side_effect=_slow_query,
         ):
             out = _get_eu_transposition_deadlines(
@@ -672,7 +672,7 @@ class TestDeadlinesHelperTimeout:
         from app.dashboard.service import _get_eu_transposition_deadlines
 
         with patch(
-            "app.dashboard.service.list_overdue_or_upcoming_transpositions",
+            "app.analyysikeskus.eu_transposition.list_overdue_or_upcoming_transpositions",
             side_effect=RuntimeError("kabloom"),
         ):
             out = _get_eu_transposition_deadlines(
@@ -705,7 +705,7 @@ class TestDeadlinesHelperTimeout:
 
         start = _time.perf_counter()
         with patch(
-            "app.dashboard.service.list_overdue_or_upcoming_transpositions",
+            "app.analyysikeskus.eu_transposition.list_overdue_or_upcoming_transpositions",
             side_effect=_very_slow_query,
         ):
             out = _get_eu_transposition_deadlines(
