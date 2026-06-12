@@ -18,10 +18,15 @@ from __future__ import annotations
 
 import importlib
 import os
+import subprocess
 import sys
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+# tests/ -> repo root (anchors the fresh-subprocess imports below).
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # ---------------------------------------------------------------------------
 # register_all_handlers
@@ -166,6 +171,53 @@ class TestStandaloneImportIsolation:
             f"{leaked_route_modules}. The standalone worker container "
             "should stay framework-free at startup."
         )
+
+
+def test_worker_import_surface_loads_no_framework() -> None:
+    """The standalone worker's import surface must load zero ``fasthtml`` / ``starlette``.
+
+    This is the #895 contract for the worker container. ``app/docs/__init__.py``
+    promises the worker process — which only ever imports ``app.jobs.registry``
+    (and, transitively, ``app.docs`` so the ``@register_handler`` decorators
+    fire) — never loads the web framework. Before #895 that promise was broken:
+    importing ``app.docs`` eagerly pulled in roughly a dozen fasthtml modules
+    via ``app.auth``'s eager ``__init__`` and via ``app.docs.status`` →
+    ``app.ui.primitives.badge``. #895 sealed both leaks (lazy ``app.auth``
+    init; ``BadgeVariant`` is now a ``TYPE_CHECKING``-only import in
+    ``app.docs.status``), so a fresh import of either entry point now loads
+    no framework at all.
+
+    The sibling in-process check
+    (:meth:`TestStandaloneImportIsolation.test_register_all_handlers_does_not_load_route_modules`)
+    can only prove the *route* modules stay out, because the parent test process
+    has already imported fasthtml transitively. This runs in a fresh subprocess
+    so it sees a pristine ``sys.modules`` and can assert *zero* framework — the
+    stronger guarantee the worker container actually needs.
+    """
+    code = (
+        "import sys\n"
+        "import app.jobs.registry  # noqa: F401  -- the standalone worker's entry import\n"
+        "import app.docs  # noqa: F401  -- pulled in so @register_handler side effects fire\n"
+        "framework = sorted(m for m in sys.modules "
+        "if m.startswith(('fasthtml', 'starlette')))\n"
+        "assert not framework, "
+        "'the standalone worker import surface pulled in a web framework: ' + repr(framework) + "
+        "' -- app.docs / app.jobs.registry must stay framework-free so the worker "
+        "container never loads FastHTML/Starlette (the #895 contract)'\n"
+        "print('OK')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=str(_REPO_ROOT),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        "fresh-subprocess import of the standalone worker surface "
+        "(app.jobs.registry + app.docs) loaded a web framework.\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert "OK" in result.stdout
 
 
 # ---------------------------------------------------------------------------

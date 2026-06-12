@@ -448,7 +448,7 @@ app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=get_trusted_proxy_hosts
 # Record per-request latency into the metrics table for the admin
 # performance dashboard.  Added after ProxyHeadersMiddleware so that
 # the request path is already resolved when the middleware fires.
-from app.metrics import MetricsMiddleware  # noqa: E402
+from app.metrics_middleware import MetricsMiddleware  # noqa: E402
 
 app.add_middleware(MetricsMiddleware)
 

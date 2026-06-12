@@ -55,7 +55,7 @@ _LAW_SCOPE_OPTIONS: list[tuple[str, str]] = [
 def _card(heading: str, content: Any) -> Any:
     """A compact section card — ``Card(CardHeader(H3(...)), CardBody(...))``.
 
-    Mirrors ``app/templates/dashboard.py::_section_card`` so the
+    Mirrors ``app/dashboard/pages.py::_section_card`` so the
     Analüüsikeskus pages share the dense-but-calm card rhythm with the
     rest of ``app/``.
     """

@@ -1,4 +1,5 @@
-"""Tests for app.metrics — record_metric, MetricsMiddleware, track_duration (#545)."""
+"""Tests for app.metrics (record_metric, track_duration) and
+app.metrics_middleware (MetricsMiddleware) (#545, #895)."""
 
 from __future__ import annotations
 
@@ -420,7 +421,7 @@ def _middleware_app(*, authenticated: bool):
     from starlette.responses import PlainTextResponse
     from starlette.routing import Route
 
-    from app.metrics import MetricsMiddleware
+    from app.metrics_middleware import MetricsMiddleware
 
     async def item(request: Any) -> PlainTextResponse:
         return PlainTextResponse("ok")
@@ -449,7 +450,7 @@ def _middleware_app(*, authenticated: bool):
 
 
 class TestMetricsMiddleware:
-    @patch("app.metrics.record_metric")
+    @patch("app.metrics_middleware.record_metric")
     def test_records_route_template_for_authenticated_request(self, mock_record: MagicMock):
         app = _middleware_app(authenticated=True)
         client = TestClient(app, follow_redirects=False)
@@ -467,7 +468,7 @@ class TestMetricsMiddleware:
         assert "path" not in labels
         assert labels["status"] == 200
 
-    @patch("app.metrics.record_metric")
+    @patch("app.metrics_middleware.record_metric")
     def test_skips_unauthenticated_requests(self, mock_record: MagicMock):
         app = _middleware_app(authenticated=False)
         client = TestClient(app, follow_redirects=False)
@@ -480,7 +481,7 @@ class TestMetricsMiddleware:
         ]
         assert duration_calls == []
 
-    @patch("app.metrics.record_metric")
+    @patch("app.metrics_middleware.record_metric")
     def test_skips_404_for_authenticated_user(self, mock_record: MagicMock):
         app = _middleware_app(authenticated=True)
         client = TestClient(app, follow_redirects=False)
@@ -494,7 +495,7 @@ class TestMetricsMiddleware:
         ]
         assert duration_calls == []
 
-    @patch("app.metrics.record_metric")
+    @patch("app.metrics_middleware.record_metric")
     def test_skips_static_requests(self, mock_record: MagicMock):
         app = _middleware_app(authenticated=True)
         client = TestClient(app, follow_redirects=False)
@@ -506,7 +507,7 @@ class TestMetricsMiddleware:
         ]
         assert duration_calls == []
 
-    @patch("app.metrics.record_metric")
+    @patch("app.metrics_middleware.record_metric")
     def test_real_app_skips_unauthenticated_ping(self, mock_record: MagicMock):
         """Integration: /api/ping (unauthenticated, DB-free) is not recorded."""
         from app.main import app

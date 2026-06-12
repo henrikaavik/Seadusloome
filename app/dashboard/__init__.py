@@ -22,9 +22,12 @@ registrar is actually requested.
 
 The lazy export is one half of the guarantee; the other lives in the service
 layer itself, which defers its sole ``app.analyysikeskus.eu_transposition``
-import to call time (importing that package runs its ``__init__`` → SPARQL
-client → ``app.metrics`` → starlette). Both are needed for a fresh
-``import app.dashboard.service`` to stay framework-free at runtime.
+import to call time — so a fresh ``import app.dashboard.service`` stays clear of
+the whole ``app.analyysikeskus`` import graph. (That deferral once also fenced
+off a transitive starlette floor reached through ``app.metrics``; #895 split the
+middleware out of ``app.metrics`` and sealed it, so the deferral now buys
+import-graph hygiene rather than framework isolation.) Both halves keep a fresh
+``import app.dashboard.service`` framework-free at runtime.
 """
 
 from __future__ import annotations

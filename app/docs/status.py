@@ -53,9 +53,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from app.ui.primitives.badge import BadgeVariant
+if TYPE_CHECKING:
+    # Annotation-only. ``app.ui.primitives.badge`` is a fasthtml component
+    # module, and this status SSOT sits under the framework-free data layer
+    # (``draft_model`` → every docs job handler → the standalone worker), so a
+    # runtime import here would pull fasthtml into all of them (#895).
+    from app.ui.primitives.badge import BadgeVariant
 
 
 @dataclass(frozen=True)

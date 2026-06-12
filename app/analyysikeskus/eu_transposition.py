@@ -432,7 +432,7 @@ def list_overdue_or_upcoming_transpositions(
             result to the caller's org. Today every authenticated user
             sees the same nation-wide list. The parameter is on the
             signature now so the call sites in
-            :mod:`app.templates.dashboard` don't need to change when the
+            :mod:`app.dashboard.service` don't need to change when the
             scoping lands.
         sparql_client: Optional :class:`SparqlClient` override (tests
             inject one whose ``.query`` is mocked).
