@@ -194,15 +194,18 @@ def test_env_bool_truthy(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.env_bool("CHAT_FOLLOW_UPS_ENABLED") is False
 
 
-def test_env_bool_true_literal_cookie_secure(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_env_bool_cookie_secure_truthy(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("COOKIE_SECURE", raising=False)
     assert config.env_bool("COOKIE_SECURE") is True
     monkeypatch.setenv("COOKIE_SECURE", "True")
     assert config.env_bool("COOKIE_SECURE") is True
-    # Historical quirk, deliberately preserved: only the literal "true"
-    # counts — "1" disables the secure flag.
+    # #899: "1" must ENABLE the flag — prod sets COOKIE_SECURE=1, and the
+    # historical literal-"true"-only parse silently disabled Secure there.
     monkeypatch.setenv("COOKIE_SECURE", "1")
-    assert config.env_bool("COOKIE_SECURE") is False
+    assert config.env_bool("COOKIE_SECURE") is True
+    for value in ("0", "false", "no", "off", ""):
+        monkeypatch.setenv("COOKIE_SECURE", value)
+        assert config.env_bool("COOKIE_SECURE") is False
 
 
 def test_env_bool_one_literal(monkeypatch: pytest.MonkeyPatch) -> None:

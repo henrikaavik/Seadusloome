@@ -368,11 +368,13 @@ ENV_REGISTRY: tuple[EnvSetting, ...] = (
         "COOKIE_SECURE",
         "bool",
         True,
-        'Secure flag on auth cookies. Only the literal "true" '
-        "(case-insensitive) enables it when set; defaults to true when "
-        "unset. NB: COOKIE_SECURE=1 disables it.",
+        "Secure flag on auth cookies. Truthy values (1/true/yes/on, "
+        "case-insensitive) enable it; defaults to true when unset. Set "
+        "false only for local HTTP development. (#899: was literal-"
+        '"true"-only, which silently disabled the flag for the '
+        "COOKIE_SECURE=1 prod config.)",
         section="Auth & cookies",
-        bool_style="true-literal",
+        bool_style="truthy",
     ),
     EnvSetting(
         "TRUSTED_PROXY_HOSTS",
@@ -778,9 +780,9 @@ def env_bool(name: str) -> bool:
     Styles (declared per-entry, preserving each site's historical
     semantics): ``truthy`` — member of {1,true,yes,on} case-insensitively,
     registry default when unset; ``true-literal`` — exactly "true"
-    case-insensitively (NB ``COOKIE_SECURE=1`` is *false*); ``one-literal``
-    — exactly "1" (unset → False); ``off-set`` — true unless a member of
-    {off,0,false,no,disabled}.
+    case-insensitively (no current entry; COOKIE_SECURE moved to truthy in
+    #899); ``one-literal`` — exactly "1" (unset → False); ``off-set`` —
+    true unless a member of {off,0,false,no,disabled}.
     """
     setting = _setting(name)
     if setting.kind != "bool":
